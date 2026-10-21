@@ -49,13 +49,8 @@ fn client() -> reqwest::Client {
 /// Pull the transcript out of a provider response.
 pub fn extract_transcript(provider: &SttProvider, value: &Value) -> Option<String> {
     let text = match provider.wire {
-        SttWire::MultipartText => value.get("text").and_then(Value::as_str).map(str::to_owned),
         SttWire::RawAudio => value
             .pointer("/results/channels/0/alternatives/0/transcript")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        SttWire::GoogleJson => value
-            .pointer("/results/0/alternatives/0/transcript")
             .and_then(Value::as_str)
             .map(str::to_owned),
     }?;
@@ -84,47 +79,29 @@ pub async fn transcribe(
     };
     let http = client();
 
-    let request = match provider.wire {
-        SttWire::MultipartText => {
-            let part = reqwest::multipart::Part::bytes(wav)
-                .file_name("audio.wav")
-                .mime_str("audio/wav")
-                .map_err(|error| SttError::Encode(error.to_string()))?;
-            let mut form = reqwest::multipart::Form::new()
-                .part("file", part)
-                .text("model", model.to_owned());
-            if let Some(language) = language.filter(|value| !value.is_empty()) {
-                form = form.text("language", language.to_owned());
-            }
-            http.post(provider.endpoint)
-                .bearer_auth(&config.api_key)
-                .multipart(form)
-        }
-        SttWire::RawAudio => {
-            let mut url = format!("{}?model={}", provider.endpoint, model);
-            if let Some(language) = language.filter(|value| !value.is_empty()) {
-                url.push_str(&format!("&language={language}"));
-            }
-            url.push_str("&diarize=true&smart_format=true");
-            http.post(url)
-                .header("Authorization", format!("Token {}", config.api_key))
-                .header("Content-Type", "audio/wav")
-                .body(wav)
-        }
-        SttWire::GoogleJson => {
-            let body = json!({
-                "config": {
-                    "encoding": "LINEAR16",
-                    "sampleRateHertz": SAMPLE_RATE,
-                    "languageCode": language.unwrap_or("en-US"),
-                },
-                "audio": { "content": STANDARD.encode(&wav) },
-            });
-            http.post(provider.endpoint)
-                .bearer_auth(&config.api_key)
-                .json(&body)
-        }
+    let endpoint = if config.base_url.is_empty() {
+        provider.endpoint
+    } else {
+        &config.base_url
     };
+    let mut url = reqwest::Url::parse(endpoint)
+        .map_err(|_| SttError::Protocol("invalid speech endpoint".into()))?;
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("model", model)
+            .append_pair("diarize", "true")
+            .append_pair("smart_format", "true")
+            .append_pair("punctuate", "true");
+        if let Some(language) = language.filter(|v| !v.is_empty()) {
+            query.append_pair("language", language);
+        }
+    }
+    let request = http
+        .post(url)
+        .header("Authorization", format!("Token {}", config.api_key))
+        .header("Content-Type", "audio/wav")
+        .body(wav);
 
     let response = request.send().await?;
     let status = response.status();
@@ -137,12 +114,7 @@ pub async fn transcribe(
     }
     let value: Value = serde_json::from_str(&text)
         .map_err(|_| SttError::Protocol("response was not JSON".into()))?;
-    // Some providers answer in plain text rather than JSON.
     extract_transcript(provider, &value)
-        .or_else(|| {
-            let trimmed = text.trim();
-            (!trimmed.is_empty() && !trimmed.starts_with('{')).then(|| trimmed.to_owned())
-        })
         .ok_or_else(|| SttError::Protocol("no transcript in the response".into()))
 }
 
@@ -406,11 +378,6 @@ mod tests {
 
     #[test]
     fn extracts_transcripts_per_wire_format() {
-        let openai = SttProvider::by_id("openai-whisper").unwrap();
-        assert_eq!(
-            extract_transcript(openai, &json!({"text": "  hello  "})),
-            Some("hello".into())
-        );
         let deepgram = SttProvider::by_id("deepgram-stt").unwrap();
         assert_eq!(
             extract_transcript(
@@ -419,15 +386,13 @@ mod tests {
             ),
             Some("hi there".into())
         );
-        let google = SttProvider::by_id("google-stt").unwrap();
         assert_eq!(
             extract_transcript(
-                google,
-                &json!({"results":[{"alternatives":[{"transcript":"bonjour"}]}]})
+                deepgram,
+                &json!({"results":{"channels":[{"alternatives":[{"transcript":" "}]}]}})
             ),
-            Some("bonjour".into())
+            None
         );
-        assert_eq!(extract_transcript(openai, &json!({"text": "   "})), None);
     }
 
     #[test]

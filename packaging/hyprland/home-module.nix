@@ -12,6 +12,8 @@ let
     runtimeInputs = [
       self.packages.${pkgs.stdenv.hostPlatform.system}.hyprland-private
       pkgs.jq
+      pkgs.grim
+      pkgs.pulseaudio
     ];
     text = ''
       export LENNETTE_BINARY=${lib.escapeShellArg cfg.executable}
@@ -41,7 +43,10 @@ in
     wayland.windowManager.hyprland.extraConfig = lib.mkAfter ''
       require('lennette')
     '';
-    home.packages = [ launcher ];
+    home.packages = [
+      launcher
+      pkgs.nerd-fonts.fira-code
+    ];
     # The Nix-owned file also prevents Lennette's startup installer from replacing
     # these bindings with mutable ones that bypass the protected launcher.
     xdg.configFile."hypr/lennette.lua" = {
@@ -49,7 +54,7 @@ in
       text = ''
         ${builtins.readFile ./lennette-private.lua}
         hl.bind("CTRL + SHIFT + D", hl.dsp.exec_cmd("${command} --toggle-dashboard"))
-        hl.bind("CTRL + SHIFT + backslash", hl.dsp.exec_cmd("${command} --toggle-window"))
+        hl.bind("CTRL + SHIFT + code:51", hl.dsp.exec_cmd("${command} --toggle-window"))
         hl.bind("CTRL + SHIFT + I", hl.dsp.exec_cmd("${command} --focus-input"))
         hl.bind("CTRL + SHIFT + M", hl.dsp.exec_cmd("${command} --toggle-system-audio"))
         hl.bind("CTRL + SHIFT + A", hl.dsp.exec_cmd("${command} --toggle-voice"))

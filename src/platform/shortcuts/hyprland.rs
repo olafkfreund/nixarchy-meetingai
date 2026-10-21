@@ -67,6 +67,7 @@ pub fn accelerator(binding: &Binding) -> String {
         parts.push("ALT");
     }
     let key = match binding.key.as_str() {
+        "backslash" if binding.shift => "code:51".to_owned(),
         "backslash" => "backslash".to_owned(),
         "space" => "space".to_owned(),
         "enter" => "Return".to_owned(),
@@ -89,6 +90,7 @@ pub fn window_rules() -> &'static str {
      \x20   pin = true,\n\
      \x20   border_size = 0,\n\
      \x20   rounding = 0,\n\
+     \x20   no_blur = true,\n\
      })\n\
      hl.window_rule({\n\
      \x20   match = { title = \"lennette\" },\n\
@@ -96,6 +98,7 @@ pub fn window_rules() -> &'static str {
      \x20   pin = true,\n\
      \x20   border_size = 0,\n\
      \x20   rounding = 0,\n\
+     \x20   no_blur = true,\n\
      })\n\
      hl.window_rule({\n\
      \x20   match = { class = \"dev.lennette.overlay\" },\n\
@@ -103,6 +106,7 @@ pub fn window_rules() -> &'static str {
      \x20   pin = true,\n\
      \x20   border_size = 0,\n\
      \x20   rounding = 0,\n\
+     \x20   no_blur = true,\n\
      })\n\
      hl.window_rule({ match = { class = \"dev.lennette.overlay\", title = \"^lennette$\" }, size = {720, 620}, center = true })\n\
      hl.window_rule({ match = { class = \"dev.lennette.overlay\", title = \"^lennette dashboard$\" }, size = {1100, 760}, center = true })\n"
@@ -185,6 +189,127 @@ fn apply_expression(expression: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Keep the protected Nix launcher when repairing the shifted physical key.
+pub fn repair_managed_toggle() -> Result<(), String> {
+    apply_expression(
+        r#"hl.window_rule({name="lennette-clear-glass",match={class=[[^(dev\.lennette\.overlay|lennette)$]]},no_blur=true})"#,
+    )?;
+    let path = config_directory().ok_or("Hyprland configuration not found")?;
+    let text = std::fs::read_to_string(include_path(&path)).map_err(|e| e.to_string())?;
+    let Some(binding) = text.lines().find(|line| {
+        (line.contains("CTRL + SHIFT + backslash") || line.contains("CTRL + SHIFT + code:51"))
+            && line.contains("lennette-private")
+            && line.contains("--toggle-window")
+    }) else {
+        return Ok(());
+    };
+    // A keysym binding and a physical binding can both match the same stroke.
+    // Replace both forms atomically so one keypress never toggles twice.
+    let replacement = binding.replace("CTRL + SHIFT + backslash", "CTRL + SHIFT + code:51");
+    apply_expression(&format!(
+        r#"hl.unbind("CTRL + SHIFT + backslash"); hl.unbind("CTRL + SHIFT + code:51"); {replacement}"#
+    ))
+}
+
+/// Park the protected surface on an unopened workspace, retaining its contents.
+pub fn set_overlay_visible(visible: bool) -> Result<(), String> {
+    let workspace = if visible {
+        let output = std::process::Command::new("hyprctl")
+            .args(["-j", "activeworkspace"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+        value["id"]
+            .as_i64()
+            .ok_or("No active workspace")?
+            .to_string()
+    } else {
+        "special:lennette-hidden".to_owned()
+    };
+    let workspace = serde_json::to_string(&workspace).map_err(|e| e.to_string())?;
+    let selector = r#"window="title:^lennette$""#;
+    let expression = format!(
+        "hl.dispatch(hl.dsp.window.pin({{{selector},action=\"disable\"}})); hl.dispatch(hl.dsp.window.move({{{selector},workspace={workspace},follow=false}}))"
+    );
+    apply_expression(&expression)?;
+    if visible {
+        apply_expression(&format!(
+            "hl.dispatch(hl.dsp.window.pin({{{selector},action=\"enable\"}}))"
+        ))?;
+        focus_overlay();
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayGeometry {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+pub fn overlay_geometry() -> Option<OverlayGeometry> {
+    let output = std::process::Command::new("hyprctl")
+        .args(["-j", "clients"])
+        .output()
+        .ok()?;
+    let clients: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let window = clients
+        .as_array()?
+        .iter()
+        .find(|w| w["class"] == "dev.lennette.overlay" && w["title"] == "lennette")?;
+    Some(OverlayGeometry {
+        x: window["at"][0].as_f64()? as f32,
+        y: window["at"][1].as_f64()? as f32,
+        width: window["size"][0].as_f64()? as f32,
+        height: window["size"][1].as_f64()? as f32,
+    })
+}
+
+pub fn place_overlay(geometry: OverlayGeometry) -> Result<(), String> {
+    apply_expression(&format!(
+        "hl.dispatch(hl.dsp.window.resize({{window=\"title:^lennette$\",x={},y={}}})); hl.dispatch(hl.dsp.window.move({{window=\"title:^lennette$\",x={},y={}}}))",
+        geometry.width, geometry.height, geometry.x, geometry.y
+    ))
+}
+
+pub fn dock_geometry(expanded: bool) -> Option<OverlayGeometry> {
+    let output = std::process::Command::new("hyprctl")
+        .args(["-j", "monitors"])
+        .output()
+        .ok()?;
+    let monitors: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let monitor = monitors.as_array()?.iter().find(|m| m["focused"] == true)?;
+    let scale = monitor["scale"].as_f64()?.max(0.1) as f32;
+    let mut width = monitor["width"].as_f64()? as f32 / scale;
+    let mut height = monitor["height"].as_f64()? as f32 / scale;
+    if matches!(monitor["transform"].as_i64().unwrap_or(0), 1 | 3 | 5 | 7) {
+        std::mem::swap(&mut width, &mut height);
+    }
+    let left = monitor["x"].as_f64()? as f32;
+    let top = monitor["y"].as_f64()? as f32
+        + monitor["reserved"][1].as_f64().unwrap_or(0.0) as f32
+        + 16.0;
+    let panel_width = if expanded { 720.0_f32 } else { 560.0_f32 }.min(width - 32.0);
+    Some(OverlayGeometry {
+        x: left
+            + if expanded {
+                (width - panel_width) / 2.0
+            } else {
+                width - panel_width - 16.0
+            },
+        y: top,
+        width: panel_width,
+        height: if expanded {
+            (height - 100.0).min(620.0)
+        } else {
+            64.0
+        },
+    })
+}
+
 /// Focus and raise the overlay window in Hyprland.
 pub fn focus_overlay() {
     if !is_hyprland() {
@@ -226,6 +351,8 @@ mod tests {
 
         let backslash = Binding::parse(Action::ToggleWindow, "ctrl+backslash").unwrap();
         assert_eq!(accelerator(&backslash), "CTRL + backslash");
+        let shifted = Binding::parse(Action::ToggleWindow, "ctrl+shift+backslash").unwrap();
+        assert_eq!(accelerator(&shifted), "CTRL + SHIFT + code:51");
     }
 
     #[test]

@@ -68,6 +68,8 @@ in
     xorg.xauth
     xorg.xvfb
     imagemagick
+    grim
+    wlrctl
     # secure storage / http
     sqlite
     zlib

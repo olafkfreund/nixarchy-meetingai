@@ -27,6 +27,18 @@ pub fn shortcut_catalog() -> Vec<(String, &'static str)> {
         .collect()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CredentialField {
+    Key,
+    Model,
+}
+
+pub const KEY_PROVIDERS: &[(&str, &str)] = &[
+    ("Gemini", "gemini"),
+    ("Merge Gateway", "merge-gateway"),
+    ("Deepgram", "deepgram-stt"),
+];
+
 /// Settings state shared by every settings page.
 pub struct SettingsState {
     pub settings: Settings,
@@ -41,6 +53,8 @@ pub struct SettingsState {
     pub key_provider: String,
     /// Model override typed alongside the key.
     pub key_model: String,
+    pub key_field: Option<CredentialField>,
+    pub replace_key_field: bool,
     /// Result of the last save attempt.
     pub key_status: Option<String>,
     /// Credentials currently stored, refreshed after each change.
@@ -76,7 +90,9 @@ impl SettingsState {
             notice: None,
             key_input: String::new(),
             key_provider: crate::ai::providers::CHAT_PROVIDERS[0].id.to_owned(),
-            key_model: String::new(),
+            key_model: crate::ai::models::default_for("gemini").unwrap().to_owned(),
+            key_field: None,
+            replace_key_field: false,
             key_status: None,
             stored_chat,
             stored_speech,
@@ -580,7 +596,7 @@ pub fn audio_settings(
     let mut providers = section(
         theme,
         "Speech to Text",
-        "Bring your own speech provider. Keys are stored in the encrypted vault.",
+        "Deepgram handles speech. Add its key in AI & Keys to enable recording.",
     );
     for provider in crate::ai::providers::STT_PROVIDERS {
         providers = providers.child(row(
@@ -720,88 +736,109 @@ fn credentials_section(
         "Stored encrypted on this computer. Keys are only sent to the provider you choose.",
     );
 
-    // Provider picker for chat.
-    let choices: Vec<(&'static str, bool)> = crate::ai::providers::CHAT_PROVIDERS
+    let choices: Vec<(&str, bool)> = KEY_PROVIDERS
         .iter()
-        .take(4)
-        .map(|provider| (provider.name, provider.id == state.key_provider))
+        .map(|(name, id)| (*name, *id == state.key_provider))
         .collect();
     card = card.child(row(
         theme,
-        "Chat provider",
-        "Which service answers your questions",
+        "Service",
+        "Connect AI answers and speech transcription",
         segmented(
             "cred-provider",
             theme,
             &choices,
             cx,
             |view: &mut crate::ui::dashboard::view::DashboardView, index, _| {
-                let provider = crate::ai::providers::CHAT_PROVIDERS[index];
-                view.settings_mut().key_provider = provider.id.to_owned();
-                view.settings_mut().key_model = String::new();
+                let id = KEY_PROVIDERS[index].1;
+                let state = view.settings_mut();
+                state.key_provider = id.to_owned();
+                state.key_input.clear();
+                state.key_field = None;
+                state.key_status = None;
+                state.key_model = crate::ai::models::default_for(id)
+                    .or_else(|| {
+                        crate::ai::providers::SttProvider::by_id(id).map(|p| p.default_model)
+                    })
+                    .unwrap_or_default()
+                    .to_owned();
             },
         ),
     ));
 
-    // The key field. Typing is handled by the dashboard's keyboard capture.
-    let shown = if state.key_input.is_empty() {
-        "Paste your API key".to_owned()
-    } else {
-        "•".repeat(state.key_input.len().min(40))
-    };
-    card = card.child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .py(px(space::SM))
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
-                    .child("API key"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .h(px(30.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(radius::MD))
-                            .border_1()
-                            .border_color(if state.key_input.is_empty() {
-                                theme.border
-                            } else {
-                                theme.primary
-                            })
-                            .bg(theme.muted)
-                            .px(px(space::SM))
-                            .text_size(px(11.5))
-                            .text_color(if state.key_input.is_empty() {
-                                theme.muted_foreground
-                            } else {
-                                theme.foreground
-                            })
-                            .child(shown),
-                    )
-                    .child(action(
-                        "save-key",
-                        theme,
-                        "Save key",
-                        cx,
-                        |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                            view.save_credential();
-                        },
-                    )),
-            ),
-    );
-
+    for (id, label, field, shown) in [
+        (
+            "credential-key",
+            "API key",
+            CredentialField::Key,
+            if state.key_input.is_empty() {
+                "Click to paste your API key".to_owned()
+            } else {
+                "•".repeat(state.key_input.chars().count().min(40))
+            },
+        ),
+        (
+            "credential-model",
+            "Model",
+            CredentialField::Model,
+            state.key_model.clone(),
+        ),
+    ] {
+        let focused = state.key_field == Some(field);
+        let locked = field == CredentialField::Model && state.key_provider == "merge-gateway";
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .py(px(space::SM))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.foreground)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .id(id)
+                        .h(px(36.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .rounded(px(radius::LG))
+                        .border_1()
+                        .border_color(if focused {
+                            theme.foreground
+                        } else {
+                            theme.border
+                        })
+                        .bg(theme.input)
+                        .px(px(space::SM))
+                        .text_size(px(12.0))
+                        .text_color(theme.foreground)
+                        .cursor_text()
+                        .child(shown)
+                        .child(if focused { "│" } else { "" })
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |view, _, window, cx| {
+                                if !locked {
+                                    view.focus_credential_field(field, window, cx);
+                                }
+                            }),
+                        ),
+                ),
+        );
+    }
+    card = card.child(action(
+        "save-key",
+        theme,
+        "Save key",
+        cx,
+        |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
+            view.save_credential();
+        },
+    ));
     if let Some(status) = state.key_status.as_deref() {
         card = card.child(
             div()
@@ -850,44 +887,12 @@ fn credentials_section(
     card
 }
 
-/// Developer space: local CLI detection.
+/// Provider setup and storage status.
 pub fn dev_space(
     state: &SettingsState,
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
 ) -> gpui::AnyElement {
-    let detected = crate::ai::local_cli::detect();
-    let s = &state.settings;
-
-    let mut clis = section(
-        theme,
-        "Local AI CLIs",
-        "Drive an assistant you already have installed instead of a hosted model.",
-    );
-    for spec in crate::ai::local_cli::CLIS {
-        let found = detected.get(spec.id).cloned();
-        let selected = s.cli_connection == spec.id;
-        let description = found
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "Not found on PATH".to_owned());
-        let control: gpui::AnyElement = match found {
-            Some(_) => action(
-                gpui::ElementId::Name(format!("pick-cli-{}", spec.id).into()),
-                theme,
-                if selected { "Connected" } else { "Connect" },
-                cx,
-                move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    view.settings_mut().settings.cli_connection = spec.id.to_owned();
-                    view.save_settings();
-                },
-            )
-            .into_any_element(),
-            None => value_chip(theme, "Not installed").into_any_element(),
-        };
-        clis = clis.child(row(theme, spec.name, &description, control));
-    }
-
     let storage = section(
         theme,
         "Storage",
@@ -915,7 +920,6 @@ pub fn dev_space(
 
     stack(vec![
         credentials_section(state, theme, cx).into_any_element(),
-        clis.into_any_element(),
         storage.into_any_element(),
     ])
 }

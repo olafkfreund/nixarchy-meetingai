@@ -86,7 +86,7 @@ impl Route {
             Route::Settings => "Overlay, appearance, capture timing and startup preferences.",
             Route::Audio => "Devices, levels and speech-to-text providers.",
             Route::Shortcuts => "Keyboard combinations that work from anywhere.",
-            Route::DevSpace => "API credentials and local developer options.",
+            Route::DevSpace => "Gemini, Merge Gateway and Deepgram credentials.",
         }
     }
 

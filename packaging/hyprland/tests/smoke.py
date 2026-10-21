@@ -58,7 +58,7 @@ hl.config({animations={enabled=false},misc={disable_hyprland_logo=true,disable_s
     ecosystem={no_update_news=true,no_donation_nag=true},decoration={active_opacity=1,inactive_opacity=1}})
 hl.permission(".*", "screencopy", "allow")
 hl.permission(".*", "keyboard", "allow")
-hl.config({input={resolve_binds_by_sym=true}})
+hl.config({input={resolve_binds_by_sym=false}})
 hl.window_rule({match={class="test\\\\.background.*"},float=true,border_size=0,rounding=0})
 hl.window_rule({match={class="test\\\\.public"},float=true,pin=true,border_size=0,rounding=0})
 ''' + ("" if args.ordinary_launch else f'dofile({json.dumps(str(PACKAGE / "lennette-private.lua"))})\n'))
@@ -188,7 +188,7 @@ try:
         time.sleep(1)
         window = next(w for w in clients() if w["class"] == "dev.lennette.overlay")
         assert window["floating"] and window["pinned"], window
-        assert window["size"] == [720, 620], window
+        assert window["size"] == [560, 64], window
         (artifacts / "results.json").write_text(json.dumps({"passed": True, "test": "ordinary first launch floats and pins without preloaded app rules", "window": window}, indent=2) + "\n")
         print("PASS ordinary first launch floats and pins without preloaded app rules", flush=True)
         raise SystemExit(0)
@@ -316,8 +316,10 @@ try:
             expected_keys = {"D", "backslash", "I", "M", "A", "S"}
             # Lua dispatchers expose closure IDs, rather than their shell text,
             # through IPC. Verify keys plus the immutable source module.
-            protected = [b for b in bindings if b.get("modmask") == 5 and b.get("key") in expected_keys]
-            assert len(protected) == 6 and {b["key"] for b in protected} == expected_keys, bindings
+            def binding_key(binding):
+                return "backslash" if binding.get("keycode") == 51 else binding.get("key")
+            protected = [b for b in bindings if b.get("modmask") == 5 and binding_key(b) in expected_keys]
+            assert len(protected) == 6 and {binding_key(b) for b in protected} == expected_keys, bindings
             assert all(b["dispatcher"] == "HL.Dispatcher(exec_cmd)" for b in protected), protected
             assert shortcut_file.read_text() == args.shortcut_module.read_text()
             checks.append({"test": "all six protected compositor bindings installed"})
@@ -330,12 +332,18 @@ try:
                 keyboard.stdin.write(f"{code}\n")
                 keyboard.stdin.flush()
                 assert keyboard.stdout.readline().strip() == "sent"
-            for key, code in (("\\", 43), ("I", 23)):
-                dispatch('hl.dsp.focus({window="class:test.background$"})')
-                press(code)
-                wait_for(lambda: json.loads(ctl("-j", "activewindow")).get("class") == "dev.lennette.overlay",
-                         f"real keyboard shortcut CTRL+SHIFT+{key}")
-                clean(capture(f"shortcut-{ord(key)}"), f"real keyboard shortcut {key} stays excluded")
+            def app_window():
+                return next(w for w in clients() if w.get("pid") == application.pid and w["title"] == "lennette")
+            press(43)
+            wait_for(lambda: app_window()["workspace"]["name"] == "special:lennette-hidden", "physical shortcut hides overlay")
+            clean(capture("shortcut-hidden"), "hidden overlay stays excluded")
+            press(43)
+            wait_for(lambda: app_window()["workspace"]["name"] != "special:lennette-hidden" and app_window()["pinned"], "physical shortcut restores pinned overlay")
+            clean(capture("shortcut-restored"), "restored overlay stays excluded")
+            press(43)
+            press(23)
+            wait_for(lambda: app_window()["workspace"]["name"] != "special:lennette-hidden" and app_window()["pinned"], "input shortcut restores hidden overlay")
+            clean(capture("shortcut-input"), "input shortcut stays excluded")
             count = sum(w.get("pid") == application.pid for w in clients())
             press(32)
             wait_for(lambda: sum(w.get("pid") == application.pid for w in clients()) > count,

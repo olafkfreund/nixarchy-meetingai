@@ -73,6 +73,9 @@ pub fn primary_monitor() -> Result<MonitorInfo, ScreenError> {
 
 /// Capture a monitor's full frame.
 pub fn capture_monitor(index: Option<usize>) -> Result<RgbaImage, ScreenError> {
+    if crate::platform::hyprland::is_hyprland() {
+        return capture_hyprland(index);
+    }
     let monitors = xcap::Monitor::all().map_err(|error| ScreenError::Capture(error.to_string()))?;
     if monitors.is_empty() {
         return Err(ScreenError::NoMonitors);
@@ -97,6 +100,44 @@ pub fn capture_monitor(index: Option<usize>) -> Result<RgbaImage, ScreenError> {
         .ok_or(ScreenError::NoMonitors)?;
     monitor
         .capture_image()
+        .map_err(|error| ScreenError::Capture(error.to_string()))
+}
+
+/// Use the current compositor socket directly. A portal on the session bus may
+/// belong to a different compositor in a nested session, and can open a dialog
+/// over a presentation. grim also follows the compositor's private overlay rules.
+fn capture_hyprland(index: Option<usize>) -> Result<RgbaImage, ScreenError> {
+    let output = std::process::Command::new("hyprctl")
+        .args(["-j", "monitors"])
+        .output()
+        .map_err(|error| ScreenError::Capture(error.to_string()))?;
+    if !output.status.success() {
+        return Err(ScreenError::Capture(
+            "Could not query the current Hyprland displays".into(),
+        ));
+    }
+    let displays: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
+        .map_err(|error| ScreenError::Capture(error.to_string()))?;
+    let display = match index {
+        Some(index) => displays.get(index).ok_or(ScreenError::MonitorGone(index))?,
+        None => displays
+            .iter()
+            .find(|m| m["focused"].as_bool() == Some(true))
+            .or_else(|| displays.first())
+            .ok_or(ScreenError::NoMonitors)?,
+    };
+    let name = display["name"].as_str().ok_or(ScreenError::NoMonitors)?;
+    let frame = std::process::Command::new("grim")
+        .args(["-o", name, "-"])
+        .output()
+        .map_err(|error| ScreenError::Capture(format!("grim could not start: {error}")))?;
+    if !frame.status.success() {
+        return Err(ScreenError::Capture(
+            String::from_utf8_lossy(&frame.stderr).trim().to_owned(),
+        ));
+    }
+    image::load_from_memory(&frame.stdout)
+        .map(|image| image.to_rgba8())
         .map_err(|error| ScreenError::Capture(error.to_string()))
 }
 

@@ -3,6 +3,7 @@
 pub mod controls;
 pub mod markdown;
 pub mod panels;
+pub mod syntax;
 pub mod text_input;
 
 pub use controls::*;

@@ -67,15 +67,15 @@ pub struct Theme {
 impl Theme {
     /// Pure Glass mode: no background shade behind the app window, pure transparent background.
     pub const GLASS: Theme = Theme {
-        background: rgba(0x00, 0x00, 0x00, 0.0),
-        card: rgba(0xff, 0xff, 0xff, 0.07),
-        foreground: rgb_hex(0xf6f7f9),
+        background: rgba(0x08, 0x08, 0x08, 0.12),
+        card: rgba(0x18, 0x18, 0x18, 0.24),
+        foreground: rgb_hex(0xf5f5f5),
         muted: rgba(0xff, 0xff, 0xff, 0.10),
-        muted_foreground: rgba(0xf3, 0xf5, 0xf8, 0.65),
+        muted_foreground: rgba(0xf3, 0xf3, 0xf3, 0.65),
         border: rgba(0xff, 0xff, 0xff, 0.18),
-        input: rgba(0xff, 0xff, 0xff, 0.10),
+        input: rgba(0x18, 0x18, 0x18, 0.20),
         accent: rgba(0xff, 0xff, 0xff, 0.15),
-        primary: rgb_hex(0xf7f8fa),
+        primary: rgb_hex(0xf7f7f7),
         destructive: rgb_hex(0xe5837f),
         success: rgb_hex(0x8fd9b0),
         warning: rgb_hex(0xe8c48c),
@@ -83,15 +83,15 @@ impl Theme {
 
     /// Dark theme, matching the reference overlay's default appearance.
     pub const DARK: Theme = Theme {
-        background: rgba(0x0f, 0x11, 0x17, 0.95),
-        card: rgba(0x18, 0x1b, 0x24, 0.90),
-        foreground: rgb_hex(0xf3f4f6),
+        background: rgba(0x08, 0x08, 0x08, 0.88),
+        card: rgba(0x18, 0x18, 0x18, 0.52),
+        foreground: rgb_hex(0xf4f4f4),
         muted: rgba(0xff, 0xff, 0xff, 0.08),
-        muted_foreground: rgb_hex(0x9ca3af),
+        muted_foreground: rgb_hex(0xa6a6a6),
         border: rgba(0xff, 0xff, 0xff, 0.14),
-        input: rgba(0x1e, 0x22, 0x2e, 0.85),
+        input: rgba(0x12, 0x12, 0x12, 0.42),
         accent: rgba(0xff, 0xff, 0xff, 0.12),
-        primary: rgb_hex(0xf9fafb),
+        primary: rgb_hex(0xf5f5f5),
         destructive: rgb_hex(0xd35a5a),
         success: rgb_hex(0x6fcf97),
         warning: rgb_hex(0xd8a657),
@@ -217,6 +217,50 @@ impl Surfaces {
     }
 }
 
+/// Stable code metrics and programming ligatures in fenced and inline code.
+pub fn code_font_family() -> gpui::SharedString {
+    "FiraCode Nerd Font".into()
+}
+
+/// Honor the desktop UI font, with fontconfig as the Linux fallback.
+pub fn system_font_family() -> gpui::SharedString {
+    static FAMILY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FAMILY
+        .get_or_init(|| {
+            let configured = std::process::Command::new("gsettings")
+                .args(["get", "org.gnome.desktop.interface", "font-name"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok());
+            if let Some(value) = configured {
+                let value = value.trim().trim_matches('\'');
+                let family = value
+                    .rsplit_once(' ')
+                    .filter(|(_, size)| size.parse::<f32>().is_ok())
+                    .map_or(value, |(family, _)| family);
+                if !family.is_empty() {
+                    return family.to_owned();
+                }
+            }
+            std::process::Command::new("fc-match")
+                .args(["-f", "%{family}", "sans-serif"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "sans-serif".to_owned())
+                .split(',')
+                .next()
+                .unwrap_or("sans-serif")
+                .trim()
+                .to_owned()
+        })
+        .clone()
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,7 +269,7 @@ mod tests {
     fn surfaces_preserve_glass_layering() {
         let theme = Theme::GLASS;
         let half = theme.surfaces(0.5);
-        assert!(half.card().a < 0.1, "card alpha {}", half.card().a);
+        assert!(half.card().a < 0.25, "card alpha {}", half.card().a);
         assert!(half.background().a < 0.5);
         assert!(half.primary().a > 0.5);
         assert!(half.border().a > 0.05);

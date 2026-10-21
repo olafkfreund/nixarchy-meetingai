@@ -14,54 +14,16 @@ pub struct ModelList {
 
 /// Bundled suggestions. Ordered with the fastest and cheapest first, matching
 /// how people pick a model for quick answers.
+pub const MERGE_MODEL: &str = "deepseek/deepseek-v4.1-flash-1017";
+
 pub const MODELS: &[ModelList] = &[
     ModelList {
-        provider: "openai",
-        models: &["gpt-4o-mini", "gpt-4o", "gpt-4.1", "o4-mini"],
-    },
-    ModelList {
-        provider: "claude",
-        models: &["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
-    },
-    ModelList {
         provider: "gemini",
-        models: &[
-            "gemini-flash-lite-latest",
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-        ],
+        models: &["gemini-3.8-flash"],
     },
     ModelList {
-        provider: "grok",
-        models: &["grok-4-fast", "grok-4", "grok-3-mini"],
-    },
-    ModelList {
-        provider: "mistral",
-        models: &["mistral-small-latest", "mistral-large-latest"],
-    },
-    ModelList {
-        provider: "groq",
-        models: &["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
-    },
-    ModelList {
-        provider: "cohere",
-        models: &["command-r-plus", "command-r"],
-    },
-    ModelList {
-        provider: "perplexity",
-        models: &["sonar-pro", "sonar"],
-    },
-    ModelList {
-        provider: "openrouter",
-        models: &[
-            "anthropic/claude-sonnet-4",
-            "openai/gpt-4o-mini",
-            "google/gemini-2.5-flash",
-        ],
-    },
-    ModelList {
-        provider: "ollama",
-        models: &["llama3.2", "qwen2.5", "mistral"],
+        provider: "merge-gateway",
+        models: &[MERGE_MODEL],
     },
 ];
 
@@ -125,12 +87,9 @@ mod tests {
 
     #[test]
     fn label_prefers_the_configured_model() {
-        assert_eq!(label(Some("gpt-4o"), Some("openai")), "gpt-4o");
-        assert_eq!(label(None, Some("gemini")), "gemini-flash-lite-latest");
-        assert_eq!(
-            label(Some("   "), Some("gemini")),
-            "gemini-flash-lite-latest"
-        );
+        assert_eq!(label(Some("gpt-4o"), Some("gemini")), "gpt-4o");
+        assert_eq!(label(None, Some("gemini")), "gemini-3.8-flash");
+        assert_eq!(label(Some("   "), Some("gemini")), "gemini-3.8-flash");
         assert_eq!(label(None, None), "Add a provider");
     }
 

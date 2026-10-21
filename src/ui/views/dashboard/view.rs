@@ -1,7 +1,7 @@
 //! Dashboard rendering: sidebar, page header and per-route bodies.
 
 use gpui::{
-    Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
+    Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, Window, div, img, px,
 };
 use lucide_icons::Icon;
@@ -26,6 +26,7 @@ pub struct DashboardView {
     /// Inline rename state for the open conversation or meeting.
     renaming: bool,
     rename_buffer: String,
+    credential_focus: Option<FocusHandle>,
 }
 
 impl DashboardView {
@@ -55,6 +56,7 @@ impl DashboardView {
             open_meeting: None,
             renaming: false,
             rename_buffer: String::new(),
+            credential_focus: None,
         }
     }
 
@@ -86,12 +88,16 @@ impl DashboardView {
             return;
         };
         let provider = self.settings.key_provider.clone();
-        let mut credential = Credential::chat(provider, self.settings.key_input.trim());
+        let mut credential = if crate::ai::providers::SttProvider::by_id(&provider).is_some() {
+            Credential::speech(provider, self.settings.key_input.trim())
+        } else {
+            Credential::chat(provider, self.settings.key_input.trim())
+        };
         credential.model = self.settings.key_model.trim().to_owned();
         match credentials::save(vault, &credential) {
             Ok(()) => {
                 self.settings.key_input.clear();
-                self.settings.key_status = Some("Key saved.".to_owned());
+                self.settings.key_status = Some("Key saved in the encrypted vault.".to_owned());
                 self.reload_credentials();
             }
             Err(error) => self.settings.key_status = Some(error),
@@ -274,19 +280,52 @@ impl DashboardView {
         self.rename_buffer.clear();
     }
 
-    /// Feed a typed character into the key field.
+    pub fn focus_credential_field(
+        &mut self,
+        field: settings_pages::CredentialField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.key_field = Some(field);
+        self.settings.replace_key_field = false;
+        let focus = self
+            .credential_focus
+            .get_or_insert_with(|| cx.focus_handle());
+        window.focus(focus);
+        cx.notify();
+    }
+
+    fn credential_field_mut(&mut self) -> Option<&mut String> {
+        match self.settings.key_field? {
+            settings_pages::CredentialField::Key => Some(&mut self.settings.key_input),
+            settings_pages::CredentialField::Model => Some(&mut self.settings.key_model),
+        }
+    }
+
     pub fn type_into_key_field(&mut self, text: &str) {
-        self.settings.key_input.push_str(text);
+        let replace = std::mem::take(&mut self.settings.replace_key_field);
+        if let Some(field) = self.credential_field_mut() {
+            if replace {
+                field.clear();
+            }
+            field.push_str(text);
+        }
     }
 
-    /// Delete the last character of the key field.
     pub fn backspace_key_field(&mut self) {
-        self.settings.key_input.pop();
+        let replace = std::mem::take(&mut self.settings.replace_key_field);
+        if let Some(field) = self.credential_field_mut() {
+            if replace {
+                field.clear();
+            } else {
+                field.pop();
+            }
+        }
     }
 
-    /// Whether keystrokes should go to the key field.
     pub fn wants_key_input(&self) -> bool {
-        (self.dashboard.route() == super::nav::Route::DevSpace && !self.renaming) || self.renaming
+        (self.dashboard.route() == super::nav::Route::DevSpace && self.settings.key_field.is_some())
+            || self.renaming
     }
 
     /// Apply "always on top" to the real window and report when it cannot.
@@ -929,7 +968,13 @@ impl Render for DashboardView {
         self.theme = Theme::from_choice(self.settings.settings.theme);
         let theme = self.theme;
         let surfaces = self.surfaces();
+        let focus = self
+            .credential_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
         div()
+            .track_focus(&focus)
+            .font_family(crate::ui::theme::system_font_family())
             .flex()
             .size_full()
             .rounded(px(radius::XL))
@@ -973,17 +1018,30 @@ impl Render for DashboardView {
                 match event.keystroke.key.as_str() {
                     "backspace" => this.backspace_key_field(),
                     "enter" => this.save_credential(),
-                    "v" if event.keystroke.modifiers.platform => {
+                    "escape" => this.settings.key_field = None,
+                    "a" if event.keystroke.modifiers.platform
+                        || event.keystroke.modifiers.control =>
+                    {
+                        this.settings.replace_key_field = true;
+                    }
+                    "v" if event.keystroke.modifiers.platform
+                        || event.keystroke.modifiers.control =>
+                    {
                         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                             let cleaned = text.trim();
-                            if !cleaned.is_empty() && cleaned.len() <= 200 {
+                            if !cleaned.is_empty() && cleaned.len() <= 4096 {
                                 this.type_into_key_field(cleaned);
                             }
                         }
                     }
                     key => {
-                        if key.len() == 1 && !event.keystroke.modifiers.platform {
-                            this.type_into_key_field(key);
+                        if !event.keystroke.modifiers.platform && !event.keystroke.modifiers.control
+                        {
+                            if let Some(text) = event.keystroke.key_char.as_deref() {
+                                this.type_into_key_field(text);
+                            } else if key.len() == 1 {
+                                this.type_into_key_field(key);
+                            }
                         }
                     }
                 }

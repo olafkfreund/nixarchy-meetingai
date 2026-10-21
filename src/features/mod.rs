@@ -5,7 +5,7 @@
 //! - [`crate::db`]: SQLite database persistence
 //! - [`crate::audio`]: Sound processing, microphone, and system audio capture
 //! - [`crate::speech`]: Speech-to-text and live listening sessions
-//! - [`crate::ai`]: Chat engines, providers, models, and local CLI tools
+//! - [`crate::ai`]: Chat engines, providers and models
 //! - [`crate::platform`]: Display server, compositors, window management, and shortcuts
 //! - [`crate::ui`]: GPUI views, design system tokens, and widgets
 
@@ -26,7 +26,6 @@ pub use crate::speech::transcription;
 
 pub use crate::ai::conversation as chat;
 pub use crate::ai::engine as chat_engine;
-pub use crate::ai::local_cli as cli;
 pub use crate::ai::models;
 pub use crate::ai::providers;
 pub use crate::ai::session as chat_session;

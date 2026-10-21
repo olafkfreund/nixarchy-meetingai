@@ -26,6 +26,8 @@
           runtimeInputs = [
             compositor
             pkgs.jq
+            pkgs.grim
+            pkgs.pulseaudio
           ];
           text = builtins.readFile ./launch.sh;
         };

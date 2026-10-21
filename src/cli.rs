@@ -53,7 +53,7 @@ fn usage() -> String {
 
 /// If an instance is already running, activate its window and return true.
 pub fn activate_existing_instance() -> bool {
-    send("toggle-window").is_ok()
+    send("focus-input").is_ok()
 }
 
 /// Path of the control socket shared with the running instance.

@@ -132,6 +132,7 @@ impl ListenSession {
         };
         let mut events = Vec::new();
         let mut earned = Duration::ZERO;
+        let mut level = 0.0_f32;
 
         loop {
             let frame = microphone.take(FRAME_SAMPLES);
@@ -152,6 +153,7 @@ impl ListenSession {
             } else {
                 crate::audio::system_audio::mix(&frame, &remote)
             };
+            level = level.max(crate::audio::rms(&mixed));
             earned +=
                 Duration::from_secs_f64(mixed.len() as f64 / f64::from(crate::audio::SAMPLE_RATE));
             if let Some(segment) = self.segmenter.push(&mixed) {
@@ -160,12 +162,16 @@ impl ListenSession {
         }
 
         self.elapsed += earned;
-        events.push(SessionEvent::Level(microphone.level()));
+        events.push(SessionEvent::Level(level));
 
         if !microphone.is_running() {
             events.push(SessionEvent::Failed(
-                "The microphone stopped unexpectedly. Check that no other app grabbed it."
-                    .to_owned(),
+                microphone
+                    .failure()
+                    .map(|error| format!("The microphone stopped: {error}"))
+                    .unwrap_or_else(|| {
+                        "The microphone stopped unexpectedly. Check your audio device.".to_owned()
+                    }),
             ));
             self.microphone = None;
         }
@@ -337,7 +343,7 @@ mod tests {
 
     #[test]
     fn transcribing_invalid_audio_fails_cleanly() {
-        let config = ProviderConfig::new("openai-whisper", "key", "whisper-1");
+        let config = ProviderConfig::new("deepgram-stt", "key", "nova-3");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

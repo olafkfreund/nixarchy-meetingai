@@ -4,7 +4,6 @@ pub mod catalog;
 pub mod chat;
 
 // Direct re-exports
-pub use catalog::local_cli;
 pub use catalog::models;
 pub use catalog::providers;
 pub use catalog::*;

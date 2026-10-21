@@ -57,6 +57,7 @@ struct Buffer {
     capacity: usize,
     /// Number of frames dropped because the consumer fell behind.
     dropped: u64,
+    failure: Option<String>,
 }
 
 impl Buffer {
@@ -98,6 +99,7 @@ impl Microphone {
             // without letting a stall grow into a memory leak.
             capacity: (SAMPLE_RATE as usize) * 2,
             dropped: 0,
+            failure: None,
         }));
         let sink = Arc::clone(&buffer);
         let (stop_tx, stop_rx) = std_mpsc::channel::<()>();
@@ -175,6 +177,14 @@ impl Microphone {
         self.worker
             .as_ref()
             .is_some_and(|worker| !worker.is_finished())
+            && self.failure().is_none()
+    }
+
+    pub fn failure(&self) -> Option<String> {
+        self.buffer
+            .lock()
+            .ok()
+            .and_then(|buffer| buffer.failure.clone())
     }
 
     /// Stop capturing and join the worker.
@@ -270,6 +280,7 @@ where
     let mut resampler = LinearResampler::new(input_rate);
     let mut pending: Vec<Vec<f32>> = vec![Vec::new(); channels];
 
+    let error_sink = sink.clone();
     device
         .build_input_stream(
             config,
@@ -291,6 +302,9 @@ where
             },
             move |error| {
                 tracing::error!(%error, "microphone stream error");
+                if let Ok(mut buffer) = error_sink.lock() {
+                    buffer.failure = Some(error.to_string());
+                }
             },
             None::<Duration>,
         )
@@ -337,6 +351,7 @@ mod tests {
             samples: VecDeque::new(),
             capacity: 8,
             dropped: 0,
+            failure: None,
         }
     }
 

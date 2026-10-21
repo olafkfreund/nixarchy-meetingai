@@ -92,6 +92,18 @@ impl Input {
         }
     }
 
+    pub fn select_all(&mut self) {
+        self.anchor = 0;
+        self.cursor = self.text.len();
+    }
+
+    pub fn move_to_edge(&mut self, end: bool, extend: bool) {
+        self.cursor = if end { self.text.len() } else { 0 };
+        if !extend {
+            self.anchor = self.cursor;
+        }
+    }
+
     /// Delete backwards, or the selection.
     pub fn backspace(&mut self) {
         if self.cursor != self.anchor {
@@ -208,23 +220,16 @@ pub fn render(
     input: &Input,
     theme: &crate::features::theme::Theme,
     focused: bool,
+    caret_visible: bool,
     placeholder: &str,
 ) -> gpui::AnyElement {
     use gpui::{
         FontWeight, HighlightStyle, IntoElement, ParentElement, Styled, StyledText, hsla, px,
     };
 
-    if input.text().is_empty() {
-        return gpui::div()
-            .text_size(px(13.5))
-            .text_color(theme.muted_foreground)
-            .child(placeholder.to_owned())
-            .into_any_element();
-    }
-
     let default_style = gpui::TextStyle {
         color: theme.foreground.into(),
-        font_family: gpui::SharedString::default(),
+        font_family: crate::ui::theme::system_font_family(),
         font_features: Default::default(),
         font_size: px(13.5).into(),
         font_weight: FontWeight::NORMAL,
@@ -243,15 +248,16 @@ pub fn render(
     let highlights = if focused {
         highlight_ranges(input)
             .into_iter()
+            .filter(|(_, kind)| *kind == HighlightKind::Selection)
             .map(|(range, kind)| {
                 let style = match kind {
                     HighlightKind::Selection => HighlightStyle {
-                        background_color: Some(hsla(0.6, 0.6, 0.8, 0.35)),
+                        background_color: Some(hsla(0.0, 0.0, 0.65, 0.30)),
                         ..Default::default()
                     },
                     HighlightKind::Caret => HighlightStyle {
-                        background_color: Some(hsla(0.6, 0.0, 1.0, 0.9)),
-                        color: Some(hsla(0.6, 0.0, 0.0, 1.0)),
+                        background_color: Some(hsla(0.0, 0.0, 1.0, 0.9)),
+                        color: Some(hsla(0.0, 0.0, 0.0, 1.0)),
                         ..Default::default()
                     },
                 };
@@ -262,8 +268,56 @@ pub fn render(
         Vec::new()
     };
 
-    StyledText::new(input.text().to_owned())
-        .with_default_highlights(&default_style, highlights)
+    let text = input.text().to_owned();
+    let display = if text.is_empty() {
+        placeholder.to_owned()
+    } else {
+        text.clone()
+    };
+    let cursor = input.cursor;
+    let caret = focused && caret_visible && input.selection().is_empty();
+    let color = theme.foreground;
+    let content = if text.is_empty() {
+        gpui::div()
+            .text_color(theme.muted_foreground)
+            .child(display)
+            .into_any_element()
+    } else {
+        StyledText::new(display)
+            .with_default_highlights(&default_style, highlights)
+            .into_any_element()
+    };
+    gpui::div()
+        .relative()
+        .w_full()
+        .h(px(22.0))
+        .text_size(px(13.5))
+        .overflow_hidden()
+        .child(content)
+        .children(caret.then(|| {
+            gpui::div().absolute().top_0().left_0().size_full().child(
+                gpui::canvas(
+                    move |_, window, _| {
+                        let style = window.text_style();
+                        let run = style.to_run(text.len());
+                        window
+                            .text_system()
+                            .shape_line(text.into(), px(13.5), &[run], None)
+                            .x_for_index(cursor)
+                    },
+                    move |bounds, offset, window, _| {
+                        window.paint_quad(gpui::fill(
+                            gpui::Bounds::new(
+                                gpui::point(bounds.left() + offset, bounds.top() + px(2.0)),
+                                gpui::size(px(1.5), px(17.0)),
+                            ),
+                            color,
+                        ));
+                    },
+                )
+                .size_full(),
+            )
+        }))
         .into_any_element()
 }
 

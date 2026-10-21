@@ -345,11 +345,11 @@ mod tests {
             use_image_on_send: true,
             input_device: "mic-1".into(),
             output_device: "spk-1".into(),
-            speech_provider: "openai-whisper".into(),
-            speech_model: "whisper-1".into(),
+            speech_provider: "deepgram-stt".into(),
+            speech_model: "nova-3".into(),
             smart_follow_ups: false,
             smart_follow_ups_prompt: "custom".into(),
-            cli_connection: "claude".into(),
+            cli_connection: "".into(),
         };
         settings.save(&database).unwrap();
         assert_eq!(Settings::load(&database).unwrap(), settings);

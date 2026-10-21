@@ -95,6 +95,9 @@ impl gpui::AssetSource for EmbeddedAssets {
             "lennette.png" => Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
                 "assets/lennette.png"
             )))),
+            "play-filled.svg" => Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "assets/play-filled.svg"
+            )))),
             "lennette_app_icon.png" => Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
                 "assets/lennette_app_icon.png"
             )))),
@@ -115,6 +118,13 @@ pub fn run() {
         )
         .init();
 
+    // GPUI runs its own executor; reqwest/WebSockets and tokio::spawn still need
+    // a live Tokio reactor on the UI thread for all provider requests.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("could not start the provider runtime");
+    let _runtime_guard = runtime.enter();
     let services = Services::open();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -126,6 +136,7 @@ pub fn run() {
     Application::new()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
+            crate::ui::widgets::syntax::warm_up();
             // Register the bundled Lucide icon font once for the whole app.
             if let Err(error) = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(
                 crate::features::icons::FONT_BYTES,
@@ -203,7 +214,12 @@ pub fn run() {
                             Err(error) => tracing::warn!(%error, "could not apply bindings now"),
                         }
                     }
-                    Err(error) => tracing::warn!(%error, "could not write Hyprland bindings"),
+                    Err(error) => {
+                        tracing::debug!(%error, "Hyprland bindings are managed by the system");
+                        if let Err(error) = crate::features::hyprland::repair_managed_toggle() {
+                            tracing::warn!(%error, "could not repair managed toggle binding");
+                        }
+                    }
                 }
             }
 
@@ -263,7 +279,7 @@ pub fn run() {
                     }
                     Err(error) => tracing::error!(%error, "global shortcuts unavailable"),
                 }
-            } else {
+            } else if !crate::features::hyprland::is_hyprland() {
                 tracing::warn!(%message, "global shortcuts disabled");
             }
 
@@ -304,6 +320,19 @@ pub fn open_dashboard_at(
     services: Services,
     route: crate::features::dashboard::nav::Route,
 ) {
+    for handle in cx.windows() {
+        if let Some(dashboard) = handle.downcast::<DashboardView>()
+            && dashboard
+                .update(cx, |view, window, cx| {
+                    view.navigate_to(route);
+                    window.activate_window();
+                    cx.notify();
+                })
+                .is_ok()
+        {
+            return;
+        }
+    }
     let bounds = Bounds::centered(None, size(px(DASHBOARD_WIDTH), px(DASHBOARD_HEIGHT)), cx);
     let options = WindowOptions {
         app_id: Some("dev.lennette.overlay".into()),

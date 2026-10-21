@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::ai::providers::{ChatProvider, ChatWire, ProviderConfig};
+use crate::ai::providers::{ChatProvider, ProviderConfig};
 use crate::core::domain::Message;
 
 /// Errors from a chat request.
@@ -60,57 +60,25 @@ pub fn build_body(
     history: &[Message],
     context: &TurnContext,
 ) -> Value {
-    match provider.wire {
-        ChatWire::OpenAi => {
-            let mut messages: Vec<Value> = Vec::with_capacity(history.len() + 1);
-            if let Some(system) = &context.system {
-                messages.push(json!({ "role": "system", "content": system }));
-            }
-            for message in history {
-                messages.push(openai_message(message, context.images.first()));
-            }
-            json!({
-                "model": config.model,
-                "messages": messages,
-                "stream": true,
-            })
-        }
-        ChatWire::Anthropic => {
-            let mut messages: Vec<Value> = Vec::with_capacity(history.len());
-            for (index, message) in history.iter().enumerate() {
-                let image = if index == history.len() - 1 {
-                    context.images.first()
-                } else {
-                    None
-                };
-                messages.push(anthropic_message(message, image));
-            }
-            let mut body = json!({
-                "model": config.model,
-                "messages": messages,
-                "max_tokens": 4096,
-                "stream": true,
-            });
-            if let Some(system) = &context.system {
-                body["system"] = json!(system);
-            }
-            body
-        }
-        ChatWire::Cohere => {
-            let mut messages: Vec<Value> = Vec::with_capacity(history.len() + 1);
-            if let Some(system) = &context.system {
-                messages.push(json!({ "role": "system", "content": system }));
-            }
-            for message in history {
-                messages.push(openai_message(message, context.images.first()));
-            }
-            json!({
-                "model": config.model,
-                "messages": messages,
-                "stream": true,
-            })
-        }
+    let mut messages: Vec<Value> = Vec::with_capacity(history.len() + 1);
+    if let Some(system) = &context.system {
+        messages.push(json!({ "role": "system", "content": system }));
     }
+    for (index, message) in history.iter().enumerate() {
+        let image = (provider.supports_images
+            && index + 1 == history.len()
+            && message.role == crate::core::domain::Role::User)
+            .then(|| context.images.first())
+            .flatten();
+        messages.push(openai_message(message, image));
+    }
+    let mut body = json!({ "model": config.model, "messages": messages, "stream": true });
+    if provider.id == "merge-gateway" {
+        // Meeting answers need the final response promptly, rather than a long
+        // reasoning stream. This control is supported by the pinned DeepSeek model.
+        body["reasoning_effort"] = json!("none");
+    }
+    body
 }
 
 fn openai_message(message: &Message, image: Option<&String>) -> Value {
@@ -127,20 +95,6 @@ fn openai_message(message: &Message, image: Option<&String>) -> Value {
     }
 }
 
-fn anthropic_message(message: &Message, image: Option<&String>) -> Value {
-    if let Some(image) = image {
-        json!({
-            "role": role_name(message),
-            "content": [
-                { "type": "text", "text": message.content },
-                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": image } }
-            ]
-        })
-    } else {
-        json!({ "role": role_name(message), "content": message.content })
-    }
-}
-
 fn role_name(message: &Message) -> &'static str {
     match message.role {
         crate::core::domain::Role::User => "user",
@@ -149,32 +103,12 @@ fn role_name(message: &Message) -> &'static str {
     }
 }
 
-/// Apply vendor auth headers.
-fn authorise(
-    request: reqwest::RequestBuilder,
-    provider: &ChatProvider,
-    config: &ProviderConfig,
-) -> reqwest::RequestBuilder {
-    match provider.wire {
-        ChatWire::Anthropic => request
-            .header("x-api-key", &config.api_key)
-            .header("anthropic-version", "2023-06-01"),
-        ChatWire::OpenAi | ChatWire::Cohere => {
-            if config.api_key.is_empty() {
-                request
-            } else {
-                request.bearer_auth(&config.api_key)
-            }
-        }
-    }
-}
-
 /// Parse one SSE payload line into an event.
 ///
 /// Accepts comments and unknown JSON as `None`, returns `Done` for the final
 /// sentinel, and errors only on malformed JSON or an explicit provider error.
 pub fn parse_sse_line(
-    provider: &ChatProvider,
+    _provider: &ChatProvider,
     line: &[u8],
 ) -> Result<Option<ChatEvent>, ChatError> {
     let text = std::str::from_utf8(line)
@@ -194,25 +128,9 @@ pub fn parse_sse_line(
     if let Some(error) = value.get("error").and_then(message_from_error) {
         return Err(ChatError::Protocol(error));
     }
-    let delta = match provider.wire {
-        ChatWire::OpenAi | ChatWire::Cohere => value
-            .pointer("/choices/0/delta/content")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                value
-                    .pointer("/message/content/0/text")
-                    .and_then(Value::as_str)
-            })
-            .or_else(|| {
-                value
-                    .pointer("/delta/message/content/0/text")
-                    .and_then(Value::as_str)
-            }),
-        ChatWire::Anthropic => value
-            .pointer("/delta/text")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/content_block/text").and_then(Value::as_str)),
-    };
+    let delta = value
+        .pointer("/choices/0/delta/content")
+        .and_then(Value::as_str);
     Ok(delta.map(|text| ChatEvent::Delta(text.to_owned())))
 }
 
@@ -243,11 +161,26 @@ pub async fn stream_chat(
     if provider.requires_key() && config.api_key.trim().is_empty() {
         return Err(ChatError::MissingKey);
     }
+    if config.id == "merge-gateway" && config.model != crate::ai::models::MERGE_MODEL {
+        return Err(ChatError::Protocol(
+            "Merge Gateway is restricted to DeepSeek V4.1 Flash 1017.".into(),
+        ));
+    }
     let endpoint = config.endpoint().ok_or(ChatError::NotConfigured)?;
+    if *cancel.borrow() {
+        return Ok(String::new());
+    }
+    let mut cancellation = (*cancel).clone();
 
     let body = build_body(provider, config, history, context);
-    let request = authorise(client.post(endpoint), provider, config).json(&body);
-    let response = request.send().await?;
+    let request = client
+        .post(endpoint)
+        .bearer_auth(&config.api_key)
+        .json(&body);
+    let response = tokio::select! {
+        result = request.send() => result?,
+        _ = wait_for_cancellation(&mut cancellation) => return Ok(String::new()),
+    };
 
     let status = response.status();
     if !status.is_success() {
@@ -262,10 +195,11 @@ pub async fn stream_chat(
     let mut buffer = Vec::new();
     let mut answer = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        if *cancel.borrow() {
-            break;
-        }
+    loop {
+        let chunk = tokio::select! {
+            chunk = stream.next() => match chunk { Some(chunk) => chunk, None => break },
+            _ = wait_for_cancellation(&mut cancellation) => return Ok(answer),
+        };
         let chunk = chunk?;
         buffer.extend_from_slice(&chunk);
 
@@ -282,21 +216,47 @@ pub async fn stream_chat(
                     answer.push_str(&text);
                     on_text(&text);
                 }
-                Ok(Some(ChatEvent::Done)) => return Ok(answer),
+                Ok(Some(ChatEvent::Done)) => return completed_answer(answer),
                 Ok(None) => {}
                 Err(error) => return Err(error),
             }
         }
     }
 
-    // A final line without a trailing newline still counts.
-    if !buffer.is_empty()
-        && let Ok(Some(ChatEvent::Delta(text))) = parse_sse_line(provider, &buffer)
-    {
-        answer.push_str(&text);
-        on_text(&text);
+    // A final line without a newline still counts and must surface errors.
+    if !buffer.is_empty() {
+        match parse_sse_line(provider, &buffer)? {
+            Some(ChatEvent::Delta(text)) => {
+                answer.push_str(&text);
+                on_text(&text);
+            }
+            Some(ChatEvent::Done) | None => {}
+        }
     }
-    Ok(answer)
+    completed_answer(answer)
+}
+
+async fn wait_for_cancellation(cancel: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancel.borrow() {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            // A caller with no Stop control can drop its sender. That is not a
+            // cancellation request; avoid closing valid streams immediately.
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+fn completed_answer(answer: String) -> Result<String, ChatError> {
+    if answer.trim().is_empty() {
+        Err(ChatError::Protocol(
+            "the stream ended without an answer".into(),
+        ))
+    } else {
+        Ok(answer)
+    }
 }
 
 #[cfg(test)]
@@ -313,8 +273,8 @@ mod tests {
 
     #[test]
     fn openai_body_puts_system_first_and_streams() {
-        let provider = ChatProvider::by_id("openai").unwrap();
-        let config = ProviderConfig::new("openai", "k", "gpt-4o");
+        let provider = ChatProvider::by_id("gemini").unwrap();
+        let config = ProviderConfig::new("gemini", "k", "gpt-4o");
         let history = [Message::user("hi"), Message::assistant("hello")];
         let body = build_body(provider, &config, &history, &context("be brief"));
         assert_eq!(body["messages"][0]["role"], "system");
@@ -324,20 +284,9 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_body_uses_top_level_system_and_max_tokens() {
-        let provider = ChatProvider::by_id("claude").unwrap();
-        let config = ProviderConfig::new("claude", "k", "claude-sonnet-4");
-        let history = [Message::user("hi")];
-        let body = build_body(provider, &config, &history, &context("sys"));
-        assert_eq!(body["system"], "sys");
-        assert_eq!(body["max_tokens"], 4096);
-        assert_eq!(body["messages"][0]["role"], "user");
-    }
-
-    #[test]
     fn image_attaches_to_openai_content_array() {
-        let provider = ChatProvider::by_id("openai").unwrap();
-        let config = ProviderConfig::new("openai", "k", "gpt-4o");
+        let provider = ChatProvider::by_id("gemini").unwrap();
+        let config = ProviderConfig::new("gemini", "k", "gpt-4o");
         let history = [Message::user("what is this")];
         let context = TurnContext {
             system: None,
@@ -350,21 +299,30 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_image_uses_base64_source() {
-        let provider = ChatProvider::by_id("claude").unwrap();
-        let config = ProviderConfig::new("claude", "k", "m");
-        let history = [Message::user("look")];
-        let context = TurnContext {
-            system: None,
-            images: vec!["QUJD".into()],
-        };
-        let body = build_body(provider, &config, &history, &context);
-        assert_eq!(body["messages"][0]["content"][1]["source"]["data"], "QUJD");
+    fn attachments_only_belong_to_the_current_user_turn() {
+        let provider = ChatProvider::by_id("gemini").unwrap();
+        let config = ProviderConfig::new("gemini", "k", "m");
+        let body = build_body(
+            provider,
+            &config,
+            &[
+                Message::user("old"),
+                Message::assistant("reply"),
+                Message::user("look"),
+            ],
+            &TurnContext {
+                system: None,
+                images: vec!["QUJD".into()],
+            },
+        );
+        assert!(body["messages"][0]["content"].is_string());
+        assert!(body["messages"][1]["content"].is_string());
+        assert!(body["messages"][2]["content"].is_array());
     }
 
     #[test]
-    fn sse_parses_openai_and_anthropic_and_done() {
-        let openai = ChatProvider::by_id("openai").unwrap();
+    fn sse_parses_supported_streams_and_done() {
+        let openai = ChatProvider::by_id("gemini").unwrap();
         assert_eq!(
             parse_sse_line(openai, br#"data: {"choices":[{"delta":{"content":"hi"}}]}"#).unwrap(),
             Some(ChatEvent::Delta("hi".into()))
@@ -375,21 +333,11 @@ mod tests {
         );
         assert_eq!(parse_sse_line(openai, b": keep-alive").unwrap(), None);
         assert_eq!(parse_sse_line(openai, b"").unwrap(), None);
-
-        let claude = ChatProvider::by_id("claude").unwrap();
-        assert_eq!(
-            parse_sse_line(
-                claude,
-                br#"data: {"type":"content_block_delta","delta":{"text":"yo"}}"#
-            )
-            .unwrap(),
-            Some(ChatEvent::Delta("yo".into()))
-        );
     }
 
     #[test]
     fn sse_surfaces_provider_errors() {
-        let openai = ChatProvider::by_id("openai").unwrap();
+        let openai = ChatProvider::by_id("gemini").unwrap();
         assert!(matches!(
             parse_sse_line(openai, br#"data: {"error":"quota"}"#),
             Err(ChatError::Protocol(_))
@@ -402,7 +350,7 @@ mod tests {
 
     #[test]
     fn missing_key_is_reported_before_network() {
-        let config = ProviderConfig::new("openai", "", "gpt-4o");
+        let config = ProviderConfig::new("gemini", "", "gpt-4o");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

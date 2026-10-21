@@ -6,8 +6,8 @@ window rule. This is built into its own compositor package; it cannot be loaded
 as a binary plugin into an existing compositor.
 
 Protected floating, pinned windows render above other application windows,
-including fullscreen and other pinned windows. Overlay windows start centered
-at 720x620; dashboards start at 1100x760. Monitor captures recompose the public
+including fullscreen and other pinned windows. The app starts as a compact dock at the top right; hovering expands the
+720x620 conversation panel near the top center. Dashboards start at 1100x760. Monitor captures recompose the public
 scene from its surfaces, omitting protected windows, their popups, and
 their closing snapshots. The underlying applications remain visible in the
 capture, without a replacement rectangle. Direct capture of a protected window
@@ -105,8 +105,11 @@ bindings in Nix; application-side remapping cannot overwrite the managed file.
 | Ctrl+Shift+S | Screenshot command |
 
 These forward Lennette's existing command-line actions to its running instance.
-The application's window command currently activates/focuses its overlay; the
-dashboard command opens its dashboard. The compositor does not implement the
+The window command hides the overlay on a private special workspace and restores
+it to the active workspace, floating and pinned. Ctrl+Shift+I also restores a
+hidden overlay and focuses its input. The Hyprland binding uses physical keycode
+51 for the US backslash key so Shift does not change its match into `bar`.
+The dashboard command opens the dashboard. The compositor does not implement the
 application's audio, transcription, or meeting-response features.
 
 ## Test and inspect
@@ -175,3 +178,20 @@ No live receiver-side Google Meet or Zoom call is covered by the protocol tests.
 After activating the patched desktop, verify a private test share from a second
 device for each meeting application and share mode you intend to use. Audio,
 transcription, and AI response accuracy require separate validation.
+
+## Overlay controls
+
+The app opens as a compact pill at the top right of the active monitor. Hover
+to reveal the centered panel; it retracts after leaving, while an active input
+or open dropdown keeps it expanded. Starting a recording returns it to the
+corner. Hyprland animates the window movement and the panel fades in.
+
+The footer offers **Full**, **Follow-ups**, and **Hide** modes. The dashboard
+and screenshot controls are icons at the left and right of the input. Dark
+mode uses neutral charcoal; glass elements preserve their alpha and the app's
+window rules disable compositor blur. Text uses the system UI font.
+
+Recording is disabled until a configured speech provider has a key. All start
+paths share that check; recording shows a red stop square, elapsed time, and
+an audio-level waveform. Removing a key never prevents stopping an active
+recording. The provider/model picker selects the provider used by chat requests.
