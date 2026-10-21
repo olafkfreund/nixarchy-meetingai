@@ -58,6 +58,7 @@ impl Tool {
 
 /// Root view for the overlay window.
 pub struct Overlay {
+    services: crate::app::Services,
     mode: Mode,
     size: OverlaySize,
     conversation: Conversation,
@@ -72,8 +73,9 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    pub fn new() -> Self {
+    pub fn new(services: crate::app::Services) -> Self {
         Self {
+            services,
             mode: Mode::default(),
             size: OverlaySize::default(),
             conversation: Conversation::new(),
@@ -204,7 +206,7 @@ impl Overlay {
             )
             .child(div().flex_1())
             .child(self.status_pill())
-            .child(self.dashboard_button())
+            .child(self.dashboard_button(cx))
             .child(self.settings_button(settings_active, cx))
             .child(self.history_button(history_active, cx))
     }
@@ -229,8 +231,9 @@ impl Overlay {
             .child(label)
     }
 
-    fn dashboard_button(&self) -> impl IntoElement {
+    fn dashboard_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        let services = self.services.clone();
         div()
             .flex()
             .items_center()
@@ -247,6 +250,9 @@ impl Overlay {
             .id("open-dashboard")
             .child(icons::icon(&theme, Icon::LayoutDashboard, 11.0))
             .child("Open dashboard")
+            .on_click(cx.listener(move |_, _, _, cx| {
+                crate::app::open_dashboard(cx, services.clone());
+            }))
     }
 
     fn settings_button(&self, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
@@ -711,12 +717,6 @@ fn kbd(theme: &Theme, label: &'static str) -> impl IntoElement {
         .text_size(px(9.5))
         .text_color(theme.muted_foreground)
         .child(label)
-}
-
-impl Default for Overlay {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Render for Overlay {

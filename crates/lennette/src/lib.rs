@@ -3,4 +3,6 @@
 pub mod app;
 pub mod features;
 
+pub use app::Services;
+
 pub use app::run;

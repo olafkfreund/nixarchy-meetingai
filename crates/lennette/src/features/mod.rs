@@ -6,6 +6,7 @@ pub mod chat;
 pub mod chat_engine;
 pub mod cli;
 pub mod components;
+pub mod dashboard;
 pub mod db;
 pub mod domain;
 pub mod icons;
