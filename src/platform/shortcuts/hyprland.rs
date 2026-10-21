@@ -85,11 +85,22 @@ pub fn window_rules() -> &'static str {
     // rejected with "unknown field 'effect'".
     "hl.window_rule({\n\
      \x20   match = { class = \"lennette\" },\n\
+     \x20   float = true,\n\
+     \x20   pin = true,\n\
      \x20   border_size = 0,\n\
      \x20   rounding = 0,\n\
      })\n\
      hl.window_rule({\n\
      \x20   match = { title = \"lennette\" },\n\
+     \x20   float = true,\n\
+     \x20   pin = true,\n\
+     \x20   border_size = 0,\n\
+     \x20   rounding = 0,\n\
+     })\n\
+     hl.window_rule({\n\
+     \x20   match = { class = \"dev.lennette.overlay\" },\n\
+     \x20   float = true,\n\
+     \x20   pin = true,\n\
      \x20   border_size = 0,\n\
      \x20   rounding = 0,\n\
      })\n"
@@ -198,11 +209,14 @@ mod tests {
     fn module_disables_compositor_borders() {
         let module = lua_module(&Binding::defaults());
         assert!(module.contains("border_size = 0"));
+        assert!(module.contains("float = true"));
+        assert!(module.contains("pin = true"));
         assert!(!module.contains("effect = {"), "effects must be flat");
         assert!(module.contains("rounding = 0"));
         // Matched both ways: Wayland reports a class, XWayland is matched by title.
         assert!(module.contains("class = \"lennette\""));
         assert!(module.contains("title = \"lennette\""));
+        assert!(module.contains("class = \"dev.lennette.overlay\""));
     }
 
     #[test]

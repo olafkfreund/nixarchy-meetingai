@@ -137,6 +137,7 @@ pub fn run() {
             let services_for_overlay = services.clone();
             let bounds = Bounds::centered(None, size(px(OVERLAY_WIDTH), px(OVERLAY_HEIGHT)), cx);
             let overlay_options = WindowOptions {
+                app_id: Some("dev.lennette.overlay".into()),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 // A transparent window lets the opacity control show the desktop
                 // through the overlay instead of only fading toward black.
@@ -296,6 +297,7 @@ pub fn open_dashboard_at(
 ) {
     let bounds = Bounds::centered(None, size(px(DASHBOARD_WIDTH), px(DASHBOARD_HEIGHT)), cx);
     let options = WindowOptions {
+        app_id: Some("dev.lennette.overlay".into()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_background: gpui::WindowBackgroundAppearance::Transparent,
         titlebar: Some(TitlebarOptions {
