@@ -263,7 +263,10 @@ pub fn run() {
 
             let portal_clone = portal_shortcuts.clone();
             let control_handle = control.ok().map(std::sync::Arc::new);
-            cx.open_window(overlay_options, move |_, cx| {
+            cx.open_window(overlay_options, move |window, cx| {
+                window.set_window_title("lennette");
+                window.set_app_id("dev.lennette.overlay");
+                window.activate_window();
                 cx.new(|_| {
                     Overlay::new(
                         services_for_overlay,
@@ -277,6 +280,7 @@ pub fn run() {
             .expect("failed to open the overlay window");
 
             cx.activate(true);
+            crate::features::hyprland::focus_overlay();
         });
 }
 

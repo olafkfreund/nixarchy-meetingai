@@ -659,6 +659,8 @@ impl Overlay {
                 let alive = this
                     .update(cx, |overlay, cx| {
                         overlay.poll_shortcuts(cx);
+                        overlay.poll_portal(cx);
+                        overlay.poll_control(cx);
                         overlay.poll_tray(cx);
                         cx.notify();
                         true
@@ -683,6 +685,26 @@ impl Overlay {
             actions.push(action);
         }
         for action in actions {
+            self.handle_shortcut(action, cx);
+        }
+    }
+
+    /// Act on any command received from shortcut flags or the launcher over the control socket.
+    pub fn poll_control(&mut self, cx: &mut Context<Self>) {
+        let Some(control) = self.control.clone() else {
+            return;
+        };
+        for action in control.drain() {
+            self.handle_shortcut(action, cx);
+        }
+    }
+
+    /// Act on global shortcuts bound through the Wayland desktop portal.
+    pub fn poll_portal(&mut self, cx: &mut Context<Self>) {
+        let Some(portal) = self.portal.clone() else {
+            return;
+        };
+        for action in portal.drain() {
             self.handle_shortcut(action, cx);
         }
     }
@@ -744,7 +766,7 @@ impl Overlay {
         use crate::features::shortcuts::Action;
         match action {
             Action::Screenshot => self.capture_screen(),
-            Action::ToggleWindow => self.toggle_window(),
+            Action::ToggleWindow => self.toggle_window(cx),
             Action::ToggleDashboard => {
                 crate::app::open_dashboard(cx, self.services.clone());
             }
@@ -759,6 +781,7 @@ impl Overlay {
                 // Bring the overlay forward and put the cursor in the composer.
                 self.mode = Mode::Ask;
                 self.focus_composer = true;
+                self.toggle_window(cx);
             }
             Action::SystemAudio => {
                 // Toggle capture of the far side of a call alongside the mic.
@@ -772,9 +795,11 @@ impl Overlay {
         }
     }
 
-    /// Show or hide the overlay window itself.
-    fn toggle_window(&mut self) {
-        self.window_visible = !self.window_visible;
+    /// Show and focus the overlay window itself.
+    fn toggle_window(&mut self, cx: &mut Context<Self>) {
+        self.window_visible = true;
+        cx.activate(true);
+        crate::features::hyprland::focus_overlay();
     }
 
     /// Start capture without a UI context (a global shortcut).

@@ -176,6 +176,33 @@ pub fn apply_now(bindings: &[Binding]) -> Result<usize, String> {
     Ok(applied)
 }
 
+/// Focus and raise the overlay window in Hyprland.
+pub fn focus_overlay() {
+    if !is_hyprland() {
+        return;
+    }
+    // Try Hyprland-Lua dispatch first (matching the user's config environment).
+    let status = std::process::Command::new("hyprctl")
+        .args([
+            "dispatch",
+            "hl.dsp.focus({ window = \"class:.*[Ll]ennette.*\" })",
+        ])
+        .status();
+    let _ = std::process::Command::new("hyprctl")
+        .args([
+            "dispatch",
+            "hl.dsp.window.bring_to_top({ window = \"class:.*[Ll]ennette.*\" })",
+        ])
+        .status();
+
+    // Fallback to standard hyprctl syntax if lua syntax did not succeed.
+    if !status.map(|s| s.success()).unwrap_or(false) {
+        let _ = std::process::Command::new("hyprctl")
+            .args(["dispatch", "focuswindow", "class:dev.lennette.overlay"])
+            .status();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

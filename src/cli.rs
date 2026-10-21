@@ -69,8 +69,13 @@ fn send(command: &str) -> Result<(), String> {
     let path = control_socket().ok_or("XDG_RUNTIME_DIR is not set")?;
     let mut stream = UnixStream::connect(&path)
         .map_err(|_| "no running lennette instance was found".to_owned())?;
+    let payload = if command.ends_with('\n') {
+        command.to_owned()
+    } else {
+        format!("{command}\n")
+    };
     stream
-        .write_all(command.as_bytes())
+        .write_all(payload.as_bytes())
         .map_err(|error| error.to_string())
 }
 
