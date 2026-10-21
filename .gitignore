@@ -1,10 +1,8 @@
-# Reference material from the reverse-engineering phase.
-# Kept locally for parity checks, never committed.
-/ref/
-
 # Build output
 /target/
 **/target/
+result
+result-*
 
 # devenv / direnv
 .devenv/
@@ -12,12 +10,15 @@
 
 # Environment
 .env
-.env.local
+.env.*
+!.env.example
 
 # Editor / OS
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 .DS_Store
 
 # Logs and runtime artefacts
