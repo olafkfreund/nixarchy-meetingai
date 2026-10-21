@@ -71,32 +71,48 @@ impl Tray {
     }
 }
 
-/// A 16×16 icon in RGBA, drawn as a simple mark so no asset file is needed.
-fn icon_rgba() -> (Vec<u8>, u32, u32) {
-    const SIZE: u32 = 16;
-    let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            // A rounded dot with a brighter core.
-            let dx = x as f32 - 7.5;
-            let dy = y as f32 - 7.5;
+/// Render the mark at one size, in RGBA.
+///
+/// A rounded ring with a bright core: legible on both light and dark panels, and
+/// drawn in code so no external asset can go missing.
+fn icon_at(size: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    let centre = (size as f32 - 1.0) / 2.0;
+    let radius = size as f32 * 0.42;
+    let core = size as f32 * 0.20;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - centre;
+            let dy = y as f32 - centre;
             let distance = (dx * dx + dy * dy).sqrt();
-            let (r, g, b, a) = if distance < 3.0 {
-                (255, 255, 255, 255)
-            } else if distance < 6.0 {
-                (160, 160, 165, 255)
+            // Anti-alias the outer edge over one pixel.
+            let alpha = ((radius - distance) * 255.0).clamp(0.0, 255.0);
+            let (r, g, b) = if distance < core {
+                (255, 255, 255)
+            } else if distance < radius {
+                (150, 152, 158)
             } else {
-                (0, 0, 0, 0)
+                (0, 0, 0)
             };
-            pixels.extend_from_slice(&[r, g, b, a]);
+            pixels.extend_from_slice(&[r, g, b, alpha as u8]);
         }
     }
-    (pixels, SIZE, SIZE)
+    pixels
 }
+
+/// The default 16×16 icon, used by tests and as a fallback.
+#[cfg(test)]
+fn icon_rgba() -> (Vec<u8>, u32, u32) {
+    const SIZE: u32 = 16;
+    (icon_at(SIZE), SIZE, SIZE)
+}
+
+/// Sizes a panel may ask for, largest first.
+const ICON_SIZES: [u32; 4] = [64, 48, 32, 22];
 
 #[cfg(target_os = "linux")]
 mod ksni_tray {
-    use super::{TrayAction, TrayBackend, icon_rgba};
+    use super::{ICON_SIZES, TrayAction, TrayBackend, icon_at};
     use ksni::blocking::TrayMethods;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -120,12 +136,25 @@ mod ksni_tray {
         }
 
         fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-            let (rgba, width, height) = icon_rgba();
-            vec![ksni::Icon {
-                width: width as i32,
-                height: height as i32,
-                data: rgba,
-            }]
+            // Serve every common size: panels pick the closest and downscale,
+            // and a lone 16px pixmap renders blurry or is dropped entirely.
+            ICON_SIZES
+                .iter()
+                .map(|&size| ksni::Icon {
+                    width: size as i32,
+                    height: size as i32,
+                    data: icon_at(size),
+                })
+                .collect()
+        }
+
+        fn icon_name(&self) -> String {
+            // A themed name gives the panel a fallback if pixmaps are ignored.
+            "lennette".into()
+        }
+
+        fn status(&self) -> ksni::Status {
+            ksni::Status::Active
         }
 
         fn tool_tip(&self) -> ksni::ToolTip {

@@ -132,7 +132,7 @@ impl Overlay {
         // Read once at startup; changing it writes straight back to settings.
         let opacity =
             crate::features::settings::Settings::load_from_path(services.database_path.as_deref())
-                .map(|settings| (settings.transparency as f32 / 100.0).clamp(0.35, 1.0))
+                .map(|settings| (settings.transparency as f32 / 100.0).clamp(0.5, 1.0))
                 .unwrap_or(1.0);
         Self {
             services,
@@ -760,6 +760,7 @@ impl Overlay {
             .px(px(10.0))
             .border_b_1()
             .border_color(theme.border)
+            .bg(Theme::with_alpha(theme.card, self.surface_alpha()))
             // Home mark opens the dashboard.
             .child(icon_button("home", &theme, Icon::House))
             .child(
@@ -862,9 +863,16 @@ impl Overlay {
         button
     }
 
+    /// Alpha for opaque surfaces. Kept slightly above the body opacity so text
+    /// on the header and composer stays readable at low settings.
+    fn surface_alpha(&self) -> f32 {
+        (self.opacity * 0.92).clamp(0.30, 1.0)
+    }
+
     /// Change overlay opacity and persist it.
     pub fn set_opacity(&mut self, opacity: f32) {
-        self.opacity = opacity.clamp(0.35, 1.0);
+        // Below 50% the overlay stops being readable over a busy desktop.
+        self.opacity = opacity.clamp(0.5, 1.0);
         let percent = (self.opacity * 100.0).round() as u32;
         if let Some(path) = self.services.database_path.as_deref()
             && let Ok(database) = crate::features::db::Database::open(path)
@@ -1318,7 +1326,7 @@ impl Overlay {
             .gap(px(space::SM))
             .border_t_1()
             .border_color(theme.border)
-            .bg(theme.card)
+            .bg(Theme::with_alpha(theme.card, self.surface_alpha()))
             .px(px(space::MD))
             .py(px(10.0))
             // Push to talk + tool cluster.
@@ -1604,6 +1612,54 @@ pub fn render_markdown(theme: &Theme, text: &str) -> gpui::AnyElement {
                             .child(text),
                     )
                     .into_any_element()
+            }
+            Block::Table { headers, rows } => {
+                // Fixed column widths keep every row aligned instead of letting
+                // the longest cell decide the layout.
+                let columns = headers
+                    .len()
+                    .max(rows.iter().map(Vec::len).max().unwrap_or(1));
+                let cell_width = px((520.0 / columns.max(1) as f32).clamp(70.0, 180.0));
+                let mut table = div()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border);
+
+                let mut header_row = div().flex().bg(theme.card);
+                for index in 0..columns {
+                    header_row = header_row.child(
+                        div()
+                            .w(cell_width)
+                            .flex_shrink_0()
+                            .px(px(8.0))
+                            .py(px(5.0))
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(headers.get(index).cloned().unwrap_or_default()),
+                    );
+                }
+                table = table.child(header_row);
+
+                for row in &rows {
+                    let mut cells = div().flex().border_t_1().border_color(theme.border);
+                    for index in 0..columns {
+                        cells = cells.child(
+                            div()
+                                .w(cell_width)
+                                .flex_shrink_0()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .text_size(px(11.5))
+                                .text_color(theme.muted_foreground)
+                                .child(row.get(index).cloned().unwrap_or_default()),
+                        );
+                    }
+                    table = table.child(cells);
+                }
+                table.into_any_element()
             }
             Block::Rule => div()
                 .h(px(1.0))

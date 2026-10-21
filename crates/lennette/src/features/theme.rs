@@ -75,6 +75,16 @@ impl Theme {
     }
 }
 
+impl Theme {
+    /// The same colour at a given opacity, for see-through surfaces.
+    pub fn with_alpha(colour: Rgba, alpha: f32) -> Rgba {
+        Rgba {
+            a: alpha.clamp(0.0, 1.0),
+            ..colour
+        }
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self::DARK

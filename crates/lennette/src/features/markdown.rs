@@ -31,6 +31,10 @@ pub enum Block {
     Quote {
         spans: Vec<Span>,
     },
+    Table {
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
     Rule,
 }
 
@@ -77,6 +81,7 @@ pub fn parse(markdown: &str) -> Vec<Block> {
     let mut style = Style::default();
     let mut current: Option<Open> = None;
     let mut list_stack: Vec<Option<u64>> = Vec::new();
+    let mut table: Option<TableBuilder> = None;
     let mut in_code = false;
     let mut code_language = None;
     let mut code_text = String::new();
@@ -104,6 +109,26 @@ pub fn parse(markdown: &str) -> Vec<Block> {
     for event in parser {
         match event {
             Event::Start(tag) => match tag {
+                Tag::Table(_) => {
+                    flush(&mut blocks, &current, &mut spans);
+                    table = Some(TableBuilder::default());
+                }
+                Tag::TableHead => {
+                    if let Some(table) = table.as_mut() {
+                        table.in_header = true;
+                        table.cell.clear();
+                    }
+                }
+                Tag::TableRow => {
+                    if let Some(table) = table.as_mut() {
+                        table.row = Vec::new();
+                    }
+                }
+                Tag::TableCell => {
+                    if let Some(table) = table.as_mut() {
+                        table.cell.clear();
+                    }
+                }
                 // A quote contains paragraphs; keep the enclosing block so the
                 // quote is not flattened into plain paragraphs.
                 Tag::Paragraph => {
@@ -157,6 +182,32 @@ pub fn parse(markdown: &str) -> Vec<Block> {
                 _ => {}
             },
             Event::End(tag) => match tag {
+                TagEnd::TableCell => {
+                    if let Some(table) = table.as_mut() {
+                        table.row.push(table.cell.trim().to_owned());
+                    }
+                }
+                TagEnd::TableHead => {
+                    if let Some(table) = table.as_mut() {
+                        table.headers = std::mem::take(&mut table.row);
+                        table.in_header = false;
+                    }
+                }
+                TagEnd::TableRow => {
+                    if let Some(table) = table.as_mut()
+                        && !table.in_header
+                    {
+                        table.rows.push(std::mem::take(&mut table.row));
+                    }
+                }
+                TagEnd::Table => {
+                    if let Some(table) = table.take() {
+                        blocks.push(Block::Table {
+                            headers: table.headers,
+                            rows: table.rows,
+                        });
+                    }
+                }
                 TagEnd::Paragraph => {
                     if !matches!(current, Some(Open::Quote)) {
                         flush(&mut blocks, &current, &mut spans);
@@ -184,7 +235,9 @@ pub fn parse(markdown: &str) -> Vec<Block> {
                 _ => {}
             },
             Event::Text(text) => {
-                if in_code {
+                if let Some(table) = table.as_mut() {
+                    table.cell.push_str(&text);
+                } else if in_code {
                     code_text.push_str(&text);
                 } else {
                     spans.push(Span {
@@ -217,6 +270,16 @@ pub fn parse(markdown: &str) -> Vec<Block> {
 
     flush(&mut blocks, &current, &mut spans);
     blocks
+}
+
+/// Accumulates a table while it is being parsed.
+#[derive(Default)]
+struct TableBuilder {
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    row: Vec<String>,
+    cell: String,
+    in_header: bool,
 }
 
 /// Where a block sits in the document while it opens.
@@ -327,6 +390,22 @@ mod tests {
                 .iter()
                 .any(|s| s.text == "gone" && s.style.strikethrough)
         );
+    }
+
+    #[test]
+    fn tables_parse_into_headers_and_rows() {
+        let blocks = parse("| Name | Speed |\n|---|---|\n| A | fast |\n| B | slow |");
+        let table = blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Table { headers, rows } => Some((headers, rows)),
+                _ => None,
+            })
+            .expect("a table should parse");
+        assert_eq!(table.0.as_slice(), ["Name".to_owned(), "Speed".to_owned()]);
+        assert_eq!(table.1.len(), 2);
+        assert_eq!(table.1[0].as_slice(), ["A".to_owned(), "fast".to_owned()]);
+        assert_eq!(table.1[1].as_slice(), ["B".to_owned(), "slow".to_owned()]);
     }
 
     #[test]
