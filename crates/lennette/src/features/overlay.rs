@@ -17,6 +17,12 @@ use super::domain::{Mode, OverlaySize, Role};
 use super::icons;
 use super::theme::Theme;
 
+/// Messages from the network task to the UI task.
+enum StreamMsg {
+    Delta(String),
+    Error(String),
+}
+
 /// One transcribed line in the live transcript.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscriptEntry {
@@ -105,6 +111,12 @@ pub struct Overlay {
     transcription: Option<gpui::Task<()>>,
     /// Background chat stream task.
     chat_stream: Option<gpui::Task<()>>,
+    /// Answer text currently streaming, rendered live.
+    streaming_text: String,
+    /// System tray handle, polled alongside shortcuts.
+    tray: Option<crate::features::tray::Tray>,
+    /// Overlay background opacity, 0.35 to 1.0.
+    opacity: f32,
     /// System-wide shortcut listener, polled on the UI thread.
     shortcuts: Option<std::rc::Rc<crate::features::shortcuts::ShortcutListener>>,
     /// Keeps polling for shortcuts on an idle app.
@@ -115,7 +127,13 @@ impl Overlay {
     pub fn new(
         services: crate::app::Services,
         shortcuts: Option<std::rc::Rc<crate::features::shortcuts::ShortcutListener>>,
+        tray: Option<crate::features::tray::Tray>,
     ) -> Self {
+        // Read once at startup; changing it writes straight back to settings.
+        let opacity =
+            crate::features::settings::Settings::load_from_path(services.database_path.as_deref())
+                .map(|settings| (settings.transparency as f32 / 100.0).clamp(0.35, 1.0))
+                .unwrap_or(1.0);
         Self {
             services,
             mode: Mode::default(),
@@ -142,7 +160,10 @@ impl Overlay {
             pending_audio: Vec::new(),
             transcription: None,
             chat_stream: None,
+            streaming_text: String::new(),
+            opacity,
             shortcuts,
+            tray,
             shortcut_poll: None,
         }
     }
@@ -426,51 +447,66 @@ impl Overlay {
         let database_path = self.services.database_path.clone();
         let config_clone = config.clone();
 
-        // Deltas are produced on a background task but must reach the view, so
-        // they cross a channel and are applied on the UI thread.
-        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<String>>();
-        let done_rx = std::sync::Mutex::new(done_rx);
+        // Deltas cross an unbounded channel; the UI task awaits the next one, so
+        // text appears the moment the provider sends it rather than on a timer.
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<StreamMsg>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<(bool, Option<String>)>();
 
-        // Render loop: drain deltas each tick and finish when the stream ends.
         self.chat_stream = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(50))
-                    .await;
-                let mut text = String::new();
-                while let Ok(delta) = delta_rx.try_recv() {
-                    text.push_str(&delta);
+                match delta_rx.recv().await {
+                    Some(StreamMsg::Delta(text)) => {
+                        // Persist as text arrives, so a crash keeps what was shown.
+                        let database = database_path
+                            .as_deref()
+                            .and_then(|path| crate::features::db::Database::open(path).ok());
+                        this.update(cx, move |overlay, cx| {
+                            overlay.chat.push_delta(database.as_ref(), &text);
+                            overlay.streaming_text = overlay.chat.answer().to_owned();
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Some(StreamMsg::Error(message)) => {
+                        let database = database_path
+                            .as_deref()
+                            .and_then(|path| crate::features::db::Database::open(path).ok());
+                        this.update(cx, move |overlay, cx| {
+                            let text = overlay.chat.fail(database.as_ref(), &message);
+                            overlay.chat_error = Some(format!("Couldn't get an answer: {message}"));
+                            overlay.streaming_text.clear();
+                            if !text.is_empty() {
+                                overlay
+                                    .conversation
+                                    .push(crate::features::domain::Message::assistant(text));
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                        break;
+                    }
+                    None => break,
                 }
-                if !text.is_empty() {
-                    // Persist as text arrives, so a crash keeps what was shown.
-                    let database = database_path
-                        .as_deref()
-                        .and_then(|path| crate::features::db::Database::open(path).ok());
-                    this.update(cx, move |overlay, cx| {
-                        overlay.chat.push_delta(database.as_ref(), &text);
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                let received = done_rx.lock().ok().and_then(|rx| rx.try_recv().ok());
-                if let Some(result) = received {
-                    this.update(cx, |overlay, cx| {
-                        if let Some(answer) = result {
-                            overlay.chat.finish();
-                            overlay
-                                .conversation
-                                .push(crate::features::domain::Message::assistant(answer));
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                    break;
-                }
+            }
+            // The request task reports completion through this oneshot.
+            if let Ok((_ok, answer)) = done_rx.await {
+                this.update(cx, |overlay, cx| {
+                    overlay.chat.finish();
+                    let final_text = overlay.chat.answer().to_owned();
+                    if !final_text.is_empty() {
+                        overlay
+                            .conversation
+                            .push(crate::features::domain::Message::assistant(final_text));
+                    }
+                    let _ = answer;
+                    overlay.streaming_text.clear();
+                    cx.notify();
+                })
+                .ok();
             }
         }));
 
-        // The network task owns the request and reports the final answer.
+        // The network task owns the request and pushes every delta immediately.
         tokio::spawn(async move {
             let result = crate::features::chat_engine::stream_chat(
                 &client,
@@ -479,18 +515,20 @@ impl Overlay {
                 &context,
                 cancel,
                 |delta| {
-                    let _ = delta_tx.send(delta.to_owned());
+                    let _ = delta_tx.send(StreamMsg::Delta(delta.to_owned()));
                 },
             )
             .await;
-            let final_answer = result.map_err(|error| error.to_string());
-            let _ = match final_answer {
-                Ok(answer) => done_tx.send(Some(answer)),
-                Err(error) => {
-                    let _ = &error;
-                    done_tx.send(None)
+            match result {
+                Ok(answer) => {
+                    let _ = done_tx.send((true, Some(answer)));
                 }
-            };
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = delta_tx.send(StreamMsg::Error(message));
+                    let _ = done_tx.send((false, None));
+                }
+            }
         });
     }
 
@@ -551,7 +589,7 @@ impl Overlay {
 
     /// Keep polling shortcuts even when no session is running.
     fn ensure_shortcut_poll(&mut self, cx: &mut Context<Self>) {
-        if self.shortcuts.is_none() || self.shortcut_poll.is_some() {
+        if (self.shortcuts.is_none() && self.tray.is_none()) || self.shortcut_poll.is_some() {
             return;
         }
         self.shortcut_poll = Some(cx.spawn(async move |this, cx| {
@@ -562,6 +600,7 @@ impl Overlay {
                 let alive = this
                     .update(cx, |overlay, cx| {
                         overlay.poll_shortcuts();
+                        overlay.poll_tray(cx);
                         cx.notify();
                         true
                     })
@@ -586,6 +625,36 @@ impl Overlay {
         }
         for action in actions {
             self.handle_shortcut(action);
+        }
+    }
+
+    /// Act on tray clicks and menu choices.
+    fn poll_tray(&mut self, cx: &mut Context<Self>) {
+        use crate::features::tray::TrayAction;
+        let Some(tray) = self.tray.as_ref() else {
+            return;
+        };
+        tray.set_tooltip(if self.is_listening() {
+            "lennette · listening"
+        } else {
+            "lennette"
+        });
+        let actions = tray.poll();
+        for action in actions {
+            match action {
+                TrayAction::ShowOverlay => cx.activate(true),
+                TrayAction::OpenDashboard => {
+                    crate::app::open_dashboard(cx, self.services.clone());
+                }
+                TrayAction::ToggleListening => {
+                    if self.is_listening() {
+                        self.stop_listening();
+                    } else {
+                        self.begin_capture();
+                    }
+                }
+                TrayAction::Quit => cx.quit(),
+            }
         }
     }
 
@@ -793,6 +862,70 @@ impl Overlay {
         button
     }
 
+    /// Change overlay opacity and persist it.
+    pub fn set_opacity(&mut self, opacity: f32) {
+        self.opacity = opacity.clamp(0.35, 1.0);
+        let percent = (self.opacity * 100.0).round() as u32;
+        if let Some(path) = self.services.database_path.as_deref()
+            && let Ok(database) = crate::features::db::Database::open(path)
+        {
+            let _ = crate::features::settings::Settings::set(
+                &database,
+                "transparency",
+                &percent.to_string(),
+            );
+        }
+    }
+
+    fn opacity_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let current = self.opacity;
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(22.0))
+                    .rounded(px(radius::SM))
+                    .cursor_pointer()
+                    .text_color(theme.muted_foreground)
+                    .id("opacity-down")
+                    .child(icons::icon(&theme, Icon::SunDim, 11.0))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let next = this.opacity - 0.1;
+                        this.set_opacity(next);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(px(9.5))
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{:.0}%", current * 100.0)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(22.0))
+                    .rounded(px(radius::SM))
+                    .cursor_pointer()
+                    .text_color(theme.muted_foreground)
+                    .id("opacity-up")
+                    .child(icons::icon(&theme, Icon::SunMedium, 11.0))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let next = this.opacity + 0.1;
+                        this.set_opacity(next);
+                        cx.notify();
+                    })),
+            )
+    }
+
     /// A notice shown under the header: errors, live level, or an attachment.
     fn listen_banner(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let theme = self.theme;
@@ -951,26 +1084,42 @@ impl Overlay {
 
         for (index, message) in self.conversation.messages().iter().enumerate() {
             let is_user = message.role == Role::User;
-            let bubble = div()
-                .id(("message", index))
-                .max_w(px(520.0))
-                .rounded(px(radius::LG))
-                .px(px(space::MD))
-                .py(px(space::SM))
-                .text_size(px(12.5))
-                .text_color(if is_user {
-                    theme.background
-                } else {
-                    theme.foreground
-                })
-                .bg(if is_user { theme.primary } else { theme.muted })
-                .child(message.content.clone());
-
-            list = list.child(if is_user {
-                div().flex().justify_end().child(bubble)
+            if is_user {
+                list = list.child(
+                    div().flex().justify_end().child(
+                        div()
+                            .id(("message", index))
+                            .max_w(px(520.0))
+                            .rounded(px(radius::LG))
+                            .px(px(space::MD))
+                            .py(px(space::SM))
+                            .text_size(px(12.5))
+                            .text_color(theme.background)
+                            .bg(theme.primary)
+                            .child(message.content.clone()),
+                    ),
+                );
             } else {
-                div().flex().justify_start().child(bubble)
-            });
+                // Assistant answers are markdown and render as formatted blocks.
+                list = list.child(
+                    div()
+                        .flex()
+                        .justify_start()
+                        .child(render_markdown(&theme, &message.content)),
+                );
+            }
+        }
+
+        // The answer currently arriving, rendered as partial markdown.
+        if !self.streaming_text.is_empty() {
+            list = list.child(
+                div()
+                    .flex()
+                    .justify_start()
+                    .gap(px(6.0))
+                    .child(render_markdown(&theme, &self.streaming_text))
+                    .child(div().size(px(6.0)).rounded_full().bg(theme.success)),
+            );
         }
         list
     }
@@ -1325,6 +1474,7 @@ impl Overlay {
             )
             .child(switcher)
             .child(div().flex_1())
+            .child(self.opacity_controls(cx))
             .child(kbd(&theme, "Ctrl"))
             .child(kbd(&theme, "\\"))
             .child(
@@ -1336,6 +1486,135 @@ impl Overlay {
                     .child("hide"),
             )
     }
+}
+
+/// Render markdown into styled GPUI blocks.
+pub fn render_markdown(theme: &Theme, text: &str) -> gpui::AnyElement {
+    use crate::features::markdown::{Block, Span};
+
+    fn span_element(theme: &Theme, span: &Span) -> gpui::AnyElement {
+        let mut text = div().text_size(px(12.5)).child(span.text.clone());
+        let colour = if span.style.code {
+            theme.success
+        } else if span.style.strikethrough {
+            theme.muted_foreground
+        } else {
+            theme.foreground
+        };
+        text = text.text_color(colour);
+        if span.style.bold {
+            text = text.font_weight(FontWeight::SEMIBOLD);
+        }
+        if span.style.italic {
+            text = text.italic();
+        }
+        if span.style.strikethrough {
+            text = text.line_through();
+        }
+        if span.style.code {
+            text = text
+                .font_family("monospace")
+                .px(px(3.0))
+                .rounded(px(3.0))
+                .bg(theme.card);
+        }
+        text.into_any_element()
+    }
+
+    let mut column = div().flex().flex_col().gap(px(6.0)).max_w(px(520.0));
+
+    for block in crate::features::markdown::parse(text) {
+        let element: gpui::AnyElement = match block {
+            Block::Heading { level, spans } => {
+                let size = match level {
+                    1 => 16.0,
+                    2 => 14.5,
+                    3 => 13.5,
+                    _ => 12.5,
+                };
+                let mut row = div()
+                    .flex()
+                    .flex_wrap()
+                    .text_size(px(size))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground);
+                for span in &spans {
+                    row = row.child(span_element(theme, span));
+                }
+                row.into_any_element()
+            }
+            Block::Paragraph { spans } => {
+                let mut row = div().flex().flex_wrap().items_baseline();
+                for span in &spans {
+                    row = row.child(span_element(theme, span));
+                }
+                row.into_any_element()
+            }
+            Block::Quote { spans } => {
+                let mut row = div()
+                    .flex()
+                    .flex_wrap()
+                    .pl(px(8.0))
+                    .border_l_1()
+                    .border_color(theme.accent)
+                    .text_color(theme.muted_foreground);
+                for span in &spans {
+                    row = row.child(span_element(theme, span));
+                }
+                row.into_any_element()
+            }
+            Block::ListItem { marker, spans, .. } => {
+                let mut row = div().flex().flex_wrap().gap(px(6.0)).pl(px(4.0));
+                row = row.child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme.muted_foreground)
+                        .child(marker),
+                );
+                for span in &spans {
+                    row = row.child(span_element(theme, span));
+                }
+                row.into_any_element()
+            }
+            Block::Code { language, text } => {
+                let mut panel = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.card)
+                    .px(px(10.0))
+                    .py(px(8.0));
+                if let Some(language) = language {
+                    panel = panel.child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.muted_foreground)
+                            .child(language),
+                    );
+                }
+                panel
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(11.5))
+                            .text_color(theme.foreground)
+                            .child(text),
+                    )
+                    .into_any_element()
+            }
+            Block::Rule => div()
+                .h(px(1.0))
+                .w_full()
+                .bg(theme.border)
+                .into_any_element(),
+        };
+        column = column.child(element);
+    }
+
+    column.into_any_element()
 }
 
 /// A small keyboard chip.
@@ -1367,7 +1646,10 @@ impl Render for Overlay {
             .flex()
             .flex_col()
             .size_full()
-            .bg(theme.background)
+            .bg(gpui::Rgba {
+                a: self.opacity,
+                ..theme.background
+            })
             .text_color(theme.foreground)
             .child(self.header(cx))
             .children(self.listen_banner(cx))

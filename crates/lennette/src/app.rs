@@ -116,6 +116,9 @@ pub fn run() {
         let bounds = Bounds::centered(None, size(px(OVERLAY_WIDTH), px(OVERLAY_HEIGHT)), cx);
         let overlay_options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            // A transparent window lets the opacity control show the desktop
+            // through the overlay instead of only fading toward black.
+            window_background: gpui::WindowBackgroundAppearance::Transparent,
             titlebar: Some(TitlebarOptions {
                 title: Some("lennette".into()),
                 appears_transparent: true,
@@ -123,6 +126,19 @@ pub fn run() {
             }),
             ..Default::default()
         };
+
+        // The tray appears without needing a window, so start it together with
+        // the shortcuts.
+        let tray_state = Some(crate::features::tray::Tray::start());
+        match tray_state.as_ref() {
+            Some(crate::features::tray::Tray::Live(_)) => {
+                tracing::info!("tray icon available")
+            }
+            Some(crate::features::tray::Tray::Unavailable(reason)) => {
+                tracing::warn!(%reason, "tray icon unavailable")
+            }
+            None => {}
+        }
 
         // Global shortcuts are grabbed once for the whole process.
         let mut shortcut_listener = None;
@@ -147,7 +163,7 @@ pub fn run() {
         }
 
         cx.open_window(overlay_options, move |_, cx| {
-            cx.new(|_| Overlay::new(services_for_overlay, shortcut_listener.clone()))
+            cx.new(|_| Overlay::new(services_for_overlay, shortcut_listener.clone(), tray_state))
         })
         .expect("failed to open the overlay window");
 
