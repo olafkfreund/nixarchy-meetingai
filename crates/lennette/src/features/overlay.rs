@@ -28,6 +28,10 @@ enum StreamMsg {
 pub struct TranscriptEntry {
     pub text: String,
     pub start: f64,
+    /// `me` for the microphone, `them` for the far side.
+    pub who: &'static str,
+    /// Diarized speaker index when the provider supplied one.
+    pub speaker: Option<i64>,
 }
 
 /// Follow-up suggestions shown above the composer, in the reference's order.
@@ -414,7 +418,12 @@ impl Overlay {
                 );
             }
         }
-        self.transcript.push(TranscriptEntry { text, start });
+        self.transcript.push(TranscriptEntry {
+            text,
+            start,
+            who: "them",
+            speaker: None,
+        });
     }
 
     /// The configured input device, if one was chosen.
@@ -715,6 +724,25 @@ impl Overlay {
         }
     }
 
+    /// Open the dashboard on a specific page.
+    pub fn open_dashboard_at(
+        &mut self,
+        cx: &mut Context<Self>,
+        route: crate::features::dashboard::nav::Route,
+    ) {
+        crate::app::open_dashboard_at(cx, self.services.clone(), route);
+    }
+
+    /// Start a fresh conversation without losing the old one.
+    pub fn new_chat(&mut self) {
+        self.chat.reset();
+        self.conversation.clear();
+        self.follow_ups.clear();
+        self.streaming_text.clear();
+        self.chat_error = None;
+        self.attached_capture = None;
+    }
+
     /// Act on tray clicks and menu choices.
     fn poll_tray(&mut self, cx: &mut Context<Self>) {
         use crate::features::tray::TrayAction;
@@ -885,6 +913,7 @@ impl Overlay {
             )
             .child(div().flex_1())
             .child(self.status_pill())
+            .child(self.new_chat_button(cx))
             .child(self.dashboard_button(cx))
             .child(self.settings_button(settings_active, cx))
             .child(self.history_button(history_active, cx))
@@ -908,6 +937,42 @@ impl Overlay {
             .text_color(theme.foreground)
             .child(div().size(px(6.0)).rounded_full().bg(dot))
             .child(label)
+    }
+
+    /// "Start new", matching the reference: clears the conversation and starts
+    /// listening again. Shown in Listen once there is something to clear.
+    fn new_chat_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let visible = self.mode == Mode::Listen
+            && (!self.transcript.is_empty() || self.chat.conversation_id().is_some());
+        let mut button = div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .h(px(26.0))
+            .px(px(8.0))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.muted)
+            .text_size(px(10.5))
+            .text_color(theme.foreground)
+            .cursor_pointer()
+            .id("new-chat")
+            .child(icons::icon(&theme, Icon::Plus, 11.0))
+            .child("Start new");
+        if !visible {
+            button = button.opacity(0.0);
+        } else {
+            button = button.on_click(cx.listener(|this, _, _, cx| {
+                this.new_chat();
+                this.transcript.clear();
+                this.stop_listening();
+                this.begin_capture();
+                cx.notify();
+            }));
+        }
+        button
     }
 
     fn dashboard_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1227,8 +1292,208 @@ impl Overlay {
             })
     }
 
-    fn empty_state(&self) -> impl IntoElement {
+    /// The Listen tab's body: transcript while running, prompt when idle.
+    fn listen_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        if self.transcript.is_empty() && !self.is_listening() {
+            let start = div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(30.0))
+                .px(px(14.0))
+                .rounded_full()
+                .bg(theme.primary)
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.background)
+                .cursor_pointer()
+                .id("start-listening")
+                .child(icons::icon_colored(
+                    theme.background,
+                    Icon::Headphones,
+                    13.0,
+                ))
+                .child("Start listening")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.start_listening(cx);
+                    this.start_pulse(cx);
+                    cx.notify();
+                }));
+
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap(px(10.0))
+                .px(px(space::XL))
+                .child(icons::icon_colored(theme.success, Icon::Headphones, 20.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.foreground)
+                        .child("Listen to the conversation"),
+                )
+                .child(
+                    div()
+                        .max_w(px(300.0))
+                        .text_size(px(11.5))
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            "Captures your mic and system audio, transcribes live, and saves the \
+                             transcript to a meeting.",
+                        ),
+                )
+                .child(start)
+                .into_any_element();
+        }
+
+        // Live transcript: speaker, timestamp, then the words.
+        let mut list = div()
+            .id("live-transcript")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .gap(px(6.0))
+            .overflow_y_scroll()
+            .px(px(space::LG))
+            .py(px(space::MD));
+
+        for (index, entry) in self.transcript.iter().enumerate() {
+            let who = if entry.who == "me" {
+                "You".to_owned()
+            } else {
+                match entry.speaker {
+                    Some(speaker) => format!("Speaker {}", speaker + 1),
+                    None => "Them".to_owned(),
+                }
+            };
+            let stamp = crate::features::db::meetings::format_duration(entry.start as i64);
+            list = list.child(
+                div()
+                    .id(("transcript-line", index))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .rounded(px(8.0))
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .bg(Theme::with_alpha(
+                        if entry.who == "me" {
+                            theme.primary
+                        } else {
+                            theme.muted
+                        },
+                        self.surface_alpha(),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child(who),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .text_color(theme.muted_foreground)
+                                    .child(stamp),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(theme.foreground)
+                            .child(entry.text.clone()),
+                    ),
+            );
+        }
+
+        if self.is_listening() {
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(10.0))
+                    .child(div().size(px(6.0)).rounded_full().bg(theme.success))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.muted_foreground)
+                            .child(if self.speech.is_some() {
+                                "Transcribing…"
+                            } else {
+                                "Recording · add a speech key to transcribe"
+                            }),
+                    ),
+            );
+        }
+
+        list.into_any_element()
+    }
+
+    fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+
+        // A fresh install has no provider; say so here rather than failing on
+        // the first send with no explanation.
+        if self.model_provider.is_none() {
+            let open_dev = div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(30.0))
+                .px(px(14.0))
+                .rounded_full()
+                .bg(theme.primary)
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.background)
+                .cursor_pointer()
+                .id("setup-provider")
+                .child("Open Dev Space")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.open_dashboard_at(cx, crate::features::dashboard::nav::Route::DevSpace);
+                }));
+
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap(px(10.0))
+                .px(px(space::XL))
+                .child(icons::icon_colored(theme.primary, Icon::Sparkles, 18.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.foreground)
+                        .child("Connect an AI first"),
+                )
+                .child(
+                    div()
+                        .max_w(px(320.0))
+                        .text_size(px(11.5))
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            "Add a provider key in Dev Space and answers work right here. Keys are \
+                             stored encrypted on this computer.",
+                        ),
+                )
+                .child(open_dev);
+        }
+
         div()
             .flex()
             .flex_col()
@@ -2068,8 +2333,11 @@ impl Render for Overlay {
         self.ensure_shortcut_poll(cx);
         let theme = self.theme;
         let mut body = div().flex().flex_col().flex_1();
-        if self.conversation.is_empty() {
-            body = body.child(self.empty_state());
+        // Listen shows the live transcript; Ask shows the conversation.
+        if self.mode == Mode::Listen {
+            body = body.child(self.listen_body(cx));
+        } else if self.conversation.is_empty() {
+            body = body.child(self.empty_state(cx));
         } else {
             body = body.child(self.message_list());
         }

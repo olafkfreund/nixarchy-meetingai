@@ -173,6 +173,15 @@ pub fn run() {
 
 /// Open (or focus) the dashboard window.
 pub fn open_dashboard(cx: &mut App, services: Services) {
+    open_dashboard_at(cx, services, crate::features::dashboard::nav::Route::Home);
+}
+
+/// Open the dashboard on a specific page.
+pub fn open_dashboard_at(
+    cx: &mut App,
+    services: Services,
+    route: crate::features::dashboard::nav::Route,
+) {
     let bounds = Bounds::centered(None, size(px(DASHBOARD_WIDTH), px(DASHBOARD_HEIGHT)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -187,7 +196,11 @@ pub fn open_dashboard(cx: &mut App, services: Services) {
     if let Err(error) = cx.open_window(options, move |_, cx| {
         // Each window gets its own connection so a slow page never blocks the
         // overlay's writes.
-        cx.new(|_| DashboardView::new(services.connect()))
+        cx.new(|_| {
+            let mut view = DashboardView::new(services.connect());
+            view.navigate_to(route);
+            view
+        })
     }) {
         tracing::error!(%error, "could not open the dashboard");
     }

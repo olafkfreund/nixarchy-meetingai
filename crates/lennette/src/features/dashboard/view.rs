@@ -89,6 +89,11 @@ impl DashboardView {
         self.dashboard.navigate(route, self.database.as_ref());
     }
 
+    /// Navigate to a page, loading its data.
+    pub fn navigate_to(&mut self, route: super::nav::Route) {
+        self.navigate(route);
+    }
+
     /// Mutable settings state, for page controls.
     pub fn settings_mut(&mut self) -> &mut SettingsState {
         &mut self.settings
