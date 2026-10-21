@@ -76,6 +76,25 @@ pub fn accelerator(binding: &Binding) -> String {
     parts.join(" + ")
 }
 
+/// Window rules so the overlay is drawn by lennette, not by Hyprland.
+///
+/// A compositor border or rounding would fight the overlay's own glass edge, so
+/// both are disabled and the window floats without decorations.
+pub fn window_rules() -> &'static str {
+    // Effects are flat in this Hyprland build; a nested `effect = {}` table is
+    // rejected with "unknown field 'effect'".
+    "hl.window_rule({\n\
+     \x20   match = { class = \"lennette\" },\n\
+     \x20   border_size = 0,\n\
+     \x20   rounding = 0,\n\
+     })\n\
+     hl.window_rule({\n\
+     \x20   match = { title = \"lennette\" },\n\
+     \x20   border_size = 0,\n\
+     \x20   rounding = 0,\n\
+     })\n"
+}
+
 /// Generate the Lua module contents.
 pub fn lua_module(bindings: &[Binding]) -> String {
     let mut out = String::from(
@@ -89,6 +108,8 @@ pub fn lua_module(bindings: &[Binding]) -> String {
             command(binding.action)
         ));
     }
+    out.push('\n');
+    out.push_str(window_rules());
     out
 }
 
@@ -171,6 +192,17 @@ mod tests {
         }
         // Six bindings means six hl.bind calls.
         assert_eq!(module.matches("hl.bind(").count(), bindings.len());
+    }
+
+    #[test]
+    fn module_disables_compositor_borders() {
+        let module = lua_module(&Binding::defaults());
+        assert!(module.contains("border_size = 0"));
+        assert!(!module.contains("effect = {"), "effects must be flat");
+        assert!(module.contains("rounding = 0"));
+        // Matched both ways: Wayland reports a class, XWayland is matched by title.
+        assert!(module.contains("class = \"lennette\""));
+        assert!(module.contains("title = \"lennette\""));
     }
 
     #[test]

@@ -1621,13 +1621,17 @@ impl Overlay {
             menu = menu.child(item);
         }
 
+        // The menu floats above the composer rather than pushing the tray taller:
+        // `anchored` takes it out of flow and flips it when it would overflow.
         div()
-            .flex()
-            .flex_col()
-            .items_end()
-            .gap(px(4.0))
+            .relative()
             .child(button)
-            .child(menu)
+            .child(
+                gpui::anchored()
+                    .anchor(gpui::Corner::BottomLeft)
+                    .offset(gpui::point(px(0.0), px(-28.0)))
+                    .child(menu),
+            )
             .into_any_element()
     }
 
@@ -1687,13 +1691,16 @@ impl Overlay {
             menu = menu.child(item);
         }
 
+        // Floats above the composer, same as the model list.
         div()
-            .flex()
-            .flex_col()
-            .items_start()
-            .gap(px(4.0))
+            .relative()
             .child(button)
-            .child(menu)
+            .child(
+                gpui::anchored()
+                    .anchor(gpui::Corner::BottomLeft)
+                    .offset(gpui::point(px(0.0), px(-28.0)))
+                    .child(menu),
+            )
             .into_any_element()
     }
 
