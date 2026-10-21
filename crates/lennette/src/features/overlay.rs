@@ -76,8 +76,18 @@ pub struct Overlay {
     size: OverlaySize,
     conversation: Conversation,
     theme: Theme,
-    selected_model: &'static str,
-    prompt_mode: &'static str,
+    /// Provider id backing the active credential.
+    model_provider: Option<String>,
+    /// Model in use; falls back to the provider's first suggestion.
+    model: Option<String>,
+    /// Listen/system prompts available as context.
+    prompt_choices: Vec<(i64, String, String)>,
+    /// Selected prompt id.
+    active_prompt: Option<i64>,
+    /// Whether the model list is open.
+    model_menu_open: bool,
+    /// Whether the prompt list is open.
+    prompt_menu_open: bool,
     use_image: bool,
     show_settings: bool,
     show_history: bool,
@@ -87,6 +97,8 @@ pub struct Overlay {
     level: f32,
     /// Why listening could not start, shown under the header.
     listen_error: Option<String>,
+    /// Non-fatal capture notice, e.g. microphone-only fallback.
+    listen_notice: Option<String>,
     /// Device that capture actually opened.
     listening_device: Option<String>,
     /// Timer driving the level meter and the elapsed clock.
@@ -113,6 +125,16 @@ pub struct Overlay {
     chat_stream: Option<gpui::Task<()>>,
     /// Answer text currently streaming, rendered live.
     streaming_text: String,
+    /// Generated follow-up questions for this conversation.
+    follow_ups: Vec<String>,
+    /// Whether a follow-up request is in flight.
+    follow_ups_loading: bool,
+    /// Background follow-up task.
+    follow_up_task: Option<gpui::Task<()>>,
+    /// Set when a shortcut asked to focus the composer.
+    focus_composer: bool,
+    /// Whether the far side of the call is captured too.
+    system_audio: bool,
     /// System tray handle, polled alongside shortcuts.
     tray: Option<crate::features::tray::Tray>,
     /// Overlay background opacity, 0.35 to 1.0.
@@ -134,20 +156,64 @@ impl Overlay {
             crate::features::settings::Settings::load_from_path(services.database_path.as_deref())
                 .map(|settings| (settings.transparency as f32 / 100.0).clamp(0.5, 1.0))
                 .unwrap_or(1.0);
+        // Resolve the active credential and prompts once, so the pickers show
+        // real values rather than placeholders.
+        let (model_provider, model) = services
+            .vault
+            .as_ref()
+            .as_ref()
+            .and_then(|vault| {
+                crate::features::credentials::list(vault, crate::features::credentials::Kind::Chat)
+                    .ok()
+            })
+            .and_then(|credentials| {
+                credentials.into_iter().find_map(|credential| {
+                    let config = credential.to_config();
+                    config.is_usable().then(|| {
+                        let provider = config.id.clone();
+                        let model = Some(config.model).filter(|m| !m.trim().is_empty());
+                        (provider, model)
+                    })
+                })
+            })
+            .map(|(provider, model)| (Some(provider), model))
+            .unwrap_or((None, None));
+
+        let prompt_choices = services
+            .database_path
+            .as_deref()
+            .and_then(|path| crate::features::db::Database::open(path).ok())
+            .and_then(|database| {
+                crate::features::db::settings::listen_modes(database.connection()).ok()
+            })
+            .map(|modes| {
+                modes
+                    .into_iter()
+                    .map(|mode| (mode.id, mode.name, mode.prompt))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let active_prompt = prompt_choices.first().map(|(id, _, _)| *id);
+
         Self {
             services,
             mode: Mode::default(),
             size: OverlaySize::default(),
             conversation: Conversation::new(),
             theme: Theme::new(),
-            selected_model: "Select a model",
-            prompt_mode: "General",
+            model_provider,
+            model,
+            prompt_choices,
+            active_prompt,
+            model_menu_open: false,
+            prompt_menu_open: false,
             use_image: false,
             show_settings: false,
             show_history: false,
             session: None,
             level: 0.0,
             listen_error: None,
+            listen_notice: None,
             listening_device: None,
             pulse: None,
             attached_capture: None,
@@ -163,6 +229,11 @@ impl Overlay {
             streaming_text: String::new(),
             opacity,
             shortcuts,
+            follow_ups: Vec::new(),
+            follow_ups_loading: false,
+            follow_up_task: None,
+            focus_composer: false,
+            system_audio: false,
             tray,
             shortcut_poll: None,
         }
@@ -270,6 +341,7 @@ impl Overlay {
 
         let config = crate::features::listen::SessionConfig {
             device,
+            system_audio: self.system_audio,
             speech: self.speech.clone(),
         };
         let (session, events) = crate::features::listen::ListenSession::start(&config);
@@ -356,7 +428,9 @@ impl Overlay {
     fn create_meeting(&self) -> Option<String> {
         let path = self.services.database_path.as_ref()?;
         let database = crate::features::db::Database::open(path).ok()?;
-        crate::features::db::meetings::start(database.connection(), "", "meeting", "en").ok()
+        // Name it at creation so the list never shows a blank title.
+        let title = format!("Session · {}", chrono_like_now());
+        crate::features::db::meetings::start(database.connection(), &title, "meeting", "en").ok()
     }
 
     /// Stop capturing and flush the last utterance.
@@ -534,6 +608,16 @@ impl Overlay {
 
     /// The system prompt for the current context tab.
     fn selected_system_prompt(&self) -> String {
+        // The chosen listen mode drives answers; the built-in default is only a
+        // fallback for a profile with no prompts.
+        if let Some(id) = self.active_prompt
+            && let Some((_, _, prompt)) = self
+                .prompt_choices
+                .iter()
+                .find(|(prompt_id, _, _)| *prompt_id == id)
+        {
+            return prompt.clone();
+        }
         crate::features::db::seed::DEFAULT_SYSTEM_PROMPT.to_owned()
     }
 
@@ -583,6 +667,9 @@ impl Overlay {
             }
             SessionEvent::Stopped { .. } => {
                 self.level = 0.0;
+            }
+            SessionEvent::Notice(message) => {
+                self.listen_notice = Some(message);
             }
         }
     }
@@ -668,12 +755,25 @@ impl Overlay {
                 if self.is_listening() {
                     self.stop_listening();
                 } else {
-                    // Shortcut-driven start has no context; the next frame's
-                    // poll begins transcription instead.
                     self.begin_capture();
                 }
             }
-            Action::SystemAudio | Action::FocusInput => {}
+            Action::FocusInput => {
+                // Bring the overlay forward and put the cursor in the composer.
+                self.mode = Mode::Ask;
+                self.show_settings = false;
+                self.show_history = false;
+                self.focus_composer = true;
+            }
+            Action::SystemAudio => {
+                // Toggle capture of the far side of a call alongside the mic.
+                self.system_audio = !self.system_audio;
+                if self.is_listening() {
+                    // Restart so the new source set takes effect immediately.
+                    self.stop_listening();
+                    self.begin_capture();
+                }
+            }
         }
     }
 
@@ -689,6 +789,7 @@ impl Overlay {
         let device = self.configured_input_device();
         let config = crate::features::listen::SessionConfig {
             device,
+            system_audio: self.system_audio,
             speech: None,
         };
         let (session, events) = crate::features::listen::ListenSession::start(&config);
@@ -867,6 +968,77 @@ impl Overlay {
     /// on the header and composer stays readable at low settings.
     fn surface_alpha(&self) -> f32 {
         (self.opacity * 0.92).clamp(0.30, 1.0)
+    }
+
+    /// Ask the model for fresh follow-up questions based on the conversation.
+    pub fn generate_follow_ups(&mut self, cx: &mut Context<Self>) {
+        use crate::features::chat_session::chat_config;
+        let Some(config) = chat_config(self.services.vault.as_ref().as_ref()) else {
+            self.chat_error =
+                Some("Add an AI provider key in Dev Space to generate follow-ups.".to_owned());
+            return;
+        };
+        if self.follow_ups_loading {
+            return;
+        }
+        self.follow_ups_loading = true;
+        self.follow_ups.clear();
+
+        let mut history: Vec<crate::features::domain::Message> =
+            self.conversation.messages().to_vec();
+        history.push(crate::features::domain::Message::user(
+            "Suggest three short follow-up questions the user might ask next. Reply with one              question per line, no numbering, no other text.",
+        ));
+
+        let client = crate::features::chat_engine::http_client();
+        let cancel = std::sync::Arc::new(tokio::sync::watch::channel(false).1);
+        self.follow_up_task = Some(cx.spawn(async move |this, cx| {
+            let result = crate::features::chat_engine::stream_chat(
+                &client,
+                &config,
+                &history,
+                &crate::features::chat_engine::TurnContext::default(),
+                cancel,
+                |_| {},
+            )
+            .await;
+            this.update(cx, |overlay, cx| {
+                overlay.follow_ups_loading = false;
+                match result {
+                    Ok(text) => {
+                        overlay.follow_ups = text
+                            .lines()
+                            .map(|line| {
+                                line.trim()
+                                    .trim_start_matches(['-', '*', '1', '2', '3', '.', ' '])
+                                    .trim()
+                            })
+                            .filter(|line| !line.is_empty() && line.ends_with('?'))
+                            .take(3)
+                            .map(str::to_owned)
+                            .collect();
+                        if overlay.follow_ups.is_empty() {
+                            overlay.chat_error =
+                                Some("The model did not return usable questions.".to_owned());
+                        }
+                    }
+                    Err(error) => {
+                        overlay.chat_error = Some(format!("Couldn't generate follow-ups: {error}"))
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The follow-ups to show: generated ones, else the defaults.
+    fn visible_follow_ups(&self) -> Vec<String> {
+        if self.follow_ups.is_empty() {
+            FOLLOW_UPS.iter().map(|text| (*text).to_owned()).collect()
+        } else {
+            self.follow_ups.clone()
+        }
     }
 
     /// Change overlay opacity and persist it.
@@ -1142,13 +1314,17 @@ impl Overlay {
             .id("follow-up-chips")
             .overflow_x_scroll();
 
-        for (index, label) in FOLLOW_UPS.iter().enumerate() {
+        let labels = self.visible_follow_ups();
+        for (index, label) in labels.into_iter().enumerate() {
             let chip = pill(("follow-up", index), &theme, false)
                 .flex_shrink_0()
                 .child(icons::icon(&theme, Icon::ArrowUpRight, 10.0))
-                .child(*label);
+                .child(label.clone());
+            let send = label;
             chips = chips.child(chip.on_click(cx.listener(move |this, _, _, cx| {
-                this.conversation.set_draft(*label);
+                // Fill the composer and send, so a chip is one click.
+                this.conversation.set_draft(send.clone());
+                this.send_message(cx);
                 cx.notify();
             })));
         }
@@ -1295,9 +1471,12 @@ impl Overlay {
             }))
     }
 
-    fn model_selector(&self) -> impl IntoElement {
+    /// The model button, showing the real active model.
+    fn model_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        div()
+        let label =
+            crate::features::models::label(self.model.as_deref(), self.model_provider.as_deref());
+        let mut button = div()
             .flex()
             .items_center()
             .gap(px(5.0))
@@ -1305,14 +1484,166 @@ impl Overlay {
             .px(px(8.0))
             .rounded(px(radius::MD))
             .border_1()
-            .border_color(theme.border)
+            .border_color(if self.model_menu_open {
+                theme.primary
+            } else {
+                theme.border
+            })
             .text_size(px(11.5))
             .text_color(theme.muted_foreground)
             .cursor_pointer()
             .id("model-select")
             .child(icons::icon(&theme, Icon::Sparkles, 11.0))
-            .child(self.selected_model)
-            .child(icons::icon(&theme, Icon::ChevronDown, 11.0))
+            .child(label)
+            .child(icons::icon(&theme, Icon::ChevronDown, 11.0));
+        button = button.on_click(cx.listener(|this, _, _, cx| {
+            this.model_menu_open = !this.model_menu_open;
+            this.prompt_menu_open = false;
+            cx.notify();
+        }));
+
+        if !self.model_menu_open {
+            return button.into_any_element();
+        }
+
+        // A list of the provider's suggested models.
+        let models = self
+            .model_provider
+            .as_deref()
+            .map(crate::features::models::for_provider)
+            .unwrap_or(&[]);
+        let mut menu = div()
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .rounded(px(radius::MD))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.card)
+            .p(px(3.0));
+        if models.is_empty() {
+            menu = menu.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.muted_foreground)
+                    .child("Add a provider key in Dev Space"),
+            );
+        }
+        for (index, model) in models.iter().enumerate() {
+            let active = self.model.as_deref() == Some(*model);
+            let mut item = div()
+                .flex()
+                .items_center()
+                .forge_model_item(&theme, active)
+                .id(("model-option", index))
+                .child(*model);
+            item = item.on_click(cx.listener(move |this, _, _, cx| {
+                this.select_model(model);
+                cx.notify();
+            }));
+            menu = menu.child(item);
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(4.0))
+            .child(button)
+            .child(menu)
+            .into_any_element()
+    }
+
+    /// The context prompt button, listing the listen modes from the database.
+    fn prompt_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let label = self
+            .active_prompt_name()
+            .unwrap_or_else(|| "General".to_owned());
+        let mut button = div()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .h(px(28.0))
+            .px(px(8.0))
+            .rounded(px(radius::MD))
+            .text_size(px(11.5))
+            .text_color(theme.foreground)
+            .cursor_pointer()
+            .id("prompt-mode")
+            .child(icons::icon(&theme, Icon::Sparkles, 11.0))
+            .child(label)
+            .child(icons::icon(&theme, Icon::ChevronDown, 11.0));
+        button = button.on_click(cx.listener(|this, _, _, cx| {
+            this.prompt_menu_open = !this.prompt_menu_open;
+            this.model_menu_open = false;
+            cx.notify();
+        }));
+
+        if !self.prompt_menu_open {
+            return button.into_any_element();
+        }
+
+        let mut menu = div()
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .rounded(px(radius::MD))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.card)
+            .p(px(3.0));
+        for (index, (id, name, _)) in self.prompt_choices.clone().into_iter().enumerate() {
+            let active = self.active_prompt == Some(id);
+            let mut item = div()
+                .flex()
+                .items_center()
+                .forge_model_item(&theme, active)
+                .id(("prompt-option", index))
+                .child(name);
+            item = item.on_click(cx.listener(move |this, _, _, cx| {
+                this.active_prompt = Some(id);
+                this.prompt_menu_open = false;
+                cx.notify();
+            }));
+            menu = menu.child(item);
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(4.0))
+            .child(button)
+            .child(menu)
+            .into_any_element()
+    }
+
+    fn active_prompt_name(&self) -> Option<String> {
+        let id = self.active_prompt?;
+        self.prompt_choices
+            .iter()
+            .find(|(prompt_id, _, _)| *prompt_id == id)
+            .map(|(_, name, _)| name.clone())
+    }
+
+    /// Switch model and persist it to the active credential.
+    pub fn select_model(&mut self, model: &str) {
+        self.model = Some(model.to_owned());
+        self.model_menu_open = false;
+        if let Some(vault) = self.services.vault.as_ref().as_ref()
+            && let Some(provider) = self.model_provider.clone()
+            && let Ok(Some(mut credential)) = crate::features::credentials::load(
+                vault,
+                crate::features::credentials::Kind::Chat,
+                &provider,
+            )
+        {
+            credential.model = model.to_owned();
+            let _ = crate::features::credentials::save(vault, &credential);
+        }
     }
 
     fn input_block(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1345,25 +1676,10 @@ impl Overlay {
                     .flex()
                     .items_center()
                     .gap(px(space::SM))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.0))
-                            .h(px(28.0))
-                            .px(px(8.0))
-                            .rounded(px(radius::MD))
-                            .text_size(px(11.5))
-                            .text_color(theme.foreground)
-                            .cursor_pointer()
-                            .id("prompt-mode")
-                            .child(icons::icon(&theme, Icon::Sparkles, 11.0))
-                            .child(self.prompt_mode)
-                            .child(icons::icon(&theme, Icon::ChevronDown, 11.0)),
-                    )
+                    .child(self.prompt_selector(cx))
                     .child(div().flex_1())
                     .child(self.image_toggle(cx))
-                    .child(self.model_selector()),
+                    .child(self.model_selector(cx)),
             )
             // Composer.
             .child(
@@ -1493,6 +1809,67 @@ impl Overlay {
                     .whitespace_nowrap()
                     .child("hide"),
             )
+    }
+}
+
+/// Local time as `HH:MM` without pulling in a date library.
+fn chrono_like_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    // Derive the wall clock from the local offset the OS reports.
+    let local = seconds as i64 + local_offset_seconds();
+    let day_seconds = local.rem_euclid(86_400);
+    format!("{:02}:{:02}", day_seconds / 3600, (day_seconds % 3600) / 60)
+}
+
+/// The system UTC offset in seconds, read once from `date`.
+fn local_offset_seconds() -> i64 {
+    static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *OFFSET.get_or_init(|| {
+        std::process::Command::new("date")
+            .arg("+%z")
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|text| {
+                let text = text.trim().to_owned();
+                if text.len() < 5 {
+                    return None;
+                }
+                let sign = if text.starts_with('-') { -1 } else { 1 };
+                let hours: i64 = text[1..3].parse().ok()?;
+                let minutes: i64 = text[3..5].parse().ok()?;
+                Some(sign * (hours * 3600 + minutes * 60))
+            })
+            .unwrap_or(0)
+    })
+}
+
+/// Menu row styling shared by the two pickers.
+trait ModelItemStyle: Sized {
+    fn forge_model_item(self, theme: &Theme, active: bool) -> Self;
+}
+
+impl ModelItemStyle for gpui::Div {
+    fn forge_model_item(mut self, theme: &Theme, active: bool) -> Self {
+        self = self
+            .h(px(24.0))
+            .px(px(8.0))
+            .rounded(px(5.0))
+            .text_size(px(11.0))
+            .cursor_pointer()
+            .text_color(if active {
+                theme.foreground
+            } else {
+                theme.muted_foreground
+            });
+        if active {
+            self = self.bg(theme.muted);
+        }
+        self
     }
 }
 

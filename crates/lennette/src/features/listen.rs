@@ -38,6 +38,8 @@ pub enum SessionEvent {
     Level(f32),
     /// Capture stopped.
     Stopped { elapsed: Duration },
+    /// Informational message, e.g. a fallback to microphone only.
+    Notice(String),
     /// Something went wrong; the UI shows this verbatim.
     Failed(String),
 }
@@ -47,6 +49,8 @@ pub enum SessionEvent {
 pub struct SessionConfig {
     /// Device id (`cpal:<name>`), or `None` for the system default.
     pub device: Option<String>,
+    /// Capture the far side of the call through a monitor source.
+    pub system_audio: bool,
     /// Batch speech provider, used to transcribe finished utterances.
     pub speech: Option<ProviderConfig>,
 }
@@ -54,6 +58,7 @@ pub struct SessionConfig {
 /// A running capture session.
 pub struct ListenSession {
     microphone: Option<Microphone>,
+    system: Option<super::system_audio::SystemAudio>,
     segmenter: Segmenter,
     elapsed: Duration,
 }
@@ -77,8 +82,30 @@ impl ListenSession {
             }
         };
 
+        // The far side of the call, when requested. A failure here is reported
+        // but must not stop microphone capture.
+        let system = if config.system_audio {
+            match super::system_audio::SystemAudio::start(None) {
+                Ok(system) => {
+                    events.push(SessionEvent::Started {
+                        device: format!("microphone + {}", system.source()),
+                    });
+                    Some(system)
+                }
+                Err(error) => {
+                    events.push(SessionEvent::Notice(format!(
+                        "Recording the microphone only: {error}"
+                    )));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let session = Self {
             microphone,
+            system,
             segmenter: Segmenter::new(VadConfig::default()),
             elapsed: Duration::ZERO,
         };
@@ -108,12 +135,26 @@ impl ListenSession {
 
         loop {
             let frame = microphone.take(FRAME_SAMPLES);
-            if frame.is_empty() {
+            let remote = self
+                .system
+                .as_mut()
+                .map(|system| system.take(FRAME_SAMPLES))
+                .unwrap_or_default();
+            if frame.is_empty() && remote.is_empty() {
                 break;
             }
+            // Both sides of the call feed one stream, so the transcriber hears
+            // the whole conversation rather than only the user.
+            let mixed = if remote.is_empty() {
+                frame
+            } else if frame.is_empty() {
+                remote
+            } else {
+                super::system_audio::mix(&frame, &remote)
+            };
             earned +=
-                Duration::from_secs_f64(frame.len() as f64 / f64::from(super::audio::SAMPLE_RATE));
-            if let Some(segment) = self.segmenter.push(&frame) {
+                Duration::from_secs_f64(mixed.len() as f64 / f64::from(super::audio::SAMPLE_RATE));
+            if let Some(segment) = self.segmenter.push(&mixed) {
                 events.push(utterance_event(&segment));
             }
         }
@@ -146,6 +187,9 @@ impl ListenSession {
                 }
             }
             microphone.stop();
+        }
+        if let Some(system) = self.system.take() {
+            let _ = system;
         }
         if let Some(segment) = self.segmenter.finish() {
             events.push(utterance_event(&segment));
@@ -224,6 +268,7 @@ mod tests {
     fn missing_device_fails_with_a_readable_message() {
         let config = SessionConfig {
             device: Some("cpal:lennette-no-such-device".into()),
+            system_audio: false,
             speech: None,
         };
         let (session, events) = ListenSession::start(&config);
@@ -242,6 +287,7 @@ mod tests {
     fn stop_is_safe_without_a_microphone() {
         let config = SessionConfig {
             device: Some("cpal:lennette-no-such-device".into()),
+            system_audio: false,
             speech: None,
         };
         let (mut session, _) = ListenSession::start(&config);
@@ -264,6 +310,7 @@ mod tests {
     fn pump_without_capture_is_quiet() {
         let config = SessionConfig {
             device: Some("cpal:lennette-no-such-device".into()),
+            system_audio: false,
             speech: None,
         };
         let (mut session, _) = ListenSession::start(&config);

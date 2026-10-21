@@ -23,6 +23,9 @@ pub struct DashboardView {
     open_conversation: Option<String>,
     /// Meeting whose transcript is open, when viewing a detail page.
     open_meeting: Option<String>,
+    /// Inline rename state for the open conversation or meeting.
+    renaming: bool,
+    rename_buffer: String,
 }
 
 impl DashboardView {
@@ -43,6 +46,8 @@ impl DashboardView {
             settings,
             open_conversation: None,
             open_meeting: None,
+            renaming: false,
+            rename_buffer: String::new(),
         }
     }
 
@@ -231,6 +236,65 @@ impl DashboardView {
         }
     }
 
+    /// Begin renaming the open conversation or meeting.
+    pub fn start_rename(&mut self) {
+        self.renaming = match self.dashboard.route() {
+            super::nav::Route::ConversationDetail => self.open_conversation.is_some(),
+            super::nav::Route::MeetingDetail => self.open_meeting.is_some(),
+            _ => false,
+        };
+        if self.renaming {
+            self.rename_buffer = self.current_title().unwrap_or_default();
+        }
+    }
+
+    fn current_title(&self) -> Option<String> {
+        match self.dashboard.route() {
+            super::nav::Route::ConversationDetail => {
+                let id = self.open_conversation.clone()?;
+                let database = self.database.as_ref()?;
+                conversations::list(database.connection(), 500)
+                    .ok()?
+                    .into_iter()
+                    .find(|record| record.id == id)
+                    .map(|record| record.title)
+            }
+            super::nav::Route::MeetingDetail => {
+                let id = self.open_meeting.clone()?;
+                let database = self.database.as_ref()?;
+                crate::features::db::meetings::list(database.connection(), 500)
+                    .ok()?
+                    .into_iter()
+                    .find(|record| record.id == id)
+                    .map(|record| record.title)
+            }
+            _ => None,
+        }
+    }
+
+    /// Commit the rename and leave edit mode.
+    pub fn finish_rename(&mut self) {
+        if !self.renaming {
+            return;
+        }
+        let title = self.rename_buffer.trim().to_owned();
+        self.renaming = false;
+        if title.is_empty() {
+            return;
+        }
+        match self.dashboard.route() {
+            super::nav::Route::ConversationDetail => self.rename_open_conversation(&title),
+            super::nav::Route::MeetingDetail => self.rename_open_meeting(&title),
+            _ => {}
+        }
+    }
+
+    /// Cancel renaming.
+    pub fn cancel_rename(&mut self) {
+        self.renaming = false;
+        self.rename_buffer.clear();
+    }
+
     /// Feed a typed character into the key field.
     pub fn type_into_key_field(&mut self, text: &str) {
         self.settings.key_input.push_str(text);
@@ -243,7 +307,7 @@ impl DashboardView {
 
     /// Whether keystrokes should go to the key field.
     pub fn wants_key_input(&self) -> bool {
-        self.dashboard.route() == super::nav::Route::DevSpace
+        (self.dashboard.route() == super::nav::Route::DevSpace && !self.renaming) || self.renaming
     }
 
     /// Apply "always on top" to the real window and report when it cannot.
@@ -664,6 +728,19 @@ impl DashboardView {
                 .gap(px(6.0))
                 .pb(px(8.0))
                 .child(super::view::action_button(
+                    "rename-meeting",
+                    &theme,
+                    if self.renaming { "Save name" } else { "Rename" },
+                    cx,
+                    |this: &mut Self, _, _| {
+                        if this.renaming {
+                            this.finish_rename();
+                        } else {
+                            this.start_rename();
+                        }
+                    },
+                ))
+                .child(super::view::action_button(
                     "delete-meeting",
                     &theme,
                     "Delete",
@@ -682,6 +759,27 @@ impl DashboardView {
                 .into_any_element();
         }
         let mut list = div().flex().flex_col().gap(px(6.0)).child(actions);
+        if self.renaming {
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.primary)
+                    .bg(theme.card)
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.foreground)
+                    .child(if self.rename_buffer.is_empty() {
+                        "Type a name, Enter to save".to_owned()
+                    } else {
+                        self.rename_buffer.clone()
+                    }),
+            );
+        }
         for line in lines {
             let who = match line.who.as_str() {
                 "me" => "You".to_owned(),
@@ -735,6 +833,19 @@ impl DashboardView {
                     .gap(px(6.0))
                     .pb(px(8.0))
                     .child(super::view::action_button(
+                        "rename-conversation",
+                        &theme,
+                        if self.renaming { "Save name" } else { "Rename" },
+                        cx,
+                        |this: &mut Self, _, _| {
+                            if this.renaming {
+                                this.finish_rename();
+                            } else {
+                                this.start_rename();
+                            }
+                        },
+                    ))
+                    .child(super::view::action_button(
                         "export-conversation",
                         &theme,
                         "Export",
@@ -764,6 +875,27 @@ impl DashboardView {
                 .into_any_element();
         }
         let mut list = div().flex().flex_col().gap(px(8.0)).child(actions);
+        if self.renaming {
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.primary)
+                    .bg(theme.card)
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.foreground)
+                    .child(if self.rename_buffer.is_empty() {
+                        "Type a name, Enter to save".to_owned()
+                    } else {
+                        self.rename_buffer.clone()
+                    }),
+            );
+        }
         for message in messages {
             let is_user = message.role == "user";
             list = list.child(
@@ -893,6 +1025,21 @@ impl Render for DashboardView {
             // Dev Space owns the keyboard so the key field can be typed into.
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if !this.wants_key_input() {
+                    return;
+                }
+                if this.renaming {
+                    match event.keystroke.key.as_str() {
+                        "backspace" => {
+                            this.rename_buffer.pop();
+                        }
+                        "enter" => this.finish_rename(),
+                        "escape" => this.cancel_rename(),
+                        key if key.len() == 1 && !event.keystroke.modifiers.platform => {
+                            this.rename_buffer.push_str(key)
+                        }
+                        _ => {}
+                    }
+                    cx.notify();
                     return;
                 }
                 match event.keystroke.key.as_str() {
