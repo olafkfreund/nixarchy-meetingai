@@ -6,7 +6,7 @@
 
 use gpui::{
     Context, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, div, px,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::features::icons;
@@ -18,7 +18,7 @@ pub fn switch<V: 'static>(
     theme: &Theme,
     on: bool,
     cx: &mut Context<V>,
-    handler: impl Fn(&mut V, &mut Context<V>) + 'static,
+    handler: impl Fn(&mut V, &mut Context<V>, &mut Window) + 'static,
 ) -> impl IntoElement {
     let track = div()
         .flex()
@@ -41,8 +41,8 @@ pub fn switch<V: 'static>(
         } else {
             theme.muted_foreground
         }))
-        .on_click(cx.listener(move |view, _, _, cx| {
-            handler(view, cx);
+        .on_click(cx.listener(move |view, _, window, cx| {
+            handler(view, cx, window);
             cx.notify();
         }))
 }
@@ -226,7 +226,7 @@ pub fn action<V: 'static>(
     theme: &Theme,
     label: &str,
     cx: &mut Context<V>,
-    handler: impl Fn(&mut V, &mut Context<V>) + 'static,
+    handler: impl Fn(&mut V, &mut Context<V>, &mut Window) + 'static,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -242,8 +242,8 @@ pub fn action<V: 'static>(
         .cursor_pointer()
         .id(id)
         .child(label.to_owned())
-        .on_click(cx.listener(move |view, _, _, cx| {
-            handler(view, cx);
+        .on_click(cx.listener(move |view, _, window, cx| {
+            handler(view, cx, window);
             cx.notify();
         }))
 }

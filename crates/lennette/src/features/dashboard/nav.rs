@@ -53,6 +53,12 @@ pub const SECTIONS: &[(&str, &[NavItem])] = &[
                 description: "Every chat and meeting in one searchable place.",
             },
             NavItem {
+                route: Route::Meetings,
+                label: "Meetings",
+                icon: Icon::Headphones,
+                description: "Recorded sessions with transcripts and recaps.",
+            },
+            NavItem {
                 route: Route::Files,
                 label: "Files",
                 icon: Icon::FolderOpen,

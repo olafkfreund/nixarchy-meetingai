@@ -21,6 +21,8 @@ pub struct DashboardView {
     settings: SettingsState,
     /// Conversation whose transcript is open, when viewing a detail page.
     open_conversation: Option<String>,
+    /// Meeting whose transcript is open, when viewing a detail page.
+    open_meeting: Option<String>,
 }
 
 impl DashboardView {
@@ -40,6 +42,7 @@ impl DashboardView {
             theme: Theme::new(),
             settings,
             open_conversation: None,
+            open_meeting: None,
         }
     }
 
@@ -89,6 +92,36 @@ impl DashboardView {
     /// Persist settings after a control changes.
     pub fn save_settings(&mut self) {
         self.settings.save();
+    }
+
+    /// Apply "always on top" to the real window and report when it cannot.
+    pub fn apply_always_on_top(&mut self, enabled: bool, window: &mut gpui::Window) {
+        use crate::features::window::{self, Applied};
+
+        self.settings.notice = match window::set_always_on_top(window, enabled) {
+            Applied::Yes => None,
+            Applied::Unsupported => Some(
+                "Always on top is not supported by this display server. The setting is saved \
+                 and applies wherever it is supported."
+                    .to_owned(),
+            ),
+            Applied::Failed => Some("The window manager refused the change.".to_owned()),
+        };
+    }
+
+    /// Open a meeting's transcript.
+    pub fn open_meeting(&mut self, id: impl Into<String>) {
+        self.open_meeting = Some(id.into());
+        self.dashboard
+            .navigate(super::nav::Route::MeetingDetail, self.database.as_ref());
+    }
+
+    fn meeting_lines(&self) -> Vec<crate::features::db::meetings::LineRecord> {
+        let (Some(database), Some(id)) = (self.database.as_ref(), self.open_meeting.as_ref())
+        else {
+            return Vec::new();
+        };
+        crate::features::db::meetings::lines(database.connection(), id).unwrap_or_default()
     }
 
     /// Open a conversation's transcript.
@@ -394,6 +427,130 @@ impl DashboardView {
         settings_pages::render(self.dashboard.route(), &self.settings, &self.theme, cx)
     }
 
+    fn meetings_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.theme;
+        let PageData::Meetings(meetings) = self.dashboard.data() else {
+            return self
+                .empty_note("No meetings recorded yet.")
+                .into_any_element();
+        };
+        if meetings.is_empty() {
+            return self
+                .empty_note("No meetings yet. Start a Listen session and it will appear here as it happens.")
+                .into_any_element();
+        }
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.card);
+        for meeting in meetings {
+            let duration = crate::features::db::meetings::format_duration(meeting.duration_seconds);
+            let live = meeting.ended_at.is_none();
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .id(gpui::ElementId::Name(
+                        format!("meeting-{}", meeting.id).into(),
+                    ))
+                    .on_click(cx.listener({
+                        let id = meeting.id.clone();
+                        move |this, _, _, cx| {
+                            this.open_meeting(id.clone());
+                            cx.notify();
+                        }
+                    }))
+                    .child(icons::icon(&theme, Icon::Headphones, 13.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.5))
+                            .text_color(theme.foreground)
+                            .child(if meeting.title.is_empty() {
+                                "Untitled session".to_owned()
+                            } else {
+                                meeting.title.clone()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(if live {
+                                theme.success
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(if live { "Live".to_owned() } else { duration }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{} lines", meeting.line_count)),
+                    ),
+            );
+        }
+        list.into_any_element()
+    }
+
+    fn meeting_detail(&self) -> gpui::AnyElement {
+        let theme = self.theme;
+        let lines = self.meeting_lines();
+        if lines.is_empty() {
+            return self
+                .empty_note("Pick a meeting from the list to read its transcript.")
+                .into_any_element();
+        }
+        let mut list = div().flex().flex_col().gap(px(6.0));
+        for line in lines {
+            let who = match line.who.as_str() {
+                "me" => "You".to_owned(),
+                _ => match line.speaker {
+                    Some(speaker) => format!("Speaker {}", speaker + 1),
+                    None => "Them".to_owned(),
+                },
+            };
+            let stamp = crate::features::db::meetings::format_duration(line.start_time as i64);
+            list = list.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(10.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.card)
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .child(
+                        div()
+                            .w(px(72.0))
+                            .flex_shrink_0()
+                            .text_size(px(10.5))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{stamp} {who}")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.5))
+                            .text_color(theme.foreground)
+                            .child(line.text),
+                    ),
+            );
+        }
+        list.into_any_element()
+    }
+
     fn conversation_detail(&self) -> gpui::AnyElement {
         let theme = self.theme;
         let messages = self.conversation_messages();
@@ -439,6 +596,8 @@ impl DashboardView {
         match self.dashboard.route() {
             super::nav::Route::Conversations => self.conversations_body(cx).into_any_element(),
             super::nav::Route::ConversationDetail => self.conversation_detail(),
+            super::nav::Route::Meetings => self.meetings_body(cx),
+            super::nav::Route::MeetingDetail => self.meeting_detail(),
             super::nav::Route::Files => self.files_body().into_any_element(),
             super::nav::Route::Prompts => self.prompts_body().into_any_element(),
             super::nav::Route::Home => {

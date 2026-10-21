@@ -6,6 +6,7 @@
 
 pub mod conversations;
 pub mod library;
+pub mod meetings;
 pub mod seed;
 pub mod settings;
 

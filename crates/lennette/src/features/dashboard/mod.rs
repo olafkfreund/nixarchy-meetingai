@@ -11,6 +11,7 @@ pub mod view;
 use crate::features::dashboard::nav::Route;
 use crate::features::db::conversations::{self, ConversationRecord};
 use crate::features::db::library::{self, FileRecord};
+use crate::features::db::meetings::{self, MeetingRecord};
 use crate::features::db::settings::{self, PromptRecord};
 use crate::features::db::{Database, DbError};
 
@@ -22,6 +23,7 @@ pub enum PageData {
     Conversations(Vec<ConversationRecord>),
     Files(Vec<FileRecord>),
     Prompts(Vec<PromptRecord>),
+    Meetings(Vec<MeetingRecord>),
 }
 
 /// Errors shown inline when a page cannot load.
@@ -84,6 +86,13 @@ impl Dashboard {
                     PageData::Empty
                 }
             },
+            Route::Meetings | Route::MeetingDetail => match Self::load_meetings(database) {
+                Ok(records) => PageData::Meetings(records),
+                Err(error) => {
+                    self.error = Some(error);
+                    PageData::Empty
+                }
+            },
             Route::Prompts => match Self::load_prompts(database) {
                 Ok(records) => PageData::Prompts(records),
                 Err(error) => {
@@ -98,6 +107,11 @@ impl Dashboard {
     fn load_conversations(database: Option<&Database>) -> Result<Vec<ConversationRecord>, String> {
         let database = database.ok_or_else(not_ready)?;
         conversations::list(database.connection(), 200).map_err(describe)
+    }
+
+    fn load_meetings(database: Option<&Database>) -> Result<Vec<MeetingRecord>, String> {
+        let database = database.ok_or_else(not_ready)?;
+        meetings::list(database.connection(), 100).map_err(describe)
     }
 
     fn load_files(database: Option<&Database>) -> Result<Vec<FileRecord>, String> {

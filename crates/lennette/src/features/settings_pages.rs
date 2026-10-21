@@ -29,6 +29,8 @@ pub struct SettingsState {
     pub database: Option<super::db::Database>,
     /// Last error from a failed save, surfaced inline.
     pub error: Option<String>,
+    /// Notice shown when a setting could not be applied on this platform.
+    pub notice: Option<String>,
 }
 
 impl SettingsState {
@@ -41,6 +43,7 @@ impl SettingsState {
             settings,
             database,
             error: None,
+            notice: None,
         }
     }
 
@@ -141,7 +144,7 @@ pub fn app_settings(
                 theme,
                 "Less",
                 cx,
-                |view: &mut super::dashboard::view::DashboardView, _| {
+                |view: &mut super::dashboard::view::DashboardView, _, _| {
                     let value = view.settings_mut().settings.transparency;
                     view.settings_mut().settings.transparency = value.saturating_sub(10);
                     view.save_settings();
@@ -152,7 +155,7 @@ pub fn app_settings(
                 theme,
                 "More",
                 cx,
-                |view: &mut super::dashboard::view::DashboardView, _| {
+                |view: &mut super::dashboard::view::DashboardView, _, _| {
                     let value = view.settings_mut().settings.transparency;
                     view.settings_mut().settings.transparency = (value + 10).min(100);
                     view.save_settings();
@@ -174,7 +177,7 @@ pub fn app_settings(
             theme,
             s.autostart,
             cx,
-            |view: &mut super::dashboard::view::DashboardView, _| {
+            |view: &mut super::dashboard::view::DashboardView, _, _| {
                 let enabled = view.settings_mut().settings.autostart;
                 view.settings_mut().settings.autostart = !enabled;
                 view.save_settings();
@@ -190,10 +193,11 @@ pub fn app_settings(
             theme,
             s.always_on_top,
             cx,
-            |view: &mut super::dashboard::view::DashboardView, _| {
-                let enabled = view.settings_mut().settings.always_on_top;
-                view.settings_mut().settings.always_on_top = !enabled;
+            |view: &mut super::dashboard::view::DashboardView, _, window| {
+                let enabled = !view.settings_mut().settings.always_on_top;
+                view.settings_mut().settings.always_on_top = enabled;
                 view.save_settings();
+                view.apply_always_on_top(enabled, window);
             },
         ),
     ))
@@ -206,7 +210,7 @@ pub fn app_settings(
             theme,
             s.hide_app_icon,
             cx,
-            |view: &mut super::dashboard::view::DashboardView, _| {
+            |view: &mut super::dashboard::view::DashboardView, _, _| {
                 let enabled = view.settings_mut().settings.hide_app_icon;
                 view.settings_mut().settings.hide_app_icon = !enabled;
                 view.save_settings();
@@ -222,7 +226,7 @@ pub fn app_settings(
             theme,
             s.reduce_motion,
             cx,
-            |view: &mut super::dashboard::view::DashboardView, _| {
+            |view: &mut super::dashboard::view::DashboardView, _, _| {
                 let enabled = view.settings_mut().settings.reduce_motion;
                 view.settings_mut().settings.reduce_motion = !enabled;
                 view.save_settings();
@@ -262,6 +266,9 @@ pub fn app_settings(
         overlay.into_any_element(),
     ];
     if let Some(message) = state.error.as_deref() {
+        children.insert(0, warning(theme, message).into_any_element());
+    }
+    if let Some(message) = state.notice.as_deref() {
         children.insert(0, warning(theme, message).into_any_element());
     }
     stack(children)
@@ -312,7 +319,7 @@ pub fn screenshot_settings(
                 theme,
                 "−",
                 cx,
-                |view: &mut super::dashboard::view::DashboardView, _| {
+                |view: &mut super::dashboard::view::DashboardView, _, _| {
                     let value = view.settings_mut().settings.capture_delay_seconds;
                     view.settings_mut().settings.capture_delay_seconds = value.saturating_sub(1);
                     view.save_settings();
@@ -324,7 +331,7 @@ pub fn screenshot_settings(
                 theme,
                 "+",
                 cx,
-                |view: &mut super::dashboard::view::DashboardView, _| {
+                |view: &mut super::dashboard::view::DashboardView, _, _| {
                     let value = view.settings_mut().settings.capture_delay_seconds;
                     view.settings_mut().settings.capture_delay_seconds = (value + 1).min(60);
                     view.save_settings();
@@ -344,7 +351,7 @@ pub fn screenshot_settings(
                 theme,
                 "−",
                 cx,
-                |view: &mut super::dashboard::view::DashboardView, _| {
+                |view: &mut super::dashboard::view::DashboardView, _, _| {
                     let value = view.settings_mut().settings.screenshot_interval;
                     view.settings_mut().settings.screenshot_interval =
                         value.saturating_sub(5).max(5);
@@ -357,7 +364,7 @@ pub fn screenshot_settings(
                 theme,
                 "+",
                 cx,
-                |view: &mut super::dashboard::view::DashboardView, _| {
+                |view: &mut super::dashboard::view::DashboardView, _, _| {
                     let value = view.settings_mut().settings.screenshot_interval;
                     view.settings_mut().settings.screenshot_interval = (value + 5).min(600);
                     view.save_settings();
@@ -373,7 +380,7 @@ pub fn screenshot_settings(
             theme,
             s.use_image_on_send,
             cx,
-            |view: &mut super::dashboard::view::DashboardView, _| {
+            |view: &mut super::dashboard::view::DashboardView, _, _| {
                 let enabled = view.settings_mut().settings.use_image_on_send;
                 view.settings_mut().settings.use_image_on_send = !enabled;
                 view.save_settings();
@@ -406,7 +413,7 @@ pub fn capture_settings(
             theme,
             s.auto_screenshot != AutoScreenshot::Off,
             cx,
-            |view: &mut super::dashboard::view::DashboardView, _| {
+            |view: &mut super::dashboard::view::DashboardView, _, _| {
                 let current = view.settings_mut().settings.auto_screenshot;
                 view.settings_mut().settings.auto_screenshot = if current == AutoScreenshot::Off {
                     AutoScreenshot::EveryQuestion
@@ -495,7 +502,7 @@ pub fn audio_settings(
                 cx,
                 {
                     let id = device.id.clone();
-                    move |view: &mut super::dashboard::view::DashboardView, _| {
+                    move |view: &mut super::dashboard::view::DashboardView, _, _| {
                         view.settings_mut().settings.input_device = id.clone();
                         view.save_settings();
                     }
@@ -535,7 +542,7 @@ pub fn audio_settings(
                 cx,
                 {
                     let id = device.id.clone();
-                    move |view: &mut super::dashboard::view::DashboardView, _| {
+                    move |view: &mut super::dashboard::view::DashboardView, _, _| {
                         view.settings_mut().settings.output_device = id.clone();
                         view.save_settings();
                     }
@@ -575,7 +582,7 @@ pub fn audio_settings(
                     "Choose"
                 },
                 cx,
-                move |view: &mut super::dashboard::view::DashboardView, _| {
+                move |view: &mut super::dashboard::view::DashboardView, _, _| {
                     view.settings_mut().settings.speech_provider = provider.id.to_owned();
                     view.settings_mut().settings.speech_model = provider.default_model.to_owned();
                     view.save_settings();
@@ -613,7 +620,7 @@ pub fn response_settings(
             theme,
             s.smart_follow_ups,
             cx,
-            |view: &mut super::dashboard::view::DashboardView, _| {
+            |view: &mut super::dashboard::view::DashboardView, _, _| {
                 let enabled = view.settings_mut().settings.smart_follow_ups;
                 view.settings_mut().settings.smart_follow_ups = !enabled;
                 view.save_settings();
@@ -709,7 +716,7 @@ pub fn dev_space(
                 theme,
                 if selected { "Connected" } else { "Connect" },
                 cx,
-                move |view: &mut super::dashboard::view::DashboardView, _| {
+                move |view: &mut super::dashboard::view::DashboardView, _, _| {
                     view.settings_mut().settings.cli_connection = spec.id.to_owned();
                     view.save_settings();
                 },

@@ -3185,6 +3185,7 @@ dependencies = [
  "lucide-icons",
  "parking_lot",
  "rand 0.10.3",
+ "raw-window-handle",
  "reqwest",
  "rusqlite",
  "serde",
@@ -3196,6 +3197,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "x11rb",
 ]
 
 [[package]]

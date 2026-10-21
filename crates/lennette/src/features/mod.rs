@@ -19,3 +19,4 @@ pub mod settings_pages;
 pub mod theme;
 pub mod transcription;
 pub mod vault;
+pub mod window;

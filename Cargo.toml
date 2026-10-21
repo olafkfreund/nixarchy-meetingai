@@ -25,6 +25,9 @@ uuid = { version = "1.28.0", features = ["v4", "serde"] }
 parking_lot = "0.12.5"
 directories = "6.0.0"
 lucide-icons = "1.60.0"
+raw-window-handle = "0.6"
+
+
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
 
 [profile.release]
