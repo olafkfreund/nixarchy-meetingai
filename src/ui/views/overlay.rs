@@ -152,7 +152,11 @@ pub struct Overlay {
     /// Why the last send failed.
     chat_error: Option<String>,
     /// Utterances waiting to be transcribed.
-    pending_audio: Vec<(String, f64, f64)>,
+    pending_audio: Vec<Vec<f32>>,
+    live_connected: bool,
+    live_interim: [String; 2],
+    live_turns: crate::speech::transcription::LiveTurns,
+    live_speaking: Option<u8>,
     pending_question: Option<String>,
     last_elapsed: f64,
     /// Background transcription task.
@@ -204,10 +208,7 @@ pub struct Overlay {
     speech_ready: bool,
     refreshed_at: std::time::Instant,
     dock_expanded: bool,
-    dock_positioned: bool,
-    dock_hovered: bool,
     dock_generation: usize,
-    dock_restore: Option<crate::features::hyprland::OverlayGeometry>,
     /// Keeps polling for shortcuts on an idle app.
     shortcut_poll: Option<gpui::Task<()>>,
 }
@@ -303,6 +304,10 @@ impl Overlay {
             chat: crate::features::chat_session::ChatSession::new(),
             chat_error: None,
             pending_audio: Vec::new(),
+            live_connected: false,
+            live_interim: Default::default(),
+            live_turns: Default::default(),
+            live_speaking: None,
             pending_question: None,
             last_elapsed: 0.0,
             transcription: None,
@@ -335,11 +340,8 @@ impl Overlay {
             chat_choices: Vec::new(),
             speech_ready: false,
             refreshed_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
-            dock_expanded: !crate::features::hyprland::is_hyprland(),
-            dock_positioned: !crate::features::hyprland::is_hyprland(),
-            dock_hovered: false,
+            dock_expanded: true,
             dock_generation: 0,
-            dock_restore: None,
         }
     }
 
@@ -396,8 +398,14 @@ impl Overlay {
             return;
         }
         self.last_elapsed = 0.0;
+        self.live_connected = false;
+        self.live_interim = Default::default();
+        self.live_turns = Default::default();
+        self.live_speaking = None;
+        self.pending_audio.clear();
         self.pending_question = None;
         self.listen_error = None;
+        self.listen_notice = None;
         self.pulse = None;
         let device = self.configured_input_device();
 
@@ -418,7 +426,6 @@ impl Overlay {
         if self.is_listening() {
             self.meeting_id = self.create_meeting();
             self.mode = Mode::Listen;
-            self.dock_restore = crate::features::hyprland::overlay_geometry();
             self.set_dock_expanded(false);
             self.spawn_transcription(cx);
         } else {
@@ -426,57 +433,162 @@ impl Overlay {
         }
     }
 
-    /// Transcribe finished utterances in the background as they arrive.
+    /// Stream raw two-channel PCM as capture runs; never wait for a local utterance.
     fn spawn_transcription(&mut self, cx: &mut Context<Self>) {
         let Some(config) = self.speech.clone() else {
             return;
         };
         self.transcription_busy = true;
         self.transcription = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(250))
-                    .await;
-                let (pending, alive) = this
-                    .update(cx, |overlay, _| {
-                        (overlay.take_pending_audio(), overlay.session.is_some())
-                    })
-                    .unwrap_or((Vec::new(), false));
-                if !alive && pending.is_empty() {
+            use crate::speech::transcription::{LiveEvent, LiveTranscriber};
+            let connected = LiveTranscriber::connect(config.api_key, config.model, None).await;
+            match connected {
+                Err(error) => {
                     this.update(cx, |overlay, cx| {
-                        overlay.transcription_busy = false;
+                        overlay.stop_listening();
+                        overlay.listen_error = Some(error.to_string());
                         cx.notify();
                     })
                     .ok();
-                    break;
                 }
-                for (wav, start, duration) in pending {
-                    let language = None;
-                    let result =
-                        crate::features::listen::transcribe_utterance(&config, &wav, language)
-                            .await;
+                Ok(mut live) => {
                     this.update(cx, |overlay, cx| {
-                        match result {
-                            Ok(text) if !text.trim().is_empty() => {
-                                overlay.push_transcript(text, start, duration);
-                                overlay.answer_pending_question(cx);
-                            }
-                            Ok(_) => {}
-                            Err(error) => overlay.listen_error = Some(error),
-                        }
+                        overlay.live_connected = true;
                         cx.notify();
                     })
                     .ok();
+                    let mut closing = false;
+                    let mut done = false;
+                    while !done {
+                        let (pending, alive) = this
+                            .update(cx, |overlay, _| {
+                                (
+                                    std::mem::take(&mut overlay.pending_audio),
+                                    overlay.session.is_some(),
+                                )
+                            })
+                            .unwrap_or((Vec::new(), false));
+                        for samples in pending {
+                            if let Err(error) = live.push(&samples).await {
+                                this.update(cx, |overlay, cx| {
+                                    overlay.stop_listening();
+                                    overlay.listen_error = Some(error.to_string());
+                                    cx.notify();
+                                })
+                                .ok();
+                                done = true;
+                                break;
+                            }
+                        }
+                        if !alive && !closing {
+                            live.finish();
+                            closing = true;
+                        }
+                        loop {
+                            match live.try_event() {
+                                Ok(event) => {
+                                    let failed = matches!(event, LiveEvent::Failed(_));
+                                    this.update(cx, |overlay, cx| {
+                                        overlay.handle_live_event(event);
+                                        overlay.answer_pending_question(cx);
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                    if failed {
+                                        done = true;
+                                    }
+                                }
+                                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                                    done = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if this.upgrade().is_none() {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(25))
+                            .await;
+                    }
                 }
             }
+            this.update(cx, |overlay, cx| {
+                // Finalized words received during CloseStream still belong to the old meeting.
+                overlay.transcription_busy = false;
+                overlay.live_connected = false;
+                overlay.live_interim = Default::default();
+                overlay.live_turns = Default::default();
+                if overlay.session.is_some() {
+                    overlay.stop_listening();
+                }
+                cx.notify();
+            })
+            .ok();
         }));
     }
 
-    fn take_pending_audio(&mut self) -> Vec<(String, f64, f64)> {
-        std::mem::take(&mut self.pending_audio)
+    fn completed_turn(&mut self, channel: u8, text: Option<String>) {
+        if let Some(text) = text {
+            self.live_interim[usize::from(channel)].clear();
+            if channel == 1 && is_question(&text) {
+                self.pending_question = Some(text);
+            }
+        }
+        if self.live_speaking == Some(channel) {
+            self.live_speaking = None;
+        }
     }
 
-    fn push_transcript(&mut self, text: String, start: f64, duration: f64) {
+    fn handle_live_event(&mut self, event: crate::speech::transcription::LiveEvent) {
+        use crate::speech::transcription::LiveEvent;
+        match event {
+            LiveEvent::Transcript(line) => {
+                let channel = usize::from(line.channel);
+                let completed = self.live_turns.push(&line);
+                if line.is_final {
+                    self.live_interim[channel].clear();
+                    if !line.text.is_empty() {
+                        self.push_transcript(
+                            line.text,
+                            line.start,
+                            line.end - line.start,
+                            line.channel,
+                            line.speaker,
+                        );
+                    }
+                    if line.speech_final {
+                        self.completed_turn(line.channel, completed);
+                    }
+                } else {
+                    self.live_interim[channel] = line.text;
+                }
+            }
+            LiveEvent::SpeechStarted { channel } => self.live_speaking = Some(channel),
+            LiveEvent::UtteranceEnd {
+                channel,
+                last_word_end,
+            } => {
+                let completed = self.live_turns.finish(channel, last_word_end);
+                self.completed_turn(channel, completed);
+            }
+            LiveEvent::Failed(message) => {
+                self.stop_listening();
+                self.listen_error = Some(message);
+            }
+        }
+    }
+
+    fn push_transcript(
+        &mut self,
+        text: String,
+        start: f64,
+        duration: f64,
+        channel: u8,
+        speaker: Option<i64>,
+    ) {
+        let who = if channel == 0 { "me" } else { "them" };
         if let Some(meeting_id) = self.meeting_id.as_ref() {
             let path = self.services.database_path.clone();
             if let Some(path) = path
@@ -485,16 +597,13 @@ impl Overlay {
                 let _ = crate::features::db::meetings::add_line(
                     database.connection(),
                     meeting_id,
-                    "them",
-                    None,
+                    who,
+                    speaker,
                     &text,
                     start,
                     start + duration,
                 );
             }
-        }
-        if is_question(&text) {
-            self.pending_question = Some(text.clone());
         }
         if self.transcript.len() >= 500 {
             self.transcript.drain(..100);
@@ -502,8 +611,8 @@ impl Overlay {
         self.transcript.push(TranscriptEntry {
             text,
             start,
-            who: "them",
-            speaker: None,
+            who,
+            speaker,
         });
     }
 
@@ -545,10 +654,7 @@ impl Overlay {
         self.level = 0.0;
         self.pulse = None;
         self.listening_device = None;
-        self.dock_expanded = true;
-        if let Some(geometry) = self.dock_restore.take() {
-            let _ = crate::features::hyprland::place_overlay(geometry);
-        }
+        self.set_dock_expanded(true);
     }
 
     /// Tick the session a few times a second so the meter and clock stay live.
@@ -559,7 +665,7 @@ impl Overlay {
         self.pulse = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(120))
+                    .timer(std::time::Duration::from_millis(40))
                     .await;
                 let keep_going = this
                     .update(cx, |overlay, cx| {
@@ -758,6 +864,13 @@ impl Overlay {
                 .into_iter()
                 .rev()
             {
+                if entry.who == "me" {
+                    prompt.push_str("You: ");
+                } else if let Some(speaker) = entry.speaker {
+                    prompt.push_str(&format!("Speaker {}: ", speaker + 1));
+                } else {
+                    prompt.push_str("Them: ");
+                }
                 prompt.extend(entry.text.chars().take(2000));
                 prompt.push('\n');
             }
@@ -820,20 +933,21 @@ impl Overlay {
                 self.listen_error = Some(message);
                 self.listening_device = None;
             }
-            SessionEvent::Utterance {
-                wav_base64,
-                duration,
-                ..
-            } => {
-                if self.speech.is_some() {
-                    let start = (self.elapsed_seconds() - duration).max(0.0);
-                    self.pending_audio.push((wav_base64, start, duration));
+            SessionEvent::Audio(samples) => {
+                // Five seconds is a hard bound while the socket connects.
+                if self.pending_audio.len() < 100 {
+                    self.pending_audio.push(samples);
+                } else {
+                    self.listen_error =
+                        Some("Live audio fell behind. Stop and start again to reconnect.".into());
+                    // The next pump sees capture stopped; never silently discard live speech.
+                    if let Some(mut session) = self.session.take() {
+                        session.stop();
+                    }
                 }
             }
             SessionEvent::Transcript(line) => {
-                if line.is_final && !line.text.trim().is_empty() {
-                    self.push_transcript(line.text, line.start, line.end - line.start);
-                }
+                self.handle_live_event(crate::speech::transcription::LiveEvent::Transcript(line))
             }
             SessionEvent::Stopped { .. } => {
                 self.level = 0.0;
@@ -861,13 +975,6 @@ impl Overlay {
                     .await;
                 let alive = this
                     .update(cx, |overlay, cx| {
-                        if !overlay.dock_positioned
-                            && let Some(geometry) = crate::features::hyprland::overlay_geometry()
-                        {
-                            overlay.dock_restore = Some(geometry);
-                            overlay.dock_positioned = true;
-                            overlay.set_dock_expanded(false);
-                        }
                         let changed = overlay.sync_settings();
                         overlay.answer_pending_question(cx);
                         overlay.poll_shortcuts(cx);
@@ -1007,10 +1114,12 @@ impl Overlay {
             Action::SystemAudio => {
                 // Toggle capture of the far side of a call alongside the mic.
                 self.system_audio = !self.system_audio;
-                if self.is_listening() {
-                    // Restart so the new source set takes effect immediately.
-                    self.stop_listening();
-                    self.begin_capture(cx);
+                self.listen_notice = None;
+                if let Some(session) = self.session.as_mut() {
+                    let events = session.set_system_audio(self.system_audio);
+                    for event in events {
+                        self.handle_session_event(event);
+                    }
                 }
             }
         }
@@ -1052,48 +1161,17 @@ impl Overlay {
         self.start_pulse(cx);
     }
 
+    // This controls only the header's alignment within the existing window.
     fn set_dock_expanded(&mut self, expanded: bool) {
-        self.dock_expanded = expanded;
-        if crate::features::hyprland::is_hyprland()
-            && let Some(geometry) = crate::features::hyprland::dock_geometry(expanded)
-            && let Err(error) = crate::features::hyprland::place_overlay(geometry)
-        {
-            tracing::warn!(%error, "could not position recording dock");
+        if self.dock_expanded != expanded {
+            self.dock_expanded = expanded;
+            self.dock_generation += 1;
         }
     }
 
     fn dock_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
-        self.dock_hovered = hovered;
-        self.dock_generation += 1;
-        if !self.dock_positioned {
-            return;
-        }
-        if hovered && !self.dock_expanded {
-            self.set_dock_expanded(true);
-            cx.notify();
-        } else if !hovered {
-            let generation = self.dock_generation;
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(1400))
-                    .await;
-                this.update(cx, |this, cx| {
-                    if this.dock_positioned
-                        && this.window_visible
-                        && !this.dock_hovered
-                        && this.dock_generation == generation
-                        && !this.model_menu_open
-                        && !this.prompt_menu_open
-                        && !this.composer_focused
-                    {
-                        this.set_dock_expanded(false);
-                        cx.notify();
-                    }
-                })
-                .ok();
-            })
-            .detach();
-        }
+        self.set_dock_expanded(hovered || !self.is_listening());
+        cx.notify();
     }
 
     /// Drain microphone audio. Called on a short timer while listening.
@@ -1168,14 +1246,39 @@ impl Overlay {
             );
         }
         pill = pill.child(self.play_pause_button(cx));
+        let right = recording && !self.dock_expanded;
+        let duration = if self.reduce_motion { 1 } else { 240 };
+        let animation = || {
+            gpui::Animation::new(std::time::Duration::from_millis(duration))
+                .with_easing(|t| 1.0 - (1.0 - t).powi(3))
+        };
         div()
+            .id("session-header")
+            .on_hover(cx.listener(|this, hovered, _, cx| this.dock_hover(*hovered, cx)))
             .flex()
             .items_center()
-            .justify_center()
             .h(px(62.0))
             .flex_shrink_0()
             .px(px(10.0))
+            .child(div().min_w(px(0.0)).with_animation(
+                ("pill-left", self.dock_generation),
+                animation(),
+                move |mut spacer, t| {
+                    let alignment = if right { t } else { 1.0 - t };
+                    spacer.style().flex_grow = Some(1.0 + alignment);
+                    spacer
+                },
+            ))
             .child(pill)
+            .child(div().min_w(px(0.0)).with_animation(
+                ("pill-right", self.dock_generation),
+                animation(),
+                move |mut spacer, t| {
+                    let alignment = if right { t } else { 1.0 - t };
+                    spacer.style().flex_grow = Some(1.0 - alignment);
+                    spacer
+                },
+            ))
     }
 
     fn play_pause_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1584,7 +1687,7 @@ impl Overlay {
     }
 
     /// A notice shown under the header: errors, live level, or an attachment.
-    fn listen_banner(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn listen_banner(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let theme = self.theme;
         if let Some(message) = self
             .capture_error
@@ -1615,53 +1718,6 @@ impl Overlay {
                             .text_size(px(11.0))
                             .text_color(theme.foreground)
                             .child(message.to_owned()),
-                    )
-                    .into_any_element(),
-            );
-        }
-
-        if self.attached_capture.is_some() {
-            let preview = self.capture_preview.clone().map(|preview| {
-                img(preview)
-                    .size(px(52.0))
-                    .object_fit(gpui::ObjectFit::Cover)
-                    .rounded(px(9.0))
-            });
-            return Some(
-                div()
-                    .mx(px(space::MD))
-                    .mt(px(6.0))
-                    .flex()
-                    .flex_shrink_0()
-                    .child(
-                        div()
-                            .relative()
-                            .size(px(56.0))
-                            .rounded(px(11.0))
-                            .border_1()
-                            .border_color(self.surfaces().border())
-                            .bg(self.surfaces().card())
-                            .p(px(1.0))
-                            .children(preview)
-                            .child(
-                                div()
-                                    .id("clear-capture")
-                                    .absolute()
-                                    .top(px(2.0))
-                                    .right(px(2.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(16.0))
-                                    .rounded_full()
-                                    .bg(theme.background)
-                                    .cursor_pointer()
-                                    .child(icons::icon(&theme, Icon::X, 10.0))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.clear_capture();
-                                        cx.notify();
-                                    })),
-                            ),
                     )
                     .into_any_element(),
             );
@@ -1718,20 +1774,46 @@ impl Overlay {
                             div()
                                 .flex()
                                 .flex_col()
+                                .flex_1()
+                                .min_w(px(0.0))
                                 .gap(px(2.0))
                                 .child(
                                     div()
                                         .text_size(px(12.0))
                                         .text_color(theme.foreground)
-                                        .child("Listening to your conversation"),
+                                        .child(if !self.live_connected {
+                                            "Connecting to Deepgram…"
+                                        } else if self.live_speaking == Some(0) {
+                                            "You are speaking"
+                                        } else if self.live_speaking == Some(1) {
+                                            "Call participant is speaking"
+                                        } else if self.listen_notice.is_some() || !self.system_audio
+                                        {
+                                            "Live · microphone only"
+                                        } else {
+                                            "Live · microphone and call audio"
+                                        }),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(10.0))
+                                        .max_h(px(40.0))
+                                        .overflow_hidden()
+                                        .text_size(px(11.0))
                                         .text_color(theme.muted_foreground)
                                         .child(
-                                            self.listening_device
-                                                .clone()
+                                            self.live_interim
+                                                .iter()
+                                                .enumerate()
+                                                .filter(|(_, text)| !text.is_empty())
+                                                .map(|(channel, text)| {
+                                                    format!(
+                                                        "{}: {text}",
+                                                        if channel == 0 { "You" } else { "Them" }
+                                                    )
+                                                })
+                                                .next()
+                                                .or_else(|| self.listen_notice.clone())
+                                                .or_else(|| self.listening_device.clone())
                                                 .unwrap_or_else(|| "Default audio input".into()),
                                         ),
                                 ),
@@ -2084,12 +2166,7 @@ impl Overlay {
 
     fn model_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let label = if self.model.as_deref() == Some(crate::ai::models::MERGE_MODEL) {
-            if self.dock_expanded {
-                "DeepSeek 4.1 · 1017"
-            } else {
-                "DeepSeek 4.1"
-            }
-            .to_owned()
+            "DeepSeek 4.1 · 1017".to_owned()
         } else {
             crate::features::models::label(self.model.as_deref(), self.model_provider.as_deref())
         };
@@ -2109,7 +2186,7 @@ impl Overlay {
             .child(icons::icon(&self.theme, Icon::Sparkles, 12.0))
             .child(
                 div()
-                    .max_w(px(if !self.dock_expanded { 120.0 } else { 190.0 }))
+                    .max_w(px(190.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(label),
@@ -2150,7 +2227,7 @@ impl Overlay {
             .child(icons::icon(&self.theme, Icon::Layers, 12.0))
             .child(
                 div()
-                    .max_w(px(if !self.dock_expanded { 70.0 } else { 100.0 }))
+                    .max_w(px(100.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .child(
@@ -2468,6 +2545,57 @@ impl Overlay {
         )
     }
 
+    fn attachment_tray(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let theme = self.theme;
+        if self.attached_capture.is_some() {
+            let preview = self.capture_preview.clone().map(|preview| {
+                img(preview)
+                    .size(px(52.0))
+                    .object_fit(gpui::ObjectFit::Cover)
+                    .rounded(px(9.0))
+            });
+            return Some(
+                div()
+                    .mx(px(space::MD))
+                    .mt(px(6.0))
+                    .flex()
+                    .flex_shrink_0()
+                    .child(
+                        div()
+                            .relative()
+                            .size(px(56.0))
+                            .rounded(px(11.0))
+                            .border_1()
+                            .border_color(self.surfaces().border())
+                            .bg(self.surfaces().card())
+                            .p(px(1.0))
+                            .children(preview)
+                            .child(
+                                div()
+                                    .id("clear-capture")
+                                    .absolute()
+                                    .top(px(2.0))
+                                    .right(px(2.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(16.0))
+                                    .rounded_full()
+                                    .bg(theme.background)
+                                    .cursor_pointer()
+                                    .child(icons::icon(&theme, Icon::X, 10.0))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.clear_capture();
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        None
+    }
+
     /// The composer: one card, three zones.
     ///
     /// Left are the tools you attach with, the middle is the text, and the right is
@@ -2478,48 +2606,55 @@ impl Overlay {
             !self.composer.is_empty() && !self.chat.is_streaming() && self.model_provider.is_some();
         let focus = self.focus_handle(cx);
 
-        div().px(px(12.0)).pb(px(12.0)).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .h(px(46.0))
-                .px(px(8.0))
-                .rounded_full()
-                .border_1()
-                .border_color(if self.composer_focused {
-                    theme.border
-                } else {
-                    self.surfaces().border()
-                })
-                .bg(self.surfaces().card())
-                .id("composer")
-                .track_focus(&focus)
-                .cursor_text()
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        window.focus(&this.focus_handle(cx));
-                        this.composer_focused = true;
-                        cx.notify();
-                    }),
-                )
-                .child(self.dashboard_button(cx))
-                .child(
-                    div()
-                        .flex_1()
-                        .px(px(4.0))
-                        .child(crate::features::text_input::render(
-                            &self.composer,
-                            &theme,
-                            self.composer_focused,
-                            self.caret_visible,
-                            "Session guidance, notes or follow-up question…",
-                        )),
-                )
-                .child(self.attach_button(cx))
-                .child(self.send_button(can_submit, cx)),
-        )
+        div()
+            .px(px(12.0))
+            .pb(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .children(self.attachment_tray(cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .h(px(46.0))
+                    .px(px(8.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(if self.composer_focused {
+                        theme.border
+                    } else {
+                        self.surfaces().border()
+                    })
+                    .bg(self.surfaces().card())
+                    .id("composer")
+                    .track_focus(&focus)
+                    .cursor_text()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            window.focus(&this.focus_handle(cx));
+                            this.composer_focused = true;
+                            cx.notify();
+                        }),
+                    )
+                    .child(self.dashboard_button(cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .px(px(4.0))
+                            .child(crate::features::text_input::render(
+                                &self.composer,
+                                &theme,
+                                self.composer_focused,
+                                self.caret_visible,
+                                "Session guidance, notes or follow-up question…",
+                            )),
+                    )
+                    .child(self.attach_button(cx))
+                    .child(self.send_button(can_submit, cx)),
+            )
     }
 
     /// The one obvious action.
@@ -2716,7 +2851,7 @@ fn render_markdown_blocks(
             let mut font = gpui::font(if span.style.code {
                 crate::ui::theme::code_font_family()
             } else {
-                crate::ui::theme::system_font_family()
+                crate::ui::theme::ui_font_family()
             });
             font.weight = if span.style.bold {
                 FontWeight::SEMIBOLD
@@ -2989,7 +3124,6 @@ impl Render for Overlay {
         }
         self.composer_focused = focus.is_focused(window) && window.is_window_active();
         self.ensure_caret_blink(cx);
-        let compact = !self.dock_expanded;
         let theme = self.theme;
         let mut root = div()
             .id("overlay-root")
@@ -2997,9 +3131,8 @@ impl Render for Overlay {
             .flex()
             .flex_col()
             .size_full()
-            .font_family(crate::ui::theme::system_font_family())
+            .font_family(crate::ui::theme::ui_font_family())
             .text_color(theme.foreground)
-            .on_hover(cx.listener(|this, hovered, _, cx| this.dock_hover(*hovered, cx)))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     this.model_menu_open = false;
@@ -3013,43 +3146,39 @@ impl Render for Overlay {
                 }
                 cx.notify();
             }));
-        if !compact {
-            root = root
-                .rounded(px(radius::XL))
-                .border_1()
-                .border_color(self.surfaces().border())
-                .bg(self.surfaces().background());
-        }
+        root = root
+            .rounded(px(radius::XL))
+            .border_1()
+            .border_color(self.surfaces().border())
+            .bg(self.surfaces().background());
         root = root.child(self.header(cx));
-        if !compact {
+        root = root
+            .children(self.listen_banner(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .child(self.listen_body(cx))
+                    .with_animation(
+                        "panel-reveal",
+                        gpui::Animation::new(std::time::Duration::from_millis(
+                            if self.reduce_motion { 0 } else { 220 },
+                        ))
+                        .with_easing(|t| 1.0 - (1.0 - t).powi(3)),
+                        |panel, t| panel.opacity(t),
+                    ),
+            )
+            .child(self.bottom_controls(cx));
+        if self.bottom_mode != BottomMode::Hidden {
+            root = root.child(self.follow_ups(cx));
+        }
+        if self.bottom_mode == BottomMode::Full {
             root = root
-                .children(self.listen_banner(cx))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .overflow_hidden()
-                        .child(self.listen_body(cx))
-                        .with_animation(
-                            "panel-reveal",
-                            gpui::Animation::new(std::time::Duration::from_millis(
-                                if self.reduce_motion { 0 } else { 220 },
-                            ))
-                            .with_easing(|t| 1.0 - (1.0 - t).powi(3)),
-                            |panel, t| panel.opacity(t),
-                        ),
-                )
-                .child(self.bottom_controls(cx));
-            if self.bottom_mode != BottomMode::Hidden {
-                root = root.child(self.follow_ups(cx));
-            }
-            if self.bottom_mode == BottomMode::Full {
-                root = root
-                    .children(self.api_key_banner(cx))
-                    .child(self.input_block(cx));
-            }
+                .children(self.api_key_banner(cx))
+                .child(self.input_block(cx));
         }
         root.children(self.selection_menu(cx))
     }
@@ -3069,7 +3198,7 @@ impl Render for HoverLabel {
             .border_color(self.theme.border)
             .bg(Theme::with_alpha(self.theme.card, 0.96))
             .text_color(self.theme.foreground)
-            .font_family(crate::ui::theme::system_font_family())
+            .font_family(crate::ui::theme::ui_font_family())
             .text_size(px(11.0))
             .child(self.text.clone())
     }
@@ -3089,6 +3218,77 @@ mod tests {
             database_ready: false,
         };
         (path, Overlay::new(services, None, None, None, None))
+    }
+
+    #[test]
+    fn live_turns_identify_sources_and_only_answer_completed_remote_questions() {
+        use crate::speech::transcription::{LiveEvent, TranscriptLine};
+        let (path, mut overlay) = fixture();
+        let line = |channel, text: &str, is_final, speech_final, start, end| TranscriptLine {
+            channel,
+            text: text.into(),
+            is_final,
+            speech_final,
+            start,
+            end,
+            speaker: Some(2),
+        };
+        overlay.handle_live_event(LiveEvent::Transcript(line(
+            0,
+            "How does Rust work?",
+            true,
+            true,
+            0.0,
+            1.0,
+        )));
+        assert_eq!(overlay.transcript[0].who, "me");
+        assert!(
+            overlay.pending_question.is_none(),
+            "do not answer the user's own speech automatically"
+        );
+        overlay.handle_live_event(LiveEvent::Transcript(line(
+            1, "What is", false, false, 2.0, 3.0,
+        )));
+        assert_eq!(
+            overlay.transcript.len(),
+            1,
+            "interim revisions are not saved as duplicate lines"
+        );
+        assert_eq!(overlay.live_interim[1], "What is");
+        overlay.handle_live_event(LiveEvent::Transcript(line(
+            1,
+            "What is the benefit",
+            true,
+            false,
+            2.0,
+            3.0,
+        )));
+        assert!(overlay.pending_question.is_none());
+        overlay.handle_live_event(LiveEvent::Transcript(line(
+            1,
+            "of using Rust?",
+            true,
+            true,
+            3.0,
+            4.0,
+        )));
+        assert_eq!(
+            overlay.pending_question.as_deref(),
+            Some("What is the benefit of using Rust?")
+        );
+        assert_eq!(overlay.transcript[1].who, "them");
+        assert_eq!(overlay.transcript[1].speaker, Some(2));
+        assert!(overlay.live_interim[1].is_empty());
+        overlay.pending_question.take();
+        overlay.handle_live_event(LiveEvent::UtteranceEnd {
+            channel: 1,
+            last_word_end: 4.0,
+        });
+        assert!(
+            overlay.pending_question.is_none(),
+            "the fallback boundary must not repeat a recommendation"
+        );
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

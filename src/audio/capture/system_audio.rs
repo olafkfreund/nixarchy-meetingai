@@ -113,10 +113,19 @@ impl SystemAudio {
                 id: id.to_owned(),
                 name: id.to_owned(),
             },
-            _ => monitor_sources()
-                .into_iter()
-                .next()
-                .ok_or(SystemAudioError::NoMonitor)?,
+            _ => {
+                let default = Command::new("pactl")
+                    .arg("get-default-sink")
+                    .output()
+                    .ok()
+                    .filter(|out| out.status.success())
+                    .map(|out| format!("{}.monitor", String::from_utf8_lossy(&out.stdout).trim()));
+                let monitors = monitor_sources();
+                default
+                    .and_then(|id| monitors.iter().find(|m| m.id == id).cloned())
+                    .or_else(|| monitors.into_iter().next())
+                    .ok_or(SystemAudioError::NoMonitor)?
+            }
         };
 
         // Ask parec for 16 kHz mono directly: it resamples in the server, so no
@@ -128,7 +137,7 @@ impl SystemAudio {
                 "--format=float32le",
                 "--rate=16000",
                 "--channels=1",
-                "--latency-msec=100",
+                "--latency-msec=50",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -220,6 +229,15 @@ impl SystemAudio {
             }
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Check whether the capture subprocess is still producing audio.
+    pub fn is_running(&self) -> bool {
+        self.child.lock().ok().is_some_and(|mut guard| {
+            guard
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        })
     }
 
     /// Samples discarded because the consumer fell behind.

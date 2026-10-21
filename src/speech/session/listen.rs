@@ -1,7 +1,7 @@
 //! A live listening session.
 //!
-//! Owns the microphone, the speech segmenter and (when configured) the streaming
-//! transcriber. The UI drives it: `start`, poll `pump`, and `stop`.
+//! Owns microphone and call capture, preserving separate channels for the
+//! live network transcriber. The UI drives `start`, `pump`, and `stop`.
 //!
 //! Everything that can fail — a missing device, a refused stream, a provider
 //! error — is reported through [`SessionEvent`] so the overlay can show the real
@@ -15,23 +15,19 @@ use base64::engine::general_purpose::STANDARD;
 
 use crate::ai::providers::ProviderConfig;
 use crate::audio::microphone::{AudioError, Microphone};
-use crate::audio::{FlushReason, Segmenter, VadConfig, encode_wav};
+
 use crate::speech::transcription::{self, TranscriptLine};
 
-/// How much audio a single pump drains, in samples (about 100 ms at 16 kHz).
-const FRAME_SAMPLES: usize = 1_600;
+/// How much audio a single pump drains, in samples (about 50 ms at 16 kHz).
+const FRAME_SAMPLES: usize = 800;
 
 /// Something the session wants the UI to know about.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
     /// Capture is running on this device.
     Started { device: String },
-    /// A finished utterance, already encoded as WAV and ready to transcribe.
-    Utterance {
-        wav_base64: String,
-        duration: f64,
-        reason: FlushReason,
-    },
+    /// Interleaved 16 kHz samples: microphone left, call audio right.
+    Audio(Vec<f32>),
     /// A transcript line from the streaming provider.
     Transcript(TranscriptLine),
     /// Measured microphone level, for a meter.
@@ -51,7 +47,7 @@ pub struct SessionConfig {
     pub device: Option<String>,
     /// Capture the far side of the call through a monitor source.
     pub system_audio: bool,
-    /// Batch speech provider, used to transcribe finished utterances.
+    /// Speech provider used by the live network task.
     pub speech: Option<ProviderConfig>,
 }
 
@@ -59,7 +55,8 @@ pub struct SessionConfig {
 pub struct ListenSession {
     microphone: Option<Microphone>,
     system: Option<crate::audio::system_audio::SystemAudio>,
-    segmenter: Segmenter,
+    started: std::time::Instant,
+    sent_samples: usize,
     elapsed: Duration,
 }
 
@@ -84,7 +81,7 @@ impl ListenSession {
 
         // The far side of the call, when requested. A failure here is reported
         // but must not stop microphone capture.
-        let system = if config.system_audio {
+        let system = if config.system_audio && microphone.is_some() {
             match crate::audio::system_audio::SystemAudio::start(None) {
                 Ok(system) => {
                     events.push(SessionEvent::Started {
@@ -103,13 +100,48 @@ impl ListenSession {
             None
         };
 
+        if let Some(mic) = &microphone {
+            mic.take(32_000);
+        }
+        let mut system = system;
+        if let Some(sys) = &mut system {
+            sys.take(32_000);
+        }
         let session = Self {
             microphone,
             system,
-            segmenter: Segmenter::new(VadConfig::default()),
+            started: std::time::Instant::now(),
+            sent_samples: 0,
             elapsed: Duration::ZERO,
         };
         (session, events)
+    }
+
+    /// Switch call capture without reconnecting or interrupting the microphone.
+    pub fn set_system_audio(&mut self, enabled: bool) -> Vec<SessionEvent> {
+        if !enabled {
+            self.system.take();
+            return vec![SessionEvent::Started {
+                device: self
+                    .microphone
+                    .as_ref()
+                    .map(|m| m.device_name().to_owned())
+                    .unwrap_or_default(),
+            }];
+        }
+        if self.system.is_some() {
+            return Vec::new();
+        }
+        match crate::audio::system_audio::SystemAudio::start(None) {
+            Ok(system) => {
+                let device = format!("microphone + {}", system.source());
+                self.system = Some(system);
+                vec![SessionEvent::Started { device }]
+            }
+            Err(error) => vec![SessionEvent::Notice(format!(
+                "Recording the microphone only: {error}"
+            ))],
+        }
     }
 
     /// Whether capture is actually running.
@@ -124,44 +156,50 @@ impl ListenSession {
 
     /// Drain pending audio and report what happened.
     ///
-    /// Returns finished utterances and a level reading. This is cheap enough to
+    /// Returns raw interleaved PCM blocks and a level reading. This is cheap enough to
     /// call every frame: it only moves samples that are already buffered.
     pub fn pump(&mut self) -> Vec<SessionEvent> {
         let Some(microphone) = self.microphone.as_ref() else {
             return Vec::new();
         };
         let mut events = Vec::new();
-        let mut earned = Duration::ZERO;
         let mut level = 0.0_f32;
-
-        loop {
+        let due =
+            (self.started.elapsed().as_secs_f64() * f64::from(crate::audio::SAMPLE_RATE)) as usize;
+        if due.saturating_sub(self.sent_samples) > 32_000
+            || microphone.dropped() > 0
+            || self
+                .system
+                .as_ref()
+                .is_some_and(|s| s.dropped() > 0 || !s.is_running())
+        {
+            self.microphone.take();
+            self.system.take();
+            events.push(SessionEvent::Failed(
+                "Audio capture was interrupted or fell behind. Start again to reconnect.".into(),
+            ));
+            return events;
+        }
+        // Clock both sources together. A silent or unavailable channel is padded,
+        // never mixed into the other speaker's track.
+        while self.sent_samples + FRAME_SAMPLES <= due {
             let frame = microphone.take(FRAME_SAMPLES);
             let remote = self
                 .system
                 .as_mut()
-                .map(|system| system.take(FRAME_SAMPLES))
+                .map(|s| s.take(FRAME_SAMPLES))
                 .unwrap_or_default();
-            if frame.is_empty() && remote.is_empty() {
-                break;
-            }
-            // Both sides of the call feed one stream, so the transcriber hears
-            // the whole conversation rather than only the user.
-            let mixed = if remote.is_empty() {
-                frame
-            } else if frame.is_empty() {
-                remote
-            } else {
-                crate::audio::system_audio::mix(&frame, &remote)
-            };
-            level = level.max(crate::audio::rms(&mixed));
-            earned +=
-                Duration::from_secs_f64(mixed.len() as f64 / f64::from(crate::audio::SAMPLE_RATE));
-            if let Some(segment) = self.segmenter.push(&mixed) {
-                events.push(utterance_event(&segment));
-            }
+            level = level
+                .max(crate::audio::rms(&frame))
+                .max(crate::audio::rms(&remote));
+            events.push(SessionEvent::Audio(interleave(
+                &frame,
+                &remote,
+                FRAME_SAMPLES,
+            )));
+            self.sent_samples += FRAME_SAMPLES;
         }
-
-        self.elapsed += earned;
+        self.elapsed = self.started.elapsed();
         events.push(SessionEvent::Level(level));
 
         if !microphone.is_running() {
@@ -180,26 +218,24 @@ impl ListenSession {
 
     /// Stop capturing and flush any pending speech.
     pub fn stop(&mut self) -> Vec<SessionEvent> {
-        let mut events = Vec::new();
+        let mut events = self.pump();
         if let Some(microphone) = self.microphone.take() {
-            // Drain anything still buffered before closing the device.
-            loop {
-                let frame = microphone.take(FRAME_SAMPLES);
-                if frame.is_empty() {
-                    break;
-                }
-                if let Some(segment) = self.segmenter.push(&frame) {
-                    events.push(utterance_event(&segment));
-                }
+            let frame = microphone.take(FRAME_SAMPLES);
+            let remote = self
+                .system
+                .as_mut()
+                .map(|s| s.take(FRAME_SAMPLES))
+                .unwrap_or_default();
+            if !frame.is_empty() || !remote.is_empty() {
+                events.push(SessionEvent::Audio(interleave(
+                    &frame,
+                    &remote,
+                    frame.len().max(remote.len()),
+                )));
             }
             microphone.stop();
         }
-        if let Some(system) = self.system.take() {
-            let _ = system;
-        }
-        if let Some(segment) = self.segmenter.finish() {
-            events.push(utterance_event(&segment));
-        }
+        self.system.take();
         events.push(SessionEvent::Stopped {
             elapsed: self.elapsed,
         });
@@ -207,14 +243,16 @@ impl ListenSession {
     }
 }
 
-fn utterance_event(segment: &crate::audio::Segment) -> SessionEvent {
-    let duration = segment.samples.len() as f64 / f64::from(crate::audio::SAMPLE_RATE);
-    let wav = encode_wav(&segment.samples).unwrap_or_default();
-    SessionEvent::Utterance {
-        wav_base64: STANDARD.encode(wav),
-        duration,
-        reason: segment.reason,
-    }
+/// Fixed channel order is the source of You/Them identity, independent of diarization.
+pub fn interleave(microphone: &[f32], remote: &[f32], frames: usize) -> Vec<f32> {
+    (0..frames)
+        .flat_map(|i| {
+            [
+                microphone.get(i).copied().unwrap_or(0.0),
+                remote.get(i).copied().unwrap_or(0.0),
+            ]
+        })
+        .collect()
 }
 
 fn describe(error: &AudioError) -> String {
@@ -269,6 +307,16 @@ pub fn shared_session() -> SharedSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::encode_wav;
+
+    #[test]
+    fn stereo_channels_never_mix_and_missing_audio_is_silent() {
+        assert_eq!(
+            interleave(&[0.1, 0.2], &[0.8], 3),
+            vec![0.1, 0.8, 0.2, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(interleave(&[], &[0.3], 1), vec![0.0, 0.3]);
+    }
 
     #[test]
     fn missing_device_fails_with_a_readable_message() {

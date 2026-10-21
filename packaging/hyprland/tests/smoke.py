@@ -108,7 +108,9 @@ def bound_host_window():
     wait_for(lambda: find_window() is not None, "nested compositor host window")
     window = find_window()
     selector = f'address:{window["address"]}'
-    for action in (f'hl.dsp.window.float({{window="{selector}",action="set"}})',
+    active = json.loads(subprocess.check_output(["hyprctl", "-i", "0", "-j", "activeworkspace"], env=parent_env, text=True))["id"]
+    for action in (f'hl.dsp.window.move({{window="{selector}",workspace="{active}",follow=false}})',
+                   f'hl.dsp.window.float({{window="{selector}",action="set"}})',
                    f'hl.dsp.window.resize({{window="{selector}",x=960,y=640}})',
                    f'hl.dsp.window.center({{window="{selector}"}})'):
         result = subprocess.run(["hyprctl", "-i", "0", "eval", f"hl.dispatch({action})"], env=parent_env,
@@ -188,7 +190,7 @@ try:
         time.sleep(1)
         window = next(w for w in clients() if w["class"] == "dev.lennette.overlay")
         assert window["floating"] and window["pinned"], window
-        assert window["size"] == [560, 64], window
+        assert window["size"] == [720, 620], window
         (artifacts / "results.json").write_text(json.dumps({"passed": True, "test": "ordinary first launch floats and pins without preloaded app rules", "window": window}, indent=2) + "\n")
         print("PASS ordinary first launch floats and pins without preloaded app rules", flush=True)
         raise SystemExit(0)

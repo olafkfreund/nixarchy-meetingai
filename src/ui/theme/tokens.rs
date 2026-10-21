@@ -222,43 +222,9 @@ pub fn code_font_family() -> gpui::SharedString {
     "FiraCode Nerd Font".into()
 }
 
-/// Honor the desktop UI font, with fontconfig as the Linux fallback.
-pub fn system_font_family() -> gpui::SharedString {
-    static FAMILY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    FAMILY
-        .get_or_init(|| {
-            let configured = std::process::Command::new("gsettings")
-                .args(["get", "org.gnome.desktop.interface", "font-name"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| String::from_utf8(o.stdout).ok());
-            if let Some(value) = configured {
-                let value = value.trim().trim_matches('\'');
-                let family = value
-                    .rsplit_once(' ')
-                    .filter(|(_, size)| size.parse::<f32>().is_ok())
-                    .map_or(value, |(family, _)| family);
-                if !family.is_empty() {
-                    return family.to_owned();
-                }
-            }
-            std::process::Command::new("fc-match")
-                .args(["-f", "%{family}", "sans-serif"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "sans-serif".to_owned())
-                .split(',')
-                .next()
-                .unwrap_or("sans-serif")
-                .trim()
-                .to_owned()
-        })
-        .clone()
-        .into()
+/// Bundled proportional UI face, consistent even when the desktop uses a code font.
+pub fn ui_font_family() -> gpui::SharedString {
+    "Inter".into()
 }
 
 #[cfg(test)]

@@ -131,10 +131,10 @@ pub struct TranscriptLine {
     pub end: f64,
 }
 
-/// Deepgram streaming endpoint for raw 16-bit mono PCM.
+/// Deepgram streaming endpoint for raw 16-bit two-channel PCM.
 pub fn deepgram_url(model: &str, language: Option<&str>) -> String {
     let mut url = format!(
-        "wss://api.deepgram.com/v1/listen?model={model}&encoding=linear16&sample_rate={SAMPLE_RATE}&channels=1&diarize=true&interim_results=true&smart_format=true&punctuate=true&vad_events=true&endpointing=300&utterance_end_ms=1000"
+        "wss://api.deepgram.com/v1/listen?model={model}&encoding=linear16&sample_rate={SAMPLE_RATE}&channels=2&multichannel=true&diarize_model=latest&interim_results=true&smart_format=true&punctuate=true&vad_events=true&endpointing=300&utterance_end_ms=1000"
     );
     if let Some(language) = language.filter(|value| !value.is_empty() && *value != "en") {
         url.push_str(&format!("&language={language}"));
@@ -194,6 +194,14 @@ struct DeepgramAlternative {
 struct DeepgramWord {
     #[serde(default)]
     speaker: Option<i64>,
+    #[serde(default)]
+    word: String,
+    #[serde(default)]
+    punctuated_word: Option<String>,
+    #[serde(default)]
+    start: f64,
+    #[serde(default)]
+    end: f64,
 }
 
 /// Parse one Deepgram `Results` message into a transcript line.
@@ -228,123 +236,267 @@ pub fn parse_live_message(payload: &[u8]) -> Option<TranscriptLine> {
     })
 }
 
-/// A running live transcription session.
+/// Provider events, including silence boundaries and errors that must reach the UI.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiveEvent {
+    Transcript(TranscriptLine),
+    SpeechStarted { channel: u8 },
+    UtteranceEnd { channel: u8, last_word_end: f64 },
+    Failed(String),
+}
+
+pub fn parse_live_event(payload: &[u8]) -> Option<LiveEvent> {
+    let value: Value = serde_json::from_slice(payload).ok()?;
+    let channel = value
+        .get("channel")
+        .and_then(|v| v.as_array().and_then(|a| a.first()).or(Some(v)))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(1) as u8;
+    match value.get("type").and_then(Value::as_str) {
+        Some("SpeechStarted") => Some(LiveEvent::SpeechStarted { channel }),
+        Some("UtteranceEnd") => Some(LiveEvent::UtteranceEnd {
+            channel,
+            last_word_end: value
+                .get("last_word_end")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+        }),
+        Some("Error") => Some(LiveEvent::Failed(
+            value
+                .get("description")
+                .or_else(|| value.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("Deepgram rejected the live stream")
+                .to_owned(),
+        )),
+        _ => parse_live_message(payload).map(LiveEvent::Transcript),
+    }
+}
+
+/// Preserve speaker changes within a single final result, not just its first speaker.
+pub fn parse_live_events(payload: &[u8]) -> Vec<LiveEvent> {
+    let Some(event) = parse_live_event(payload) else {
+        return Vec::new();
+    };
+    let LiveEvent::Transcript(line) = &event else {
+        return vec![event];
+    };
+    if !line.is_final {
+        return vec![event];
+    }
+    let Some(alternative) = serde_json::from_slice::<DeepgramMessage>(payload)
+        .ok()
+        .and_then(|m| m.channel)
+        .and_then(|c| c.alternatives.into_iter().next())
+    else {
+        return vec![event];
+    };
+    if alternative.words.is_empty() || alternative.words.iter().any(|w| w.word.is_empty()) {
+        return vec![event];
+    }
+    let mut lines: Vec<TranscriptLine> = Vec::new();
+    for word in alternative.words {
+        let text = word.punctuated_word.unwrap_or(word.word);
+        if let Some(last) = lines.last_mut().filter(|last| last.speaker == word.speaker) {
+            last.text.push(' ');
+            last.text.push_str(&text);
+            last.end = word.end;
+        } else {
+            lines.push(TranscriptLine {
+                channel: line.channel,
+                speaker: word.speaker,
+                text,
+                is_final: true,
+                speech_final: false,
+                start: word.start,
+                end: word.end,
+            });
+        }
+    }
+    if let Some(last) = lines.last_mut() {
+        last.speech_final = line.speech_final;
+    }
+    lines.into_iter().map(LiveEvent::Transcript).collect()
+}
+
+/// Stable fragments accumulate independently until endpointing or UtteranceEnd.
+#[derive(Default)]
+pub struct LiveTurns {
+    text: [String; 2],
+    last_end: [f64; 2],
+}
+impl LiveTurns {
+    pub fn push(&mut self, line: &TranscriptLine) -> Option<String> {
+        if !line.is_final {
+            return None;
+        }
+        let channel = usize::from(line.channel.min(1));
+        if !line.text.is_empty() {
+            if !self.text[channel].is_empty() {
+                self.text[channel].push(' ');
+            }
+            self.text[channel].push_str(&line.text);
+            self.last_end[channel] = line.end;
+        }
+        if line.speech_final {
+            self.finish(line.channel, line.end)
+        } else {
+            None
+        }
+    }
+    pub fn finish(&mut self, channel: u8, last_word_end: f64) -> Option<String> {
+        let channel = usize::from(channel.min(1));
+        // A delayed boundary for an earlier utterance cannot flush the next turn.
+        if last_word_end + 0.01 < self.last_end[channel] {
+            return None;
+        }
+        let text = std::mem::take(&mut self.text[channel]);
+        (!text.is_empty()).then_some(text)
+    }
+}
+
+/// A running live transcription session. Dropping it cancels the socket task.
 pub struct LiveTranscriber {
     audio: mpsc::Sender<Vec<i16>>,
     stop: watch::Sender<bool>,
-    lines: mpsc::Receiver<TranscriptLine>,
-    task: tokio::task::JoinHandle<()>,
+    events: mpsc::Receiver<LiveEvent>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LiveTranscriber {
-    /// Connect and start streaming.
     pub async fn connect(
         api_key: String,
         model: String,
         language: Option<String>,
     ) -> Result<Self, SttError> {
-        let model = validate_model(&model)?.to_owned();
-        let url = deepgram_url(&model, language.as_deref());
+        let model = validate_model(&model)?;
+        Self::connect_url(api_key, deepgram_url(model, language.as_deref())).await
+    }
 
+    /// Endpoint injection is also used by protocol integration tests.
+    pub async fn connect_url(api_key: String, url: String) -> Result<Self, SttError> {
+        if api_key.trim().is_empty() {
+            return Err(SttError::MissingKey);
+        }
+        // reqwest and GPUI enable different rustls backends; choose one explicitly
+        // before tungstenite builds TLS, including in standalone test tools.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut request = url
             .into_client_request()
-            .map_err(|error| SttError::Socket(error.to_string()))?;
+            .map_err(|e| SttError::Socket(e.to_string()))?;
         request.headers_mut().insert(
             "Authorization",
             HeaderValue::from_str(&format!("Token {api_key}")).map_err(|_| SttError::MissingKey)?,
         );
-
-        let (socket, _) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|error| SttError::Socket(error.to_string()))?;
+        let (socket, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .map_err(|_| SttError::Socket("Deepgram connection timed out".into()))?
+        .map_err(|e| SttError::Socket(e.to_string()))?;
         let (mut sink, mut source) = socket.split();
-
         let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<i16>>(64);
         let (stop_tx, mut stop_rx) = watch::channel(false);
-        let (line_tx, line_rx) = mpsc::channel::<TranscriptLine>(64);
-
+        let (event_tx, event_rx) = mpsc::channel::<LiveEvent>(128);
         let task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = stop_rx.changed() => break,
-                    audio = audio_rx.recv() => {
-                        let Some(audio) = audio else { break };
-                        let mut bytes = Vec::with_capacity(audio.len() * 2);
-                        for sample in audio {
-                            bytes.extend_from_slice(&sample.to_le_bytes());
-                        }
-                        if sink.send(Message::Binary(bytes.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    message = source.next() => {
-                        match message {
-                            Some(Ok(Message::Text(text))) => {
-                                if let Some(line) = parse_live_message(text.as_bytes()) {
-                                    let _ = line_tx.send(line).await;
-                                }
+            let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(3));
+            keepalive.tick().await;
+            let mut closing = false;
+            let mut deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(86400);
+            let result: Result<(), String> = async {
+                loop {
+                    tokio::select! {
+                        _ = stop_rx.changed(), if !closing => {
+                            // Every previously accepted audio block precedes finalization.
+                            while let Ok(audio) = audio_rx.try_recv() {
+                                let bytes: Vec<u8> = audio.into_iter().flat_map(i16::to_le_bytes).collect();
+                                sink.send(Message::Binary(bytes.into())).await.map_err(|e| e.to_string())?;
                             }
-                            Some(Ok(Message::Binary(bytes))) => {
-                                if let Some(line) = parse_live_message(&bytes) {
-                                    let _ = line_tx.send(line).await;
+                            sink.send(Message::Text(json!({"type":"Finalize"}).to_string().into())).await.map_err(|e| e.to_string())?;
+                            sink.send(Message::Text(json!({"type":"CloseStream"}).to_string().into())).await.map_err(|e| e.to_string())?;
+                            closing = true;
+                            deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+                        }
+                        audio = audio_rx.recv(), if !closing => {
+                            let Some(audio) = audio else { break };
+                            let bytes: Vec<u8> = audio.into_iter().flat_map(i16::to_le_bytes).collect();
+                            sink.send(Message::Binary(bytes.into())).await.map_err(|e| e.to_string())?;
+                        }
+                        _ = keepalive.tick(), if !closing => {
+                            sink.send(Message::Text(json!({"type":"KeepAlive"}).to_string().into())).await.map_err(|e| e.to_string())?;
+                        }
+                        _ = tokio::time::sleep_until(deadline), if closing => {
+                            return Err("Deepgram did not finish the last words before the close timeout".into());
+                        }
+                        message = source.next() => {
+                            match message {
+                                Some(Ok(Message::Text(text))) => {
+                                    for event in parse_live_events(text.as_bytes()) {
+                                        if event_tx.send(event).await.is_err() { return Ok(()); }
+                                    }
                                 }
+                                Some(Ok(Message::Close(_))) | None => {
+                                    if !closing { return Err("Deepgram disconnected; recording stopped. Start again to reconnect.".into()); }
+                                    break;
+                                }
+                                Some(Err(error)) => return Err(error.to_string()),
+                                Some(Ok(_)) => {}
                             }
-                            Some(Ok(_)) => {}
-                            Some(Err(_)) | None => break,
                         }
                     }
                 }
+                Ok(())
+            }.await;
+            if let Err(error) = result {
+                let _ = event_tx.send(LiveEvent::Failed(error)).await;
             }
-            // Close the stream cleanly so the provider finalises its last words.
-            let _ = sink
-                .send(Message::Text(
-                    json!({"type": "CloseStream"}).to_string().into(),
-                ))
-                .await;
             let _ = sink.close().await;
         });
-
         Ok(Self {
             audio: audio_tx,
             stop: stop_tx,
-            lines: line_rx,
-            task,
+            events: event_rx,
+            task: Some(task),
         })
     }
 
-    /// Send a block of mono samples.
+    /// Send interleaved microphone/call samples with bounded backpressure.
     pub async fn push(&self, samples: &[f32]) -> Result<(), SttError> {
-        let pcm: Vec<i16> = samples
+        let pcm = samples
             .iter()
-            .map(|sample| {
-                let clamped = if sample.is_finite() {
-                    sample.clamp(-1.0, 1.0)
+            .map(|s| {
+                if s.is_finite() {
+                    (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
                 } else {
-                    0.0
-                };
-                (clamped * f32::from(i16::MAX)) as i16
+                    0
+                }
             })
             .collect();
-        self.audio
-            .send(pcm)
+        tokio::time::timeout(std::time::Duration::from_secs(1), self.audio.send(pcm))
             .await
+            .map_err(|_| SttError::Socket("the live audio connection fell behind".into()))?
             .map_err(|_| SttError::Socket("the live stream has ended".into()))
     }
 
-    /// Next transcript line, or `None` once the stream closes.
-    pub async fn next_line(&mut self) -> Option<TranscriptLine> {
-        self.lines.recv().await
+    pub async fn next_event(&mut self) -> Option<LiveEvent> {
+        self.events.recv().await
     }
-
-    /// Stop streaming and wait for the connection to close.
-    pub async fn stop(self) {
+    pub fn try_event(&mut self) -> Result<LiveEvent, mpsc::error::TryRecvError> {
+        self.events.try_recv()
+    }
+    /// Request finalization; continue receiving events until the stream closes.
+    pub fn finish(&self) {
         let _ = self.stop.send(true);
-        let _ = self.task.await;
     }
+}
 
-    /// Keep the control handle across an owned stop.
-    pub fn stop_handle(&self) -> watch::Sender<bool> {
-        self.stop.clone()
+impl Drop for LiveTranscriber {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -377,6 +529,36 @@ mod tests {
     use crate::features::providers::STT_PROVIDERS;
 
     #[test]
+    fn speaker_changes_preserve_word_identity_and_one_endpoint() {
+        let events = parse_live_events(br#"{"type":"Results","channel_index":[1,2],"is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"Hello. How are you?","words":[{"word":"hello","punctuated_word":"Hello.","speaker":0,"start":0.1,"end":0.4},{"word":"how","punctuated_word":"How","speaker":1,"start":0.6,"end":0.8},{"word":"are","speaker":1,"start":0.9,"end":1.0},{"word":"you","punctuated_word":"you?","speaker":1,"start":1.1,"end":1.3}]}]}}"#);
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], LiveEvent::Transcript(line) if line.text == "Hello." && line.speaker == Some(0) && !line.speech_final)
+        );
+        assert!(
+            matches!(&events[1], LiveEvent::Transcript(line) if line.text == "How are you?" && line.speaker == Some(1) && line.speech_final)
+        );
+    }
+
+    #[test]
+    fn stale_utterance_end_does_not_flush_the_next_turn() {
+        let mut turns = LiveTurns::default();
+        let line = TranscriptLine {
+            channel: 1,
+            text: "What comes next".into(),
+            is_final: true,
+            speech_final: false,
+            start: 5.0,
+            end: 7.0,
+            speaker: None,
+        };
+        assert_eq!(turns.push(&line), None);
+        assert_eq!(turns.finish(1, 3.0), None);
+        assert_eq!(turns.finish(1, 7.0).as_deref(), Some("What comes next"));
+        assert_eq!(turns.finish(1, 7.0), None);
+    }
+
+    #[test]
     fn extracts_transcripts_per_wire_format() {
         let deepgram = SttProvider::by_id("deepgram-stt").unwrap();
         assert_eq!(
@@ -401,7 +583,8 @@ mod tests {
         assert!(url.starts_with("wss://api.deepgram.com/v1/listen?"));
         assert!(url.contains("encoding=linear16"));
         assert!(url.contains("sample_rate=16000"));
-        assert!(url.contains("diarize=true"));
+        assert!(url.contains("diarize_model=latest"));
+        assert!(url.contains("channels=2&multichannel=true"));
         assert!(url.contains("interim_results=true"));
         assert!(!url.contains("language="), "default language is omitted");
         assert!(deepgram_url("nova-3", Some("de")).contains("language=de"));

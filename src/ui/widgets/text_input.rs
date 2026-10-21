@@ -229,7 +229,7 @@ pub fn render(
 
     let default_style = gpui::TextStyle {
         color: theme.foreground.into(),
-        font_family: crate::ui::theme::system_font_family(),
+        font_family: crate::ui::theme::ui_font_family(),
         font_features: Default::default(),
         font_size: px(13.5).into(),
         font_weight: FontWeight::NORMAL,

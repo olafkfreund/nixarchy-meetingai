@@ -137,11 +137,12 @@ pub fn run() {
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
             crate::ui::widgets::syntax::warm_up();
-            // Register the bundled Lucide icon font once for the whole app.
-            if let Err(error) = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(
-                crate::features::icons::FONT_BYTES,
-            )]) {
-                tracing::error!(%error, "could not register the icon font");
+            // Register bundled UI and icon fonts once for every native window.
+            if let Err(error) = cx.text_system().add_fonts(vec![
+                std::borrow::Cow::Borrowed(crate::features::icons::FONT_BYTES),
+                std::borrow::Cow::Borrowed(include_bytes!("assets/fonts/Inter.ttf")),
+            ]) {
+                tracing::error!(%error, "could not register bundled fonts");
             }
 
             // The overlay opens first and can open the dashboard.

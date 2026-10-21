@@ -974,7 +974,7 @@ impl Render for DashboardView {
             .clone();
         div()
             .track_focus(&focus)
-            .font_family(crate::ui::theme::system_font_family())
+            .font_family(crate::ui::theme::ui_font_family())
             .flex()
             .size_full()
             .rounded(px(radius::XL))
