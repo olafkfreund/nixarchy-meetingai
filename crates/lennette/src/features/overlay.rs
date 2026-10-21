@@ -129,6 +129,12 @@ pub struct Overlay {
     chat_stream: Option<gpui::Task<()>>,
     /// Answer text currently streaming, rendered live.
     streaming_text: String,
+    /// The composer's editable text.
+    composer: crate::features::text_input::Input,
+    /// Focus handle for the composer, so the platform routes typing here.
+    composer_focus: Option<gpui::FocusHandle>,
+    /// Whether the composer currently holds focus.
+    composer_focused: bool,
     /// Generated follow-up questions for this conversation.
     follow_ups: Vec<String>,
     /// Whether a follow-up request is in flight.
@@ -237,6 +243,9 @@ impl Overlay {
             transcription: None,
             chat_stream: None,
             streaming_text: String::new(),
+            composer: crate::features::text_input::Input::new(),
+            composer_focus: None,
+            composer_focused: false,
             opacity,
             shortcuts,
             follow_ups: Vec::new(),
@@ -497,7 +506,7 @@ impl Overlay {
             self.chat_error = Some(SendError::AlreadyStreaming.message());
             return;
         }
-        let question = self.conversation.draft().trim().to_owned();
+        let question = self.composer.text().trim().to_owned();
         if question.is_empty() {
             return;
         }
@@ -522,6 +531,7 @@ impl Overlay {
         // Show the question in the overlay and clear the composer.
         self.conversation.submit();
         self.conversation.set_draft(String::new());
+        self.composer.clear();
         let images = self
             .attached_capture
             .as_ref()
@@ -1040,6 +1050,39 @@ impl Overlay {
             button = button.bg(self.surfaces().accent());
         }
         button
+    }
+
+    /// The composer's focus handle, created once.
+    fn focus_handle(&mut self, cx: &mut Context<Self>) -> gpui::FocusHandle {
+        self.composer_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone()
+    }
+
+    /// Route a key to the composer.
+    fn handle_composer_key(&mut self, event: &gpui::KeyDownEvent) {
+        let keystroke = &event.keystroke;
+        match keystroke.key.as_str() {
+            "backspace" => self.composer.backspace(),
+            "delete" => self.composer.delete(),
+            "left" => self.composer.move_cursor(true, keystroke.modifiers.shift),
+            "right" => self.composer.move_cursor(false, keystroke.modifiers.shift),
+            "home" => {
+                self.composer.set_text(self.composer.text().to_owned());
+            }
+            "enter" => return,
+            key if !keystroke.modifiers.platform && !keystroke.modifiers.control => {
+                // IME and printable input arrive through key_char; fall back to the
+                // key name for plain letters when it is absent.
+                if let Some(text) = keystroke.key_char.as_deref() {
+                    self.composer.insert(text);
+                } else if key.len() == 1 {
+                    self.composer.insert(key);
+                }
+            }
+            _ => {}
+        }
+        self.conversation.set_draft(self.composer.text().to_owned());
     }
 
     /// Surface colours at this window's opacity, so every child fades together.
@@ -1932,10 +1975,9 @@ impl Overlay {
         }
     }
 
-    fn input_block(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn input_block(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        let draft = self.conversation.draft().to_string();
-        let can_submit = self.conversation.can_submit();
+        let can_submit = !self.composer.is_empty();
 
         div()
             .flex()
@@ -1977,23 +2019,28 @@ impl Overlay {
                     .px(px(space::MD))
                     .rounded(px(radius::LG))
                     .border_1()
-                    .border_color(theme.input)
+                    .border_color(if self.composer_focused {
+                        theme.primary
+                    } else {
+                        theme.input
+                    })
                     .id("composer")
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(13.5))
-                            .text_color(if draft.is_empty() {
-                                theme.muted_foreground
-                            } else {
-                                theme.foreground
-                            })
-                            .child(if draft.is_empty() {
-                                "Ask anything, or paste a screenshot…".to_string()
-                            } else {
-                                draft
-                            }),
+                    .track_focus(&self.focus_handle(cx))
+                    .cursor_text()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            window.focus(&this.focus_handle(cx));
+                            this.composer_focused = true;
+                            cx.notify();
+                        }),
                     )
+                    .child(div().flex_1().child(crate::features::text_input::render(
+                        &self.composer,
+                        &theme,
+                        self.composer_focused,
+                        "Ask anything, or paste a screenshot…",
+                    )))
                     .child(kbd(&theme, self.surfaces(), "↵"))
                     .child(
                         div()
@@ -2390,6 +2437,16 @@ impl Render for Overlay {
             .flex()
             .flex_col()
             .size_full()
+            // Keys reach the composer only because the root claims them.
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                this.composer_focused = true;
+                if event.keystroke.key == "enter" && !event.keystroke.modifiers.shift {
+                    this.send_message(cx);
+                } else {
+                    this.handle_composer_key(event);
+                }
+                cx.notify();
+            }))
             .bg(gpui::Rgba {
                 a: self.opacity,
                 ..theme.background

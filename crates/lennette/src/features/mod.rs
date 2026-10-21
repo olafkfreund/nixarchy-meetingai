@@ -27,6 +27,7 @@ pub mod settings;
 pub mod settings_pages;
 pub mod shortcuts;
 pub mod system_audio;
+pub mod text_input;
 pub mod theme;
 pub mod transcription;
 pub mod tray;
