@@ -6,6 +6,24 @@
 
 use gpui::Rgba;
 
+/// Vertical spacing steps used across the app.
+pub mod space {
+    pub const XS: f32 = 4.0;
+    pub const SM: f32 = 8.0;
+    pub const MD: f32 = 12.0;
+    pub const LG: f32 = 16.0;
+    pub const XL: f32 = 24.0;
+}
+
+/// Border radii, matching the reference's `rounded-lg` / `rounded-xl` scale.
+pub mod radius {
+    pub const SM: f32 = 6.0;
+    pub const MD: f32 = 8.0;
+    pub const LG: f32 = 10.0;
+    pub const XL: f32 = 12.0;
+    pub const FULL: f32 = 999.0;
+}
+
 /// Build an opaque colour from a 24-bit RGB literal at compile time.
 const fn rgb_hex(value: u32) -> Rgba {
     Rgba {
@@ -30,6 +48,7 @@ pub struct Theme {
     pub primary: Rgba,
     pub destructive: Rgba,
     pub success: Rgba,
+    pub warning: Rgba,
 }
 
 impl Theme {
@@ -46,7 +65,10 @@ impl Theme {
         primary: rgb_hex(0xe8e8e8),
         destructive: rgb_hex(0xd35a5a),
         success: rgb_hex(0x6fcf97),
+        warning: rgb_hex(0xd8a657),
     };
+
+    pub const DEFAULT: Theme = Self::DARK;
 
     pub const fn new() -> Self {
         Self::DARK

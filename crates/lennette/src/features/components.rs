@@ -10,24 +10,7 @@ use gpui::{
 };
 
 use super::theme::Theme;
-
-/// Vertical spacing steps used across the app.
-pub mod space {
-    pub const XS: f32 = 4.0;
-    pub const SM: f32 = 8.0;
-    pub const MD: f32 = 12.0;
-    pub const LG: f32 = 16.0;
-    pub const XL: f32 = 24.0;
-}
-
-/// Border radii, matching the reference's `rounded-lg` / `rounded-xl` scale.
-pub mod radius {
-    pub const SM: f32 = 6.0;
-    pub const MD: f32 = 8.0;
-    pub const LG: f32 = 10.0;
-    pub const XL: f32 = 12.0;
-    pub const FULL: f32 = 999.0;
-}
+pub use super::theme::{radius, space};
 
 /// A rounded container used for cards and grouped settings.
 pub fn panel(theme: &Theme) -> gpui::Div {

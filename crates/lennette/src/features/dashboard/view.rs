@@ -8,8 +8,9 @@ use lucide_icons::Icon;
 
 use super::nav::{NavItem, SECTIONS};
 use super::{Dashboard, PageData};
-use crate::features::db::Database;
+use crate::features::db::{Database, conversations};
 use crate::features::icons;
+use crate::features::settings_pages::{self, SettingsState};
 use crate::features::theme::Theme;
 
 /// Shared dashboard handle. Wrapped so the view owns it.
@@ -17,6 +18,9 @@ pub struct DashboardView {
     dashboard: Dashboard,
     database: Option<Database>,
     theme: Theme,
+    settings: SettingsState,
+    /// Conversation whose transcript is open, when viewing a detail page.
+    open_conversation: Option<String>,
 }
 
 impl DashboardView {
@@ -25,10 +29,17 @@ impl DashboardView {
         if let Some(database) = database.as_ref() {
             dashboard.navigate(super::nav::Route::Home, Some(database));
         }
+        let settings = SettingsState::new(database.as_ref().map(|database| {
+            // A second connection keeps settings writes off the list queries.
+            Database::open(database.connection().path().unwrap_or_default())
+                .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory database"))
+        }));
         Self {
             dashboard,
             database,
             theme: Theme::new(),
+            settings,
+            open_conversation: None,
         }
     }
 
@@ -68,6 +79,33 @@ impl DashboardView {
 
     fn navigate(&mut self, route: super::nav::Route) {
         self.dashboard.navigate(route, self.database.as_ref());
+    }
+
+    /// Mutable settings state, for page controls.
+    pub fn settings_mut(&mut self) -> &mut SettingsState {
+        &mut self.settings
+    }
+
+    /// Persist settings after a control changes.
+    pub fn save_settings(&mut self) {
+        self.settings.save();
+    }
+
+    /// Open a conversation's transcript.
+    pub fn open_conversation(&mut self, id: impl Into<String>) {
+        self.open_conversation = Some(id.into());
+        self.dashboard.navigate(
+            super::nav::Route::ConversationDetail,
+            self.database.as_ref(),
+        );
+    }
+
+    fn conversation_messages(&self) -> Vec<conversations::MessageRecord> {
+        let (Some(database), Some(id)) = (self.database.as_ref(), self.open_conversation.as_ref())
+        else {
+            return Vec::new();
+        };
+        conversations::messages(database.connection(), id).unwrap_or_default()
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -197,7 +235,7 @@ impl DashboardView {
             )
     }
 
-    fn conversations_body(&self) -> impl IntoElement {
+    fn conversations_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let records = self.dashboard.filtered_conversations();
         if records.is_empty() {
@@ -222,6 +260,17 @@ impl DashboardView {
                     .py(px(10.0))
                     .border_b_1()
                     .border_color(theme.border)
+                    .cursor_pointer()
+                    .id(gpui::ElementId::Name(
+                        format!("conversation-{}", record.id).into(),
+                    ))
+                    .on_click(cx.listener({
+                        let id = record.id.clone();
+                        move |this, _, _, cx| {
+                            this.open_conversation(id.clone());
+                            cx.notify();
+                        }
+                    }))
                     .child(icons::icon(&theme, Icon::MessagesSquare, 13.0))
                     .child(
                         div()
@@ -341,13 +390,55 @@ impl DashboardView {
         list
     }
 
-    fn settings_body(&self) -> impl IntoElement {
-        self.empty_note("Settings editing lands next: the pages are wired and ready.")
+    fn settings_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        settings_pages::render(self.dashboard.route(), &self.settings, &self.theme, cx)
     }
 
-    fn body(&self) -> impl IntoElement {
+    fn conversation_detail(&self) -> gpui::AnyElement {
+        let theme = self.theme;
+        let messages = self.conversation_messages();
+        if messages.is_empty() {
+            return self
+                .empty_note("Pick a conversation from the list to read it here.")
+                .into_any_element();
+        }
+        let mut list = div().flex().flex_col().gap(px(8.0));
+        for message in messages {
+            let is_user = message.role == "user";
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.card)
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .max_w(px(680.0))
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .child(if is_user { "You" } else { "Assistant" }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(theme.foreground)
+                            .child(message.content),
+                    ),
+            );
+        }
+        list.into_any_element()
+    }
+
+    fn body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.dashboard.route() {
-            super::nav::Route::Conversations => self.conversations_body().into_any_element(),
+            super::nav::Route::Conversations => self.conversations_body(cx).into_any_element(),
+            super::nav::Route::ConversationDetail => self.conversation_detail(),
             super::nav::Route::Files => self.files_body().into_any_element(),
             super::nav::Route::Prompts => self.prompts_body().into_any_element(),
             super::nav::Route::Home => {
@@ -385,7 +476,7 @@ impl DashboardView {
                 }
                 grid.into_any_element()
             }
-            _ => self.settings_body().into_any_element(),
+            _ => self.settings_body(cx),
         }
     }
 }
@@ -422,7 +513,7 @@ impl Render for DashboardView {
                         if let Some(banner) = self.error_banner() {
                             content = content.child(banner);
                         }
-                        content.child(self.body())
+                        content.child(self.body(cx))
                     }),
             )
     }
