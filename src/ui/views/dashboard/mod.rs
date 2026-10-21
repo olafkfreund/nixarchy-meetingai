@@ -10,7 +10,6 @@ pub mod view;
 
 use crate::features::dashboard::nav::Route;
 use crate::features::db::conversations::{self, ConversationRecord};
-use crate::features::db::library::{self, FileRecord};
 use crate::features::db::meetings::{self, MeetingRecord};
 use crate::features::db::settings::{self, PromptRecord};
 use crate::features::db::{Database, DbError};
@@ -21,7 +20,6 @@ pub enum PageData {
     #[default]
     Empty,
     Conversations(Vec<ConversationRecord>),
-    Files(Vec<FileRecord>),
     Prompts(Vec<PromptRecord>),
     Meetings(Vec<MeetingRecord>),
 }
@@ -40,7 +38,7 @@ pub struct Dashboard {
 impl Dashboard {
     pub fn new() -> Self {
         Self {
-            route: Route::Home,
+            route: Route::Conversations,
             data: PageData::Empty,
             error: None,
             search: String::new(),
@@ -79,13 +77,6 @@ impl Dashboard {
                     PageData::Empty
                 }
             },
-            Route::Files => match Self::load_files(database) {
-                Ok(records) => PageData::Files(records),
-                Err(error) => {
-                    self.error = Some(error);
-                    PageData::Empty
-                }
-            },
             Route::Meetings | Route::MeetingDetail => match Self::load_meetings(database) {
                 Ok(records) => PageData::Meetings(records),
                 Err(error) => {
@@ -112,11 +103,6 @@ impl Dashboard {
     fn load_meetings(database: Option<&Database>) -> Result<Vec<MeetingRecord>, String> {
         let database = database.ok_or_else(not_ready)?;
         meetings::list(database.connection(), 100).map_err(describe)
-    }
-
-    fn load_files(database: Option<&Database>) -> Result<Vec<FileRecord>, String> {
-        let database = database.ok_or_else(not_ready)?;
-        library::list(database.connection()).map_err(describe)
     }
 
     fn load_prompts(database: Option<&Database>) -> Result<Vec<PromptRecord>, String> {

@@ -6,7 +6,7 @@ use gpui::{
 };
 use lucide_icons::Icon;
 
-use super::nav::{NavItem, SECTIONS};
+use super::nav::{NAV_ITEMS, NavItem};
 use super::{Dashboard, PageData};
 use crate::features::db::{Database, conversations};
 use crate::features::icons;
@@ -29,15 +29,15 @@ pub struct DashboardView {
 }
 
 impl DashboardView {
-    /// Surface colours at full opacity; the dashboard is not a glass surface.
+    /// Surface colours at 50% opacity for glass aesthetics.
     fn surfaces(&self) -> crate::features::theme::Surfaces {
-        self.theme.surfaces(1.0)
+        self.theme.surfaces(crate::features::theme::DEFAULT_OPACITY)
     }
 
     pub fn new(database: Option<Database>) -> Self {
         let mut dashboard = Dashboard::new();
         if let Some(database) = database.as_ref() {
-            dashboard.navigate(super::nav::Route::Home, Some(database));
+            dashboard.navigate(super::nav::Route::Conversations, Some(database));
         }
         let settings = SettingsState::new(database.as_ref().map(|database| {
             // A second connection keeps settings writes off the list queries.
@@ -341,24 +341,28 @@ impl DashboardView {
         let mut row = div()
             .flex()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(6.0))
             .flex_1()
             .min_w(px(0.0))
-            .id("dashboard-nav")
-            .overflow_x_scroll();
+            .id("dashboard-nav");
 
-        for (_, items) in SECTIONS {
-            for item in *items {
-                row = row.child(self.nav_pill(*item, item.route == self.dashboard.route(), cx));
-            }
+        for item in NAV_ITEMS {
+            let active = if item.route == super::nav::Route::Settings {
+                self.dashboard.route().is_setting()
+            } else {
+                item.route == self.dashboard.route()
+            };
+            row = row.child(self.nav_pill(*item, active, cx));
         }
 
         div()
             .flex()
             .items_center()
             .gap(px(8.0))
-            .h(px(56.0))
+            .h(px(52.0))
             .px(px(20.0))
+            .border_b_1()
+            .border_color(self.surfaces().border())
             .flex_shrink_0()
             .child(row)
     }
@@ -366,15 +370,16 @@ impl DashboardView {
     /// One navigation pill.
     fn nav_pill(&self, item: NavItem, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        let surfaces = self.surfaces();
         let mut pill = div()
             .flex()
             .items_center()
             .gap(px(6.0))
-            .h(px(30.0))
-            .px(px(11.0))
+            .h(px(32.0))
+            .px(px(14.0))
             .flex_shrink_0()
             .rounded(px(radius::FULL))
-            .text_size(px(11.5))
+            .text_size(px(12.0))
             .font_weight(if active {
                 FontWeight::MEDIUM
             } else {
@@ -384,14 +389,23 @@ impl DashboardView {
             .text_color(if active {
                 theme.foreground
             } else {
-                self.surfaces().muted_foreground()
+                surfaces.muted_foreground()
             })
-            .hover(|style| style.bg(self.surfaces().muted()))
+            .border_1()
+            .border_color(if active {
+                surfaces.border()
+            } else {
+                gpui::Rgba {
+                    a: 0.0,
+                    ..surfaces.border()
+                }
+            })
+            .hover(|style| style.bg(surfaces.muted()).border_color(surfaces.border()))
             .id(("nav", item.route as usize))
-            .child(icons::icon(&theme, item.icon, 12.0))
+            .child(icons::icon(&theme, item.icon, 13.0))
             .child(item.label);
         if active {
-            pill = pill.bg(self.surfaces().muted());
+            pill = pill.bg(surfaces.muted());
         }
         pill.on_click(cx.listener(move |this, _, _, cx| {
             this.navigate(item.route);
@@ -417,11 +431,12 @@ impl DashboardView {
 
     fn empty_note(&self, message: &'static str) -> impl IntoElement {
         let theme = self.theme;
+        let surfaces = self.surfaces();
         div()
-            .rounded(px(12.0))
+            .rounded(px(radius::LG))
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.card)
+            .border_color(surfaces.border())
+            .bg(surfaces.card())
             .px(px(16.0))
             .py(px(28.0))
             .flex()
@@ -444,13 +459,15 @@ impl DashboardView {
                 "No conversations yet. Ask something from the overlay and it will show up here.",
             ));
         }
+        let surfaces = self.surfaces();
         let mut list = div()
             .flex()
             .flex_col()
-            .rounded(px(12.0))
+            .rounded(px(radius::LG))
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.card);
+            .border_color(surfaces.border())
+            .bg(surfaces.card())
+            .overflow_hidden();
         for record in records {
             list = list.child(
                 div()
@@ -460,8 +477,9 @@ impl DashboardView {
                     .px(px(14.0))
                     .py(px(10.0))
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(surfaces.border())
                     .cursor_pointer()
+                    .hover(|style| style.bg(surfaces.muted()))
                     .id(gpui::ElementId::Name(
                         format!("conversation-{}", record.id).into(),
                     ))
@@ -491,54 +509,6 @@ impl DashboardView {
         list
     }
 
-    fn files_body(&self) -> impl IntoElement {
-        let theme = self.theme;
-        let PageData::Files(files) = self.dashboard.data() else {
-            return div().child(self.empty_note("No files yet."));
-        };
-        if files.is_empty() {
-            return div().child(
-                self.empty_note(
-                    "No files yet. Documents you attach are kept here after processing.",
-                ),
-            );
-        }
-        let mut list = div()
-            .flex()
-            .flex_col()
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.card);
-        for file in files {
-            list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(icons::icon(&theme, Icon::FileText, 13.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(12.5))
-                            .text_color(theme.foreground)
-                            .child(file.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.muted_foreground)
-                            .child(format!("{} pages", file.pages)),
-                    ),
-            );
-        }
-        list
-    }
-
     fn prompts_body(&self) -> impl IntoElement {
         let theme = self.theme;
         let PageData::Prompts(prompts) = self.dashboard.data() else {
@@ -550,15 +520,17 @@ impl DashboardView {
                 .listen_slot
                 .map(|slot| format!("Listen mode {slot}"))
                 .unwrap_or_else(|| "Prompt".to_owned());
+            let surfaces = self.surfaces();
             list = list.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(4.0))
-                    .rounded(px(12.0))
+                    .rounded(px(radius::LG))
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.card)
+                    .border_color(surfaces.border())
+                    .bg(surfaces.card())
+                    .hover(|style| style.bg(surfaces.muted()))
                     .px(px(14.0))
                     .py(px(12.0))
                     .child(
@@ -607,16 +579,17 @@ impl DashboardView {
                 .empty_note("No meetings yet. Start a Listen session and it will appear here as it happens.")
                 .into_any_element();
         }
+        let surfaces = self.surfaces();
         let mut list = div()
             .flex()
             .flex_col()
-            .rounded(px(12.0))
+            .rounded(px(radius::LG))
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.card);
+            .border_color(surfaces.border())
+            .bg(surfaces.card())
+            .overflow_hidden();
         for meeting in meetings {
             let duration = crate::features::db::meetings::format_duration(meeting.duration_seconds);
-            let live = meeting.ended_at.is_none();
             list = list.child(
                 div()
                     .flex()
@@ -625,8 +598,9 @@ impl DashboardView {
                     .px(px(14.0))
                     .py(px(10.0))
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(surfaces.border())
                     .cursor_pointer()
+                    .hover(|style| style.bg(surfaces.muted()))
                     .id(gpui::ElementId::Name(
                         format!("meeting-{}", meeting.id).into(),
                     ))
@@ -652,12 +626,8 @@ impl DashboardView {
                     .child(
                         div()
                             .text_size(px(11.0))
-                            .text_color(if live {
-                                theme.success
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(if live { "Live".to_owned() } else { duration }),
+                            .text_color(theme.muted_foreground)
+                            .child(duration),
                     )
                     .child(
                         div()
@@ -886,43 +856,7 @@ impl DashboardView {
             super::nav::Route::ConversationDetail => self.conversation_detail(cx),
             super::nav::Route::Meetings => self.meetings_body(cx),
             super::nav::Route::MeetingDetail => self.meeting_detail(cx),
-            super::nav::Route::Files => self.files_body().into_any_element(),
             super::nav::Route::Prompts => self.prompts_body().into_any_element(),
-            super::nav::Route::Home => {
-                let theme = self.theme;
-                let mut grid = div().flex().flex_wrap().gap(px(10.0));
-                for (_, items) in SECTIONS {
-                    for item in *items {
-                        grid = grid.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.0))
-                                .w(px(220.0))
-                                .rounded(px(12.0))
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.card)
-                                .p(px(12.0))
-                                .child(icons::icon(&theme, item.icon, 14.0))
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme.foreground)
-                                        .child(item.label),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.muted_foreground)
-                                        .child(item.description),
-                                ),
-                        );
-                    }
-                }
-                grid.into_any_element()
-            }
             _ => self.settings_body(cx),
         }
     }
@@ -936,20 +870,21 @@ pub fn action_button<V: 'static>(
     cx: &mut Context<V>,
     handler: impl Fn(&mut V, &mut Context<V>, &mut gpui::Window) + 'static,
 ) -> impl IntoElement {
+    let surfaces = theme.surfaces(crate::features::theme::DEFAULT_OPACITY);
     div()
         .flex()
         .items_center()
         .justify_center()
         .h(px(26.0))
         .px(px(10.0))
-        .rounded(px(7.0))
+        .rounded(px(radius::SM))
         .border_1()
-        .border_color(theme.border)
-        .bg(theme.card)
+        .border_color(surfaces.border())
+        .bg(surfaces.card())
         .text_size(px(11.0))
         .text_color(theme.foreground)
         .cursor_pointer()
-        .hover(|style| style.bg(theme.muted))
+        .hover(|style| style.bg(surfaces.muted()).border_color(theme.primary))
         .id(id)
         .child(label)
         .on_click(cx.listener(move |view, _, window, cx| {
@@ -969,11 +904,16 @@ fn truncate(text: &str, limit: usize) -> String {
 impl Render for DashboardView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        let surfaces = self.surfaces();
         div()
             .flex()
             .size_full()
-            .bg(theme.background)
+            .rounded(px(radius::XL))
+            .border_1()
+            .border_color(surfaces.border())
+            .bg(surfaces.background())
             .text_color(theme.foreground)
+            .overflow_hidden()
             // Dev Space owns the keyboard so the key field can be typed into.
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 if !this.wants_key_input() {

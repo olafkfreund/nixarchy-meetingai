@@ -259,7 +259,11 @@ pub fn run() {
 
 /// Open (or focus) the dashboard window.
 pub fn open_dashboard(cx: &mut App, services: Services) {
-    open_dashboard_at(cx, services, crate::features::dashboard::nav::Route::Home);
+    open_dashboard_at(
+        cx,
+        services,
+        crate::features::dashboard::nav::Route::Conversations,
+    );
 }
 
 /// Open the dashboard on a specific page.
@@ -271,9 +275,10 @@ pub fn open_dashboard_at(
     let bounds = Bounds::centered(None, size(px(DASHBOARD_WIDTH), px(DASHBOARD_HEIGHT)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_background: gpui::WindowBackgroundAppearance::Transparent,
         titlebar: Some(TitlebarOptions {
             title: Some("lennette".into()),
-            appears_transparent: false,
+            appears_transparent: true,
             ..Default::default()
         }),
         ..Default::default()

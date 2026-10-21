@@ -848,10 +848,7 @@ impl Overlay {
             .child(mode.label())
     }
 
-    /// A minimal glass bar: mode switch, live state, and two quiet actions.
-    ///
-    /// The brand, divider, wordmark and status pill are gone on purpose; the mode
-    /// switch and a single dot carry all the state this surface needs.
+    /// A minimal glass bar: mode switch and quiet actions.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -871,30 +868,8 @@ impl Overlay {
                     .child(self.mode_tab(Mode::Listen, self.mode == Mode::Listen, cx)),
             )
             .child(div().flex_1())
-            .child(self.live_dot())
             .child(self.new_chat_button(cx))
             .child(self.dashboard_button(cx))
-    }
-
-    /// One dot that says whether lennette is listening.
-    fn live_dot(&self) -> impl IntoElement {
-        let theme = self.theme;
-        let listening = self.is_listening();
-        let colour = if self.listen_error.is_some() {
-            theme.destructive
-        } else if listening {
-            theme.success
-        } else if self.chat.is_streaming() {
-            theme.primary
-        } else {
-            self.surfaces().muted_foreground()
-        };
-        div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(24.0))
-            .child(div().size(px(7.0)).rounded_full().bg(colour))
     }
 
     /// "Start new", matching the reference: clears the conversation and starts

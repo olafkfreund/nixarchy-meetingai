@@ -4,7 +4,10 @@
 //! [`SettingsState`], which persists immediately so a restart never loses a
 //! change.
 
-use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div, px};
+use gpui::{
+    Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, div, px,
+};
 use lucide_icons::Icon;
 
 use crate::core::settings::{AutoScreenshot, PrimaryTab, Settings, ThemeChoice};
@@ -114,12 +117,12 @@ fn page_header(theme: &Theme, title: &str, description: &str) -> impl IntoElemen
         )
 }
 
-fn stack(children: Vec<gpui::AnyElement>) -> impl IntoElement {
+fn stack(children: Vec<gpui::AnyElement>) -> gpui::AnyElement {
     let mut column = div().flex().flex_col().gap(px(12.0)).pb(px(24.0));
     for child in children {
         column = column.child(child);
     }
-    column
+    column.into_any_element()
 }
 
 /// App settings: theme, transparency, startup and window behaviour.
@@ -127,7 +130,7 @@ pub fn app_settings(
     state: &SettingsState,
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
-) -> impl IntoElement {
+) -> gpui::AnyElement {
     let s = &state.settings;
 
     let theme_options: Vec<(&'static str, bool)> = ThemeChoice::ALL
@@ -311,7 +314,7 @@ pub fn screenshot_settings(
     state: &SettingsState,
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
-) -> impl IntoElement {
+) -> gpui::AnyElement {
     let s = &state.settings;
     let modes: Vec<(&'static str, bool)> = AutoScreenshot::ALL
         .iter()
@@ -428,7 +431,7 @@ pub fn capture_settings(
     state: &SettingsState,
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
-) -> impl IntoElement {
+) -> gpui::AnyElement {
     let s = &state.settings;
 
     let regions = section(
@@ -486,7 +489,7 @@ pub fn audio_settings(
     state: &SettingsState,
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
-) -> impl IntoElement {
+) -> gpui::AnyElement {
     let s = &state.settings;
     let devices = crate::audio::devices::enumerate();
     let inputs = devices.inputs.clone();
@@ -635,7 +638,7 @@ pub fn response_settings(
     state: &SettingsState,
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
-) -> impl IntoElement {
+) -> gpui::AnyElement {
     let s = &state.settings;
 
     let follow_ups = section(
@@ -693,7 +696,7 @@ pub fn response_settings(
 pub fn shortcut_settings(
     theme: &Theme,
     _cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
-) -> impl IntoElement {
+) -> gpui::AnyElement {
     let mut list = section(
         theme,
         "Global Shortcuts",
@@ -867,7 +870,7 @@ pub fn dev_space(
     state: &SettingsState,
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
-) -> impl IntoElement {
+) -> gpui::AnyElement {
     let detected = crate::ai::local_cli::detect();
     let s = &state.settings;
 
@@ -939,22 +942,98 @@ pub fn render(
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
 ) -> gpui::AnyElement {
-    let (title, description) = (route.title(), route.description());
-    let body: gpui::AnyElement = match route {
-        Route::Settings => app_settings(state, theme, cx).into_any_element(),
-        Route::Screenshot => screenshot_settings(state, theme, cx).into_any_element(),
-        Route::Capture => capture_settings(state, theme, cx).into_any_element(),
-        Route::Audio => audio_settings(state, theme, cx).into_any_element(),
-        Route::Responses => response_settings(state, theme, cx).into_any_element(),
-        Route::Shortcuts => shortcut_settings(theme, cx).into_any_element(),
-        Route::DevSpace => dev_space(state, theme, cx).into_any_element(),
-        _ => div().into_any_element(),
+    let active_route = if route.is_setting() {
+        route
+    } else {
+        Route::Settings
+    };
+    let subtabs = [
+        ("General", Route::Settings),
+        ("Audio", Route::Audio),
+        ("AI & Keys", Route::DevSpace),
+        ("Shortcuts", Route::Shortcuts),
+    ];
+    let surfaces = theme.surfaces(crate::features::theme::DEFAULT_OPACITY);
+    let mut tab_bar = div()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .p(px(3.0))
+        .rounded(px(radius::FULL))
+        .border_1()
+        .border_color(surfaces.border())
+        .bg(surfaces.card());
+
+    for (label, sub_route) in subtabs {
+        let is_active = sub_route == active_route;
+        let mut chip = div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .h(px(26.0))
+            .px(px(14.0))
+            .rounded(px(radius::FULL))
+            .text_size(px(11.5))
+            .font_weight(if is_active {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::NORMAL
+            })
+            .cursor_pointer()
+            .text_color(if is_active {
+                theme.foreground
+            } else {
+                surfaces.muted_foreground()
+            })
+            .id(("settings-subtab", sub_route as usize));
+
+        if is_active {
+            chip = chip
+                .bg(surfaces.muted())
+                .border_1()
+                .border_color(surfaces.border());
+        } else {
+            chip = chip.hover(|s| s.bg(surfaces.card()));
+        }
+
+        chip = chip.on_click(cx.listener(move |view, _, _, cx| {
+            view.navigate_to(sub_route);
+            cx.notify();
+        }));
+        tab_bar = tab_bar.child(chip.child(label));
+    }
+
+    let body: gpui::AnyElement = match active_route {
+        Route::Settings => {
+            let app = app_settings(state, theme, cx);
+            let screenshots = screenshot_settings(state, theme, cx);
+            let capture = capture_settings(state, theme, cx);
+            let responses = response_settings(state, theme, cx);
+            stack(vec![app, screenshots, capture, responses])
+        }
+        Route::Audio => audio_settings(state, theme, cx),
+        Route::DevSpace => dev_space(state, theme, cx),
+        Route::Shortcuts => shortcut_settings(theme, cx),
+        _ => app_settings(state, theme, cx),
     };
 
     div()
         .flex()
         .flex_col()
-        .child(page_header(theme, title, description))
+        .gap(px(space::SM))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(space::MD))
+                .child(page_header(
+                    theme,
+                    active_route.title(),
+                    active_route.description(),
+                ))
+                .child(tab_bar),
+        )
         .child(body)
         .into_any_element()
 }
