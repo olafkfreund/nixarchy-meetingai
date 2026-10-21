@@ -62,6 +62,7 @@
     # audio + capture
     pipewire
     alsa-lib
+    alsa-lib.dev
     pulseaudio
     libpulseaudio
     xorg.xauth
@@ -94,19 +95,36 @@
     ];
   };
 
+  # CPAL links against ALSA; pkg-config must find its headers or `cargo clippy`
+  # fails inside git hooks where the shell env is not inherited.
+  env.PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig";
+
   env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   env.NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   env.XDG_DATA_DIRS = "${pkgs.fontconfig}/share:$XDG_DATA_DIRS";
 
   git-hooks.hooks = {
-    nixfmt.enable = true;
+    nixfmt = {
+      enable = true;
+      package = pkgs.nixfmt;
+    };
     rustfmt.enable = true;
+    # The pre-commit hook runs outside the shell env, so it carries its own
+    # toolchain and the pkg-config paths CPAL's ALSA dependency needs.
     clippy = {
       enable = true;
-      settings = {
-        denyWarnings = true;
-        allFeatures = true;
-      };
+      entry = "${pkgs.writeShellScript "lennette-clippy" ''
+        export PATH="${
+          lib.makeBinPath [
+            pkgs.rust-bin.stable."1.99.1".cargo
+            pkgs.rust-bin.stable."1.99.1".rustc
+            pkgs.pkg-config
+          ]
+        }:$PATH"
+        export PKG_CONFIG_PATH="${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig"
+        exec cargo clippy --all-targets --all-features -- -D warnings
+      ''}";
+      pass_filenames = false;
     };
   };
 

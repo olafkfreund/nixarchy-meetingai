@@ -68,8 +68,16 @@ pub struct Overlay {
     use_image: bool,
     show_settings: bool,
     show_history: bool,
-    listening: bool,
-    elapsed_secs: u32,
+    /// The running capture session, when Listen is active.
+    session: Option<crate::features::listen::ListenSession>,
+    /// Live microphone level, 0.0 to 1.0.
+    level: f32,
+    /// Why listening could not start, shown under the header.
+    listen_error: Option<String>,
+    /// Device that capture actually opened.
+    listening_device: Option<String>,
+    /// Timer driving the level meter and the elapsed clock.
+    pulse: Option<gpui::Task<()>>,
 }
 
 impl Overlay {
@@ -85,8 +93,11 @@ impl Overlay {
             use_image: false,
             show_settings: false,
             show_history: false,
-            listening: false,
-            elapsed_secs: 0,
+            session: None,
+            level: 0.0,
+            listen_error: None,
+            listening_device: None,
+            pulse: None,
         }
     }
 
@@ -102,14 +113,11 @@ impl Overlay {
         &self.conversation
     }
 
-    pub fn is_listening(&self) -> bool {
-        self.listening
-    }
-
     pub fn set_mode(&mut self, mode: Mode) {
-        // Leaving Listen pauses the session, matching the reference behaviour.
+        // Leaving Listen stops the session, matching the reference behaviour:
+        // the microphone is released and the status returns to Ready.
         if self.mode == Mode::Listen && mode != Mode::Listen {
-            self.listening = false;
+            self.stop_listening();
         }
         self.mode = mode;
         self.show_settings = false;
@@ -123,17 +131,123 @@ impl Overlay {
 
     fn status_label(&self) -> (String, gpui::Rgba) {
         let theme = self.theme;
-        if self.listening && self.mode == Mode::Listen {
+        if let Some(session) = self
+            .session
+            .as_ref()
+            .filter(|session| session.is_capturing())
+        {
+            let seconds = session.elapsed().as_secs();
             (
-                format!(
-                    "Listening · {:02}:{:02}",
-                    self.elapsed_secs / 60,
-                    self.elapsed_secs % 60
-                ),
+                format!("Listening · {:02}:{:02}", seconds / 60, seconds % 60),
                 theme.success,
             )
+        } else if self.listen_error.is_some() {
+            ("Microphone error".to_string(), theme.destructive)
         } else {
             ("Ready".to_string(), theme.muted_foreground)
+        }
+    }
+
+    /// Whether a live session is running.
+    pub fn is_listening(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(crate::features::listen::ListenSession::is_capturing)
+    }
+
+    /// Start capturing from the configured device.
+    pub fn start_listening(&mut self) {
+        if self.is_listening() {
+            return;
+        }
+        self.listen_error = None;
+        let device = self
+            .services
+            .database_path
+            .as_ref()
+            .and_then(|_| {
+                crate::features::settings::Settings::load_from_path(
+                    self.services.database_path.as_deref(),
+                )
+            })
+            .map(|settings| settings.input_device)
+            .filter(|device| !device.is_empty());
+
+        let config = crate::features::listen::SessionConfig {
+            device,
+            speech: None,
+        };
+        let (session, events) = crate::features::listen::ListenSession::start(&config);
+        self.session = Some(session);
+        for event in events {
+            self.handle_session_event(event);
+        }
+    }
+
+    /// Stop capturing and flush the last utterance.
+    pub fn stop_listening(&mut self) {
+        if let Some(mut session) = self.session.take() {
+            for event in session.stop() {
+                self.handle_session_event(event);
+            }
+        }
+        self.level = 0.0;
+    }
+
+    /// Tick the session a few times a second so the meter and clock stay live.
+    fn start_pulse(&mut self, cx: &mut Context<Self>) {
+        if self.pulse.is_some() {
+            return;
+        }
+        self.pulse = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(120))
+                    .await;
+                let keep_going = this
+                    .update(cx, |overlay, cx| {
+                        overlay.pump();
+                        if overlay.is_listening() {
+                            cx.notify();
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn handle_session_event(&mut self, event: crate::features::listen::SessionEvent) {
+        use crate::features::listen::SessionEvent;
+        match event {
+            SessionEvent::Started { device } => {
+                self.listening_device = Some(device);
+                self.listen_error = None;
+            }
+            SessionEvent::Level(level) => self.level = level.clamp(0.0, 1.0),
+            SessionEvent::Failed(message) => {
+                self.listen_error = Some(message);
+                self.listening_device = None;
+            }
+            SessionEvent::Utterance { .. } | SessionEvent::Transcript(_) => {}
+            SessionEvent::Stopped { .. } => {
+                self.level = 0.0;
+            }
+        }
+    }
+
+    /// Drain microphone audio. Called on a short timer while listening.
+    pub fn pump(&mut self) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        for event in session.pump() {
+            self.handle_session_event(event);
         }
     }
 
@@ -161,6 +275,10 @@ impl Overlay {
             .id(("mode-tab", mode as usize));
         tab = tab.on_click(cx.listener(move |this, _, _, cx| {
             this.set_mode(mode);
+            if mode == Mode::Listen {
+                this.start_listening();
+                this.start_pulse(cx);
+            }
             cx.notify();
         }));
         if active {
@@ -283,6 +401,85 @@ impl Overlay {
             button = button.bg(theme.accent);
         }
         button
+    }
+
+    /// A notice shown under the header: microphone error, or live level.
+    fn listen_banner(&self) -> Option<impl IntoElement> {
+        let theme = self.theme;
+        if let Some(message) = self.listen_error.as_deref() {
+            return Some(
+                div()
+                    .mx(px(space::MD))
+                    .mt(px(space::SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(px(radius::MD))
+                    .border_1()
+                    .border_color(theme.destructive)
+                    .px(px(space::MD))
+                    .py(px(space::SM))
+                    .child(icons::icon_colored(
+                        theme.destructive,
+                        Icon::TriangleAlert,
+                        12.0,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.0))
+                            .text_color(theme.foreground)
+                            .child(message.to_owned()),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        self.session
+            .as_ref()
+            .filter(|session| session.is_capturing())
+            .map(|_session| {
+                let device = self
+                    .listening_device
+                    .clone()
+                    .unwrap_or_else(|| "the system default".to_owned());
+                let width = (self.level * 120.0).clamp(2.0, 120.0);
+                div()
+                    .mx(px(space::MD))
+                    .mt(px(space::SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("Recording from {device}")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .w(px(120.0))
+                            .h(px(4.0))
+                            .rounded_full()
+                            .bg(theme.muted)
+                            .child(
+                                div()
+                                    .w(px(width))
+                                    .h(px(4.0))
+                                    .rounded_full()
+                                    .bg(theme.success),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{:.0}%", self.level * 100.0)),
+                    )
+                    .into_any_element()
+            })
     }
 
     fn empty_state(&self) -> impl IntoElement {
@@ -464,7 +661,7 @@ impl Overlay {
             .cursor_pointer()
             .id("push-to-talk")
             .child(icons::icon(&theme, Icon::Mic, 12.0))
-            .child(if self.listening {
+            .child(if self.is_listening() {
                 "Listening…"
             } else {
                 "Push to talk"
@@ -737,6 +934,7 @@ impl Render for Overlay {
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.header(cx))
+            .children(self.listen_banner())
             // The body owns the remaining height so the empty state can centre in
             // it, and follow-ups sit directly above the input block.
             .child(

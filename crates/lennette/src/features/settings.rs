@@ -246,6 +246,16 @@ impl Settings {
         })
     }
 
+    /// Load settings from a database path, without a long-lived connection.
+    ///
+    /// The overlay uses this on demand: it should not hold a connection open just
+    /// to read one preference.
+    pub fn load_from_path(path: Option<&std::path::Path>) -> Option<Self> {
+        let path = path?;
+        let database = Database::open(path).ok()?;
+        Self::load(&database).ok()
+    }
+
     /// Persist every setting.
     pub fn save(&self, database: &Database) -> Result<()> {
         let connection = database.connection();

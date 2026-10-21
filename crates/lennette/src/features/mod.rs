@@ -12,6 +12,8 @@ pub mod db;
 pub mod devices;
 pub mod domain;
 pub mod icons;
+pub mod listen;
+pub mod microphone;
 pub mod overlay;
 pub mod providers;
 pub mod settings;
