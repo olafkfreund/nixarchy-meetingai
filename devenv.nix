@@ -122,19 +122,28 @@
       package = pkgs.nixfmt;
     };
     rustfmt.enable = true;
-    # The pre-commit hook runs outside the shell env, so it carries its own
-    # toolchain and the pkg-config paths CPAL's ALSA dependency needs.
+    # The pre-commit hook runs outside the shell env with the user's PATH, which
+    # can contain a newer nightly rustc. Build the PATH explicitly instead of
+    # appending to it, so the pinned toolchain always wins.
     clippy = {
       enable = true;
       entry = "${pkgs.writeShellScript "lennette-clippy" ''
+        # Use the complete toolchain (rustc + std + clippy together). Splitting
+        # them across separate outputs makes clippy-driver unable to find std.
         export PATH="${
           lib.makeBinPath [
-            pkgs.rust-bin.stable."1.99.1".cargo
-            pkgs.rust-bin.stable."1.99.1".rustc
+            pkgs.rust-bin.stable."1.99.1".default
             pkgs.pkg-config
+            pkgs.coreutils
+            pkgs.gcc
+            pkgs.glibc.bin
           ]
-        }:$PATH"
-        export PKG_CONFIG_PATH="${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig"
+        }"
+        export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+        export BINDGEN_EXTRA_CLANG_ARGS="-isystem ${pkgs.glibc.dev}/include"
+        export CPATH="${pkgs.glibc.dev}/include"
+        export PKG_CONFIG_PATH="${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig:${pkgs.libGL.dev}/lib/pkgconfig:${pkgs.mesa}/lib/pkgconfig"
+        cd "''${DEVENV_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
         exec cargo clippy --all-targets --all-features -- -D warnings
       ''}";
       pass_filenames = false;
