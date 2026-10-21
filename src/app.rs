@@ -152,7 +152,13 @@ pub fn run() {
 
             // The tray appears without needing a window, so start it together with
             // the shortcuts.
-            let tray_state = Some(crate::features::tray::Tray::start());
+            // A tray is drawn by the desktop shell, outside the protected window.
+            let tray_state = if std::env::var("LENNETTE_PRIVATE_OVERLAY").as_deref() == Ok("1") {
+                tracing::info!("tray disabled for private overlay");
+                None
+            } else {
+                Some(crate::features::tray::Tray::start())
+            };
             match tray_state.as_ref() {
                 Some(crate::features::tray::Tray::Live(_)) => {
                     tracing::info!("tray icon available")
@@ -280,7 +286,6 @@ pub fn run() {
             .expect("failed to open the overlay window");
 
             cx.activate(true);
-            crate::features::hyprland::focus_overlay();
         });
 }
 
@@ -305,14 +310,15 @@ pub fn open_dashboard_at(
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_background: gpui::WindowBackgroundAppearance::Transparent,
         titlebar: Some(TitlebarOptions {
-            title: Some("lennette".into()),
+            title: Some("lennette dashboard".into()),
             appears_transparent: true,
             ..Default::default()
         }),
         ..Default::default()
     };
 
-    if let Err(error) = cx.open_window(options, move |_, cx| {
+    if let Err(error) = cx.open_window(options, move |window, cx| {
+        window.set_window_title("lennette dashboard");
         // Each window gets its own connection so a slow page never blocks the
         // overlay's writes.
         cx.new(|_| {

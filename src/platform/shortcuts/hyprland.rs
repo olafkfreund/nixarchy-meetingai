@@ -103,7 +103,9 @@ pub fn window_rules() -> &'static str {
      \x20   pin = true,\n\
      \x20   border_size = 0,\n\
      \x20   rounding = 0,\n\
-     })\n"
+     })\n\
+     hl.window_rule({ match = { class = \"dev.lennette.overlay\", title = \"^lennette$\" }, size = {720, 620}, center = true })\n\
+     hl.window_rule({ match = { class = \"dev.lennette.overlay\", title = \"^lennette dashboard$\" }, size = {1100, 760}, center = true })\n"
 }
 
 /// Generate the Lua module contents.
@@ -150,11 +152,14 @@ pub fn is_required(directory: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Apply the bindings to the running compositor with `hyprctl eval`.
+/// Apply window rules and bindings to the running compositor with `hyprctl eval`.
 ///
 /// This makes them work immediately; the written module makes them survive a
 /// restart.
 pub fn apply_now(bindings: &[Binding]) -> Result<usize, String> {
+    // This runs before open_window. Writing lennette.lua alone leaves the
+    // first launch tiled until the user reloads the compositor configuration.
+    apply_expression(window_rules())?;
     let mut applied = 0;
     for binding in bindings {
         let expression = format!(
@@ -162,18 +167,22 @@ pub fn apply_now(bindings: &[Binding]) -> Result<usize, String> {
             accelerator(binding),
             command(binding.action)
         );
-        let output = std::process::Command::new("hyprctl")
-            .arg("eval")
-            .arg(&expression)
-            .output()
-            .map_err(|error| format!("hyprctl is unavailable: {error}"))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if output.status.success() && stdout.trim() != "ok" {
-            return Err(format!("hyprctl rejected the binding: {}", stdout.trim()));
-        }
+        apply_expression(&expression)?;
         applied += 1;
     }
     Ok(applied)
+}
+
+fn apply_expression(expression: &str) -> Result<(), String> {
+    let output = std::process::Command::new("hyprctl")
+        .args(["eval", expression])
+        .output()
+        .map_err(|error| format!("hyprctl is unavailable: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() || stdout.trim() != "ok" {
+        return Err(format!("hyprctl rejected configuration: {}", stdout.trim()));
+    }
+    Ok(())
 }
 
 /// Focus and raise the overlay window in Hyprland.
@@ -184,7 +193,7 @@ pub fn focus_overlay() {
     // bring_to_top operates on the focused window and takes no selector. Check
     // the reply too: hyprctl can report a Lua error with a successful exit code.
     for expression in [
-        "hl.dispatch(hl.dsp.focus({ window = \"class:.*[Ll]ennette.*\" }))",
+        "hl.dispatch(hl.dsp.focus({ window = \"title:^lennette$\" }))",
         "hl.dispatch(hl.dsp.window.bring_to_top())",
     ] {
         match std::process::Command::new("hyprctl")

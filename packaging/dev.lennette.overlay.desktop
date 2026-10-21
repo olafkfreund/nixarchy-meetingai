@@ -2,8 +2,8 @@
 Type=Application
 Name=lennette
 GenericName=Ambient Real-Time Meeting Copilot
-Comment=Invisible ambient AI for live discussions and meetings. Live audio transcription, situational recall, and proactive intelligence without interrupting your focus.
-Exec=/home/parazeeknova/.local/bin/lennette
+Comment=An ambient real-time meeting and discussion copilot
+Exec=lennette
 Icon=dev.lennette.overlay
 Terminal=false
 Categories=Utility;AudioVideo;Audio;Office;

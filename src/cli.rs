@@ -46,6 +46,7 @@ fn usage() -> String {
         "  --help                  print this help",
         "",
         "Run without a flag to launch the app.",
+        "LENNETTE_PRIVATE_OVERLAY=1 disables the desktop tray for protected launches.",
     ]
     .join("\n")
 }
