@@ -47,3 +47,18 @@ pre-push: pre-commit test
 install-hooks:
     cp .githooks/pre-push .git/hooks/pre-push
     chmod +x .git/hooks/pre-push
+
+# Validate lints, format, types, compile optimized release binary and install locally.
+install: fmt-check lint typecheck
+    cargo build --release
+    mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/512x512/apps ~/.local/share/icons/hicolor/scalable/apps
+    cp target/release/lennette ~/.local/bin/lennette
+    chmod +x ~/.local/bin/lennette
+    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/dev.lennette.overlay.png
+    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/lennette.png
+    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/lennette.png
+    cp packaging/dev.lennette.overlay.desktop ~/.local/share/applications/dev.lennette.overlay.desktop
+    cp packaging/dev.lennette.overlay.desktop ~/.local/share/applications/lennette.desktop
+    @command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database ~/.local/share/applications || true
+    @command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor || true
+    @echo "Lennette successfully built and installed to ~/.local/bin/lennette"

@@ -10,11 +10,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Mode {
-    /// Ask the assistant a question about the current screen or conversation.
-    #[default]
-    Ask,
     /// Follow a live conversation and answer in real time.
+    #[default]
     Listen,
+    /// Ask a question or follow-up query.
+    Ask,
 }
 
 impl Mode {
@@ -146,7 +146,7 @@ mod tests {
     fn mode_cycles_between_two_modes() {
         assert_eq!(Mode::Ask.next(), Mode::Listen);
         assert_eq!(Mode::Listen.next(), Mode::Ask);
-        assert_eq!(Mode::default(), Mode::Ask);
+        assert_eq!(Mode::default(), Mode::Listen);
     }
 
     #[test]

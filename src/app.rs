@@ -87,6 +87,26 @@ fn default_database_path() -> Option<std::path::PathBuf> {
 }
 
 /// Start the application. Blocks until the last window closes.
+pub struct EmbeddedAssets;
+
+impl gpui::AssetSource for EmbeddedAssets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        match path {
+            "lennette.png" => Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "assets/lennette.png"
+            )))),
+            "lennette_app_icon.png" => Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "assets/lennette_app_icon.png"
+            )))),
+            _ => Ok(None),
+        }
+    }
+
+    fn list(&self, _path: &str) -> anyhow::Result<Vec<gpui::SharedString>> {
+        Ok(vec!["lennette.png".into(), "lennette_app_icon.png".into()])
+    }
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -103,158 +123,160 @@ pub fn run() {
         "starting lennette"
     );
 
-    Application::new().run(move |cx: &mut App| {
-        // Register the bundled Lucide icon font once for the whole app.
-        if let Err(error) = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(
-            crate::features::icons::FONT_BYTES,
-        )]) {
-            tracing::error!(%error, "could not register the icon font");
-        }
+    Application::new()
+        .with_assets(EmbeddedAssets)
+        .run(move |cx: &mut App| {
+            // Register the bundled Lucide icon font once for the whole app.
+            if let Err(error) = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(
+                crate::features::icons::FONT_BYTES,
+            )]) {
+                tracing::error!(%error, "could not register the icon font");
+            }
 
-        // The overlay opens first and can open the dashboard.
-        let services_for_overlay = services.clone();
-        let bounds = Bounds::centered(None, size(px(OVERLAY_WIDTH), px(OVERLAY_HEIGHT)), cx);
-        let overlay_options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            // A transparent window lets the opacity control show the desktop
-            // through the overlay instead of only fading toward black.
-            window_background: gpui::WindowBackgroundAppearance::Transparent,
-            titlebar: Some(TitlebarOptions {
-                title: Some("lennette".into()),
-                appears_transparent: true,
+            // The overlay opens first and can open the dashboard.
+            let services_for_overlay = services.clone();
+            let bounds = Bounds::centered(None, size(px(OVERLAY_WIDTH), px(OVERLAY_HEIGHT)), cx);
+            let overlay_options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // A transparent window lets the opacity control show the desktop
+                // through the overlay instead of only fading toward black.
+                window_background: gpui::WindowBackgroundAppearance::Transparent,
+                titlebar: Some(TitlebarOptions {
+                    title: Some("lennette".into()),
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
+            };
 
-        // The tray appears without needing a window, so start it together with
-        // the shortcuts.
-        let tray_state = Some(crate::features::tray::Tray::start());
-        match tray_state.as_ref() {
-            Some(crate::features::tray::Tray::Live(_)) => {
-                tracing::info!("tray icon available")
+            // The tray appears without needing a window, so start it together with
+            // the shortcuts.
+            let tray_state = Some(crate::features::tray::Tray::start());
+            match tray_state.as_ref() {
+                Some(crate::features::tray::Tray::Live(_)) => {
+                    tracing::info!("tray icon available")
+                }
+                Some(crate::features::tray::Tray::Unavailable(reason)) => {
+                    tracing::warn!(%reason, "tray icon unavailable")
+                }
+                None => {}
             }
-            Some(crate::features::tray::Tray::Unavailable(reason)) => {
-                tracing::warn!(%reason, "tray icon unavailable")
+
+            // Global shortcuts are grabbed once for the whole process.
+            let mut shortcut_listener = None;
+            let mut portal_shortcuts: Option<
+                std::sync::Arc<crate::features::wayland::PortalShortcuts>,
+            > = None;
+            let pure_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+                && std::env::var_os("DISPLAY").is_none();
+            // The control socket lets a shortcut flag reach this instance.
+            let control = crate::features::control::ControlListener::start();
+            match &control {
+                Ok(_) => tracing::info!("shortcut control socket ready"),
+                Err(error) => tracing::warn!(%error, "shortcut control socket unavailable"),
             }
-            None => {}
-        }
 
-        // Global shortcuts are grabbed once for the whole process.
-        let mut shortcut_listener = None;
-        let mut portal_shortcuts: Option<
-            std::sync::Arc<crate::features::wayland::PortalShortcuts>,
-        > = None;
-        let pure_wayland =
-            std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_none();
-        // The control socket lets a shortcut flag reach this instance.
-        let control = crate::features::control::ControlListener::start();
-        match &control {
-            Ok(_) => tracing::info!("shortcut control socket ready"),
-            Err(error) => tracing::warn!(%error, "shortcut control socket unavailable"),
-        }
-
-        // Hyprland has its own config; use it instead of the portal, which is
-        // unreliable on some systems.
-        if crate::features::hyprland::is_hyprland() {
-            let bindings = crate::features::shortcuts::Binding::defaults();
-            match crate::features::hyprland::install(&bindings) {
-                Ok(path) => {
-                    tracing::info!(path = %path.display(), "wrote Hyprland bindings");
-                    if let Some(directory) = crate::features::hyprland::config_directory()
-                        && !crate::features::hyprland::is_required(&directory)
-                    {
-                        tracing::warn!(
-                            line = crate::features::hyprland::required_line(),
-                            "add this line to hyprland.lua so the bindings survive a restart"
-                        );
+            // Hyprland has its own config; use it instead of the portal, which is
+            // unreliable on some systems.
+            if crate::features::hyprland::is_hyprland() {
+                let bindings = crate::features::shortcuts::Binding::defaults();
+                match crate::features::hyprland::install(&bindings) {
+                    Ok(path) => {
+                        tracing::info!(path = %path.display(), "wrote Hyprland bindings");
+                        if let Some(directory) = crate::features::hyprland::config_directory()
+                            && !crate::features::hyprland::is_required(&directory)
+                        {
+                            tracing::warn!(
+                                line = crate::features::hyprland::required_line(),
+                                "add this line to hyprland.lua so the bindings survive a restart"
+                            );
+                        }
+                        match crate::features::hyprland::apply_now(&bindings) {
+                            Ok(count) => tracing::info!(count, "Hyprland bindings applied now"),
+                            Err(error) => tracing::warn!(%error, "could not apply bindings now"),
+                        }
                     }
-                    match crate::features::hyprland::apply_now(&bindings) {
-                        Ok(count) => tracing::info!(count, "Hyprland bindings applied now"),
-                        Err(error) => tracing::warn!(%error, "could not apply bindings now"),
+                    Err(error) => tracing::warn!(%error, "could not write Hyprland bindings"),
+                }
+            }
+
+            if pure_wayland && !crate::features::hyprland::is_hyprland() {
+                // Wayland: bind through the desktop portal instead of grabbing keys.
+                let runtime = tokio::runtime::Handle::try_current();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let actions = crate::features::shortcuts::Action::ALL.to_vec();
+                match runtime {
+                    Ok(handle) => {
+                        handle.spawn(async move {
+                            let result =
+                                crate::features::wayland::PortalShortcuts::bind(&actions).await;
+                            let _ = tx.send(result);
+                        });
+                    }
+                    Err(_) => {
+                        std::thread::spawn(move || {
+                            let runtime = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build();
+                            let result = match runtime {
+                                Ok(runtime) => runtime.block_on(
+                                    crate::features::wayland::PortalShortcuts::bind(&actions),
+                                ),
+                                Err(error) => Err(crate::features::wayland::PortalError::Bus(
+                                    error.to_string(),
+                                )),
+                            };
+                            let _ = tx.send(result);
+                        });
                     }
                 }
-                Err(error) => tracing::warn!(%error, "could not write Hyprland bindings"),
-            }
-        }
-
-        if pure_wayland && !crate::features::hyprland::is_hyprland() {
-            // Wayland: bind through the desktop portal instead of grabbing keys.
-            let runtime = tokio::runtime::Handle::try_current();
-            let (tx, rx) = std::sync::mpsc::channel();
-            let actions = crate::features::shortcuts::Action::ALL.to_vec();
-            match runtime {
-                Ok(handle) => {
-                    handle.spawn(async move {
-                        let result =
-                            crate::features::wayland::PortalShortcuts::bind(&actions).await;
-                        let _ = tx.send(result);
-                    });
-                }
-                Err(_) => {
-                    std::thread::spawn(move || {
-                        let runtime = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build();
-                        let result = match runtime {
-                            Ok(runtime) => runtime.block_on(
-                                crate::features::wayland::PortalShortcuts::bind(&actions),
-                            ),
-                            Err(error) => Err(crate::features::wayland::PortalError::Bus(
-                                error.to_string(),
-                            )),
-                        };
-                        let _ = tx.send(result);
-                    });
-                }
-            }
-            match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-                Ok(Ok(portal)) => {
-                    tracing::info!("global shortcuts bound through the desktop portal");
-                    portal_shortcuts = Some(std::sync::Arc::new(portal));
-                }
-                Ok(Err(error)) => tracing::warn!(%error, "portal shortcuts unavailable"),
-                Err(_) => tracing::warn!("the shortcut portal did not answer in time"),
-            }
-        }
-
-        let (supported, message) = crate::features::shortcuts::support();
-        if !pure_wayland && supported {
-            match crate::features::shortcuts::ShortcutListener::start(
-                &crate::features::shortcuts::Binding::defaults(),
-            ) {
-                Ok((listener, failed)) => {
-                    if failed.is_empty() {
-                        tracing::info!(count = 6, "global shortcuts registered");
-                    } else {
-                        tracing::warn!(?failed, "some shortcuts could not be registered");
+                match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                    Ok(Ok(portal)) => {
+                        tracing::info!("global shortcuts bound through the desktop portal");
+                        portal_shortcuts = Some(std::sync::Arc::new(portal));
                     }
-                    // Handed to the overlay, which polls it on the UI thread.
-                    shortcut_listener = Some(std::rc::Rc::new(listener));
+                    Ok(Err(error)) => tracing::warn!(%error, "portal shortcuts unavailable"),
+                    Err(_) => tracing::warn!("the shortcut portal did not answer in time"),
                 }
-                Err(error) => tracing::error!(%error, "global shortcuts unavailable"),
             }
-        } else {
-            tracing::warn!(%message, "global shortcuts disabled");
-        }
 
-        let portal_clone = portal_shortcuts.clone();
-        let control_handle = control.ok().map(std::sync::Arc::new);
-        cx.open_window(overlay_options, move |_, cx| {
-            cx.new(|_| {
-                Overlay::new(
-                    services_for_overlay,
-                    shortcut_listener.clone(),
-                    tray_state,
-                    portal_clone,
-                    control_handle,
-                )
+            let (supported, message) = crate::features::shortcuts::support();
+            if !pure_wayland && supported {
+                match crate::features::shortcuts::ShortcutListener::start(
+                    &crate::features::shortcuts::Binding::defaults(),
+                ) {
+                    Ok((listener, failed)) => {
+                        if failed.is_empty() {
+                            tracing::info!(count = 6, "global shortcuts registered");
+                        } else {
+                            tracing::warn!(?failed, "some shortcuts could not be registered");
+                        }
+                        // Handed to the overlay, which polls it on the UI thread.
+                        shortcut_listener = Some(std::rc::Rc::new(listener));
+                    }
+                    Err(error) => tracing::error!(%error, "global shortcuts unavailable"),
+                }
+            } else {
+                tracing::warn!(%message, "global shortcuts disabled");
+            }
+
+            let portal_clone = portal_shortcuts.clone();
+            let control_handle = control.ok().map(std::sync::Arc::new);
+            cx.open_window(overlay_options, move |_, cx| {
+                cx.new(|_| {
+                    Overlay::new(
+                        services_for_overlay,
+                        shortcut_listener.clone(),
+                        tray_state,
+                        portal_clone,
+                        control_handle,
+                    )
+                })
             })
-        })
-        .expect("failed to open the overlay window");
+            .expect("failed to open the overlay window");
 
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }
 
 /// Open (or focus) the dashboard window.

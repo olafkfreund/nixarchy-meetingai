@@ -2,7 +2,7 @@
 
 use gpui::{
     Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    StatefulInteractiveElement, Styled, Window, div, img, px,
 };
 use lucide_icons::Icon;
 
@@ -358,12 +358,32 @@ impl DashboardView {
         div()
             .flex()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(14.0))
             .h(px(52.0))
             .px(px(20.0))
             .border_b_1()
             .border_color(self.surfaces().border())
             .flex_shrink_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .mr(px(8.0))
+                    .child(
+                        img("lennette.png")
+                            .h(px(24.0))
+                            .w(px(36.0))
+                            .rounded(px(radius::SM)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(self.theme.foreground)
+                            .child("lennette"),
+                    ),
+            )
             .child(row)
     }
 

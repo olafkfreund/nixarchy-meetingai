@@ -7,7 +7,7 @@
 
 use gpui::{
     Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    StatefulInteractiveElement, Styled, Window, div, img, px,
 };
 use lucide_icons::Icon;
 
@@ -811,61 +811,32 @@ impl Overlay {
         }
     }
 
-    fn mode_tab(&self, mode: Mode, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let icon = match mode {
-            Mode::Ask => Icon::MessageSquare,
-            Mode::Listen => Icon::Headphones,
-        };
-        let mut tab = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(24.0))
-            .px(px(10.0))
-            .rounded(px(radius::SM))
-            .text_size(px(12.0))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(if active {
-                theme.foreground
-            } else {
-                theme.muted_foreground
-            })
-            .cursor_pointer()
-            .id(("mode-tab", mode as usize));
-        tab = tab.on_click(cx.listener(move |this, _, _, cx| {
-            this.set_mode(mode);
-            if mode == Mode::Listen {
-                this.start_listening(cx);
-                this.start_pulse(cx);
-            }
-            cx.notify();
-        }));
-        if active {
-            tab = tab.bg(self.surfaces().background());
-        }
-        tab.child(icons::icon(&theme, icon, 13.0))
-            .child(mode.label())
-    }
-
-    /// A minimal glass bar: mode switch and quiet actions.
+    /// A minimal glass bar: lennette branding on the top left and quiet actions.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .items_center()
             .gap(px(space::SM))
             .h(px(48.0))
-            .px(px(12.0))
+            .px(px(14.0))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(2.0))
-                    .p(px(3.0))
-                    .rounded(px(radius::FULL))
-                    .bg(self.surfaces().muted())
-                    .child(self.mode_tab(Mode::Ask, self.mode == Mode::Ask, cx))
-                    .child(self.mode_tab(Mode::Listen, self.mode == Mode::Listen, cx)),
+                    .gap(px(8.0))
+                    .child(
+                        img("lennette.png")
+                            .h(px(24.0))
+                            .w(px(36.0))
+                            .rounded(px(radius::SM)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(self.theme.foreground)
+                            .child("lennette"),
+                    ),
             )
             .child(div().flex_1())
             .child(self.new_chat_button(cx))
@@ -1332,6 +1303,7 @@ impl Overlay {
         list.into_any_element()
     }
 
+    #[allow(dead_code)]
     fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
 
@@ -1406,6 +1378,7 @@ impl Overlay {
             )
     }
 
+    #[allow(dead_code)]
     fn message_list(&self) -> impl IntoElement {
         let theme = self.theme;
         let mut list = div()
@@ -1750,7 +1723,7 @@ impl Overlay {
                             &self.composer,
                             &theme,
                             self.composer_focused,
-                            "Ask anything, or paste a screenshot…",
+                            "Session guidance, notes or follow-up question…",
                         )))
                         .child(self.send_button(can_submit, cx)),
                 )
@@ -2123,15 +2096,7 @@ impl Render for Overlay {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_shortcut_poll(cx);
         let theme = self.theme;
-        let mut body = div().flex().flex_col().flex_1();
-        // Listen shows the live transcript; Ask shows the conversation.
-        if self.mode == Mode::Listen {
-            body = body.child(self.listen_body(cx));
-        } else if self.conversation.is_empty() {
-            body = body.child(self.empty_state(cx));
-        } else {
-            body = body.child(self.message_list());
-        }
+        let body = div().flex().flex_col().flex_1().child(self.listen_body(cx));
 
         div()
             .relative()

@@ -249,11 +249,13 @@ const APP_ID: &str = "dev.lennette.overlay";
 const DESKTOP_FILE: &str = r#"[Desktop Entry]
 Type=Application
 Name=lennette
-Comment=Desktop assistant with live transcription, chat and meeting notes
+GenericName=Ambient Real-Time Meeting Copilot
+Comment=Invisible ambient AI for live discussions and meetings. Live audio transcription, situational recall, and proactive intelligence without interrupting your focus.
 Exec=lennette
 Icon=dev.lennette.overlay
 Terminal=false
-Categories=Utility;
+Categories=Utility;AudioVideo;Audio;Office;
+Keywords=ai;meeting;transcription;copilot;speech;audio;notes;live;intelligence;
 StartupWMClass=lennette
 "#;
 
