@@ -150,7 +150,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeChoice::Dark,
-            transparency: 100,
+            transparency: 50,
             autostart: false,
             hide_app_icon: false,
             always_on_top: true,
@@ -313,7 +313,7 @@ mod tests {
     fn defaults_load_when_nothing_is_stored() {
         let settings = Settings::load(&database()).unwrap();
         assert_eq!(settings.theme, ThemeChoice::Dark);
-        assert_eq!(settings.transparency, 100);
+        assert_eq!(settings.transparency, 50);
         assert!(settings.always_on_top);
         assert_eq!(settings.overlay_size, "sm");
     }
@@ -352,7 +352,7 @@ mod tests {
         Settings::set(&database, "transparency", "banana").unwrap();
         Settings::set(&database, "theme", "neon").unwrap();
         let settings = Settings::load(&database).unwrap();
-        assert_eq!(settings.transparency, 100);
+        assert_eq!(settings.transparency, 50);
         assert_eq!(settings.theme, ThemeChoice::Dark);
     }
 
@@ -362,6 +362,7 @@ mod tests {
         Settings::set(&database, "transparency", "500").unwrap();
         Settings::set(&database, "screenshot_interval", "1").unwrap();
         let settings = Settings::load(&database).unwrap();
+        // 500 is clamped to the ceiling, not to the default.
         assert_eq!(settings.transparency, 100);
         assert_eq!(settings.screenshot_interval, 5);
     }

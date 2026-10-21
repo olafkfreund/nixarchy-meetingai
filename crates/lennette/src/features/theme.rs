@@ -17,10 +17,10 @@ pub mod space {
 
 /// Border radii, matching the reference's `rounded-lg` / `rounded-xl` scale.
 pub mod radius {
-    pub const SM: f32 = 6.0;
-    pub const MD: f32 = 8.0;
-    pub const LG: f32 = 10.0;
-    pub const XL: f32 = 12.0;
+    pub const SM: f32 = 8.0;
+    pub const MD: f32 = 12.0;
+    pub const LG: f32 = 16.0;
+    pub const XL: f32 = 22.0;
     pub const FULL: f32 = 999.0;
 }
 
@@ -33,6 +33,19 @@ const fn rgb_hex(value: u32) -> Rgba {
         a: 1.0,
     }
 }
+
+/// Build a colour with alpha from a 24-bit literal at compile time.
+const fn rgba(r: u32, g: u32, b: u32, a: f32) -> Rgba {
+    Rgba {
+        r: r as f32 / 255.0,
+        g: g as f32 / 255.0,
+        b: b as f32 / 255.0,
+        a,
+    }
+}
+
+/// Default window opacity: half-see-through glass.
+pub const DEFAULT_OPACITY: f32 = 0.5;
 
 /// Semantic surface and text colours.
 #[derive(Debug, Clone, Copy)]
@@ -52,6 +65,26 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Glass: a soft dark pane with light hairline edges.
+    ///
+    /// Colours carry their own alpha so the window reads as layered glass rather
+    /// than a solid panel, and borders are a light grey rather than white so they
+    /// stay hairline at low opacity.
+    pub const GLASS: Theme = Theme {
+        background: rgba(0x14, 0x15, 0x18, 0.55),
+        card: rgba(0xff, 0xff, 0xff, 0.06),
+        foreground: rgb_hex(0xf6f7f9),
+        muted: rgba(0xff, 0xff, 0xff, 0.09),
+        muted_foreground: rgba(0xf3, 0xf5, 0xf8, 0.62),
+        border: rgba(0xff, 0xff, 0xff, 0.16),
+        input: rgba(0xff, 0xff, 0xff, 0.10),
+        accent: rgba(0xff, 0xff, 0xff, 0.14),
+        primary: rgb_hex(0xf7f8fa),
+        destructive: rgb_hex(0xe5837f),
+        success: rgb_hex(0x8fd9b0),
+        warning: rgb_hex(0xe8c48c),
+    };
+
     /// Dark theme, matching the reference overlay's default appearance.
     pub const DARK: Theme = Theme {
         background: rgb_hex(0x0a0a0a),
@@ -68,10 +101,10 @@ impl Theme {
         warning: rgb_hex(0xd8a657),
     };
 
-    pub const DEFAULT: Theme = Self::DARK;
+    pub const DEFAULT: Theme = Self::GLASS;
 
     pub const fn new() -> Self {
-        Self::DARK
+        Self::GLASS
     }
 }
 
@@ -98,7 +131,7 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::DARK
+        Self::GLASS
     }
 }
 
@@ -111,9 +144,13 @@ pub struct Surfaces {
 
 impl Surfaces {
     /// Scale a colour's alpha by the window opacity.
+    ///
+    /// The glass palette already carries alpha, so this multiplies rather than
+    /// flattening to the window value: a 0.06 card at 50% stays a whisper of
+    /// light instead of becoming an opaque block.
     fn fade(self, colour: Rgba) -> Rgba {
         Rgba {
-            a: (colour.a * self.opacity).clamp(0.0, 1.0),
+            a: (colour.a * (0.35 + self.opacity * 0.65)).clamp(0.0, 1.0),
             ..colour
         }
     }
@@ -147,6 +184,10 @@ impl Surfaces {
         }
     }
 
+    pub fn muted_foreground(self) -> Rgba {
+        self.fade(self.theme.muted_foreground)
+    }
+
     pub fn border(self) -> Rgba {
         self.fade(self.theme.border)
     }
@@ -157,15 +198,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn surfaces_scale_alpha_and_keep_primary_readable() {
-        let theme = Theme::DARK;
+    fn surfaces_preserve_glass_layering() {
+        let theme = Theme::GLASS;
         let half = theme.surfaces(0.5);
-        assert!((half.card().a - 0.5).abs() < 1e-6);
-        assert!((half.background().a - 0.5).abs() < 1e-6);
+        // A glass card keeps its own low alpha, so it stays a whisper of light
+        // rather than turning into an opaque block.
+        assert!(half.card().a < 0.1, "card alpha {}", half.card().a);
+        assert!(half.background().a < 0.5);
         // Primary stays readable at low opacity rather than vanishing.
         assert!(half.primary().a > 0.5);
+        // Borders stay visible enough to read as an edge.
+        assert!(half.border().a > 0.05);
+    }
+
+    #[test]
+    fn full_opacity_keeps_the_declared_alpha() {
+        let theme = Theme::GLASS;
         let full = theme.surfaces(1.0);
-        assert!((full.card().a - 1.0).abs() < 1e-6);
+        assert!((full.card().a - theme.card.a).abs() < 1e-6);
+        assert!((full.background().a - theme.background.a).abs() < 1e-6);
     }
 
     #[test]

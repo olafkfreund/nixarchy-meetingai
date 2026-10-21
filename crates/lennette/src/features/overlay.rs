@@ -12,7 +12,7 @@ use gpui::{
 use lucide_icons::Icon;
 
 use super::chat::Conversation;
-use super::components::{icon_button, pill, radius, space};
+use super::components::{pill, radius, space};
 use super::domain::{Mode, OverlaySize, Role};
 use super::icons;
 use super::theme::Theme;
@@ -93,8 +93,6 @@ pub struct Overlay {
     /// Whether the prompt list is open.
     prompt_menu_open: bool,
     use_image: bool,
-    show_settings: bool,
-    show_history: bool,
     /// The running capture session, when Listen is active.
     session: Option<crate::features::listen::ListenSession>,
     /// Live microphone level, 0.0 to 1.0.
@@ -135,6 +133,8 @@ pub struct Overlay {
     composer_focus: Option<gpui::FocusHandle>,
     /// Whether the composer currently holds focus.
     composer_focused: bool,
+    /// Whether the overlay is shown; toggled by the Toggle Window shortcut.
+    window_visible: bool,
     /// Generated follow-up questions for this conversation.
     follow_ups: Vec<String>,
     /// Whether a follow-up request is in flight.
@@ -224,8 +224,6 @@ impl Overlay {
             model_menu_open: false,
             prompt_menu_open: false,
             use_image: false,
-            show_settings: false,
-            show_history: false,
             session: None,
             level: 0.0,
             listen_error: None,
@@ -246,6 +244,7 @@ impl Overlay {
             composer: crate::features::text_input::Input::new(),
             composer_focus: None,
             composer_focused: false,
+            window_visible: true,
             opacity,
             shortcuts,
             follow_ups: Vec::new(),
@@ -279,32 +278,11 @@ impl Overlay {
             self.stop_listening();
         }
         self.mode = mode;
-        self.show_settings = false;
-        self.show_history = false;
     }
 
     /// Compact layouts drop tool labels, as the reference does below `md`.
     fn show_tool_labels(&self) -> bool {
         self.size != OverlaySize::Small
-    }
-
-    fn status_label(&self) -> (String, gpui::Rgba) {
-        let theme = self.theme;
-        if let Some(session) = self
-            .session
-            .as_ref()
-            .filter(|session| session.is_capturing())
-        {
-            let seconds = session.elapsed().as_secs();
-            (
-                format!("Listening · {:02}:{:02}", seconds / 60, seconds % 60),
-                theme.success,
-            )
-        } else if self.listen_error.is_some() {
-            ("Microphone error".to_string(), theme.destructive)
-        } else {
-            ("Ready".to_string(), theme.muted_foreground)
-        }
     }
 
     /// Seconds elapsed in the current session.
@@ -718,7 +696,7 @@ impl Overlay {
                     .await;
                 let alive = this
                     .update(cx, |overlay, cx| {
-                        overlay.poll_shortcuts();
+                        overlay.poll_shortcuts(cx);
                         overlay.poll_tray(cx);
                         cx.notify();
                         true
@@ -732,7 +710,7 @@ impl Overlay {
     }
 
     /// Act on any global shortcut pressed since the last frame.
-    pub fn poll_shortcuts(&mut self) {
+    pub fn poll_shortcuts(&mut self, cx: &mut Context<Self>) {
         let Some(listener) = self.shortcuts.clone() else {
             return;
         };
@@ -743,7 +721,7 @@ impl Overlay {
             actions.push(action);
         }
         for action in actions {
-            self.handle_shortcut(action);
+            self.handle_shortcut(action, cx);
         }
     }
 
@@ -796,12 +774,18 @@ impl Overlay {
         }
     }
 
-    fn handle_shortcut(&mut self, action: crate::features::shortcuts::Action) {
+    fn handle_shortcut(
+        &mut self,
+        action: crate::features::shortcuts::Action,
+        cx: &mut Context<Self>,
+    ) {
         use crate::features::shortcuts::Action;
         match action {
             Action::Screenshot => self.capture_screen(),
-            Action::ToggleWindow => self.show_settings = !self.show_settings,
-            Action::ToggleDashboard => self.show_history = !self.show_history,
+            Action::ToggleWindow => self.toggle_window(),
+            Action::ToggleDashboard => {
+                crate::app::open_dashboard(cx, self.services.clone());
+            }
             Action::VoiceInput => {
                 if self.is_listening() {
                     self.stop_listening();
@@ -812,8 +796,6 @@ impl Overlay {
             Action::FocusInput => {
                 // Bring the overlay forward and put the cursor in the composer.
                 self.mode = Mode::Ask;
-                self.show_settings = false;
-                self.show_history = false;
                 self.focus_composer = true;
             }
             Action::SystemAudio => {
@@ -826,6 +808,11 @@ impl Overlay {
                 }
             }
         }
+    }
+
+    /// Show or hide the overlay window itself.
+    fn toggle_window(&mut self) {
+        self.window_visible = !self.window_visible;
     }
 
     /// Start capture without a UI context (a global shortcut).
@@ -899,67 +886,53 @@ impl Overlay {
             .child(mode.label())
     }
 
+    /// A minimal glass bar: mode switch, live state, and two quiet actions.
+    ///
+    /// The brand, divider, wordmark and status pill are gone on purpose; the mode
+    /// switch and a single dot carry all the state this surface needs.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let settings_active = self.show_settings;
-        let history_active = self.show_history;
-
         div()
             .flex()
             .items_center()
             .gap(px(space::SM))
-            .h(px(44.0))
-            .px(px(10.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(Theme::with_alpha(theme.card, self.surface_alpha()))
-            // Home mark opens the dashboard.
-            .child(icon_button("home", &theme, Icon::House))
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.foreground)
-                    .child("lennette"),
-            )
-            .child(div().w(px(1.0)).h(px(16.0)).bg(theme.border))
+            .h(px(48.0))
+            .px(px(12.0))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(2.0))
-                    .p(px(2.0))
-                    .rounded(px(radius::MD))
-                    .bg(self.surfaces().card())
+                    .p(px(3.0))
+                    .rounded(px(radius::FULL))
+                    .bg(self.surfaces().muted())
                     .child(self.mode_tab(Mode::Ask, self.mode == Mode::Ask, cx))
                     .child(self.mode_tab(Mode::Listen, self.mode == Mode::Listen, cx)),
             )
             .child(div().flex_1())
-            .child(self.status_pill())
+            .child(self.live_dot())
             .child(self.new_chat_button(cx))
             .child(self.dashboard_button(cx))
-            .child(self.settings_button(settings_active, cx))
-            .child(self.history_button(history_active, cx))
     }
 
-    fn status_pill(&self) -> impl IntoElement {
+    /// One dot that says whether lennette is listening.
+    fn live_dot(&self) -> impl IntoElement {
         let theme = self.theme;
-        let (label, dot) = self.status_label();
+        let listening = self.is_listening();
+        let colour = if self.listen_error.is_some() {
+            theme.destructive
+        } else if listening {
+            theme.success
+        } else if self.chat.is_streaming() {
+            theme.primary
+        } else {
+            self.surfaces().muted_foreground()
+        };
         div()
             .flex()
             .items_center()
-            .gap(px(6.0))
-            .h(px(26.0))
-            .px(px(8.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            .bg(self.surfaces().muted())
-            .text_size(px(10.5))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.foreground)
-            .child(div().size(px(6.0)).rounded_full().bg(dot))
-            .child(label)
+            .justify_center()
+            .size(px(24.0))
+            .child(div().size(px(7.0)).rounded_full().bg(colour))
     }
 
     /// "Start new", matching the reference: clears the conversation and starts
@@ -1020,36 +993,6 @@ impl Overlay {
             .on_click(cx.listener(move |_, _, _, cx| {
                 crate::app::open_dashboard(cx, services.clone());
             }))
-    }
-
-    fn settings_button(&self, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let mut button = icon_button("toggle-settings", &theme, Icon::Settings).on_click(
-            cx.listener(move |this, _, _, cx| {
-                this.show_settings = !this.show_settings;
-                this.show_history = false;
-                cx.notify();
-            }),
-        );
-        if active {
-            button = button.bg(self.surfaces().accent());
-        }
-        button
-    }
-
-    fn history_button(&self, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let mut button = icon_button("toggle-history", &theme, Icon::History).on_click(
-            cx.listener(move |this, _, _, cx| {
-                this.show_history = !this.show_history;
-                this.show_settings = false;
-                cx.notify();
-            }),
-        );
-        if active {
-            button = button.bg(self.surfaces().accent());
-        }
-        button
     }
 
     /// The composer's focus handle, created once.
@@ -1169,8 +1112,7 @@ impl Overlay {
 
     /// Change overlay opacity and persist it.
     pub fn set_opacity(&mut self, opacity: f32) {
-        // Below 50% the overlay stops being readable over a busy desktop.
-        self.opacity = opacity.clamp(0.5, 1.0);
+        self.opacity = opacity.clamp(0.35, 1.0);
         let percent = (self.opacity * 100.0).round() as u32;
         if let Some(path) = self.services.database_path.as_deref()
             && let Ok(database) = crate::features::db::Database::open(path)
@@ -1181,55 +1123,6 @@ impl Overlay {
                 &percent.to_string(),
             );
         }
-    }
-
-    fn opacity_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let current = self.opacity;
-        div()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(22.0))
-                    .rounded(px(radius::SM))
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .id("opacity-down")
-                    .child(icons::icon(&theme, Icon::SunDim, 11.0))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let next = this.opacity - 0.1;
-                        this.set_opacity(next);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .text_size(px(9.5))
-                    .text_color(theme.muted_foreground)
-                    .child(format!("{:.0}%", current * 100.0)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(22.0))
-                    .rounded(px(radius::SM))
-                    .cursor_pointer()
-                    .text_color(theme.muted_foreground)
-                    .id("opacity-up")
-                    .child(icons::icon(&theme, Icon::SunMedium, 11.0))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let next = this.opacity + 0.1;
-                        this.set_opacity(next);
-                        cx.notify();
-                    })),
-            )
     }
 
     /// A notice shown under the header: errors, live level, or an attachment.
@@ -1983,9 +1876,6 @@ impl Overlay {
             .flex()
             .flex_col()
             .gap(px(space::SM))
-            .border_t_1()
-            .border_color(theme.border)
-            .bg(Theme::with_alpha(theme.card, self.surface_alpha()))
             .px(px(space::MD))
             .py(px(10.0))
             // Push to talk + tool cluster.
@@ -2041,7 +1931,6 @@ impl Overlay {
                         self.composer_focused,
                         "Ask anything, or paste a screenshot…",
                     )))
-                    .child(kbd(&theme, self.surfaces(), "↵"))
                     .child(
                         div()
                             .size(px(28.0))
@@ -2071,77 +1960,25 @@ impl Overlay {
                             })),
                     ),
             )
-            .child(self.size_row(cx))
+            .child(self.footer_hint())
     }
 
-    fn size_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A whisper of a footer: how to send, and nothing else.
+    fn footer_hint(&self) -> impl IntoElement {
         let theme = self.theme;
-        let mut switcher = div()
-            .flex()
-            .items_center()
-            .gap(px(1.0))
-            .p(px(2.0))
-            .rounded(px(radius::MD))
-            .border_1()
-            .border_color(theme.border)
-            .bg(self.surfaces().muted());
-
-        for size in OverlaySize::ALL {
-            let active = size == self.size;
-            let mut chip = div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .h(px(20.0))
-                .min_w(px(20.0))
-                .px(px(6.0))
-                .rounded(px(radius::SM))
-                .text_size(px(10.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .cursor_pointer()
-                .text_color(if active {
-                    theme.foreground
-                } else {
-                    theme.muted_foreground
-                })
-                .id(("size", size as usize))
-                .child(size.label());
-            if active {
-                chip = chip.bg(self.surfaces().background());
-            }
-            switcher = switcher.child(chip.on_click(cx.listener(move |this, _, _, cx| {
-                this.size = size;
-                cx.notify();
-            })));
-        }
-
         div()
             .flex()
             .items_center()
-            .gap(px(space::SM))
-            .w_full()
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(10.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.muted_foreground)
-                    .whitespace_nowrap()
-                    .child("Size:"),
-            )
-            .child(switcher)
-            .child(div().flex_1())
-            .child(self.opacity_controls(cx))
-            .child(kbd(&theme, self.surfaces(), "Ctrl"))
-            .child(kbd(&theme, self.surfaces(), "\\"))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(10.5))
-                    .text_color(theme.muted_foreground)
-                    .whitespace_nowrap()
-                    .child("hide"),
-            )
+            .justify_center()
+            .gap(px(5.0))
+            .pt(px(8.0))
+            .text_size(px(9.5))
+            .text_color(self.surfaces().muted_foreground())
+            .child(kbd(&theme, self.surfaces(), "↵"))
+            .child("send")
+            .child(div().w(px(6.0)))
+            .child(kbd(&theme, self.surfaces(), "Esc"))
+            .child("hide")
     }
 }
 
@@ -2447,6 +2284,9 @@ impl Render for Overlay {
                 }
                 cx.notify();
             }))
+            .rounded(px(radius::XL))
+            .border_1()
+            .border_color(theme.border)
             .bg(gpui::Rgba {
                 a: self.opacity,
                 ..theme.background
