@@ -78,6 +78,10 @@ pub struct Overlay {
     listening_device: Option<String>,
     /// Timer driving the level meter and the elapsed clock.
     pulse: Option<gpui::Task<()>>,
+    /// Most recent screenshot, attached to the next message.
+    attached_capture: Option<crate::features::capture::CapturedImage>,
+    /// Why the last capture failed, shown under the header.
+    capture_error: Option<String>,
 }
 
 impl Overlay {
@@ -98,6 +102,8 @@ impl Overlay {
             listen_error: None,
             listening_device: None,
             pulse: None,
+            attached_capture: None,
+            capture_error: None,
         }
     }
 
@@ -220,6 +226,23 @@ impl Overlay {
                 }
             }
         }));
+    }
+
+    /// Capture the screen and hold it for the next message.
+    pub fn capture_screen(&mut self) {
+        self.capture_error = None;
+        let png = false;
+        match crate::features::screen::capture(None, None, png) {
+            Ok(image) => self.attached_capture = Some(image),
+            Err(error) => {
+                self.capture_error = Some(format!("Couldn't capture the screen: {error}"))
+            }
+        }
+    }
+
+    /// Discard the attached screenshot.
+    pub fn clear_capture(&mut self) {
+        self.attached_capture = None;
     }
 
     fn handle_session_event(&mut self, event: crate::features::listen::SessionEvent) {
@@ -403,10 +426,14 @@ impl Overlay {
         button
     }
 
-    /// A notice shown under the header: microphone error, or live level.
-    fn listen_banner(&self) -> Option<impl IntoElement> {
+    /// A notice shown under the header: errors, live level, or an attachment.
+    fn listen_banner(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let theme = self.theme;
-        if let Some(message) = self.listen_error.as_deref() {
+        if let Some(message) = self
+            .capture_error
+            .as_deref()
+            .or(self.listen_error.as_deref())
+        {
             return Some(
                 div()
                     .mx(px(space::MD))
@@ -431,6 +458,44 @@ impl Overlay {
                             .text_color(theme.foreground)
                             .child(message.to_owned()),
                     )
+                    .into_any_element(),
+            );
+        }
+
+        if let Some(image) = self.attached_capture.as_ref() {
+            let kilobytes = image.base64.len() * 3 / 4 / 1024;
+            let clear = div()
+                .text_size(px(11.0))
+                .text_color(theme.muted_foreground)
+                .cursor_pointer()
+                .id("clear-capture")
+                .child("Remove")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.clear_capture();
+                    cx.notify();
+                }));
+            return Some(
+                div()
+                    .mx(px(space::MD))
+                    .mt(px(space::SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .rounded(px(radius::MD))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.card)
+                    .px(px(space::MD))
+                    .py(px(space::SM))
+                    .child(icons::icon(&theme, Icon::Image, 12.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.0))
+                            .text_color(theme.foreground)
+                            .child(format!("Screenshot attached · {kilobytes} KB")),
+                    )
+                    .child(clear)
                     .into_any_element(),
             );
         }
@@ -638,7 +703,10 @@ impl Overlay {
                         .child(tool.label()),
                 );
             }
-            cluster = cluster.child(button.on_click(cx.listener(|_, _, _, cx| {
+            cluster = cluster.child(button.on_click(cx.listener(move |this, _, _, cx| {
+                if tool == Tool::Capture {
+                    this.capture_screen();
+                }
                 cx.notify();
             })));
         }
@@ -825,7 +893,11 @@ impl Overlay {
                                 13.0,
                             ))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.conversation.submit();
+                                if this.conversation.submit().is_some() {
+                                    // The screenshot rides with the message that
+                                    // was just sent, so it is consumed here.
+                                    this.attached_capture = None;
+                                }
                                 cx.notify();
                             })),
                     ),
@@ -934,7 +1006,7 @@ impl Render for Overlay {
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.header(cx))
-            .children(self.listen_banner())
+            .children(self.listen_banner(cx))
             // The body owns the remaining height so the empty state can centre in
             // it, and follow-ups sit directly above the input block.
             .child(

@@ -16,6 +16,7 @@ pub mod listen;
 pub mod microphone;
 pub mod overlay;
 pub mod providers;
+pub mod screen;
 pub mod settings;
 pub mod settings_pages;
 pub mod theme;

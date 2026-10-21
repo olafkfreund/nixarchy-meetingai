@@ -45,11 +45,16 @@
     cargo-nextest
     cargo-deny
     pkg-config
+    llvmPackages.clang
+    llvmPackages.libclang
     openssl
     # gpui native dependency surface
     vulkan-loader
     vulkan-headers
     mesa
+    libgbm
+    libGL.dev
+    libGLU
     wayland
     wayland-protocols
     libxkbcommon
@@ -97,7 +102,15 @@
 
   # CPAL links against ALSA; pkg-config must find its headers or `cargo clippy`
   # fails inside git hooks where the shell env is not inherited.
-  env.PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig";
+  # libspa-sys generates bindings with bindgen, which needs the C standard
+  # headers on clang's search path.
+  env.CPATH = "${pkgs.glibc.dev}/include";
+
+  env.BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
+
+  env.LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+  env.PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig:${pkgs.libGL.dev}/lib/pkgconfig";
 
   env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   env.NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
