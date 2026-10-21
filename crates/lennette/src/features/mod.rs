@@ -19,6 +19,7 @@ pub mod providers;
 pub mod screen;
 pub mod settings;
 pub mod settings_pages;
+pub mod shortcuts;
 pub mod theme;
 pub mod transcription;
 pub mod vault;

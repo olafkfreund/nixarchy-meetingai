@@ -124,8 +124,30 @@ pub fn run() {
             ..Default::default()
         };
 
+        // Global shortcuts are grabbed once for the whole process.
+        let mut shortcut_listener = None;
+        let (supported, message) = crate::features::shortcuts::support();
+        if supported {
+            match crate::features::shortcuts::ShortcutListener::start(
+                &crate::features::shortcuts::Binding::defaults(),
+            ) {
+                Ok((listener, failed)) => {
+                    if failed.is_empty() {
+                        tracing::info!(count = 6, "global shortcuts registered");
+                    } else {
+                        tracing::warn!(?failed, "some shortcuts could not be registered");
+                    }
+                    // Handed to the overlay, which polls it on the UI thread.
+                    shortcut_listener = Some(std::rc::Rc::new(listener));
+                }
+                Err(error) => tracing::error!(%error, "global shortcuts unavailable"),
+            }
+        } else {
+            tracing::warn!(%message, "global shortcuts disabled");
+        }
+
         cx.open_window(overlay_options, move |_, cx| {
-            cx.new(|_| Overlay::new(services_for_overlay))
+            cx.new(|_| Overlay::new(services_for_overlay, shortcut_listener.clone()))
         })
         .expect("failed to open the overlay window");
 

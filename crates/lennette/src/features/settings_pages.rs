@@ -13,15 +13,14 @@ use super::icons;
 use super::settings::{AutoScreenshot, PrimaryTab, Settings, ThemeChoice};
 use super::theme::{Theme, radius, space};
 
-/// Shortcut catalog shown on the shortcuts page.
-pub const SHORTCUTS: &[(&str, &str, &str)] = &[
-    ("toggle_dashboard", "Toggle Dashboard", "Ctrl+Shift+D"),
-    ("toggle_window", "Toggle Window", "Ctrl+\\"),
-    ("focus_input", "Refocus Input", "Ctrl+Shift+I"),
-    ("system_audio", "System Audio", "Ctrl+Shift+M"),
-    ("audio_recording", "Voice Input", "Ctrl+Shift+A"),
-    ("screenshot", "Screenshot", "Ctrl+Shift+S"),
-];
+/// Shortcut catalog shown on the shortcuts page, derived from the real bindings
+/// that the shortcut layer registers.
+pub fn shortcut_catalog() -> Vec<(String, &'static str)> {
+    crate::features::shortcuts::Binding::defaults()
+        .into_iter()
+        .map(|binding| (binding.display, binding.action.label()))
+        .collect()
+}
 
 /// Settings state shared by every settings page.
 pub struct SettingsState {
@@ -667,7 +666,7 @@ pub fn shortcut_settings(
         "Global Shortcuts",
         "These work from any application while lennette runs.",
     );
-    for (_, label, keys) in SHORTCUTS {
+    for (keys, label) in shortcut_catalog() {
         list = list.child(row(
             theme,
             label,
@@ -680,11 +679,8 @@ pub fn shortcut_settings(
         ));
     }
 
-    list = list.child(div().pt(px(space::SM)).child(warning(
-        theme,
-        "On Wayland, global shortcuts depend on the desktop's shortcut portal. If a \
-                 binding does not register, the desktop may be refusing it.",
-    )));
+    let (_, message) = crate::features::shortcuts::support();
+    list = list.child(div().pt(px(space::SM)).child(warning(theme, message)));
 
     stack(vec![list.into_any_element()])
 }
@@ -800,9 +796,9 @@ mod tests {
 
     #[test]
     fn shortcut_catalog_is_complete() {
-        assert_eq!(SHORTCUTS.len(), 6);
-        for (id, label, keys) in SHORTCUTS {
-            assert!(!id.is_empty());
+        let shortcuts = shortcut_catalog();
+        assert_eq!(shortcuts.len(), 6);
+        for (keys, label) in shortcuts {
             assert!(!label.is_empty());
             assert!(keys.contains('+') || keys.contains('\\'));
         }

@@ -82,10 +82,17 @@ pub struct Overlay {
     attached_capture: Option<crate::features::capture::CapturedImage>,
     /// Why the last capture failed, shown under the header.
     capture_error: Option<String>,
+    /// System-wide shortcut listener, polled on the UI thread.
+    shortcuts: Option<std::rc::Rc<crate::features::shortcuts::ShortcutListener>>,
+    /// Keeps polling for shortcuts on an idle app.
+    shortcut_poll: Option<gpui::Task<()>>,
 }
 
 impl Overlay {
-    pub fn new(services: crate::app::Services) -> Self {
+    pub fn new(
+        services: crate::app::Services,
+        shortcuts: Option<std::rc::Rc<crate::features::shortcuts::ShortcutListener>>,
+    ) -> Self {
         Self {
             services,
             mode: Mode::default(),
@@ -104,6 +111,8 @@ impl Overlay {
             pulse: None,
             attached_capture: None,
             capture_error: None,
+            shortcuts,
+            shortcut_poll: None,
         }
     }
 
@@ -261,6 +270,63 @@ impl Overlay {
             SessionEvent::Stopped { .. } => {
                 self.level = 0.0;
             }
+        }
+    }
+
+    /// Keep polling shortcuts even when no session is running.
+    fn ensure_shortcut_poll(&mut self, cx: &mut Context<Self>) {
+        if self.shortcuts.is_none() || self.shortcut_poll.is_some() {
+            return;
+        }
+        self.shortcut_poll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                let alive = this
+                    .update(cx, |overlay, cx| {
+                        overlay.poll_shortcuts();
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Act on any global shortcut pressed since the last frame.
+    pub fn poll_shortcuts(&mut self) {
+        let Some(listener) = self.shortcuts.clone() else {
+            return;
+        };
+        // Collect first: handling an action mutates the overlay, so the listener
+        // must not be borrowed across the loop.
+        let mut actions = Vec::new();
+        while let Some(action) = listener.try_action() {
+            actions.push(action);
+        }
+        for action in actions {
+            self.handle_shortcut(action);
+        }
+    }
+
+    fn handle_shortcut(&mut self, action: crate::features::shortcuts::Action) {
+        use crate::features::shortcuts::Action;
+        match action {
+            Action::Screenshot => self.capture_screen(),
+            Action::ToggleWindow => self.show_settings = !self.show_settings,
+            Action::ToggleDashboard => self.show_history = !self.show_history,
+            Action::VoiceInput => {
+                if self.is_listening() {
+                    self.stop_listening();
+                } else {
+                    self.start_listening();
+                }
+            }
+            Action::SystemAudio | Action::FocusInput => {}
         }
     }
 
@@ -990,6 +1056,7 @@ fn kbd(theme: &Theme, label: &'static str) -> impl IntoElement {
 
 impl Render for Overlay {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_shortcut_poll(cx);
         let theme = self.theme;
         let mut body = div().flex().flex_col().flex_1();
         if self.conversation.is_empty() {
