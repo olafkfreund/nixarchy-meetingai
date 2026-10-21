@@ -57,8 +57,7 @@ install-hooks:
 install: fmt-check lint typecheck
     cargo build --release
     mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/512x512/apps ~/.local/share/icons/hicolor/scalable/apps
-    cp target/release/lennette ~/.local/bin/lennette
-    chmod +x ~/.local/bin/lennette
+    ./scripts/install-binary.sh target/release/lennette ~/.local/bin/lennette
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/dev.lennette.overlay.png
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/lennette.png
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/lennette.png

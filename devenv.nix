@@ -6,6 +6,11 @@
   ...
 }:
 
+let
+  runtimeLibraryPath = lib.makeLibraryPath (
+    import ./packaging/runtime-libraries.nix { inherit pkgs; }
+  );
+in
 {
   # https://devenv.sh/reference/options/
   name = "lennette";
@@ -19,20 +24,9 @@
   env = {
     RUST_BACKTRACE = "1";
     # wayland/x11 + mesa for gpui's blade/wgpu renderer
-    LD_LIBRARY_PATH = lib.makeLibraryPath [
-      pkgs.vulkan-loader
-      pkgs.libGL
-      pkgs.wayland
-      pkgs.libxkbcommon
-      pkgs.libx11
-      pkgs.libxcursor
-      pkgs.libxrandr
-      pkgs.libxi
-      pkgs.pipewire
-      pkgs.alsa-lib
-      pkgs.openssl
-      pkgs.stdenv.cc.cc.lib
-    ];
+    LD_LIBRARY_PATH = runtimeLibraryPath;
+    # Embed the same paths at installation; desktop launchers have no dev shell.
+    LENNETTE_RUNTIME_LIBRARY_PATH = runtimeLibraryPath;
   };
 
   packages = with pkgs; [
@@ -45,6 +39,7 @@
     cargo-nextest
     cargo-deny
     pkg-config
+    patchelf
     llvmPackages.clang
     llvmPackages.libclang
     openssl

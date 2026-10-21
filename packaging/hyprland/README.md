@@ -59,6 +59,8 @@ so it follows each Home Manager user's home directory. The launcher requires
 the app to advertise `LENNETTE_PRIVATE_OVERLAY=1` in its help output; this
 suppresses the desktop tray icon. Quit an existing Lennette instance before
 using private mode. `just install` preserves a Nix-managed desktop launcher.
+On NixOS it also embeds the application's runtime library paths, so launching
+from an app menu does not depend on an active development shell.
 
 Build your system before activation. Replace `my-host` with the host name from
 your own flake, and run these commands from that flake's directory:
