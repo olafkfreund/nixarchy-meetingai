@@ -21,6 +21,13 @@ pub fn run() {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting lennette");
 
     Application::new().run(|cx: &mut App| {
+        // Register the bundled Lucide icon font once for the whole app.
+        if let Err(error) = cx.text_system().add_fonts(vec![std::borrow::Cow::Borrowed(
+            crate::features::icons::FONT_BYTES,
+        )]) {
+            tracing::error!(%error, "could not register the icon font");
+        }
+
         let bounds = Bounds::centered(None, size(px(DEFAULT_WIDTH), px(DEFAULT_HEIGHT)), cx);
 
         let options = WindowOptions {

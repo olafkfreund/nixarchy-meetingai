@@ -1,0 +1,234 @@
+//! Conversations and their messages.
+
+use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::{DbError, Result};
+
+/// A conversation summary for lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationRecord {
+    pub id: String,
+    pub title: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub message_count: i64,
+}
+
+/// A persisted message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageRecord {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub timestamp: i64,
+}
+
+/// Create a conversation and return its id.
+pub fn create(connection: &Connection, title: &str, now: i64) -> Result<String> {
+    let id = Uuid::new_v4().to_string();
+    connection.execute(
+        "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+        params![id, title, now, now],
+    )?;
+    Ok(id)
+}
+
+/// Rename a conversation.
+pub fn rename(connection: &Connection, id: &str, title: &str) -> Result<()> {
+    connection.execute(
+        "UPDATE conversations SET title = ?2 WHERE id = ?1",
+        params![id, title],
+    )?;
+    Ok(())
+}
+
+/// Delete a conversation. Messages go with it through the cascade.
+pub fn delete(connection: &Connection, id: &str) -> Result<()> {
+    connection.execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Most recently updated conversations first.
+pub fn list(connection: &Connection, limit: usize) -> Result<Vec<ConversationRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT c.id, c.title, c.created_at, c.updated_at, COUNT(m.id)
+         FROM conversations c
+         LEFT JOIN messages m ON m.conversation_id = c.id
+         GROUP BY c.id
+         ORDER BY c.updated_at DESC
+         LIMIT ?1",
+    )?;
+    let rows = statement.query_map(params![limit as i64], |row| {
+        Ok(ConversationRecord {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            created_at: row.get(2)?,
+            updated_at: row.get(3)?,
+            message_count: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Append a message, returning its id.
+///
+/// The conversation's `updated_at` is advanced by the schema trigger, so every
+/// write path keeps ordering consistent without duplicating that logic.
+pub fn append_message(
+    connection: &Connection,
+    conversation_id: &str,
+    role: &str,
+    content: &str,
+    now: i64,
+) -> Result<String> {
+    let id = Uuid::new_v4().to_string();
+    connection.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, conversation_id, role, content, now],
+    )?;
+    Ok(id)
+}
+
+/// Replace a message body, used while an answer streams in.
+pub fn update_message(connection: &Connection, id: &str, content: &str) -> Result<()> {
+    connection.execute(
+        "UPDATE messages SET content = ?2 WHERE id = ?1",
+        params![id, content],
+    )?;
+    Ok(())
+}
+
+/// Messages in a conversation, oldest first.
+pub fn messages(connection: &Connection, conversation_id: &str) -> Result<Vec<MessageRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT id, role, content, timestamp FROM messages
+         WHERE conversation_id = ?1
+         ORDER BY timestamp ASC, rowid ASC",
+    )?;
+    let rows = statement.query_map(params![conversation_id], |row| {
+        Ok(MessageRecord {
+            id: row.get(0)?,
+            role: row.get(1)?,
+            content: row.get(2)?,
+            timestamp: row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Derive a conversation title from its first user message.
+pub fn title_from(content: &str) -> String {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return "New conversation".to_owned();
+    }
+    let mut title: String = trimmed.chars().take(60).collect();
+    if trimmed.chars().count() > 60 {
+        title.push('…');
+    }
+    title
+}
+
+pub fn require_conversation(connection: &Connection, id: &str) -> Result<()> {
+    let exists: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM conversations WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::features::db::Database;
+
+    #[test]
+    fn message_updates_conversation_timestamp() {
+        let database = Database::open_in_memory().unwrap();
+        let connection = database.connection();
+        let id = create(connection, "Test", 1).unwrap();
+        append_message(connection, &id, "user", "hello", 42).unwrap();
+        let updated: i64 = connection
+            .query_row(
+                "SELECT updated_at FROM conversations WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated, 42);
+    }
+
+    #[test]
+    fn deleting_conversation_cascades_messages() {
+        let database = Database::open_in_memory().unwrap();
+        let connection = database.connection();
+        let id = create(connection, "Test", 1).unwrap();
+        append_message(connection, &id, "user", "hello", 2).unwrap();
+        delete(connection, &id).unwrap();
+        let remaining: i64 = connection
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn listing_orders_by_recent_activity() {
+        let database = Database::open_in_memory().unwrap();
+        let connection = database.connection();
+        let first = create(connection, "First", 1).unwrap();
+        let second = create(connection, "Second", 2).unwrap();
+        append_message(connection, &first, "user", "later", 99).unwrap();
+        let list = list(connection, 10).unwrap();
+        assert_eq!(list[0].id, first);
+        assert_eq!(list[1].id, second);
+        assert_eq!(list[0].message_count, 1);
+    }
+
+    #[test]
+    fn messages_are_chronological() {
+        let database = Database::open_in_memory().unwrap();
+        let connection = database.connection();
+        let id = create(connection, "Test", 1).unwrap();
+        append_message(connection, &id, "user", "one", 3).unwrap();
+        append_message(connection, &id, "assistant", "two", 1).unwrap();
+        let messages = messages(connection, &id).unwrap();
+        assert_eq!(messages[0].content, "two");
+        assert_eq!(messages[1].content, "one");
+    }
+
+    #[test]
+    fn update_rewrites_content() {
+        let database = Database::open_in_memory().unwrap();
+        let connection = database.connection();
+        let id = create(connection, "Test", 1).unwrap();
+        let message = append_message(connection, &id, "assistant", "partial", 2).unwrap();
+        update_message(connection, &message, "complete").unwrap();
+        let messages = messages(connection, &id).unwrap();
+        assert_eq!(messages[0].content, "complete");
+    }
+
+    #[test]
+    fn titles_are_shortened() {
+        assert_eq!(title_from("  "), "New conversation");
+        assert_eq!(title_from("hello world"), "hello world");
+        let long = "a".repeat(80);
+        let title = title_from(&long);
+        assert_eq!(title.chars().count(), 61);
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn role_check_is_enforced() {
+        let database = Database::open_in_memory().unwrap();
+        let connection = database.connection();
+        let id = create(connection, "Test", 1).unwrap();
+        assert!(append_message(connection, &id, "robot", "x", 1).is_err());
+    }
+}
