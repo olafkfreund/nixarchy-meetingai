@@ -30,6 +30,19 @@ pub struct SettingsState {
     pub error: Option<String>,
     /// Notice shown when a setting could not be applied on this platform.
     pub notice: Option<String>,
+    /// Provider key being typed on the Dev Space page.
+    pub key_input: String,
+    /// Which provider that key belongs to.
+    pub key_provider: String,
+    /// Model override typed alongside the key.
+    pub key_model: String,
+    /// Result of the last save attempt.
+    pub key_status: Option<String>,
+    /// Credentials currently stored, refreshed after each change.
+    pub stored_chat: Vec<super::credentials::Credential>,
+    pub stored_speech: Vec<super::credentials::Credential>,
+    /// Vault handle for reading and writing credentials.
+    pub vault: Option<super::vault::Vault>,
 }
 
 impl SettingsState {
@@ -38,11 +51,29 @@ impl SettingsState {
             .as_ref()
             .and_then(|database| Settings::load(database).ok())
             .unwrap_or_default();
+        let vault = super::vault::Vault::open_default().ok();
+        let stored_chat = vault
+            .as_ref()
+            .and_then(|vault| super::credentials::list(vault, super::credentials::Kind::Chat).ok())
+            .unwrap_or_default();
+        let stored_speech = vault
+            .as_ref()
+            .and_then(|vault| {
+                super::credentials::list(vault, super::credentials::Kind::Speech).ok()
+            })
+            .unwrap_or_default();
         Self {
             settings,
             database,
             error: None,
             notice: None,
+            key_input: String::new(),
+            key_provider: super::providers::CHAT_PROVIDERS[0].id.to_owned(),
+            key_model: String::new(),
+            key_status: None,
+            stored_chat,
+            stored_speech,
+            vault,
         }
     }
 
@@ -685,6 +716,150 @@ pub fn shortcut_settings(
     stack(vec![list.into_any_element()])
 }
 
+/// Provider credentials: the only place a key enters the app.
+fn credentials_section(
+    state: &SettingsState,
+    theme: &Theme,
+    cx: &mut Context<super::dashboard::view::DashboardView>,
+) -> impl IntoElement {
+    use super::credentials::Kind;
+
+    let mut card = section(
+        theme,
+        "Provider Keys",
+        "Stored encrypted on this computer. Keys are only sent to the provider you choose.",
+    );
+
+    // Provider picker for chat.
+    let choices: Vec<(&'static str, bool)> = super::providers::CHAT_PROVIDERS
+        .iter()
+        .take(4)
+        .map(|provider| (provider.name, provider.id == state.key_provider))
+        .collect();
+    card = card.child(row(
+        theme,
+        "Chat provider",
+        "Which service answers your questions",
+        segmented(
+            "cred-provider",
+            theme,
+            &choices,
+            cx,
+            |view: &mut super::dashboard::view::DashboardView, index, _| {
+                let provider = super::providers::CHAT_PROVIDERS[index];
+                view.settings_mut().key_provider = provider.id.to_owned();
+                view.settings_mut().key_model = String::new();
+            },
+        ),
+    ));
+
+    // The key field. Typing is handled by the dashboard's keyboard capture.
+    let shown = if state.key_input.is_empty() {
+        "Paste your API key".to_owned()
+    } else {
+        "•".repeat(state.key_input.len().min(40))
+    };
+    card = card.child(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .py(px(space::SM))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child("API key"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .h(px(30.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(radius::MD))
+                            .border_1()
+                            .border_color(if state.key_input.is_empty() {
+                                theme.border
+                            } else {
+                                theme.primary
+                            })
+                            .bg(theme.muted)
+                            .px(px(space::SM))
+                            .text_size(px(11.5))
+                            .text_color(if state.key_input.is_empty() {
+                                theme.muted_foreground
+                            } else {
+                                theme.foreground
+                            })
+                            .child(shown),
+                    )
+                    .child(action(
+                        "save-key",
+                        theme,
+                        "Save key",
+                        cx,
+                        |view: &mut super::dashboard::view::DashboardView, _, _| {
+                            view.save_credential();
+                        },
+                    )),
+            ),
+    );
+
+    if let Some(status) = state.key_status.as_deref() {
+        card = card.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.muted_foreground)
+                .child(status.to_owned()),
+        );
+    }
+
+    // Stored credentials, with the key masked.
+    for credential in state.stored_chat.iter().chain(state.stored_speech.iter()) {
+        let label = if credential.kind == Kind::Chat {
+            "Chat"
+        } else {
+            "Speech"
+        };
+        let provider = credential.provider.clone();
+        let kind = credential.kind;
+        card = card.child(row(
+            theme,
+            &format!("{} · {}", provider, label),
+            &credential.masked_key(),
+            div().flex().items_center().gap(px(6.0)).child(action(
+                gpui::ElementId::Name(format!("del-{provider}").into()),
+                theme,
+                "Remove",
+                cx,
+                move |view: &mut super::dashboard::view::DashboardView, _, _| {
+                    view.remove_credential(kind, &provider);
+                },
+            )),
+        ));
+    }
+
+    if state.stored_chat.is_empty() && state.stored_speech.is_empty() {
+        card = card.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.muted_foreground)
+                .child(
+                    "No keys stored yet. Chat and transcription stay disabled until you add one.",
+                ),
+        );
+    }
+
+    card
+}
+
 /// Developer space: local CLI detection.
 pub fn dev_space(
     state: &SettingsState,
@@ -748,7 +923,11 @@ pub fn dev_space(
         value_chip(theme, "Encrypted"),
     ));
 
-    stack(vec![clis.into_any_element(), storage.into_any_element()])
+    stack(vec![
+        credentials_section(state, theme, cx).into_any_element(),
+        clis.into_any_element(),
+        storage.into_any_element(),
+    ])
 }
 
 /// Render the settings body for a route.

@@ -15,6 +15,10 @@ pub struct SeedPrompt {
     pub slot: i64,
 }
 
+/// System prompt used when the user has not chosen a mode.
+pub const DEFAULT_SYSTEM_PROMPT: &str =
+    "You are a helpful AI assistant. Be concise, accurate, and friendly in your responses.";
+
 /// The five default listen modes, in tab order.
 pub const DEFAULT_LISTEN_MODES: &[SeedPrompt] = &[
     SeedPrompt {

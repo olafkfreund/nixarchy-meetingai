@@ -17,6 +17,13 @@ use super::domain::{Mode, OverlaySize, Role};
 use super::icons;
 use super::theme::Theme;
 
+/// One transcribed line in the live transcript.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptEntry {
+    pub text: String,
+    pub start: f64,
+}
+
 /// Follow-up suggestions shown above the composer, in the reference's order.
 pub const FOLLOW_UPS: [&str; 4] = [
     "What should I say?",
@@ -82,6 +89,22 @@ pub struct Overlay {
     attached_capture: Option<crate::features::capture::CapturedImage>,
     /// Why the last capture failed, shown under the header.
     capture_error: Option<String>,
+    /// Live transcript lines for the current Listen session.
+    transcript: Vec<TranscriptEntry>,
+    /// Meeting row for the running session.
+    meeting_id: Option<String>,
+    /// Speech provider config, resolved when the session starts.
+    speech: Option<crate::features::providers::ProviderConfig>,
+    /// Chat session: conversation row plus the streaming answer.
+    chat: crate::features::chat_session::ChatSession,
+    /// Why the last send failed.
+    chat_error: Option<String>,
+    /// Utterances waiting to be transcribed.
+    pending_audio: Vec<(String, f64, f64)>,
+    /// Background transcription task.
+    transcription: Option<gpui::Task<()>>,
+    /// Background chat stream task.
+    chat_stream: Option<gpui::Task<()>>,
     /// System-wide shortcut listener, polled on the UI thread.
     shortcuts: Option<std::rc::Rc<crate::features::shortcuts::ShortcutListener>>,
     /// Keeps polling for shortcuts on an idle app.
@@ -111,6 +134,14 @@ impl Overlay {
             pulse: None,
             attached_capture: None,
             capture_error: None,
+            transcript: Vec::new(),
+            meeting_id: None,
+            speech: None,
+            chat: crate::features::chat_session::ChatSession::new(),
+            chat_error: None,
+            pending_audio: Vec::new(),
+            transcription: None,
+            chat_stream: None,
             shortcuts,
             shortcut_poll: None,
         }
@@ -163,6 +194,14 @@ impl Overlay {
         }
     }
 
+    /// Seconds elapsed in the current session.
+    fn elapsed_seconds(&self) -> f64 {
+        self.session
+            .as_ref()
+            .map(|session| session.elapsed().as_secs_f64())
+            .unwrap_or(0.0)
+    }
+
     /// Whether a live session is running.
     pub fn is_listening(&self) -> bool {
         self.session
@@ -171,7 +210,7 @@ impl Overlay {
     }
 
     /// Start capturing from the configured device.
-    pub fn start_listening(&mut self) {
+    pub fn start_listening(&mut self, cx: &mut Context<Self>) {
         if self.is_listening() {
             return;
         }
@@ -188,15 +227,115 @@ impl Overlay {
             .map(|settings| settings.input_device)
             .filter(|device| !device.is_empty());
 
+        // Resolve the speech provider from the vault once, at start.
+        self.speech = self
+            .services
+            .vault
+            .as_ref()
+            .as_ref()
+            .and_then(|vault| {
+                crate::features::credentials::list(
+                    vault,
+                    crate::features::credentials::Kind::Speech,
+                )
+                .ok()
+            })
+            .and_then(|credentials| {
+                credentials
+                    .into_iter()
+                    .map(|credential| credential.to_config())
+                    .find(|config| !config.api_key.trim().is_empty())
+            });
+
         let config = crate::features::listen::SessionConfig {
             device,
-            speech: None,
+            speech: self.speech.clone(),
         };
         let (session, events) = crate::features::listen::ListenSession::start(&config);
         self.session = Some(session);
+        self.transcript.clear();
+        self.meeting_id = self.create_meeting();
         for event in events {
             self.handle_session_event(event);
         }
+        self.spawn_transcription(cx);
+    }
+
+    /// Transcribe finished utterances in the background as they arrive.
+    fn spawn_transcription(&mut self, cx: &mut Context<Self>) {
+        let Some(config) = self.speech.clone() else {
+            return;
+        };
+        self.transcription = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let (pending, alive) = this
+                    .update(cx, |overlay, _| {
+                        (overlay.take_pending_audio(), overlay.session.is_some())
+                    })
+                    .unwrap_or((Vec::new(), false));
+                if !alive && pending.is_empty() {
+                    break;
+                }
+                for (wav, start, duration) in pending {
+                    let language = None;
+                    let result =
+                        crate::features::listen::transcribe_utterance(&config, &wav, language)
+                            .await;
+                    this.update(cx, |overlay, cx| {
+                        match result {
+                            Ok(text) if !text.trim().is_empty() => {
+                                overlay.push_transcript(text, start, duration);
+                            }
+                            Ok(_) => {}
+                            Err(error) => overlay.listen_error = Some(error),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        }));
+    }
+
+    fn take_pending_audio(&mut self) -> Vec<(String, f64, f64)> {
+        std::mem::take(&mut self.pending_audio)
+    }
+
+    fn push_transcript(&mut self, text: String, start: f64, duration: f64) {
+        if let Some(meeting_id) = self.meeting_id.as_ref() {
+            let path = self.services.database_path.clone();
+            if let Some(path) = path
+                && let Ok(database) = crate::features::db::Database::open(&path)
+            {
+                let _ = crate::features::db::meetings::add_line(
+                    database.connection(),
+                    meeting_id,
+                    "them",
+                    None,
+                    &text,
+                    start,
+                    start + duration,
+                );
+            }
+        }
+        self.transcript.push(TranscriptEntry { text, start });
+    }
+
+    /// The configured input device, if one was chosen.
+    fn configured_input_device(&self) -> Option<String> {
+        crate::features::settings::Settings::load_from_path(self.services.database_path.as_deref())
+            .map(|settings| settings.input_device)
+            .filter(|device| !device.is_empty())
+    }
+
+    /// Create the meeting row that this session's transcript is written into.
+    fn create_meeting(&self) -> Option<String> {
+        let path = self.services.database_path.as_ref()?;
+        let database = crate::features::db::Database::open(path).ok()?;
+        crate::features::db::meetings::start(database.connection(), "", "meeting", "en").ok()
     }
 
     /// Stop capturing and flush the last utterance.
@@ -237,6 +376,129 @@ impl Overlay {
         }));
     }
 
+    /// Send the composer contents to the model and stream the answer.
+    pub fn send_message(&mut self, cx: &mut Context<Self>) {
+        use crate::features::chat_session::{SendError, chat_config};
+        self.chat_error = None;
+
+        if self.chat.is_streaming() {
+            self.chat_error = Some(SendError::AlreadyStreaming.message());
+            return;
+        }
+        let question = self.conversation.draft().trim().to_owned();
+        if question.is_empty() {
+            return;
+        }
+        let Some(config) = chat_config(self.services.vault.as_ref().as_ref()) else {
+            self.chat_error = Some(SendError::NoKey.message());
+            return;
+        };
+
+        let database = self
+            .services
+            .database_path
+            .as_deref()
+            .and_then(|path| crate::features::db::Database::open(path).ok());
+        let history = match self.chat.begin(database.as_ref(), &question) {
+            Ok(history) => history,
+            Err(error) => {
+                self.chat_error = Some(error.message());
+                return;
+            }
+        };
+
+        // Show the question in the overlay and clear the composer.
+        self.conversation.submit();
+        self.conversation.set_draft(String::new());
+        let images = self
+            .attached_capture
+            .as_ref()
+            .map(|image| vec![image.base64.clone()])
+            .unwrap_or_default();
+        self.attached_capture = None;
+
+        let context = crate::features::chat_engine::TurnContext {
+            system: Some(self.selected_system_prompt()),
+            images,
+        };
+        let cancel = std::sync::Arc::new(tokio::sync::watch::channel(false).1);
+        let client = crate::features::chat_engine::http_client();
+        let database_path = self.services.database_path.clone();
+        let config_clone = config.clone();
+
+        // Deltas are produced on a background task but must reach the view, so
+        // they cross a channel and are applied on the UI thread.
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Option<String>>();
+        let done_rx = std::sync::Mutex::new(done_rx);
+
+        // Render loop: drain deltas each tick and finish when the stream ends.
+        self.chat_stream = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                let mut text = String::new();
+                while let Ok(delta) = delta_rx.try_recv() {
+                    text.push_str(&delta);
+                }
+                if !text.is_empty() {
+                    // Persist as text arrives, so a crash keeps what was shown.
+                    let database = database_path
+                        .as_deref()
+                        .and_then(|path| crate::features::db::Database::open(path).ok());
+                    this.update(cx, move |overlay, cx| {
+                        overlay.chat.push_delta(database.as_ref(), &text);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                let received = done_rx.lock().ok().and_then(|rx| rx.try_recv().ok());
+                if let Some(result) = received {
+                    this.update(cx, |overlay, cx| {
+                        if let Some(answer) = result {
+                            overlay.chat.finish();
+                            overlay
+                                .conversation
+                                .push(crate::features::domain::Message::assistant(answer));
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                    break;
+                }
+            }
+        }));
+
+        // The network task owns the request and reports the final answer.
+        tokio::spawn(async move {
+            let result = crate::features::chat_engine::stream_chat(
+                &client,
+                &config_clone,
+                &history,
+                &context,
+                cancel,
+                |delta| {
+                    let _ = delta_tx.send(delta.to_owned());
+                },
+            )
+            .await;
+            let final_answer = result.map_err(|error| error.to_string());
+            let _ = match final_answer {
+                Ok(answer) => done_tx.send(Some(answer)),
+                Err(error) => {
+                    let _ = &error;
+                    done_tx.send(None)
+                }
+            };
+        });
+    }
+
+    /// The system prompt for the current context tab.
+    fn selected_system_prompt(&self) -> String {
+        crate::features::db::seed::DEFAULT_SYSTEM_PROMPT.to_owned()
+    }
+
     /// Capture the screen and hold it for the next message.
     pub fn capture_screen(&mut self) {
         self.capture_error = None;
@@ -266,7 +528,21 @@ impl Overlay {
                 self.listen_error = Some(message);
                 self.listening_device = None;
             }
-            SessionEvent::Utterance { .. } | SessionEvent::Transcript(_) => {}
+            SessionEvent::Utterance {
+                wav_base64,
+                duration,
+                ..
+            } => {
+                if self.speech.is_some() {
+                    let start = self.elapsed_seconds();
+                    self.pending_audio.push((wav_base64, start, duration));
+                }
+            }
+            SessionEvent::Transcript(line) => {
+                if line.is_final && !line.text.trim().is_empty() {
+                    self.push_transcript(line.text, line.start, line.end - line.start);
+                }
+            }
             SessionEvent::Stopped { .. } => {
                 self.level = 0.0;
             }
@@ -323,10 +599,35 @@ impl Overlay {
                 if self.is_listening() {
                     self.stop_listening();
                 } else {
-                    self.start_listening();
+                    // Shortcut-driven start has no context; the next frame's
+                    // poll begins transcription instead.
+                    self.begin_capture();
                 }
             }
             Action::SystemAudio | Action::FocusInput => {}
+        }
+    }
+
+    /// Start capture without a UI context (a global shortcut).
+    ///
+    /// Audio is captured and segmented immediately; transcription begins on the
+    /// next frame, when a context is available.
+    fn begin_capture(&mut self) {
+        if self.is_listening() {
+            return;
+        }
+        self.listen_error = None;
+        let device = self.configured_input_device();
+        let config = crate::features::listen::SessionConfig {
+            device,
+            speech: None,
+        };
+        let (session, events) = crate::features::listen::ListenSession::start(&config);
+        self.session = Some(session);
+        self.transcript.clear();
+        self.meeting_id = self.create_meeting();
+        for event in events {
+            self.handle_session_event(event);
         }
     }
 
@@ -365,7 +666,7 @@ impl Overlay {
         tab = tab.on_click(cx.listener(move |this, _, _, cx| {
             this.set_mode(mode);
             if mode == Mode::Listen {
-                this.start_listening();
+                this.start_listening(cx);
                 this.start_pulse(cx);
             }
             cx.notify();
@@ -959,11 +1260,7 @@ impl Overlay {
                                 13.0,
                             ))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if this.conversation.submit().is_some() {
-                                    // The screenshot rides with the message that
-                                    // was just sent, so it is consumed here.
-                                    this.attached_capture = None;
-                                }
+                                this.send_message(cx);
                                 cx.notify();
                             })),
                     ),

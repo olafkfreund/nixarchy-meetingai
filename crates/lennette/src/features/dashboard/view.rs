@@ -94,6 +94,158 @@ impl DashboardView {
         self.settings.save();
     }
 
+    /// Store the key typed on the Dev Space page.
+    pub fn save_credential(&mut self) {
+        use crate::features::credentials::{self, Credential};
+        let Some(vault) = self.settings.vault.as_ref() else {
+            self.settings.key_status = Some("The credential vault is unavailable.".to_owned());
+            return;
+        };
+        let provider = self.settings.key_provider.clone();
+        let mut credential = Credential::chat(provider, self.settings.key_input.trim());
+        credential.model = self.settings.key_model.trim().to_owned();
+        match credentials::save(vault, &credential) {
+            Ok(()) => {
+                self.settings.key_input.clear();
+                self.settings.key_status = Some("Key saved.".to_owned());
+                self.reload_credentials();
+            }
+            Err(error) => self.settings.key_status = Some(error),
+        }
+    }
+
+    /// Remove a stored credential.
+    pub fn remove_credential(&mut self, kind: crate::features::credentials::Kind, provider: &str) {
+        use crate::features::credentials;
+        let Some(vault) = self.settings.vault.as_ref() else {
+            return;
+        };
+        match credentials::remove(vault, kind, provider) {
+            Ok(()) => {
+                self.settings.key_status = Some(format!("Removed {provider}."));
+                self.reload_credentials();
+            }
+            Err(error) => self.settings.key_status = Some(error),
+        }
+    }
+
+    fn reload_credentials(&mut self) {
+        use crate::features::credentials::{self, Kind};
+        let Some(vault) = self.settings.vault.as_ref() else {
+            return;
+        };
+        self.settings.stored_chat = credentials::list(vault, Kind::Chat).unwrap_or_default();
+        self.settings.stored_speech = credentials::list(vault, Kind::Speech).unwrap_or_default();
+    }
+
+    /// Rename the open conversation from the detail page.
+    pub fn rename_open_conversation(&mut self, title: &str) {
+        let (Some(database), Some(id)) = (self.database.as_ref(), self.open_conversation.clone())
+        else {
+            return;
+        };
+        let _ = conversations::rename(database.connection(), &id, title.trim());
+        self.dashboard
+            .navigate(super::nav::Route::Conversations, self.database.as_ref());
+    }
+
+    /// Delete the conversation that is currently listed or open.
+    pub fn delete_conversation(&mut self, id: &str) {
+        let Some(database) = self.database.as_ref() else {
+            return;
+        };
+        if conversations::delete(database.connection(), id).is_ok() {
+            if self.open_conversation.as_deref() == Some(id) {
+                self.open_conversation = None;
+            }
+            self.dashboard
+                .navigate(super::nav::Route::Conversations, self.database.as_ref());
+        }
+    }
+
+    /// Write the open conversation to a markdown file and report the path.
+    pub fn export_conversation(&mut self) -> Option<std::path::PathBuf> {
+        let id = self.open_conversation.clone()?;
+        let database = self.database.as_ref()?;
+        let records = conversations::messages(database.connection(), &id).ok()?;
+        let title = conversations::list(database.connection(), 500)
+            .ok()?
+            .into_iter()
+            .find(|record| record.id == id)
+            .map(|record| record.title)
+            .unwrap_or_else(|| "Conversation".to_owned());
+
+        let mut markdown = format!("# {title}\n\n");
+        for record in records {
+            let who = if record.role == "user" {
+                "You"
+            } else {
+                "Assistant"
+            };
+            markdown.push_str(&format!("**{who}**\n\n{}\n\n---\n\n", record.content));
+        }
+
+        let directory = self
+            .database
+            .as_ref()
+            .and_then(|_| directories::ProjectDirs::from("dev", "lennette", "lennette"))
+            .map(|dirs| dirs.data_dir().to_path_buf())
+            .unwrap_or_else(std::env::temp_dir);
+        let safe: String = title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let path = directory.join(format!("{}-{}.md", safe.trim(), &id[..8.min(id.len())]));
+        std::fs::write(&path, markdown).ok()?;
+        self.settings.notice = Some(format!("Exported to {}", path.display()));
+        Some(path)
+    }
+
+    /// Rename the open meeting.
+    pub fn rename_open_meeting(&mut self, title: &str) {
+        let (Some(database), Some(id)) = (self.database.as_ref(), self.open_meeting.clone()) else {
+            return;
+        };
+        let _ = crate::features::db::meetings::rename(database.connection(), &id, title.trim());
+        self.dashboard
+            .navigate(super::nav::Route::Meetings, self.database.as_ref());
+    }
+
+    /// Delete a meeting and its transcript.
+    pub fn delete_meeting(&mut self, id: &str) {
+        let Some(database) = self.database.as_ref() else {
+            return;
+        };
+        if crate::features::db::meetings::delete(database.connection(), id).is_ok() {
+            if self.open_meeting.as_deref() == Some(id) {
+                self.open_meeting = None;
+            }
+            self.dashboard
+                .navigate(super::nav::Route::Meetings, self.database.as_ref());
+        }
+    }
+
+    /// Feed a typed character into the key field.
+    pub fn type_into_key_field(&mut self, text: &str) {
+        self.settings.key_input.push_str(text);
+    }
+
+    /// Delete the last character of the key field.
+    pub fn backspace_key_field(&mut self) {
+        self.settings.key_input.pop();
+    }
+
+    /// Whether keystrokes should go to the key field.
+    pub fn wants_key_input(&self) -> bool {
+        self.dashboard.route() == super::nav::Route::DevSpace
+    }
+
     /// Apply "always on top" to the real window and report when it cannot.
     pub fn apply_always_on_top(&mut self, enabled: bool, window: &mut gpui::Window) {
         use crate::features::window::{self, Applied};
@@ -502,15 +654,34 @@ impl DashboardView {
         list.into_any_element()
     }
 
-    fn meeting_detail(&self) -> gpui::AnyElement {
+    fn meeting_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
+        let delete_id = self.open_meeting.clone();
+        let actions: gpui::AnyElement = match delete_id.clone() {
+            Some(delete_id) => div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .pb(px(8.0))
+                .child(super::view::action_button(
+                    "delete-meeting",
+                    &theme,
+                    "Delete",
+                    cx,
+                    move |this: &mut Self, _, _| {
+                        this.delete_meeting(&delete_id);
+                    },
+                ))
+                .into_any_element(),
+            None => div().into_any_element(),
+        };
         let lines = self.meeting_lines();
         if lines.is_empty() {
             return self
                 .empty_note("Pick a meeting from the list to read its transcript.")
                 .into_any_element();
         }
-        let mut list = div().flex().flex_col().gap(px(6.0));
+        let mut list = div().flex().flex_col().gap(px(6.0)).child(actions);
         for line in lines {
             let who = match line.who.as_str() {
                 "me" => "You".to_owned(),
@@ -551,15 +722,48 @@ impl DashboardView {
         list.into_any_element()
     }
 
-    fn conversation_detail(&self) -> gpui::AnyElement {
+    fn conversation_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
+        let id = self.open_conversation.clone();
+        let actions: gpui::AnyElement = match id.clone() {
+            Some(id) => {
+                let export_id = id.clone();
+                let delete_id = id.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .pb(px(8.0))
+                    .child(super::view::action_button(
+                        "export-conversation",
+                        &theme,
+                        "Export",
+                        cx,
+                        move |this: &mut Self, _, _| {
+                            let _ = export_id;
+                            this.export_conversation();
+                        },
+                    ))
+                    .child(super::view::action_button(
+                        "delete-conversation",
+                        &theme,
+                        "Delete",
+                        cx,
+                        move |this: &mut Self, _, _| {
+                            this.delete_conversation(&delete_id);
+                        },
+                    ))
+                    .into_any_element()
+            }
+            None => div().into_any_element(),
+        };
         let messages = self.conversation_messages();
         if messages.is_empty() {
             return self
                 .empty_note("Pick a conversation from the list to read it here.")
                 .into_any_element();
         }
-        let mut list = div().flex().flex_col().gap(px(8.0));
+        let mut list = div().flex().flex_col().gap(px(8.0)).child(actions);
         for message in messages {
             let is_user = message.role == "user";
             list = list.child(
@@ -595,9 +799,9 @@ impl DashboardView {
     fn body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.dashboard.route() {
             super::nav::Route::Conversations => self.conversations_body(cx).into_any_element(),
-            super::nav::Route::ConversationDetail => self.conversation_detail(),
+            super::nav::Route::ConversationDetail => self.conversation_detail(cx),
             super::nav::Route::Meetings => self.meetings_body(cx),
-            super::nav::Route::MeetingDetail => self.meeting_detail(),
+            super::nav::Route::MeetingDetail => self.meeting_detail(cx),
             super::nav::Route::Files => self.files_body().into_any_element(),
             super::nav::Route::Prompts => self.prompts_body().into_any_element(),
             super::nav::Route::Home => {
@@ -640,6 +844,36 @@ impl DashboardView {
     }
 }
 
+/// A small secondary button used by detail pages.
+pub fn action_button<V: 'static>(
+    id: impl Into<gpui::ElementId>,
+    theme: &Theme,
+    label: &'static str,
+    cx: &mut Context<V>,
+    handler: impl Fn(&mut V, &mut Context<V>, &mut gpui::Window) + 'static,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(26.0))
+        .px(px(10.0))
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.card)
+        .text_size(px(11.0))
+        .text_color(theme.foreground)
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.muted))
+        .id(id)
+        .child(label)
+        .on_click(cx.listener(move |view, _, window, cx| {
+            handler(view, cx, window);
+            cx.notify();
+        }))
+}
+
 fn truncate(text: &str, limit: usize) -> String {
     let mut out: String = text.chars().take(limit).collect();
     if text.chars().count() > limit {
@@ -656,6 +890,30 @@ impl Render for DashboardView {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            // Dev Space owns the keyboard so the key field can be typed into.
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if !this.wants_key_input() {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "backspace" => this.backspace_key_field(),
+                    "enter" => this.save_credential(),
+                    "v" if event.keystroke.modifiers.platform => {
+                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                            let cleaned = text.trim();
+                            if !cleaned.is_empty() && cleaned.len() <= 200 {
+                                this.type_into_key_field(cleaned);
+                            }
+                        }
+                    }
+                    key => {
+                        if key.len() == 1 && !event.keystroke.modifiers.platform {
+                            this.type_into_key_field(key);
+                        }
+                    }
+                }
+                cx.notify();
+            }))
             .child(self.sidebar(cx))
             .child(
                 div()
