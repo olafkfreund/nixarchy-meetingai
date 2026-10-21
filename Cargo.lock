@@ -3181,6 +3181,7 @@ dependencies = [
  "futures-util",
  "gpui",
  "hound",
+ "image",
  "lucide-icons",
  "parking_lot",
  "rand 0.10.3",
