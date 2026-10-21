@@ -12,16 +12,23 @@ pub enum ThemeChoice {
     #[default]
     Dark,
     Light,
+    Glass,
     System,
 }
 
 impl ThemeChoice {
-    pub const ALL: [ThemeChoice; 3] = [ThemeChoice::Dark, ThemeChoice::Light, ThemeChoice::System];
+    pub const ALL: [ThemeChoice; 4] = [
+        ThemeChoice::Dark,
+        ThemeChoice::Light,
+        ThemeChoice::Glass,
+        ThemeChoice::System,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
             ThemeChoice::Dark => "Dark",
             ThemeChoice::Light => "Light",
+            ThemeChoice::Glass => "Glass",
             ThemeChoice::System => "System",
         }
     }
@@ -30,6 +37,7 @@ impl ThemeChoice {
         match self {
             ThemeChoice::Dark => "dark",
             ThemeChoice::Light => "light",
+            ThemeChoice::Glass => "glass",
             ThemeChoice::System => "system",
         }
     }
@@ -37,6 +45,7 @@ impl ThemeChoice {
     fn parse(value: &str) -> Self {
         match value {
             "light" => ThemeChoice::Light,
+            "glass" => ThemeChoice::Glass,
             "system" => ThemeChoice::System,
             _ => ThemeChoice::Dark,
         }

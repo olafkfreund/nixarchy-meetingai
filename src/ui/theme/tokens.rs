@@ -65,20 +65,16 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Glass: a soft dark pane with light hairline edges.
-    ///
-    /// Colours carry their own alpha so the window reads as layered glass rather
-    /// than a solid panel, and borders are a light grey rather than white so they
-    /// stay hairline at low opacity.
+    /// Pure Glass mode: no background shade behind the app window, pure transparent background.
     pub const GLASS: Theme = Theme {
-        background: rgba(0x14, 0x15, 0x18, 0.55),
-        card: rgba(0xff, 0xff, 0xff, 0.06),
+        background: rgba(0x00, 0x00, 0x00, 0.0),
+        card: rgba(0xff, 0xff, 0xff, 0.07),
         foreground: rgb_hex(0xf6f7f9),
-        muted: rgba(0xff, 0xff, 0xff, 0.09),
-        muted_foreground: rgba(0xf3, 0xf5, 0xf8, 0.62),
-        border: rgba(0xff, 0xff, 0xff, 0.16),
+        muted: rgba(0xff, 0xff, 0xff, 0.10),
+        muted_foreground: rgba(0xf3, 0xf5, 0xf8, 0.65),
+        border: rgba(0xff, 0xff, 0xff, 0.18),
         input: rgba(0xff, 0xff, 0xff, 0.10),
-        accent: rgba(0xff, 0xff, 0xff, 0.14),
+        accent: rgba(0xff, 0xff, 0xff, 0.15),
         primary: rgb_hex(0xf7f8fa),
         destructive: rgb_hex(0xe5837f),
         success: rgb_hex(0x8fd9b0),
@@ -87,24 +83,49 @@ impl Theme {
 
     /// Dark theme, matching the reference overlay's default appearance.
     pub const DARK: Theme = Theme {
-        background: rgb_hex(0x0a0a0a),
-        card: rgb_hex(0x18181a),
-        foreground: rgb_hex(0xf2f2f2),
-        muted: rgb_hex(0x262628),
-        muted_foreground: rgb_hex(0xa3a3a3),
-        border: rgb_hex(0x2a2a2d),
-        input: rgb_hex(0x303034),
-        accent: rgb_hex(0x35353a),
-        primary: rgb_hex(0xe8e8e8),
+        background: rgba(0x0f, 0x11, 0x17, 0.95),
+        card: rgba(0x18, 0x1b, 0x24, 0.90),
+        foreground: rgb_hex(0xf3f4f6),
+        muted: rgba(0xff, 0xff, 0xff, 0.08),
+        muted_foreground: rgb_hex(0x9ca3af),
+        border: rgba(0xff, 0xff, 0xff, 0.14),
+        input: rgba(0x1e, 0x22, 0x2e, 0.85),
+        accent: rgba(0xff, 0xff, 0xff, 0.12),
+        primary: rgb_hex(0xf9fafb),
         destructive: rgb_hex(0xd35a5a),
         success: rgb_hex(0x6fcf97),
         warning: rgb_hex(0xd8a657),
     };
 
-    pub const DEFAULT: Theme = Self::GLASS;
+    /// Light theme: modern clean light palette with crisp contrast.
+    pub const LIGHT: Theme = Theme {
+        background: rgba(0xf8, 0xf9, 0xfa, 0.95),
+        card: rgba(0xff, 0xff, 0xff, 0.95),
+        foreground: rgb_hex(0x111827),
+        muted: rgba(0x00, 0x00, 0x00, 0.06),
+        muted_foreground: rgb_hex(0x6b7280),
+        border: rgba(0x00, 0x00, 0x00, 0.14),
+        input: rgba(0xff, 0xff, 0xff, 0.90),
+        accent: rgba(0x00, 0x00, 0x00, 0.08),
+        primary: rgb_hex(0x111827),
+        destructive: rgb_hex(0xdc2626),
+        success: rgb_hex(0x16a34a),
+        warning: rgb_hex(0xd97706),
+    };
+
+    pub const DEFAULT: Theme = Self::DARK;
 
     pub const fn new() -> Self {
-        Self::GLASS
+        Self::DARK
+    }
+
+    pub fn from_choice(choice: crate::core::models::settings::ThemeChoice) -> Self {
+        match choice {
+            crate::core::models::settings::ThemeChoice::Dark => Self::DARK,
+            crate::core::models::settings::ThemeChoice::Light => Self::LIGHT,
+            crate::core::models::settings::ThemeChoice::Glass => Self::GLASS,
+            crate::core::models::settings::ThemeChoice::System => Self::DARK,
+        }
     }
 }
 
@@ -131,7 +152,7 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::GLASS
+        Self::DARK
     }
 }
 
@@ -149,6 +170,9 @@ impl Surfaces {
     /// flattening to the window value: a 0.06 card at 50% stays a whisper of
     /// light instead of becoming an opaque block.
     fn fade(self, colour: Rgba) -> Rgba {
+        if colour.a == 0.0 {
+            return colour;
+        }
         Rgba {
             a: (colour.a * (0.35 + self.opacity * 0.65)).clamp(0.0, 1.0),
             ..colour
@@ -201,13 +225,9 @@ mod tests {
     fn surfaces_preserve_glass_layering() {
         let theme = Theme::GLASS;
         let half = theme.surfaces(0.5);
-        // A glass card keeps its own low alpha, so it stays a whisper of light
-        // rather than turning into an opaque block.
         assert!(half.card().a < 0.1, "card alpha {}", half.card().a);
         assert!(half.background().a < 0.5);
-        // Primary stays readable at low opacity rather than vanishing.
         assert!(half.primary().a > 0.5);
-        // Borders stay visible enough to read as an edge.
         assert!(half.border().a > 0.05);
     }
 

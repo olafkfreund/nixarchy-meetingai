@@ -29,9 +29,10 @@ pub struct DashboardView {
 }
 
 impl DashboardView {
-    /// Surface colours at 50% opacity for glass aesthetics.
+    /// Surface colours at current transparency opacity.
     fn surfaces(&self) -> crate::features::theme::Surfaces {
-        self.theme.surfaces(crate::features::theme::DEFAULT_OPACITY)
+        let opacity = (self.settings.settings.transparency as f32 / 100.0).clamp(0.10, 1.0);
+        self.theme.surfaces(opacity)
     }
 
     pub fn new(database: Option<Database>) -> Self {
@@ -44,10 +45,11 @@ impl DashboardView {
             Database::open(database.connection().path().unwrap_or_default())
                 .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory database"))
         }));
+        let theme = Theme::from_choice(settings.settings.theme);
         Self {
             dashboard,
             database,
-            theme: Theme::new(),
+            theme,
             settings,
             open_conversation: None,
             open_meeting: None,
@@ -73,6 +75,7 @@ impl DashboardView {
     /// Persist settings after a control changes.
     pub fn save_settings(&mut self) {
         self.settings.save();
+        self.theme = Theme::from_choice(self.settings.settings.theme);
     }
 
     /// Store the key typed on the Dev Space page.
@@ -923,6 +926,7 @@ fn truncate(text: &str, limit: usize) -> String {
 
 impl Render for DashboardView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = Theme::from_choice(self.settings.settings.theme);
         let theme = self.theme;
         let surfaces = self.surfaces();
         div()
@@ -931,7 +935,19 @@ impl Render for DashboardView {
             .rounded(px(radius::XL))
             .border_1()
             .border_color(surfaces.border())
-            .bg(surfaces.background())
+            .bg(
+                if self.settings.settings.theme == crate::core::models::settings::ThemeChoice::Glass
+                {
+                    gpui::Rgba {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    }
+                } else {
+                    surfaces.background()
+                },
+            )
             .text_color(theme.foreground)
             .overflow_hidden()
             // Dev Space owns the keyboard so the key field can be typed into.

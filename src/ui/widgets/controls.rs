@@ -98,6 +98,93 @@ pub fn segmented<V: 'static>(
     row
 }
 
+/// A thick rounded slider with a rounded slider dragger inside it.
+pub fn slider<V: 'static>(
+    id: impl Into<ElementId>,
+    theme: &Theme,
+    value: u32,
+    min: u32,
+    max: u32,
+    cx: &mut Context<V>,
+    handler: impl Fn(&mut V, u32, &mut Context<V>) + Clone + 'static,
+) -> impl IntoElement {
+    let element_id: ElementId = id.into();
+    let clamped = value.clamp(min, max);
+    let range = (max.saturating_sub(min)).max(1) as f32;
+    let fraction = ((clamped.saturating_sub(min)) as f32 / range).clamp(0.0, 1.0);
+
+    let total_width = 180.0f32;
+    let dragger_size = 18.0f32;
+    let padding = 3.0f32;
+    let travel = (total_width - dragger_size - padding * 2.0).max(0.0);
+    let left_offset = padding + fraction * travel;
+
+    let steps = 10;
+    let mut click_zones = div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .flex()
+        .items_center();
+
+    for step_i in 0..=steps {
+        let step_val = min + (((max - min) as f32 * (step_i as f32 / steps as f32)).round() as u32);
+        let handler = handler.clone();
+        click_zones = click_zones.child(
+            div()
+                .flex_1()
+                .h_full()
+                .cursor_pointer()
+                .id(("slider-step", step_i as usize))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |view, _, _, cx| {
+                        handler(view, step_val, cx);
+                        cx.notify();
+                    }),
+                ),
+        );
+    }
+
+    div()
+        .relative()
+        .flex()
+        .items_center()
+        .w(px(total_width))
+        .h(px(24.0))
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.input)
+        .overflow_hidden()
+        .id(element_id)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(left_offset + dragger_size / 2.0))
+                .rounded_full()
+                .bg(Theme::with_alpha(theme.accent, 0.50)),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(padding))
+                .left(px(left_offset))
+                .size(px(dragger_size))
+                .rounded_full()
+                .bg(theme.foreground)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_sm(),
+        )
+        .child(click_zones)
+}
+
 /// A labelled setting row: title and description on the left, control right.
 pub fn row(
     theme: &Theme,

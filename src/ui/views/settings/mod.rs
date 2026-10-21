@@ -11,7 +11,9 @@ use gpui::{
 use lucide_icons::Icon;
 
 use crate::core::settings::{AutoScreenshot, PrimaryTab, Settings, ThemeChoice};
-use crate::ui::controls::{action, keycap, row, section, segmented, switch, value_chip, warning};
+use crate::ui::controls::{
+    action, keycap, row, section, segmented, slider, switch, value_chip, warning,
+};
 use crate::ui::dashboard::nav::Route;
 use crate::ui::icons;
 use crate::ui::theme::{Theme, radius, space};
@@ -138,7 +140,7 @@ pub fn app_settings(
         .map(|choice| (choice.label(), *choice == s.theme))
         .collect();
 
-    let mut appearance = section(
+    let appearance = section(
         theme,
         "Theme Customization",
         "Personalize the look and transparency of the overlay.",
@@ -162,41 +164,24 @@ pub fn app_settings(
         theme,
         "Transparency",
         "Lower values let the desktop show through",
-        value_chip(theme, &format!("{}%", s.transparency)),
-    ));
-
-    for (offset, step) in [(-10i32, "Less"), (10, "More")] {
-        let _ = (offset, step);
-    }
-    appearance = appearance.child(
         div()
             .flex()
             .items_center()
-            .gap(px(6.0))
-            .pb(px(space::SM))
-            .child(action(
-                "transparency-down",
+            .gap(px(10.0))
+            .child(slider(
+                "transparency-slider",
                 theme,
-                "Less",
+                s.transparency,
+                10,
+                100,
                 cx,
-                |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    let value = view.settings_mut().settings.transparency;
-                    view.settings_mut().settings.transparency = value.saturating_sub(10);
+                |view: &mut crate::ui::dashboard::view::DashboardView, new_val, _| {
+                    view.settings_mut().settings.transparency = new_val;
                     view.save_settings();
                 },
             ))
-            .child(action(
-                "transparency-up",
-                theme,
-                "More",
-                cx,
-                |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    let value = view.settings_mut().settings.transparency;
-                    view.settings_mut().settings.transparency = (value + 10).min(100);
-                    view.save_settings();
-                },
-            )),
-    );
+            .child(value_chip(theme, &format!("{}%", s.transparency))),
+    ));
 
     let startup = section(
         theme,

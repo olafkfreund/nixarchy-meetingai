@@ -119,8 +119,10 @@ pub struct Overlay {
     portal: Option<std::sync::Arc<crate::features::wayland::PortalShortcuts>>,
     /// System tray handle, polled alongside shortcuts.
     tray: Option<crate::features::tray::Tray>,
-    /// Overlay background opacity, 0.35 to 1.0.
+    /// Overlay background opacity, 0.10 to 1.0.
     opacity: f32,
+    /// Overlay theme choice.
+    settings_theme: crate::core::models::settings::ThemeChoice,
     /// System-wide shortcut listener, polled on the UI thread.
     shortcuts: Option<std::rc::Rc<crate::features::shortcuts::ShortcutListener>>,
     /// Keeps polling for shortcuts on an idle app.
@@ -135,11 +137,21 @@ impl Overlay {
         portal: Option<std::sync::Arc<crate::features::wayland::PortalShortcuts>>,
         control: Option<std::sync::Arc<crate::features::control::ControlListener>>,
     ) -> Self {
-        // Read once at startup; changing it writes straight back to settings.
-        let opacity =
+        let (opacity, settings_theme, theme) = if let Some(settings) =
             crate::features::settings::Settings::load_from_path(services.database_path.as_deref())
-                .map(|settings| (settings.transparency as f32 / 100.0).clamp(0.5, 1.0))
-                .unwrap_or(1.0);
+        {
+            (
+                (settings.transparency as f32 / 100.0).clamp(0.10, 1.0),
+                settings.theme,
+                Theme::from_choice(settings.theme),
+            )
+        } else {
+            (
+                0.5,
+                crate::core::models::settings::ThemeChoice::Dark,
+                Theme::DARK,
+            )
+        };
         // Resolve the active credential and prompts once, so the pickers show
         // real values rather than placeholders.
         let (model_provider, model) = services
@@ -184,7 +196,8 @@ impl Overlay {
             mode: Mode::default(),
             size: OverlaySize::default(),
             conversation: Conversation::new(),
-            theme: Theme::new(),
+            theme,
+            settings_theme,
             model_provider,
             model,
             prompt_choices,
@@ -658,6 +671,7 @@ impl Overlay {
                     .await;
                 let alive = this
                     .update(cx, |overlay, cx| {
+                        overlay.sync_settings();
                         overlay.poll_shortcuts(cx);
                         overlay.poll_portal(cx);
                         overlay.poll_control(cx);
@@ -836,36 +850,106 @@ impl Overlay {
         }
     }
 
-    /// A minimal glass bar: lennette branding on the top left and quiet actions.
+    /// A minimal glass bar: centered pill with logo and play/pause button, plus profile selector.
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
         div()
             .flex()
             .items_center()
-            .gap(px(space::SM))
-            .h(px(48.0))
+            .justify_between()
+            .h(px(46.0))
             .px(px(14.0))
             .child(
                 div()
                     .flex()
                     .items_center()
+                    .w(px(80.0))
+                    .child(self.new_chat_button(cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
                     .gap(px(8.0))
-                    .child(
-                        img(icons::brand_logo())
-                            .h(px(24.0))
-                            .w(px(36.0))
-                            .rounded(px(radius::SM)),
-                    )
+                    .h(px(34.0))
+                    .px(px(10.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(self.surfaces().card())
+                    .child(self.model_selector(cx))
+                    .child(self.prompt_selector(cx))
                     .child(
                         div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(self.theme.foreground)
-                            .child("lennette"),
-                    ),
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                img(icons::brand_logo())
+                                    .h(px(20.0))
+                                    .w(px(30.0))
+                                    .rounded(px(radius::SM)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.foreground)
+                                    .child("lennette"),
+                            ),
+                    )
+                    .child(self.play_pause_button(cx)),
             )
-            .child(div().flex_1())
-            .child(self.new_chat_button(cx))
-            .child(self.dashboard_button(cx))
+            .child(div().w(px(80.0)))
+    }
+
+    fn play_pause_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let listening = self.is_listening();
+        let icon = if listening { Icon::Pause } else { Icon::Play };
+        let _tooltip = if listening {
+            "Pause session"
+        } else {
+            "Start session"
+        };
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(26.0))
+            .rounded_full()
+            .bg(if listening {
+                Theme::with_alpha(theme.success, 0.25)
+            } else {
+                self.surfaces().muted()
+            })
+            .hover(|style| {
+                if listening {
+                    style.bg(Theme::with_alpha(theme.success, 0.40))
+                } else {
+                    style.bg(self.surfaces().accent())
+                }
+            })
+            .cursor_pointer()
+            .id("header-play-pause")
+            .child(icons::icon_colored(
+                if listening {
+                    theme.success
+                } else {
+                    theme.foreground
+                },
+                icon,
+                12.0,
+            ))
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.is_listening() {
+                    this.stop_listening();
+                } else {
+                    this.start_listening(cx);
+                    this.start_pulse(cx);
+                }
+                cx.notify();
+            }))
     }
 
     /// "Start new", matching the reference: clears the conversation and starts
@@ -1043,9 +1127,20 @@ impl Overlay {
         }
     }
 
+    /// Sync settings (theme and transparency) in real-time.
+    pub fn sync_settings(&mut self) {
+        if let Some(settings) = crate::features::settings::Settings::load_from_path(
+            self.services.database_path.as_deref(),
+        ) {
+            self.opacity = (settings.transparency as f32 / 100.0).clamp(0.10, 1.0);
+            self.settings_theme = settings.theme;
+            self.theme = Theme::from_choice(settings.theme);
+        }
+    }
+
     /// Change overlay opacity and persist it.
     pub fn set_opacity(&mut self, opacity: f32) {
-        self.opacity = opacity.clamp(0.35, 1.0);
+        self.opacity = opacity.clamp(0.10, 1.0);
         let percent = (self.opacity * 100.0).round() as u32;
         if let Some(path) = self.services.database_path.as_deref()
             && let Ok(database) = crate::features::db::Database::open(path)
@@ -1556,8 +1651,8 @@ impl Overlay {
             .child(button)
             .child(
                 gpui::anchored()
-                    .anchor(gpui::Corner::BottomLeft)
-                    .offset(gpui::point(px(0.0), px(-28.0)))
+                    .anchor(gpui::Corner::TopLeft)
+                    .offset(gpui::point(px(0.0), px(28.0)))
                     .child(menu),
             )
             .into_any_element()
@@ -1625,8 +1720,8 @@ impl Overlay {
             .child(button)
             .child(
                 gpui::anchored()
-                    .anchor(gpui::Corner::BottomLeft)
-                    .offset(gpui::point(px(0.0), px(-28.0)))
+                    .anchor(gpui::Corner::TopLeft)
+                    .offset(gpui::point(px(0.0), px(28.0)))
                     .child(menu),
             )
             .into_any_element()
@@ -1737,8 +1832,7 @@ impl Overlay {
     /// The composer: one card, three zones.
     ///
     /// Left are the tools you attach with, the middle is the text, and the right is
-    /// send. The prompt and model pickers sit on a quiet row beneath the text, so
-    /// nothing competes with what you are typing.
+    /// Minimal one-line input section with attachment, input text, dashboard button, and send.
     fn input_block(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let can_submit = !self.composer.is_empty();
@@ -1747,8 +1841,11 @@ impl Overlay {
         div().px(px(12.0)).pb(px(12.0)).child(
             div()
                 .flex()
-                .flex_col()
-                .rounded(px(radius::XL))
+                .items_center()
+                .gap(px(8.0))
+                .h(px(46.0))
+                .px(px(8.0))
+                .rounded_full()
                 .border_1()
                 .border_color(if self.composer_focused {
                     theme.border
@@ -1767,37 +1864,20 @@ impl Overlay {
                         cx.notify();
                     }),
                 )
-                // Text line with send on the right.
+                .child(self.attach_button(cx))
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .min_h(px(52.0))
-                        .px(px(14.0))
-                        .py(px(10.0))
-                        .child(div().flex_1().child(crate::features::text_input::render(
+                        .flex_1()
+                        .px(px(4.0))
+                        .child(crate::features::text_input::render(
                             &self.composer,
                             &theme,
                             self.composer_focused,
                             "Session guidance, notes or follow-up question…",
-                        )))
-                        .child(self.send_button(can_submit, cx)),
+                        )),
                 )
-                // Quiet tray: attachment on the left, pickers on the right.
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(10.0))
-                        .pb(px(10.0))
-                        .child(self.attach_button(cx))
-                        .child(self.mic_button(cx))
-                        .child(div().flex_1())
-                        .child(self.model_selector(cx))
-                        .child(self.prompt_selector(cx)),
-                ),
+                .child(self.dashboard_button(cx))
+                .child(self.send_button(can_submit, cx)),
         )
     }
 
@@ -1845,30 +1925,6 @@ impl Overlay {
         }
         button.on_click(cx.listener(|this, _, _, cx| {
             this.capture_screen();
-            cx.notify();
-        }))
-    }
-
-    /// Push to talk, shown as a mic rather than a labelled control.
-    fn mic_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let listening = self.is_listening();
-        let tooltip = if listening {
-            "Stop listening"
-        } else {
-            "Start listening"
-        };
-        let mut button = text_tool(&theme, self.surfaces(), Icon::Mic, tooltip);
-        if listening {
-            button = button.bg(self.surfaces().muted());
-        }
-        button.on_click(cx.listener(|this, _, _, cx| {
-            if this.is_listening() {
-                this.stop_listening();
-            } else {
-                this.start_listening(cx);
-                this.start_pulse(cx);
-            }
             cx.notify();
         }))
     }
@@ -2172,11 +2228,33 @@ impl Render for Overlay {
             }))
             .rounded(px(radius::XL))
             .border_1()
-            .border_color(theme.border)
-            .bg(gpui::Rgba {
-                a: self.opacity,
-                ..theme.background
-            })
+            .border_color(
+                if self.settings_theme == crate::core::models::settings::ThemeChoice::Glass {
+                    gpui::Rgba {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 0.20,
+                    }
+                } else {
+                    theme.border
+                },
+            )
+            .bg(
+                if self.settings_theme == crate::core::models::settings::ThemeChoice::Glass {
+                    gpui::Rgba {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    }
+                } else {
+                    gpui::Rgba {
+                        a: self.opacity,
+                        ..theme.background
+                    }
+                },
+            )
             .text_color(theme.foreground)
             .child(self.header(cx))
             .children(self.listen_banner(cx))
