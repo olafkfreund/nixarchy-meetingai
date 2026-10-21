@@ -9,5 +9,9 @@ fn main() {
         }
         return;
     }
+    // If an instance is already running, activate its window instead of colliding.
+    if cli::activate_existing_instance() {
+        return;
+    }
     lennette::run();
 }

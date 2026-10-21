@@ -50,6 +50,11 @@ fn usage() -> String {
     .join("\n")
 }
 
+/// If an instance is already running, activate its window and return true.
+pub fn activate_existing_instance() -> bool {
+    send("toggle-window").is_ok()
+}
+
 /// Path of the control socket shared with the running instance.
 pub fn control_socket() -> Option<std::path::PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)?;

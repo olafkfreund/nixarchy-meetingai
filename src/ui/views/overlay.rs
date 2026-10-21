@@ -825,7 +825,7 @@ impl Overlay {
                     .items_center()
                     .gap(px(8.0))
                     .child(
-                        img("lennette.png")
+                        img(icons::brand_logo())
                             .h(px(24.0))
                             .w(px(36.0))
                             .rounded(px(radius::SM)),
@@ -1154,63 +1154,18 @@ impl Overlay {
             })
     }
 
-    /// The Listen tab's body: transcript while running, prompt when idle.
-    fn listen_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The Listen tab's body: transcript while running, messages if chatting, or clean empty space.
+    fn listen_body(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        if self.transcript.is_empty() && !self.is_listening() {
-            let start = div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(30.0))
-                .px(px(14.0))
-                .rounded_full()
-                .bg(theme.primary)
-                .text_size(px(12.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.background)
-                .cursor_pointer()
-                .id("start-listening")
-                .child(icons::icon_colored(
-                    theme.background,
-                    Icon::Headphones,
-                    13.0,
-                ))
-                .child("Start listening")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.start_listening(cx);
-                    this.start_pulse(cx);
-                    cx.notify();
-                }));
 
-            return div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap(px(10.0))
-                .px(px(space::XL))
-                .child(icons::icon_colored(theme.success, Icon::Headphones, 20.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.foreground)
-                        .child("Listen to the conversation"),
-                )
-                .child(
-                    div()
-                        .max_w(px(300.0))
-                        .text_size(px(11.5))
-                        .text_color(theme.muted_foreground)
-                        .child(
-                            "Captures your mic and system audio, transcribes live, and saves the \
-                             transcript to a meeting.",
-                        ),
-                )
-                .child(start)
-                .into_any_element();
+        // If a conversation is active, render the chat message thread.
+        if !self.conversation.messages().is_empty() || !self.streaming_text.is_empty() {
+            return self.message_list().into_any_element();
+        }
+
+        if self.transcript.is_empty() && !self.is_listening() {
+            // Clean empty space when idle, removing the center listen section.
+            return div().flex().flex_col().flex_1().into_any_element();
         }
 
         // Live transcript: speaker, timestamp, then the words.
@@ -1677,6 +1632,83 @@ impl Overlay {
         }
     }
 
+    /// Whether the user has configured at least one usable API key for AI or Speech.
+    fn has_api_keys(&self) -> bool {
+        let Some(vault) = self.services.vault.as_ref().as_ref() else {
+            return false;
+        };
+        let chat_keys =
+            crate::features::credentials::list(vault, crate::features::credentials::Kind::Chat)
+                .ok()
+                .map(|list| list.iter().any(|c| c.to_config().is_usable()))
+                .unwrap_or(false);
+        let speech_keys =
+            crate::features::credentials::list(vault, crate::features::credentials::Kind::Speech)
+                .ok()
+                .map(|list| list.iter().any(|c| c.to_config().is_usable()))
+                .unwrap_or(false);
+        chat_keys || speech_keys
+    }
+
+    /// Notice displayed directly above the input space when no API keys are configured.
+    fn api_key_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.has_api_keys() {
+            return None;
+        }
+        let theme = self.theme;
+        Some(
+            div()
+                .px(px(12.0))
+                .pb(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.0))
+                        .px(px(12.0))
+                        .py(px(7.0))
+                        .rounded(px(radius::MD))
+                        .bg(Theme::with_alpha(theme.warning, 0.12))
+                        .border_1()
+                        .border_color(Theme::with_alpha(theme.warning, 0.35))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(icons::icon_colored(theme.warning, Icon::KeyRound, 13.0))
+                                .child(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .text_color(theme.foreground)
+                                        .child("Meetings & AI won't work until you configure your API keys in Dev Space."),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .px(px(8.0))
+                                .py(px(3.0))
+                                .rounded_full()
+                                .bg(Theme::with_alpha(theme.warning, 0.25))
+                                .hover(|style| style.bg(Theme::with_alpha(theme.warning, 0.4)))
+                                .text_size(px(10.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground)
+                                .cursor_pointer()
+                                .id("configure-keys-banner")
+                                .child("Configure")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.open_dashboard_at(cx, crate::features::dashboard::nav::Route::DevSpace);
+                                })),
+                        ),
+                ),
+        )
+    }
+
     /// The composer: one card, three zones.
     ///
     /// Left are the tools you attach with, the middle is the text, and the right is
@@ -2135,6 +2167,7 @@ impl Render for Overlay {
                     .child(body)
                     .child(self.follow_ups(cx)),
             )
+            .children(self.api_key_banner(cx))
             .child(self.input_block(cx))
     }
 }

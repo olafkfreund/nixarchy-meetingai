@@ -4,7 +4,9 @@
 //! consistent vector glyphs rather than emoji. The font is registered once at
 //! startup; icons then render as ordinary text tinted by `text_color`.
 
-use gpui::{FontWeight, IntoElement, ParentElement, Styled, div, px};
+use gpui::{
+    FontWeight, ImageSource, IntoElement, ParentElement, RenderImage, Resource, Styled, div, px,
+};
 
 use crate::ui::theme::Theme;
 
@@ -41,6 +43,28 @@ pub fn icon_colored(color: gpui::Rgba, glyph: lucide_icons::Icon, size: f32) -> 
         .child(char::from(glyph).to_string())
 }
 
+/// Decoded brand logo image, cached in memory for instantaneous rendering.
+pub fn brand_logo() -> ImageSource {
+    static LOGO: std::sync::LazyLock<Option<std::sync::Arc<RenderImage>>> =
+        std::sync::LazyLock::new(|| {
+            let bytes = include_bytes!("../../assets/lennette.png");
+            let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).ok()?;
+            let mut rgba = img.into_rgba8();
+            // GPUI RenderImage expects BGRA layout.
+            for pixel in rgba.as_chunks_mut::<4>().0 {
+                pixel.swap(0, 2);
+            }
+            let frame = image::Frame::new(rgba);
+            Some(std::sync::Arc::new(RenderImage::new([frame])))
+        });
+
+    if let Some(render_image) = LOGO.as_ref() {
+        ImageSource::Render(render_image.clone())
+    } else {
+        ImageSource::Resource(Resource::Embedded("lennette.png".into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +79,11 @@ mod tests {
         assert_eq!(format!("{}", lucide_icons::Icon::Mic), "mic");
         assert_eq!(format!("{}", lucide_icons::Icon::Camera), "camera");
         assert_eq!(format!("{}", lucide_icons::Icon::Settings), "settings");
+    }
+
+    #[test]
+    fn brand_logo_loads_successfully() {
+        let source = brand_logo();
+        assert!(matches!(source, ImageSource::Render(_)));
     }
 }

@@ -371,7 +371,7 @@ impl DashboardView {
                     .gap(px(8.0))
                     .mr(px(8.0))
                     .child(
-                        img("lennette.png")
+                        img(icons::brand_logo())
                             .h(px(24.0))
                             .w(px(36.0))
                             .rounded(px(radius::SM)),

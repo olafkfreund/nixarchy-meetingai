@@ -256,7 +256,7 @@ Icon=dev.lennette.overlay
 Terminal=false
 Categories=Utility;AudioVideo;Audio;Office;
 Keywords=ai;meeting;transcription;copilot;speech;audio;notes;live;intelligence;
-StartupWMClass=lennette
+StartupWMClass=dev.lennette.overlay
 "#;
 
 /// Install the desktop entry into the user's applications directory.
