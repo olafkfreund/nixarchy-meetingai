@@ -136,6 +136,7 @@ impl PrimaryTab {
 pub struct Settings {
     pub theme: ThemeChoice,
     pub transparency: u32,
+    pub show_borders: bool,
     pub autostart: bool,
     pub hide_app_icon: bool,
     pub always_on_top: bool,
@@ -160,6 +161,7 @@ impl Default for Settings {
         Self {
             theme: ThemeChoice::Dark,
             transparency: 50,
+            show_borders: true,
             autostart: false,
             hide_app_icon: false,
             always_on_top: true,
@@ -185,6 +187,7 @@ impl Default for Settings {
 mod keys {
     pub const THEME: &str = "theme";
     pub const TRANSPARENCY: &str = "transparency";
+    pub const SHOW_BORDERS: &str = "show_borders";
     pub const AUTOSTART: &str = "autostart";
     pub const HIDE_APP_ICON: &str = "hide_app_icon";
     pub const ALWAYS_ON_TOP: &str = "always_on_top";
@@ -227,6 +230,7 @@ impl Settings {
                 .map(ThemeChoice::parse)
                 .unwrap_or(defaults.theme),
             transparency: number(keys::TRANSPARENCY, defaults.transparency).min(100),
+            show_borders: flag(keys::SHOW_BORDERS, defaults.show_borders),
             autostart: flag(keys::AUTOSTART, defaults.autostart),
             hide_app_icon: flag(keys::HIDE_APP_ICON, defaults.hide_app_icon),
             always_on_top: flag(keys::ALWAYS_ON_TOP, defaults.always_on_top),
@@ -235,12 +239,13 @@ impl Settings {
             primary_tab: get(keys::PRIMARY_TAB)
                 .map(PrimaryTab::parse)
                 .unwrap_or(defaults.primary_tab),
-            capture_delay_seconds: number(keys::CAPTURE_DELAY, defaults.capture_delay_seconds),
+            capture_delay_seconds: number(keys::CAPTURE_DELAY, defaults.capture_delay_seconds)
+                .min(60),
             auto_screenshot: get(keys::AUTO_SCREENSHOT)
                 .map(AutoScreenshot::parse)
                 .unwrap_or(defaults.auto_screenshot),
             screenshot_interval: number(keys::SCREENSHOT_INTERVAL, defaults.screenshot_interval)
-                .max(5),
+                .clamp(5, 600),
             use_image_on_send: flag(keys::USE_IMAGE_ON_SEND, defaults.use_image_on_send),
             input_device: text(keys::INPUT_DEVICE, &defaults.input_device),
             output_device: text(keys::OUTPUT_DEVICE, &defaults.output_device),
@@ -271,6 +276,7 @@ impl Settings {
         let pairs = [
             (keys::THEME, self.theme.as_str().to_owned()),
             (keys::TRANSPARENCY, self.transparency.to_string()),
+            (keys::SHOW_BORDERS, self.show_borders.to_string()),
             (keys::AUTOSTART, self.autostart.to_string()),
             (keys::HIDE_APP_ICON, self.hide_app_icon.to_string()),
             (keys::ALWAYS_ON_TOP, self.always_on_top.to_string()),
@@ -333,6 +339,7 @@ mod tests {
         let settings = Settings {
             theme: ThemeChoice::Light,
             transparency: 80,
+            show_borders: false,
             autostart: true,
             hide_app_icon: true,
             always_on_top: false,
@@ -374,6 +381,16 @@ mod tests {
         // 500 is clamped to the ceiling, not to the default.
         assert_eq!(settings.transparency, 100);
         assert_eq!(settings.screenshot_interval, 5);
+    }
+
+    #[test]
+    fn capture_timing_rejects_out_of_range_persisted_values() {
+        let database = database();
+        Settings::set(&database, "capture_delay_seconds", "4294967295").unwrap();
+        Settings::set(&database, "screenshot_interval", "4294967295").unwrap();
+        let settings = Settings::load(&database).unwrap();
+        assert_eq!(settings.capture_delay_seconds, 60);
+        assert_eq!(settings.screenshot_interval, 600);
     }
 
     #[test]

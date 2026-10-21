@@ -10,7 +10,7 @@ use gpui::{
 };
 use lucide_icons::Icon;
 
-use crate::core::settings::{AutoScreenshot, PrimaryTab, Settings, ThemeChoice};
+use crate::core::settings::{AutoScreenshot, Settings, ThemeChoice};
 use crate::ui::controls::{
     action, keycap, row, section, segmented, slider, switch, value_chip, warning,
 };
@@ -117,12 +117,10 @@ fn page_header(theme: &Theme, title: &str, description: &str) -> impl IntoElemen
     div()
         .flex()
         .flex_col()
-        .gap(px(2.0))
-        .pt(px(20.0))
-        .pb(px(14.0))
+        .gap(px(6.0))
         .child(
             div()
-                .text_size(px(17.0))
+                .text_size(px(20.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.foreground)
                 .child(title.to_owned()),
@@ -136,7 +134,12 @@ fn page_header(theme: &Theme, title: &str, description: &str) -> impl IntoElemen
 }
 
 fn stack(children: Vec<gpui::AnyElement>) -> gpui::AnyElement {
-    let mut column = div().flex().flex_col().gap(px(12.0)).pb(px(24.0));
+    let mut column = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w(px(0.0))
+        .gap(px(20.0));
     for child in children {
         column = column.child(child);
     }
@@ -158,7 +161,7 @@ pub fn app_settings(
 
     let appearance = section(
         theme,
-        "Theme Customization",
+        "Appearance",
         "Personalize the look and transparency of the overlay.",
     )
     .child(row(
@@ -191,12 +194,28 @@ pub fn app_settings(
                 10,
                 100,
                 cx,
-                |view: &mut crate::ui::dashboard::view::DashboardView, new_val, _| {
+                |view: &mut crate::ui::dashboard::view::DashboardView, new_val, cx| {
                     view.settings_mut().settings.transparency = new_val;
-                    view.save_settings();
+                    view.schedule_settings_save(cx);
                 },
             ))
             .child(value_chip(theme, &format!("{}%", s.transparency))),
+    ))
+    .child(row(
+        theme,
+        "Show borders",
+        "Outline Lennette windows and panels",
+        switch(
+            "show-borders",
+            theme,
+            s.show_borders,
+            cx,
+            |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
+                view.settings_mut().settings.show_borders =
+                    !view.settings_mut().settings.show_borders;
+                view.save_settings();
+            },
+        ),
     ));
 
     let startup = section(
@@ -270,37 +289,7 @@ pub fn app_settings(
         ),
     ));
 
-    let tab_options: Vec<(&'static str, bool)> = PrimaryTab::ALL
-        .iter()
-        .map(|tab| (tab.label(), *tab == s.primary_tab))
-        .collect();
-
-    let overlay = section(
-        theme,
-        "Overlay Tabs",
-        "Which pane the overlay opens on. Changes apply immediately.",
-    )
-    .child(row(
-        theme,
-        "Opening tab",
-        "The tab selected when the overlay appears",
-        segmented(
-            "primary-tab",
-            theme,
-            &tab_options,
-            cx,
-            |view: &mut crate::ui::dashboard::view::DashboardView, index, _| {
-                view.settings_mut().settings.primary_tab = PrimaryTab::ALL[index];
-                view.save_settings();
-            },
-        ),
-    ));
-
-    let mut children = vec![
-        appearance.into_any_element(),
-        startup.into_any_element(),
-        overlay.into_any_element(),
-    ];
+    let mut children = vec![appearance.into_any_element(), startup.into_any_element()];
     if let Some(message) = state.error.as_deref() {
         children.insert(0, warning(theme, message).into_any_element());
     }
@@ -325,7 +314,7 @@ pub fn screenshot_settings(
     let capture = section(
         theme,
         "Automatic Screenshots",
-        "When a screenshot is taken without asking.",
+        "Capture context for questions, or refresh it while recording on an interval.",
     )
     .child(row(
         theme,
@@ -350,67 +339,46 @@ pub fn screenshot_settings(
             .flex()
             .items_center()
             .gap(px(6.0))
-            .child(action(
-                "delay-down",
+            .child(slider(
+                "capture-delay-slider",
                 theme,
-                "−",
+                s.capture_delay_seconds,
+                0,
+                60,
                 cx,
-                |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    let value = view.settings_mut().settings.capture_delay_seconds;
-                    view.settings_mut().settings.capture_delay_seconds = value.saturating_sub(1);
-                    view.save_settings();
+                |view: &mut crate::ui::dashboard::view::DashboardView, value, cx| {
+                    view.settings_mut().settings.capture_delay_seconds = value;
+                    view.schedule_settings_save(cx);
                 },
             ))
-            .child(value_chip(theme, &format!("{}s", s.capture_delay_seconds)))
-            .child(action(
-                "delay-up",
-                theme,
-                "+",
-                cx,
-                |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    let value = view.settings_mut().settings.capture_delay_seconds;
-                    view.settings_mut().settings.capture_delay_seconds = (value + 1).min(60);
-                    view.save_settings();
-                },
-            )),
+            .child(value_chip(theme, &format!("{}s", s.capture_delay_seconds))),
     ))
     .child(row(
         theme,
         "Interval",
-        "Only used when the mode is On an interval",
+        "Refresh screen context while recording in interval mode",
         div()
             .flex()
             .items_center()
             .gap(px(6.0))
-            .child(action(
-                "interval-down",
+            .child(slider(
+                "capture-interval-slider",
                 theme,
-                "−",
+                s.screenshot_interval,
+                5,
+                600,
                 cx,
-                |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    let value = view.settings_mut().settings.screenshot_interval;
-                    view.settings_mut().settings.screenshot_interval =
-                        value.saturating_sub(5).max(5);
-                    view.save_settings();
+                |view: &mut crate::ui::dashboard::view::DashboardView, value, cx| {
+                    view.settings_mut().settings.screenshot_interval = value;
+                    view.schedule_settings_save(cx);
                 },
             ))
-            .child(value_chip(theme, &format!("{}s", s.screenshot_interval)))
-            .child(action(
-                "interval-up",
-                theme,
-                "+",
-                cx,
-                |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    let value = view.settings_mut().settings.screenshot_interval;
-                    view.settings_mut().settings.screenshot_interval = (value + 5).min(600);
-                    view.save_settings();
-                },
-            )),
+            .child(value_chip(theme, &format!("{}s", s.screenshot_interval))),
     ))
     .child(row(
         theme,
         "Use image on send",
-        "Attach a fresh screenshot to every message",
+        "Always attach a fresh screenshot, regardless of mode",
         switch(
             "use-image",
             theme,
@@ -424,65 +392,8 @@ pub fn screenshot_settings(
         ),
     ));
 
-    stack(vec![capture.into_any_element()])
-}
-
-/// Region capture behaviour.
-pub fn capture_settings(
-    state: &SettingsState,
-    theme: &Theme,
-    cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
-) -> gpui::AnyElement {
-    let s = &state.settings;
-
-    let regions = section(
-        theme,
-        "Region Capture",
-        "Select an area once and reuse it for timed captures.",
-    )
-    .child(row(
-        theme,
-        "Automatic captures",
-        "Take a capture without asking first",
-        switch(
-            "capture-auto",
-            theme,
-            s.auto_screenshot != AutoScreenshot::Off,
-            cx,
-            |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                let current = view.settings_mut().settings.auto_screenshot;
-                view.settings_mut().settings.auto_screenshot = if current == AutoScreenshot::Off {
-                    AutoScreenshot::EveryQuestion
-                } else {
-                    AutoScreenshot::Off
-                };
-                view.save_settings();
-            },
-        ),
-    ))
-    .child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
-            .py(px(space::SM))
-            .child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(theme.muted_foreground)
-                    .child(
-                        "Captures are scaled so the longest edge is at most 1920 pixels before \
-                         they are sent.",
-                    ),
-            )
-            .child(warning(
-                theme,
-                "Region selection needs a display server that allows window placement. On \
-                 compositors that restrict it, selection may fail and the full screen is used.",
-            )),
-    );
-
-    stack(vec![regions.into_any_element()])
+    stack(vec![capture.child(div().py(px(space::SM)).text_size(px(11.0)).text_color(theme.muted_foreground)
+        .child("Captures use the active monitor and are scaled to at most 1920 pixels. Interval mode refreshes context while recording; it does not send questions.")).into_any_element()])
 }
 
 /// Audio devices and speech providers.
@@ -790,6 +701,8 @@ fn credentials_section(
             div()
                 .flex()
                 .flex_col()
+                .w_full()
+                .max_w(px(480.0))
                 .gap(px(5.0))
                 .py(px(space::SM))
                 .child(
@@ -817,7 +730,7 @@ fn credentials_section(
                         .text_size(px(12.0))
                         .text_color(theme.foreground)
                         .cursor_text()
-                        .child(shown)
+                        .child(div().flex_1().min_w(px(0.0)).truncate().child(shown))
                         .child(if focused { "│" } else { "" })
                         .on_mouse_down(
                             gpui::MouseButton::Left,
@@ -830,7 +743,7 @@ fn credentials_section(
                 ),
         );
     }
-    card = card.child(action(
+    card = card.child(div().flex().items_center().py(px(8.0)).child(action(
         "save-key",
         theme,
         "Save key",
@@ -838,7 +751,7 @@ fn credentials_section(
         |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
             view.save_credential();
         },
-    ));
+    )));
     if let Some(status) = state.key_status.as_deref() {
         card = card.child(
             div()
@@ -996,9 +909,8 @@ pub fn render(
         Route::Settings => {
             let app = app_settings(state, theme, cx);
             let screenshots = screenshot_settings(state, theme, cx);
-            let capture = capture_settings(state, theme, cx);
             let responses = response_settings(state, theme, cx);
-            stack(vec![app, screenshots, capture, responses])
+            stack(vec![app, screenshots, responses])
         }
         Route::Audio => audio_settings(state, theme, cx),
         Route::DevSpace => dev_space(state, theme, cx),
@@ -1009,13 +921,15 @@ pub fn render(
     div()
         .flex()
         .flex_col()
-        .gap(px(space::SM))
+        .w_full()
+        .min_w(px(0.0))
+        .gap(px(24.0))
         .child(
             div()
                 .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(space::MD))
+                .flex_col()
+                .items_start()
+                .gap(px(18.0))
                 .child(page_header(
                     theme,
                     active_route.title(),

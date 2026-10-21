@@ -14,6 +14,8 @@ pub struct ConversationRecord {
     pub created_at: i64,
     pub updated_at: i64,
     pub message_count: i64,
+    #[serde(default)]
+    pub preview: String,
 }
 
 /// A persisted message.
@@ -53,7 +55,10 @@ pub fn delete(connection: &Connection, id: &str) -> Result<()> {
 /// Most recently updated conversations first.
 pub fn list(connection: &Connection, limit: usize) -> Result<Vec<ConversationRecord>> {
     let mut statement = connection.prepare(
-        "SELECT c.id, c.title, c.created_at, c.updated_at, COUNT(m.id)
+        "SELECT c.id, c.title, c.created_at, c.updated_at, COUNT(m.id),
+                COALESCE((SELECT substr(p.content, 1, 320) FROM messages p
+                          WHERE p.conversation_id = c.id AND trim(p.content) != ''
+                          ORDER BY p.timestamp DESC, p.rowid DESC LIMIT 1), '')
          FROM conversations c
          LEFT JOIN messages m ON m.conversation_id = c.id
          GROUP BY c.id
@@ -67,6 +72,7 @@ pub fn list(connection: &Connection, limit: usize) -> Result<Vec<ConversationRec
             created_at: row.get(2)?,
             updated_at: row.get(3)?,
             message_count: row.get(4)?,
+            preview: row.get(5)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -148,6 +154,26 @@ pub fn require_conversation(connection: &Connection, id: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::features::db::Database;
+
+    #[test]
+    fn previews_use_the_latest_nonempty_message_in_the_right_conversation() {
+        let database = Database::open_in_memory().unwrap();
+        let connection = database.connection();
+        let first = create(connection, "First", 1).unwrap();
+        let second = create(connection, "Second", 2).unwrap();
+        append_message(connection, &first, "user", "Question", 3).unwrap();
+        append_message(connection, &first, "assistant", "Newest answer", 4).unwrap();
+        append_message(connection, &first, "assistant", "  ", 5).unwrap();
+        append_message(connection, &second, "user", "Different context", 6).unwrap();
+        let records = list(connection, 10).unwrap();
+        let first = records.iter().find(|r| r.id == first).unwrap();
+        assert_eq!(first.preview, "Newest answer");
+        assert_eq!(first.message_count, 3);
+        assert_eq!(
+            records.iter().find(|r| r.id == second).unwrap().preview,
+            "Different context"
+        );
+    }
 
     #[test]
     fn message_updates_conversation_timestamp() {

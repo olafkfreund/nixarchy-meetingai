@@ -325,14 +325,23 @@ pub fn parse_live_events(payload: &[u8]) -> Vec<LiveEvent> {
 pub struct LiveTurns {
     text: [String; 2],
     last_end: [f64; 2],
+    speaker: [Option<i64>; 2],
 }
 impl LiveTurns {
-    pub fn push(&mut self, line: &TranscriptLine) -> Option<String> {
+    pub fn push(&mut self, line: &TranscriptLine) -> Vec<String> {
+        let mut completed = Vec::new();
         if !line.is_final {
-            return None;
+            return completed;
         }
         let channel = usize::from(line.channel.min(1));
+        if let (Some(previous), Some(next)) = (self.speaker[channel], line.speaker)
+            && previous != next
+            && !self.text[channel].is_empty()
+        {
+            completed.push(std::mem::take(&mut self.text[channel]));
+        }
         if !line.text.is_empty() {
+            self.speaker[channel] = line.speaker.or(self.speaker[channel]);
             if !self.text[channel].is_empty() {
                 self.text[channel].push(' ');
             }
@@ -340,10 +349,9 @@ impl LiveTurns {
             self.last_end[channel] = line.end;
         }
         if line.speech_final {
-            self.finish(line.channel, line.end)
-        } else {
-            None
+            completed.extend(self.finish(line.channel, line.end));
         }
+        completed
     }
     pub fn finish(&mut self, channel: u8, last_word_end: f64) -> Option<String> {
         let channel = usize::from(channel.min(1));
@@ -351,6 +359,7 @@ impl LiveTurns {
         if last_word_end + 0.01 < self.last_end[channel] {
             return None;
         }
+        self.speaker[channel] = None;
         let text = std::mem::take(&mut self.text[channel]);
         (!text.is_empty()).then_some(text)
     }
@@ -541,6 +550,37 @@ mod tests {
     }
 
     #[test]
+    fn speaker_changes_complete_separate_turns_without_a_silence_boundary() {
+        let mut turns = LiveTurns::default();
+        let line = |speaker, text: &str, speech_final, start, end| TranscriptLine {
+            channel: 1,
+            speaker: Some(speaker),
+            text: text.into(),
+            is_final: true,
+            speech_final,
+            start,
+            end,
+        };
+        assert!(
+            turns
+                .push(&line(0, "How do we invalidate the cache?", false, 0.0, 1.0))
+                .is_empty()
+        );
+        assert_eq!(
+            turns.push(&line(1, "We need to consider outages.", false, 1.1, 2.0)),
+            ["How do we invalidate the cache?"]
+        );
+        assert_eq!(
+            turns.push(&line(2, "What if Redis fails?", true, 2.1, 3.0)),
+            ["We need to consider outages.", "What if Redis fails?"]
+        );
+        assert!(
+            turns.finish(1, 3.0).is_none(),
+            "endpoint must not emit duplicate turns"
+        );
+    }
+
+    #[test]
     fn stale_utterance_end_does_not_flush_the_next_turn() {
         let mut turns = LiveTurns::default();
         let line = TranscriptLine {
@@ -552,7 +592,7 @@ mod tests {
             end: 7.0,
             speaker: None,
         };
-        assert_eq!(turns.push(&line), None);
+        assert!(turns.push(&line).is_empty());
         assert_eq!(turns.finish(1, 3.0), None);
         assert_eq!(turns.finish(1, 7.0).as_deref(), Some("What comes next"));
         assert_eq!(turns.finish(1, 7.0), None);

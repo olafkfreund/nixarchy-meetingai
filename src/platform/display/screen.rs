@@ -233,6 +233,14 @@ mod tests {
     #[test]
     fn missing_monitor_index_is_reported() {
         let result = capture_monitor(Some(usize::MAX));
+        // Headless CI can fail enumeration before an index can be checked.
+        if matches!(result, Err(ScreenError::Capture(_))) {
+            assert!(
+                monitors().is_err(),
+                "a working backend must report the invalid index"
+            );
+            return;
+        }
         assert!(matches!(
             result,
             Err(ScreenError::MonitorGone(_)) | Err(ScreenError::NoMonitors)

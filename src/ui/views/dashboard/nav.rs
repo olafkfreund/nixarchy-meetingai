@@ -18,6 +18,7 @@ pub enum Route {
     Audio,
     Shortcuts,
     DevSpace,
+    About,
 }
 
 /// A navigation entry.
@@ -29,7 +30,7 @@ pub struct NavItem {
     pub description: &'static str,
 }
 
-/// Consolidated top navigation items: 4 clean, focused tabs.
+/// Dashboard destinations in display order.
 pub const NAV_ITEMS: &[NavItem] = &[
     NavItem {
         route: Route::Conversations,
@@ -55,6 +56,12 @@ pub const NAV_ITEMS: &[NavItem] = &[
         icon: Icon::Settings,
         description: "App preferences, audio devices, AI models and shortcuts.",
     },
+    NavItem {
+        route: Route::About,
+        label: "About",
+        icon: Icon::Info,
+        description: "What Lennette does and where to find the project.",
+    },
 ];
 
 /// Top-level sections in display order.
@@ -73,6 +80,7 @@ impl Route {
             Route::Audio => "Audio & Speech",
             Route::Shortcuts => "Cursor & Shortcuts",
             Route::DevSpace => "AI Models & Keys",
+            Route::About => "About Lennette",
         }
     }
 
@@ -87,6 +95,7 @@ impl Route {
             Route::Audio => "Devices, levels and speech-to-text providers.",
             Route::Shortcuts => "Keyboard combinations that work from anywhere.",
             Route::DevSpace => "Gemini, Merge Gateway and Deepgram credentials.",
+            Route::About => "A little help with what to say next.",
         }
     }
 

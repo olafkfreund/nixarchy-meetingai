@@ -101,12 +101,23 @@ impl gpui::AssetSource for EmbeddedAssets {
             "lennette_app_icon.png" => Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
                 "assets/lennette_app_icon.png"
             )))),
+            "lennette_header.png" => Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "assets/lennette_header.png"
+            )))),
+            "lennette_footer.png" => Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "assets/lennette_footer.png"
+            )))),
             _ => Ok(None),
         }
     }
 
     fn list(&self, _path: &str) -> anyhow::Result<Vec<gpui::SharedString>> {
-        Ok(vec!["lennette.png".into(), "lennette_app_icon.png".into()])
+        Ok(vec![
+            "lennette.png".into(),
+            "lennette_app_icon.png".into(),
+            "lennette_header.png".into(),
+            "lennette_footer.png".into(),
+        ])
     }
 }
 

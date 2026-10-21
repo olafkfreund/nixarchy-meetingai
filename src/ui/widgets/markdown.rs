@@ -247,7 +247,11 @@ pub fn parse(markdown: &str) -> Vec<Block> {
                     in_code = false;
                     blocks.push(Block::Code {
                         language: code_language.take(),
-                        text: code_text.trim_end().to_owned(),
+                        // Keep streamed indentation/spaces; trimming them makes the tail jump.
+                        text: code_text
+                            .strip_suffix('\n')
+                            .unwrap_or(&code_text)
+                            .to_owned(),
                     });
                     code_text.clear();
                 }
@@ -364,6 +368,12 @@ enum Open {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_code_keeps_trailing_indentation() {
+        let blocks = parse("```python\nif ready:\n    ");
+        assert!(matches!(&blocks[0], Block::Code { text, .. } if text.ends_with("    ")));
+    }
 
     #[test]
     fn plain_text_is_one_paragraph() {

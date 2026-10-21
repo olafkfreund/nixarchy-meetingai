@@ -148,7 +148,16 @@ impl ChatSession {
 
     /// Append a streamed delta and persist it.
     pub fn push_delta(&mut self, database: Option<&Database>, delta: &str) {
+        self.append_delta(delta);
+        self.checkpoint(database);
+    }
+
+    /// Append without disk I/O; native UI frames checkpoint at a bounded cadence.
+    pub fn append_delta(&mut self, delta: &str) {
         self.answer.push_str(delta);
+    }
+
+    pub fn checkpoint(&self, database: Option<&Database>) {
         self.persist_answer(database);
     }
 

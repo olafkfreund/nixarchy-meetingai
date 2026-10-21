@@ -65,6 +65,14 @@ pub struct Theme {
 }
 
 impl Theme {
+    pub fn from_settings(settings: &crate::core::settings::Settings) -> Self {
+        let mut theme = Self::from_choice(settings.theme);
+        if !settings.show_borders {
+            theme.border.a = 0.0;
+        }
+        theme
+    }
+
     /// Pure Glass mode: no background shade behind the app window, pure transparent background.
     pub const GLASS: Theme = Theme {
         background: rgba(0x08, 0x08, 0x08, 0.12),
@@ -230,6 +238,18 @@ pub fn ui_font_family() -> gpui::SharedString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn border_preference_keeps_focus_and_error_colours() {
+        let settings = crate::core::settings::Settings {
+            show_borders: false,
+            ..Default::default()
+        };
+        let theme = Theme::from_settings(&settings);
+        assert_eq!(theme.surfaces(1.0).border().a, 0.0);
+        assert!(theme.primary.a > 0.0);
+        assert!(theme.destructive.a > 0.0);
+    }
 
     #[test]
     fn surfaces_preserve_glass_layering() {

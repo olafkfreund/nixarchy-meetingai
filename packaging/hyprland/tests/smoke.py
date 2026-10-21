@@ -51,7 +51,7 @@ for key in ("HYPRLAND_INSTANCE_SIGNATURE", "DISPLAY", "AQ_BACKEND", "AQ_DRM_DEVI
     env.pop(key, None)
 config = artifacts / "config.lua"
 config.write_text('''
-hl.monitor({output="WAYLAND-1",mode="960x640@60",position="0x0",scale="1"})
+hl.monitor({output="WAYLAND-1",mode="960x640@60",position="1920x0",scale="1"})
 hl.monitor({output="HEADLESS-1",mode="960x640@60",position="0x0",scale="1"})
 hl.monitor({output="HEADLESS-2",mode="960x640@60",position="960x0",scale="1"})
 hl.config({animations={enabled=false},misc={disable_hyprland_logo=true,disable_splash_rendering=true,disable_watchdog_warning=true},
@@ -152,6 +152,8 @@ def clean(frame, name, expected=(32, 96, 128)):
     print(f"PASS {name}: {frame[0]}x{frame[1]}, no overlay or replacement pixels", flush=True)
 
 def move(x, y, app_id="dev.lennette.overlay"):
+    monitor = "HEADLESS-1" if x < 960 else "HEADLESS-2"
+    dispatch(f'hl.dsp.window.move({{window="class:{app_id}",monitor="{monitor}",follow=false}})')
     dispatch(f'hl.dsp.window.move({{window="class:{app_id}",x={x},y={y}}})')
     time.sleep(0.07)
 
@@ -168,7 +170,14 @@ try:
     wait_for(lambda: bool(list((runtime / "hypr").glob("*/.socket.sock"))), "compositor IPC", 60)
     signature = next((runtime / "hypr").glob("*/.socket.sock")).parent.name
     env["HYPRLAND_INSTANCE_SIGNATURE"] = signature
-    compositor_pid = next(i["pid"] for i in json.loads(ctl("instances", "-j")) if i["instance"] == signature)
+    # IPC can appear before Hyprland finishes writing its instance metadata.
+    def initialized_instance():
+        try:
+            return next((i for i in json.loads(ctl("instances", "-j")) if i["instance"] == signature), None)
+        except (ValueError, AssertionError):
+            return None
+    wait_for(lambda: initialized_instance() is not None, "compositor instance metadata", 60)
+    compositor_pid = initialized_instance()["pid"]
     wait_for(lambda: bool(list(runtime.glob("wayland-*"))), "Wayland socket")
     env["WAYLAND_DISPLAY"] = next(p.name for p in runtime.glob("wayland-*") if not p.name.endswith(".lock"))
     bound_host_window()
@@ -196,16 +205,21 @@ try:
         raise SystemExit(0)
     dispatch('hl.dsp.focus({monitor="HEADLESS-1"})')
     spawn("test.background", "206080")
+    dispatch('hl.dsp.window.move({window="class:test.background",monitor="HEADLESS-1",follow=false})')
     dispatch('hl.dsp.window.fullscreen({window="class:test.background",action="set"})')
     dispatch('hl.dsp.focus({monitor="HEADLESS-2"})')
     spawn("test.background2", "206080")
+    dispatch('hl.dsp.window.move({window="class:test.background2",monitor="HEADLESS-2",follow=false})')
     dispatch('hl.dsp.window.fullscreen({window="class:test.background2",action="set"})')
     dispatch('hl.dsp.focus({monitor="HEADLESS-1"})')
+    time.sleep(0.5)
+    (artifacts / "initial-clients.json").write_text(json.dumps(clients(), indent=2))
     clean(capture("baseline"), "baseline")
     overlay = spawn("dev.lennette.overlay", "ff00ff", popup=True)
     move(250, 180)
     state = next(w for w in clients() if w["class"] == "dev.lennette.overlay")
     assert state["floating"] and state["pinned"], state
+    (artifacts / "protected-fixture.json").write_text(json.dumps(state, indent=2))
     assert run([PACKAGE / "launch.sh", "--check"]).strip().endswith("private_overlay rule.")
     for protocol in ("wlr", "ext"):
         for storage in ("shm", "dma"):
@@ -232,6 +246,8 @@ try:
                                 env=parent_env, capture_output=True, text=True, timeout=20)
         assert result.returncode == 0, result.stderr
         visible = colors(ppm(path))[(255, 0, 255)]
+        if visible <= 1000:
+            (artifacts / "local-visibility-state.json").write_text(json.dumps({"host": window, "nested_clients": clients(), "nested_monitors": json.loads(ctl("-j", "monitors"))}, indent=2))
         assert visible > 1000, (name, visible)
         checks.append({"test": name, "local_overlay_pixels": visible})
         print(f"PASS {name}: {visible} overlay pixels visible locally", flush=True)

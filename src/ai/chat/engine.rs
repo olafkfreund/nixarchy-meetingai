@@ -65,12 +65,15 @@ pub fn build_body(
         messages.push(json!({ "role": "system", "content": system }));
     }
     for (index, message) in history.iter().enumerate() {
-        let image = (provider.supports_images
+        let images = if provider.supports_images
             && index + 1 == history.len()
-            && message.role == crate::core::domain::Role::User)
-            .then(|| context.images.first())
-            .flatten();
-        messages.push(openai_message(message, image));
+            && message.role == crate::core::domain::Role::User
+        {
+            context.images.as_slice()
+        } else {
+            &[]
+        };
+        messages.push(openai_message(message, images));
     }
     let mut body = json!({ "model": config.model, "messages": messages, "stream": true });
     if provider.id == "merge-gateway" {
@@ -81,17 +84,13 @@ pub fn build_body(
     body
 }
 
-fn openai_message(message: &Message, image: Option<&String>) -> Value {
-    if let Some(image) = image {
-        json!({
-            "role": role_name(message),
-            "content": [
-                { "type": "text", "text": message.content },
-                { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{image}") } }
-            ]
-        })
-    } else {
+fn openai_message(message: &Message, images: &[String]) -> Value {
+    if images.is_empty() {
         json!({ "role": role_name(message), "content": message.content })
+    } else {
+        let mut content = vec![json!({"type": "text", "text": message.content})];
+        content.extend(images.iter().map(|image| json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{image}")}})));
+        json!({"role": role_name(message), "content": content})
     }
 }
 
@@ -290,11 +289,12 @@ mod tests {
         let history = [Message::user("what is this")];
         let context = TurnContext {
             system: None,
-            images: vec!["QUJD".into()],
+            images: vec!["QUJD".into(), "REVG".into()],
         };
         let body = build_body(provider, &config, &history, &context);
         let content = &body["messages"][0]["content"];
-        assert!(content.is_array());
+        assert_eq!(content.as_array().unwrap().len(), 3);
+        assert_eq!(content[2]["image_url"]["url"], "data:image/png;base64,REVG");
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,QUJD");
     }
 

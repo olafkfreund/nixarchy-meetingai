@@ -1,8 +1,8 @@
 //! Dashboard rendering: sidebar, page header and per-route bodies.
 
 use gpui::{
-    Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, img, px,
+    AppContext, Context, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, StyledImage, Window, div, img, px,
 };
 use lucide_icons::Icon;
 
@@ -27,6 +27,7 @@ pub struct DashboardView {
     renaming: bool,
     rename_buffer: String,
     credential_focus: Option<FocusHandle>,
+    settings_save: Option<gpui::Task<()>>,
 }
 
 impl DashboardView {
@@ -46,7 +47,7 @@ impl DashboardView {
             Database::open(database.connection().path().unwrap_or_default())
                 .unwrap_or_else(|_| Database::open_in_memory().expect("in-memory database"))
         }));
-        let theme = Theme::from_choice(settings.settings.theme);
+        let theme = Theme::from_settings(&settings.settings);
         Self {
             dashboard,
             database,
@@ -57,10 +58,23 @@ impl DashboardView {
             renaming: false,
             rename_buffer: String::new(),
             credential_focus: None,
+            settings_save: None,
         }
     }
 
     fn navigate(&mut self, route: super::nav::Route) {
+        if self.settings_save.take().is_some() {
+            self.save_settings();
+        }
+        if let Some(database) = self.settings.database.as_ref()
+            && let Ok(settings) = crate::core::settings::Settings::load(database)
+        {
+            self.settings.settings = settings;
+        }
+        self.renaming = false;
+        self.rename_buffer.clear();
+        self.settings.key_field = None;
+        self.settings.notice = None;
         self.dashboard.navigate(route, self.database.as_ref());
     }
 
@@ -77,7 +91,20 @@ impl DashboardView {
     /// Persist settings after a control changes.
     pub fn save_settings(&mut self) {
         self.settings.save();
-        self.theme = Theme::from_choice(self.settings.settings.theme);
+        self.theme = Theme::from_settings(&self.settings.settings);
+    }
+
+    pub fn schedule_settings_save(&mut self, cx: &mut Context<Self>) {
+        self.settings_save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+            this.update(cx, |this, _| {
+                this.save_settings();
+                this.settings_save = None;
+            })
+            .ok();
+        }));
     }
 
     /// Store the key typed on the Dev Space page.
@@ -360,6 +387,8 @@ impl DashboardView {
 
     /// Open a conversation's transcript.
     pub fn open_conversation(&mut self, id: impl Into<String>) {
+        self.renaming = false;
+        self.settings.notice = None;
         self.open_conversation = Some(id.into());
         self.dashboard.navigate(
             super::nav::Route::ConversationDetail,
@@ -379,7 +408,7 @@ impl DashboardView {
     ///
     /// Settings live behind the same row rather than in a separate group, so every
     /// destination is one click away and the page needs no header of its own.
-    fn top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn top_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = div()
             .flex()
             .items_center()
@@ -393,8 +422,23 @@ impl DashboardView {
                 self.dashboard.route().is_setting()
             } else {
                 item.route == self.dashboard.route()
+                    || matches!(
+                        (item.route, self.dashboard.route()),
+                        (
+                            super::nav::Route::Meetings,
+                            super::nav::Route::MeetingDetail
+                        ) | (
+                            super::nav::Route::Conversations,
+                            super::nav::Route::ConversationDetail
+                        )
+                    )
             };
-            row = row.child(self.nav_pill(*item, active, cx));
+            row = row.child(self.nav_pill(
+                *item,
+                active,
+                window.viewport_size().width < px(860.0),
+                cx,
+            ));
         }
 
         div()
@@ -403,8 +447,6 @@ impl DashboardView {
             .gap(px(14.0))
             .h(px(52.0))
             .px(px(20.0))
-            .border_b_1()
-            .border_color(self.surfaces().border())
             .flex_shrink_0()
             .child(
                 div()
@@ -427,10 +469,30 @@ impl DashboardView {
                     ),
             )
             .child(row)
+            .child(
+                div()
+                    .id("close-dashboard")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(30.0))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(self.surfaces().muted()))
+                    .child(icons::icon(&self.theme, Icon::X, 16.0))
+                    .on_click(|_, window, _| window.remove_window()),
+            )
     }
 
     /// One navigation pill.
-    fn nav_pill(&self, item: NavItem, active: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn nav_pill(
+        &self,
+        item: NavItem,
+        active: bool,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = self.theme;
         let surfaces = self.surfaces();
         let mut pill = div()
@@ -465,7 +527,14 @@ impl DashboardView {
             .hover(|style| style.bg(surfaces.muted()).border_color(surfaces.border()))
             .id(("nav", item.route as usize))
             .child(icons::icon(&theme, item.icon, 13.0))
-            .child(item.label);
+            .children((!compact).then_some(item.label))
+            .tooltip(move |_, cx| {
+                cx.new(|_| NavTooltip {
+                    text: item.label.into(),
+                    theme,
+                })
+                .into()
+            });
         if active {
             pill = pill.bg(surfaces.muted());
         }
@@ -515,57 +584,176 @@ impl DashboardView {
 
     fn conversations_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        let records = self.dashboard.filtered_conversations();
-        if records.is_empty() {
-            return div().child(self.empty_note(
-                "No conversations yet. Ask something from the overlay and it will show up here.",
-            ));
-        }
         let surfaces = self.surfaces();
-        let mut list = div()
-            .flex()
-            .flex_col()
-            .rounded(px(radius::LG))
-            .border_1()
-            .border_color(surfaces.border())
-            .bg(surfaces.card())
-            .overflow_hidden();
+        let records = self.dashboard.filtered_conversations();
+        let count = records.len();
+        let mut list = div().flex().flex_col().gap(px(10.0)).pb(px(12.0)).child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .pb(px(8.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.0))
+                        .child(
+                            div()
+                                .text_size(px(20.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Conversations"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.muted_foreground)
+                                .child(format!(
+                                    "{count} saved {}",
+                                    if count == 1 {
+                                        "conversation"
+                                    } else {
+                                        "conversations"
+                                    }
+                                )),
+                        ),
+                )
+                .child(action_button(
+                    "refresh-conversations",
+                    &theme,
+                    "Refresh",
+                    cx,
+                    |this: &mut Self, _, _| this.navigate(super::nav::Route::Conversations),
+                )),
+        );
+        if records.is_empty() {
+            return list.child(
+                div()
+                    .pt(px(40.0))
+                    .pb(px(40.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(icons::icon(&theme, Icon::MessagesSquare, 28.0))
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Your conversations will appear here"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.muted_foreground)
+                            .child("Ask a question in the overlay to start one."),
+                    ),
+            );
+        }
+        let now = crate::ai::session::now_millis();
         for record in records {
+            let preview = record
+                .preview
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with("```"))
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace("**", "")
+                .replace('`', "");
             list = list.child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .border_b_1()
-                    .border_color(surfaces.border())
-                    .cursor_pointer()
-                    .hover(|style| style.bg(surfaces.muted()))
                     .id(gpui::ElementId::Name(
                         format!("conversation-{}", record.id).into(),
                     ))
+                    .flex()
+                    .items_center()
+                    .gap(px(14.0))
+                    .p(px(16.0))
+                    .rounded(px(14.0))
+                    .border_1()
+                    .border_color(surfaces.border())
+                    .bg(surfaces.card())
+                    .cursor_pointer()
+                    .hover(|s| s.bg(surfaces.muted()).border_color(theme.muted_foreground))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(36.0))
+                            .flex_shrink_0()
+                            .rounded(px(11.0))
+                            .bg(surfaces.accent())
+                            .child(icons::icon(&theme, Icon::MessagesSquare, 16.0)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(12.0))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .truncate()
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(record.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(px(10.5))
+                                            .text_color(theme.muted_foreground)
+                                            .child(relative_time(record.updated_at, now)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .text_size(px(11.5))
+                                    .text_color(theme.muted_foreground)
+                                    .child(if preview.is_empty() {
+                                        "No messages yet".into()
+                                    } else {
+                                        preview
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!(
+                                        "{} {}",
+                                        record.message_count,
+                                        if record.message_count == 1 {
+                                            "message"
+                                        } else {
+                                            "messages"
+                                        }
+                                    )),
+                            ),
+                    )
+                    .child(icons::icon(&theme, Icon::ChevronRight, 15.0))
                     .on_click(cx.listener({
                         let id = record.id.clone();
                         move |this, _, _, cx| {
                             this.open_conversation(id.clone());
                             cx.notify();
                         }
-                    }))
-                    .child(icons::icon(&theme, Icon::MessagesSquare, 13.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(12.5))
-                            .text_color(theme.foreground)
-                            .child(record.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.muted_foreground)
-                            .child(format!("{} messages", record.message_count)),
-                    ),
+                    })),
             );
         }
         list
@@ -576,18 +764,25 @@ impl DashboardView {
         let PageData::Prompts(prompts) = self.dashboard.data() else {
             return div().child(self.empty_note("No prompts loaded."));
         };
-        let mut list = div().flex().flex_col().gap(px(8.0));
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .child(self.page_heading(
+                "Prompts",
+                "Instructions used by each meeting mode. Choose a mode in the overlay.",
+            ));
         for prompt in prompts {
             let mode = prompt
                 .listen_slot
-                .map(|slot| format!("Listen mode {slot}"))
+                .map(|_| "Meeting mode".to_owned())
                 .unwrap_or_else(|| "Prompt".to_owned());
             let surfaces = self.surfaces();
             list = list.child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
+                    .gap(px(12.0))
                     .rounded(px(radius::LG))
                     .border_1()
                     .border_color(surfaces.border())
@@ -618,7 +813,7 @@ impl DashboardView {
                         div()
                             .text_size(px(11.5))
                             .text_color(theme.muted_foreground)
-                            .child(truncate(&prompt.prompt, 220)),
+                            .child(prompt.prompt.clone()),
                     ),
             );
         }
@@ -629,77 +824,130 @@ impl DashboardView {
         settings_pages::render(self.dashboard.route(), &self.settings, &self.theme, cx)
     }
 
+    fn page_heading(&self, title: &str, subtitle: &str) -> gpui::AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .pb(px(8.0))
+            .child(
+                div()
+                    .text_size(px(20.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title.to_owned()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(self.theme.muted_foreground)
+                    .child(subtitle.to_owned()),
+            )
+            .into_any_element()
+    }
+
     fn meetings_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
-        let PageData::Meetings(meetings) = self.dashboard.data() else {
-            return self
-                .empty_note("No meetings recorded yet.")
-                .into_any_element();
-        };
-        if meetings.is_empty() {
-            return self
-                .empty_note("No meetings yet. Start a Listen session and it will appear here as it happens.")
-                .into_any_element();
-        }
         let surfaces = self.surfaces();
         let mut list = div()
             .flex()
             .flex_col()
-            .rounded(px(radius::LG))
-            .border_1()
-            .border_color(surfaces.border())
-            .bg(surfaces.card())
-            .overflow_hidden();
+            .gap(px(12.0))
+            .child(self.page_heading(
+                "Meetings",
+                "Saved sessions, speaker transcripts and context for your next conversation.",
+            ));
+        let PageData::Meetings(meetings) = self.dashboard.data() else {
+            return list
+                .child(self.empty_note("No meetings recorded yet."))
+                .into_any_element();
+        };
+        if meetings.is_empty() {
+            return list
+                .child(
+                    self.empty_note("Start listening in the overlay to save your first meeting."),
+                )
+                .into_any_element();
+        }
         for meeting in meetings {
-            let duration = crate::features::db::meetings::format_duration(meeting.duration_seconds);
+            let id = meeting.id.clone();
             list = list.child(
                 div()
+                    .id(gpui::ElementId::Name(format!("meeting-{id}").into()))
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .border_b_1()
+                    .gap(px(14.0))
+                    .p(px(16.0))
+                    .rounded(px(14.0))
+                    .border_1()
                     .border_color(surfaces.border())
+                    .bg(surfaces.card())
                     .cursor_pointer()
-                    .hover(|style| style.bg(surfaces.muted()))
-                    .id(gpui::ElementId::Name(
-                        format!("meeting-{}", meeting.id).into(),
-                    ))
-                    .on_click(cx.listener({
-                        let id = meeting.id.clone();
-                        move |this, _, _, cx| {
-                            this.open_meeting(id.clone());
-                            cx.notify();
-                        }
-                    }))
-                    .child(icons::icon(&theme, Icon::Headphones, 13.0))
+                    .hover(|s| s.bg(surfaces.muted()))
+                    .child(icons::icon(&theme, Icon::Headphones, 20.0))
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
                             .flex_1()
-                            .text_size(px(12.5))
-                            .text_color(theme.foreground)
-                            .child(if meeting.title.is_empty() {
-                                "Untitled session".to_owned()
-                            } else {
-                                meeting.title.clone()
-                            }),
+                            .min_w(px(0.0))
+                            .gap(px(7.0))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(14.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(if meeting.title.is_empty() {
+                                        "Untitled session".to_owned()
+                                    } else {
+                                        meeting.title.clone()
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!(
+                                        "{} · {} · {} lines{}",
+                                        meeting.started_at,
+                                        crate::features::db::meetings::format_duration(
+                                            meeting.duration_seconds
+                                        ),
+                                        meeting.line_count,
+                                        if meeting.ended_at.is_none() {
+                                            " · In progress"
+                                        } else {
+                                            ""
+                                        }
+                                    )),
+                            ),
                     )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.muted_foreground)
-                            .child(duration),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.muted_foreground)
-                            .child(format!("{} lines", meeting.line_count)),
-                    ),
+                    .child(icons::icon(&theme, Icon::ChevronRight, 15.0))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_meeting(id.clone());
+                        cx.notify();
+                    })),
             );
         }
         list.into_any_element()
+    }
+
+    fn about_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let asset =
+            |name: &'static str| gpui::ImageSource::Resource(gpui::Resource::Embedded(name.into()));
+        let surfaces = self.surfaces();
+        div().flex().flex_col().gap(px(24.0))
+            .child(img(asset("lennette_header.png")).w_full().h(px(240.0)).object_fit(gpui::ObjectFit::Contain).rounded(px(18.0)))
+            .child(div().flex().items_center().gap(px(18.0))
+                .child(img(asset("lennette_app_icon.png")).size(px(72.0)).rounded(px(18.0)))
+                .child(div().flex().flex_col().gap(px(7.0)).child(self.page_heading("About Lennette", "An ambient meeting and discussion copilot."))
+                    .child(div().text_size(px(11.0)).text_color(self.theme.muted_foreground).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))))
+            .child(div().flex().items_center().gap(px(20.0)).p(px(20.0)).rounded(px(16.0)).bg(surfaces.card())
+                .child(img(asset("lennette.png")).w(px(100.0)).h(px(80.0)).object_fit(gpui::ObjectFit::Contain))
+                .child(div().flex_1().min_w(px(0.0)).text_size(px(13.0)).child("Listen to your microphone and call audio, follow speaker transcripts, and get streamed suggestions for what to say next. Add screenshots, files or past transcripts to give each conversation more context. Choose your own AI and speech providers in Settings.")))
+            .child(div().flex().items_center().child(action_button("about-github", &self.theme, "View Lennette on GitHub ↗", cx, |_, cx, _| cx.open_url("https://github.com/parazeeknova/lennette"))))
+            .child(div().text_size(px(12.0)).text_color(self.theme.muted_foreground).child("Built for Linux with Rust and GPUI. Your provider keys are stored in the encrypted local vault. Selected context is sent to your configured AI provider when you ask a question."))
+            .child(img(asset("lennette_footer.png")).w_full().h(px(190.0)).object_fit(gpui::ObjectFit::Contain))
+            .into_any_element()
     }
 
     fn meeting_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -709,18 +957,29 @@ impl DashboardView {
             Some(delete_id) => div()
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(8.0))
                 .pb(px(8.0))
+                .child(action_button(
+                    "back-meetings",
+                    &theme,
+                    "← Meetings",
+                    cx,
+                    |this, _, _| this.navigate(super::nav::Route::Meetings),
+                ))
                 .child(super::view::action_button(
                     "rename-meeting",
                     &theme,
                     if self.renaming { "Save name" } else { "Rename" },
                     cx,
-                    |this: &mut Self, _, _| {
+                    |this: &mut Self, cx, window| {
                         if this.renaming {
                             this.finish_rename();
                         } else {
                             this.start_rename();
+                            let focus = this
+                                .credential_focus
+                                .get_or_insert_with(|| cx.focus_handle());
+                            window.focus(focus);
                         }
                     },
                 ))
@@ -737,12 +996,25 @@ impl DashboardView {
             None => div().into_any_element(),
         };
         let lines = self.meeting_lines();
+        let mut list =
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(16.0))
+                .child(actions)
+                .child(self.page_heading(
+                    &self.current_title().unwrap_or_else(|| "Meeting".into()),
+                    &format!(
+                        "{} transcript {}",
+                        lines.len(),
+                        if lines.len() == 1 { "line" } else { "lines" }
+                    ),
+                ));
         if lines.is_empty() {
-            return self
-                .empty_note("Pick a meeting from the list to read its transcript.")
+            return list
+                .child(self.empty_note("This meeting has no transcript yet."))
                 .into_any_element();
         }
-        let mut list = div().flex().flex_col().gap(px(6.0)).child(actions);
         if self.renaming {
             list = list.child(
                 div()
@@ -783,10 +1055,10 @@ impl DashboardView {
                     .border_color(theme.border)
                     .bg(theme.card)
                     .px(px(12.0))
-                    .py(px(8.0))
+                    .py(px(14.0))
                     .child(
                         div()
-                            .w(px(72.0))
+                            .w(px(105.0))
                             .flex_shrink_0()
                             .text_size(px(10.5))
                             .text_color(theme.muted_foreground)
@@ -806,106 +1078,191 @@ impl DashboardView {
 
     fn conversation_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
-        let id = self.open_conversation.clone();
-        let actions: gpui::AnyElement = match id.clone() {
-            Some(id) => {
-                let export_id = id.clone();
-                let delete_id = id.clone();
+        let surfaces = self.surfaces();
+        let Some(id) = self.open_conversation.clone() else {
+            return self
+                .empty_note("Choose a conversation to read it.")
+                .into_any_element();
+        };
+        let messages = self.conversation_messages();
+        let title = self
+            .current_title()
+            .unwrap_or_else(|| "Conversation".into());
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap(px(18.0))
+            .pb(px(24.0))
+            .child(
                 div()
                     .flex()
                     .items_center()
+                    .justify_between()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .id("back-to-conversations")
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
+                            .h(px(30.0))
+                            .cursor_pointer()
+                            .text_size(px(11.5))
+                            .text_color(theme.muted_foreground)
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child(icons::icon(&theme, Icon::ArrowLeft, 13.0))
+                            .child("Conversations")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.navigate(super::nav::Route::Conversations);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(action_button(
+                                "rename-conversation",
+                                &theme,
+                                if self.renaming { "Save name" } else { "Rename" },
+                                cx,
+                                |this: &mut Self, cx, window| {
+                                    if this.renaming {
+                                        this.finish_rename();
+                                    } else {
+                                        this.start_rename();
+                                        let focus = this
+                                            .credential_focus
+                                            .get_or_insert_with(|| cx.focus_handle());
+                                        window.focus(focus);
+                                    }
+                                },
+                            ))
+                            .child(action_button(
+                                "export-conversation",
+                                &theme,
+                                "Export",
+                                cx,
+                                |this: &mut Self, _, _| {
+                                    this.export_conversation();
+                                },
+                            ))
+                            .child(action_button(
+                                "delete-conversation",
+                                &theme,
+                                "Delete",
+                                cx,
+                                move |this: &mut Self, _, _| this.delete_conversation(&id),
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
                     .gap(px(6.0))
                     .pb(px(8.0))
-                    .child(super::view::action_button(
-                        "rename-conversation",
-                        &theme,
-                        if self.renaming { "Save name" } else { "Rename" },
-                        cx,
-                        |this: &mut Self, _, _| {
-                            if this.renaming {
-                                this.finish_rename();
-                            } else {
-                                this.start_rename();
-                            }
-                        },
-                    ))
-                    .child(super::view::action_button(
-                        "export-conversation",
-                        &theme,
-                        "Export",
-                        cx,
-                        move |this: &mut Self, _, _| {
-                            let _ = export_id;
-                            this.export_conversation();
-                        },
-                    ))
-                    .child(super::view::action_button(
-                        "delete-conversation",
-                        &theme,
-                        "Delete",
-                        cx,
-                        move |this: &mut Self, _, _| {
-                            this.delete_conversation(&delete_id);
-                        },
-                    ))
-                    .into_any_element()
-            }
-            None => div().into_any_element(),
-        };
-        let messages = self.conversation_messages();
-        if messages.is_empty() {
-            return self
-                .empty_note("Pick a conversation from the list to read it here.")
-                .into_any_element();
+                    .child(
+                        div()
+                            .text_size(px(20.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{} messages", messages.len())),
+                    ),
+            );
+        if let Some(notice) = &self.settings.notice {
+            list = list.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.muted_foreground)
+                    .child(notice.clone()),
+            );
         }
-        let mut list = div().flex().flex_col().gap(px(8.0)).child(actions);
         if self.renaming {
             list = list.child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .rounded(px(8.0))
+                    .rounded(px(9.0))
                     .border_1()
                     .border_color(theme.primary)
-                    .bg(theme.card)
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .text_size(px(12.0))
-                    .text_color(theme.foreground)
+                    .bg(surfaces.input())
+                    .p(px(10.0))
+                    .text_size(px(13.0))
                     .child(if self.rename_buffer.is_empty() {
-                        "Type a name, Enter to save".to_owned()
+                        "Type a name, Enter to save".into()
                     } else {
                         self.rename_buffer.clone()
                     }),
             );
         }
+        if messages.is_empty() {
+            return list
+                .child(self.empty_note("This conversation has no messages yet."))
+                .into_any_element();
+        }
         for message in messages {
             let is_user = message.role == "user";
+            let content = if is_user {
+                div()
+                    .text_size(px(13.0))
+                    .child(message.content)
+                    .into_any_element()
+            } else {
+                crate::ui::overlay::render_markdown(&theme, surfaces, &message.content)
+            };
             list = list.child(
                 div()
+                    .id(gpui::ElementId::Name(
+                        format!("saved-message-{}", message.id).into(),
+                    ))
                     .flex()
-                    .flex_col()
-                    .gap(px(3.0))
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.card)
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .max_w(px(680.0))
+                    .w_full()
+                    .justify_center()
                     .child(
                         div()
-                            .text_size(px(9.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.muted_foreground)
-                            .child(if is_user { "You" } else { "Assistant" }),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(theme.foreground)
-                            .child(message.content),
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .max_w(px(760.0))
+                            .min_w(px(0.0))
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .text_size(px(10.5))
+                                    .text_color(theme.muted_foreground)
+                                    .child(icons::icon(
+                                        &theme,
+                                        if is_user {
+                                            Icon::UserRound
+                                        } else {
+                                            Icon::Sparkles
+                                        },
+                                        12.0,
+                                    ))
+                                    .child(if is_user { "You" } else { "Lennette" }),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w(px(0.0))
+                                    .rounded(px(12.0))
+                                    .p(px(14.0))
+                                    .bg(if is_user {
+                                        surfaces.accent()
+                                    } else {
+                                        surfaces.card()
+                                    })
+                                    .child(content),
+                            ),
                     ),
             );
         }
@@ -919,6 +1276,7 @@ impl DashboardView {
             super::nav::Route::Meetings => self.meetings_body(cx),
             super::nav::Route::MeetingDetail => self.meeting_detail(cx),
             super::nav::Route::Prompts => self.prompts_body().into_any_element(),
+            super::nav::Route::About => self.about_body(cx),
             _ => self.settings_body(cx),
         }
     }
@@ -955,6 +1313,17 @@ pub fn action_button<V: 'static>(
         }))
 }
 
+fn relative_time(timestamp: i64, now: i64) -> String {
+    let seconds = now.saturating_sub(timestamp).max(0) / 1000;
+    match seconds {
+        0..60 => "Just now".into(),
+        60..3600 => format!("{}m ago", seconds / 60),
+        3600..86400 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86400),
+    }
+}
+
+#[cfg(test)]
 fn truncate(text: &str, limit: usize) -> String {
     let mut out: String = text.chars().take(limit).collect();
     if text.chars().count() > limit {
@@ -964,8 +1333,8 @@ fn truncate(text: &str, limit: usize) -> String {
 }
 
 impl Render for DashboardView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.theme = Theme::from_choice(self.settings.settings.theme);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.theme = Theme::from_settings(&self.settings.settings);
         let theme = self.theme;
         let surfaces = self.surfaces();
         let focus = self
@@ -1053,7 +1422,7 @@ impl Render for DashboardView {
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.0))
-                    .child(self.top_bar(cx))
+                    .child(self.top_bar(window, cx))
                     .child({
                         let mut content = div()
                             .flex()
@@ -1062,14 +1431,45 @@ impl Render for DashboardView {
                             .min_h(px(0.0))
                             .id("dashboard-content")
                             .overflow_y_scroll()
-                            .px(px(20.0))
-                            .pb(px(20.0));
+                            .p(px(24.0))
+                            .items_center();
                         if let Some(banner) = self.error_banner() {
                             content = content.child(banner);
                         }
-                        content.child(self.body(cx))
+                        content.child(
+                            div()
+                                .w_full()
+                                .max_w(px(960.0))
+                                .min_w(px(0.0))
+                                .child(self.body(cx)),
+                        )
                     }),
             )
+    }
+}
+
+impl Drop for DashboardView {
+    fn drop(&mut self) {
+        if self.settings_save.is_some() {
+            self.settings.save();
+        }
+    }
+}
+
+struct NavTooltip {
+    text: gpui::SharedString,
+    theme: Theme,
+}
+impl Render for NavTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(6.0))
+            .bg(self.theme.card)
+            .text_color(self.theme.foreground)
+            .text_size(px(11.0))
+            .child(self.text.clone())
     }
 }
 
