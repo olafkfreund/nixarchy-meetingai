@@ -147,7 +147,38 @@ pub fn run() {
         > = None;
         let pure_wayland =
             std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_none();
-        if pure_wayland {
+        // The control socket lets a shortcut flag reach this instance.
+        let control = crate::features::control::ControlListener::start();
+        match &control {
+            Ok(_) => tracing::info!("shortcut control socket ready"),
+            Err(error) => tracing::warn!(%error, "shortcut control socket unavailable"),
+        }
+
+        // Hyprland has its own config; use it instead of the portal, which is
+        // unreliable on some systems.
+        if crate::features::hyprland::is_hyprland() {
+            let bindings = crate::features::shortcuts::Binding::defaults();
+            match crate::features::hyprland::install(&bindings) {
+                Ok(path) => {
+                    tracing::info!(path = %path.display(), "wrote Hyprland bindings");
+                    if let Some(directory) = crate::features::hyprland::config_directory()
+                        && !crate::features::hyprland::is_required(&directory)
+                    {
+                        tracing::warn!(
+                            line = crate::features::hyprland::required_line(),
+                            "add this line to hyprland.lua so the bindings survive a restart"
+                        );
+                    }
+                    match crate::features::hyprland::apply_now(&bindings) {
+                        Ok(count) => tracing::info!(count, "Hyprland bindings applied now"),
+                        Err(error) => tracing::warn!(%error, "could not apply bindings now"),
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "could not write Hyprland bindings"),
+            }
+        }
+
+        if pure_wayland && !crate::features::hyprland::is_hyprland() {
             // Wayland: bind through the desktop portal instead of grabbing keys.
             let runtime = tokio::runtime::Handle::try_current();
             let (tx, rx) = std::sync::mpsc::channel();
@@ -208,6 +239,7 @@ pub fn run() {
         }
 
         let portal_clone = portal_shortcuts.clone();
+        let control_handle = control.ok().map(std::sync::Arc::new);
         cx.open_window(overlay_options, move |_, cx| {
             cx.new(|_| {
                 Overlay::new(
@@ -215,6 +247,7 @@ pub fn run() {
                     shortcut_listener.clone(),
                     tray_state,
                     portal_clone,
+                    control_handle,
                 )
             })
         })

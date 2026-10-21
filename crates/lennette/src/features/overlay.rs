@@ -139,6 +139,8 @@ pub struct Overlay {
     focus_composer: bool,
     /// Whether the far side of the call is captured too.
     system_audio: bool,
+    /// Commands from shortcut flags, received over the control socket.
+    control: Option<std::sync::Arc<crate::features::control::ControlListener>>,
     /// Wayland portal shortcuts, polled alongside the X11 listener.
     portal: Option<std::sync::Arc<crate::features::wayland::PortalShortcuts>>,
     /// System tray handle, polled alongside shortcuts.
@@ -157,6 +159,7 @@ impl Overlay {
         shortcuts: Option<std::rc::Rc<crate::features::shortcuts::ShortcutListener>>,
         tray: Option<crate::features::tray::Tray>,
         portal: Option<std::sync::Arc<crate::features::wayland::PortalShortcuts>>,
+        control: Option<std::sync::Arc<crate::features::control::ControlListener>>,
     ) -> Self {
         // Read once at startup; changing it writes straight back to settings.
         let opacity =
@@ -243,6 +246,7 @@ impl Overlay {
             system_audio: false,
             tray,
             portal,
+            control,
             shortcut_poll: None,
         }
     }
@@ -689,7 +693,10 @@ impl Overlay {
 
     /// Keep polling shortcuts even when no session is running.
     fn ensure_shortcut_poll(&mut self, cx: &mut Context<Self>) {
-        if (self.shortcuts.is_none() && self.tray.is_none() && self.portal.is_none())
+        if (self.shortcuts.is_none()
+            && self.tray.is_none()
+            && self.portal.is_none()
+            && self.control.is_none())
             || self.shortcut_poll.is_some()
         {
             return;
