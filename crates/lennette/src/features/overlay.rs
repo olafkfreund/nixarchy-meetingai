@@ -42,37 +42,6 @@ pub const FOLLOW_UPS: [&str; 4] = [
     "Recap",
 ];
 
-/// The tool cluster entries, in the reference's order.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tool {
-    Capture,
-    Selection,
-    Attach,
-    Library,
-}
-
-impl Tool {
-    const ALL: [Tool; 4] = [Tool::Capture, Tool::Selection, Tool::Attach, Tool::Library];
-
-    fn icon(self) -> Icon {
-        match self {
-            Tool::Capture => Icon::Monitor,
-            Tool::Selection => Icon::Crop,
-            Tool::Attach => Icon::Paperclip,
-            Tool::Library => Icon::FolderOpen,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Tool::Capture => "Capture",
-            Tool::Selection => "Selection",
-            Tool::Attach => "Attach",
-            Tool::Library => "Library",
-        }
-    }
-}
-
 /// Root view for the overlay window.
 pub struct Overlay {
     services: crate::app::Services,
@@ -92,7 +61,6 @@ pub struct Overlay {
     model_menu_open: bool,
     /// Whether the prompt list is open.
     prompt_menu_open: bool,
-    use_image: bool,
     /// The running capture session, when Listen is active.
     session: Option<crate::features::listen::ListenSession>,
     /// Live microphone level, 0.0 to 1.0.
@@ -223,7 +191,6 @@ impl Overlay {
             active_prompt,
             model_menu_open: false,
             prompt_menu_open: false,
-            use_image: false,
             session: None,
             level: 0.0,
             listen_error: None,
@@ -278,11 +245,6 @@ impl Overlay {
             self.stop_listening();
         }
         self.mode = mode;
-    }
-
-    /// Compact layouts drop tool labels, as the reference does below `md`.
-    fn show_tool_labels(&self) -> bool {
-        self.size != OverlaySize::Small
     }
 
     /// Seconds elapsed in the current session.
@@ -1585,114 +1547,6 @@ impl Overlay {
             )
     }
 
-    fn tool_cluster(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let labelled = self.show_tool_labels();
-        let mut cluster = div()
-            .flex()
-            .items_center()
-            .gap(px(1.0))
-            .p(px(2.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            .bg(self.surfaces().muted());
-
-        for (index, tool) in Tool::ALL.into_iter().enumerate() {
-            if index > 0 {
-                cluster = cluster.child(div().w(px(1.0)).h(px(14.0)).bg(theme.border));
-            }
-            let mut button = div()
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .h(px(26.0))
-                .rounded_full()
-                .cursor_pointer()
-                .hover(|style| style.bg(self.surfaces().accent()))
-                .id(("tool", index))
-                .child(icons::icon(&theme, tool.icon(), 13.0));
-            button = if labelled {
-                button.px(px(9.0))
-            } else {
-                button.w(px(26.0)).justify_center()
-            };
-            if labelled {
-                button = button.child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme.foreground)
-                        .child(tool.label()),
-                );
-            }
-            cluster = cluster.child(button.on_click(cx.listener(move |this, _, _, cx| {
-                if tool == Tool::Capture {
-                    this.capture_screen();
-                }
-                cx.notify();
-            })));
-        }
-        cluster
-    }
-
-    fn push_to_talk(&self) -> impl IntoElement {
-        let theme = self.theme;
-        div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(28.0))
-            .px(px(10.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            .text_size(px(11.0))
-            .text_color(theme.foreground)
-            .cursor_pointer()
-            .id("push-to-talk")
-            .child(icons::icon(&theme, Icon::Mic, 12.0))
-            .child(if self.is_listening() {
-                "Listening…"
-            } else {
-                "Push to talk"
-            })
-            .child(kbd(&theme, self.surfaces(), "⌃"))
-            .child(kbd(&theme, self.surfaces(), "Space"))
-    }
-
-    fn image_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let active = self.use_image;
-        let mut button = div()
-            .flex()
-            .items_center()
-            .gap(px(5.0))
-            .h(px(28.0))
-            .px(px(8.0))
-            .rounded(px(radius::MD))
-            .border_1()
-            .text_size(px(11.0))
-            .cursor_pointer()
-            .id("toggle-image");
-        button = if active {
-            button
-                .border_color(theme.primary)
-                .bg(self.surfaces().accent())
-                .text_color(theme.primary)
-        } else {
-            button
-                .border_color(theme.border)
-                .text_color(theme.muted_foreground)
-        };
-        button
-            .child(icons::icon(&theme, Icon::Image, 12.0))
-            .child("Use image")
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.use_image = !this.use_image;
-                cx.notify();
-            }))
-    }
-
     /// The model button, showing the real active model.
     fn model_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
@@ -1702,17 +1556,16 @@ impl Overlay {
             .flex()
             .items_center()
             .gap(px(5.0))
-            .h(px(28.0))
+            .h(px(26.0))
             .px(px(8.0))
-            .rounded(px(radius::MD))
-            .border_1()
-            .border_color(if self.model_menu_open {
-                theme.primary
+            .rounded(px(radius::FULL))
+            .text_size(px(11.0))
+            .text_color(if self.model_menu_open {
+                theme.foreground
             } else {
-                theme.border
+                self.surfaces().muted_foreground()
             })
-            .text_size(px(11.5))
-            .text_color(theme.muted_foreground)
+            .hover(|style| style.bg(self.surfaces().muted()))
             .cursor_pointer()
             .id("model-select")
             .child(icons::icon(&theme, Icon::Sparkles, 11.0))
@@ -1788,11 +1641,12 @@ impl Overlay {
             .flex()
             .items_center()
             .gap(px(5.0))
-            .h(px(28.0))
+            .h(px(26.0))
             .px(px(8.0))
-            .rounded(px(radius::MD))
-            .text_size(px(11.5))
-            .text_color(theme.foreground)
+            .rounded(px(radius::FULL))
+            .text_size(px(11.0))
+            .text_color(self.surfaces().muted_foreground())
+            .hover(|style| style.bg(self.surfaces().muted()))
             .cursor_pointer()
             .id("prompt-mode")
             .child(icons::icon(&theme, Icon::Sparkles, 11.0))
@@ -1868,117 +1722,143 @@ impl Overlay {
         }
     }
 
+    /// The composer: one card, three zones.
+    ///
+    /// Left are the tools you attach with, the middle is the text, and the right is
+    /// send. The prompt and model pickers sit on a quiet row beneath the text, so
+    /// nothing competes with what you are typing.
     fn input_block(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let can_submit = !self.composer.is_empty();
+        let focus = self.focus_handle(cx);
 
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(space::SM))
-            .px(px(space::MD))
-            .py(px(10.0))
-            // Push to talk + tool cluster.
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(self.push_to_talk())
-                    .child(div().flex_1())
-                    .child(self.tool_cluster(cx)),
-            )
-            // Model row: context on the left, model and image on the right.
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::SM))
-                    .child(self.prompt_selector(cx))
-                    .child(div().flex_1())
-                    .child(self.image_toggle(cx))
-                    .child(self.model_selector(cx)),
-            )
-            // Composer.
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::SM))
-                    .h(px(38.0))
-                    .px(px(space::MD))
-                    .rounded(px(radius::LG))
-                    .border_1()
-                    .border_color(if self.composer_focused {
-                        theme.primary
-                    } else {
-                        theme.input
-                    })
-                    .id("composer")
-                    .track_focus(&self.focus_handle(cx))
-                    .cursor_text()
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            window.focus(&this.focus_handle(cx));
-                            this.composer_focused = true;
-                            cx.notify();
-                        }),
-                    )
-                    .child(div().flex_1().child(crate::features::text_input::render(
-                        &self.composer,
-                        &theme,
-                        self.composer_focused,
-                        "Ask anything, or paste a screenshot…",
-                    )))
-                    .child(
-                        div()
-                            .size(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(radius::MD))
-                            .bg(if can_submit {
-                                theme.primary
-                            } else {
-                                theme.muted
-                            })
-                            .cursor_pointer()
-                            .id("send")
-                            .child(icons::icon_colored(
-                                if can_submit {
-                                    theme.background
-                                } else {
-                                    theme.muted_foreground
-                                },
-                                Icon::ArrowUp,
-                                13.0,
-                            ))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.send_message(cx);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(self.footer_hint())
+        div().px(px(12.0)).pb(px(12.0)).child(
+            div()
+                .flex()
+                .flex_col()
+                .rounded(px(radius::XL))
+                .border_1()
+                .border_color(if self.composer_focused {
+                    theme.border
+                } else {
+                    self.surfaces().border()
+                })
+                .bg(self.surfaces().card())
+                .id("composer")
+                .track_focus(&focus)
+                .cursor_text()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        window.focus(&this.focus_handle(cx));
+                        this.composer_focused = true;
+                        cx.notify();
+                    }),
+                )
+                // Text line with send on the right.
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .min_h(px(52.0))
+                        .px(px(14.0))
+                        .py(px(10.0))
+                        .child(div().flex_1().child(crate::features::text_input::render(
+                            &self.composer,
+                            &theme,
+                            self.composer_focused,
+                            "Ask anything, or paste a screenshot…",
+                        )))
+                        .child(self.send_button(can_submit, cx)),
+                )
+                // Quiet tray: attachment on the left, pickers on the right.
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(10.0))
+                        .pb(px(10.0))
+                        .child(self.attach_button(cx))
+                        .child(self.mic_button(cx))
+                        .child(div().flex_1())
+                        .child(self.model_selector(cx))
+                        .child(self.prompt_selector(cx)),
+                ),
+        )
     }
 
-    /// A whisper of a footer: how to send, and nothing else.
-    fn footer_hint(&self) -> impl IntoElement {
+    /// The one obvious action.
+    fn send_button(&self, can_submit: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        let background = if can_submit {
+            theme.primary
+        } else {
+            self.surfaces().muted()
+        };
+        let icon = if can_submit {
+            theme.background
+        } else {
+            self.surfaces().muted_foreground()
+        };
         div()
             .flex()
             .items_center()
             .justify_center()
-            .gap(px(5.0))
-            .pt(px(8.0))
-            .text_size(px(9.5))
-            .text_color(self.surfaces().muted_foreground())
-            .child(kbd(&theme, self.surfaces(), "↵"))
-            .child("send")
-            .child(div().w(px(6.0)))
-            .child(kbd(&theme, self.surfaces(), "Esc"))
-            .child("hide")
+            .size(px(32.0))
+            .rounded(px(radius::FULL))
+            .bg(background)
+            .cursor_pointer()
+            .id("send")
+            .child(icons::icon_colored(icon, Icon::ArrowUp, 15.0))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.send_message(cx);
+                cx.notify();
+            }))
+    }
+
+    /// Attach a screenshot or a file.
+    fn attach_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let active = self.attached_capture.is_some();
+        let tooltip = if active {
+            "Screenshot attached"
+        } else {
+            "Attach a screenshot"
+        };
+        let mut button = text_tool(&theme, self.surfaces(), Icon::Image, tooltip);
+        if active {
+            button = button.bg(self.surfaces().muted());
+        }
+        button.on_click(cx.listener(|this, _, _, cx| {
+            this.capture_screen();
+            cx.notify();
+        }))
+    }
+
+    /// Push to talk, shown as a mic rather than a labelled control.
+    fn mic_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let listening = self.is_listening();
+        let tooltip = if listening {
+            "Stop listening"
+        } else {
+            "Start listening"
+        };
+        let mut button = text_tool(&theme, self.surfaces(), Icon::Mic, tooltip);
+        if listening {
+            button = button.bg(self.surfaces().muted());
+        }
+        button.on_click(cx.listener(|this, _, _, cx| {
+            if this.is_listening() {
+                this.stop_listening();
+            } else {
+                this.start_listening(cx);
+                this.start_pulse(cx);
+            }
+            cx.notify();
+        }))
     }
 }
 
@@ -2016,6 +1896,25 @@ fn local_offset_seconds() -> i64 {
             })
             .unwrap_or(0)
     })
+}
+
+/// A quiet icon button for the composer tray.
+fn text_tool(
+    theme: &Theme,
+    surfaces: crate::features::theme::Surfaces,
+    icon: Icon,
+    tooltip: &'static str,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(30.0))
+        .rounded(px(radius::MD))
+        .hover(|style| style.bg(surfaces.muted()))
+        .cursor_pointer()
+        .id(gpui::ElementId::Name(tooltip.into()))
+        .child(icons::icon(theme, icon, 14.0))
 }
 
 /// Menu row styling shared by the two pickers.
@@ -2236,23 +2135,6 @@ pub fn render_markdown(
     }
 
     column.into_any_element()
-}
-
-/// A small keyboard chip.
-fn kbd(
-    theme: &Theme,
-    surfaces: crate::features::theme::Surfaces,
-    label: &'static str,
-) -> impl IntoElement {
-    div()
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(theme.border)
-        .bg(surfaces.muted())
-        .px(px(4.0))
-        .text_size(px(9.5))
-        .text_color(theme.muted_foreground)
-        .child(label)
 }
 
 impl Render for Overlay {
