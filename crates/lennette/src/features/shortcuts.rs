@@ -163,9 +163,9 @@ fn format_display(ctrl: bool, shift: bool, alt: bool, key: &str) -> String {
 pub fn support() -> (bool, &'static str) {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_none() {
         return (
-            false,
-            "Global shortcuts need a desktop portal on Wayland, which is not implemented. \
-             They work under X11 or XWayland.",
+            true,
+            "Global shortcuts use the desktop's shortcut portal. Change the keys in your \
+             desktop's own shortcuts settings.",
         );
     }
     if cfg!(target_os = "linux") {

@@ -3475,6 +3475,7 @@ dependencies = [
  "uuid",
  "x11rb",
  "xcap",
+ "zbus",
 ]
 
 [[package]]

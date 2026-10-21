@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=lennette
+Comment=Desktop assistant with live transcription, chat and meeting notes
+Exec=lennette
+Icon=dev.lennette.overlay
+Terminal=false
+Categories=Utility;
+StartupWMClass=lennette

@@ -139,6 +139,8 @@ pub struct Overlay {
     focus_composer: bool,
     /// Whether the far side of the call is captured too.
     system_audio: bool,
+    /// Wayland portal shortcuts, polled alongside the X11 listener.
+    portal: Option<std::sync::Arc<crate::features::wayland::PortalShortcuts>>,
     /// System tray handle, polled alongside shortcuts.
     tray: Option<crate::features::tray::Tray>,
     /// Overlay background opacity, 0.35 to 1.0.
@@ -154,6 +156,7 @@ impl Overlay {
         services: crate::app::Services,
         shortcuts: Option<std::rc::Rc<crate::features::shortcuts::ShortcutListener>>,
         tray: Option<crate::features::tray::Tray>,
+        portal: Option<std::sync::Arc<crate::features::wayland::PortalShortcuts>>,
     ) -> Self {
         // Read once at startup; changing it writes straight back to settings.
         let opacity =
@@ -239,6 +242,7 @@ impl Overlay {
             focus_composer: false,
             system_audio: false,
             tray,
+            portal,
             shortcut_poll: None,
         }
     }
@@ -685,7 +689,9 @@ impl Overlay {
 
     /// Keep polling shortcuts even when no session is running.
     fn ensure_shortcut_poll(&mut self, cx: &mut Context<Self>) {
-        if (self.shortcuts.is_none() && self.tray.is_none()) || self.shortcut_poll.is_some() {
+        if (self.shortcuts.is_none() && self.tray.is_none() && self.portal.is_none())
+            || self.shortcut_poll.is_some()
+        {
             return;
         }
         self.shortcut_poll = Some(cx.spawn(async move |this, cx| {
@@ -870,7 +876,7 @@ impl Overlay {
             cx.notify();
         }));
         if active {
-            tab = tab.bg(theme.background);
+            tab = tab.bg(self.surfaces().background());
         }
         tab.child(icons::icon(&theme, icon, 13.0))
             .child(mode.label())
@@ -907,7 +913,7 @@ impl Overlay {
                     .gap(px(2.0))
                     .p(px(2.0))
                     .rounded(px(radius::MD))
-                    .bg(theme.card)
+                    .bg(self.surfaces().card())
                     .child(self.mode_tab(Mode::Ask, self.mode == Mode::Ask, cx))
                     .child(self.mode_tab(Mode::Listen, self.mode == Mode::Listen, cx)),
             )
@@ -931,7 +937,7 @@ impl Overlay {
             .rounded_full()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.muted)
+            .bg(self.surfaces().muted())
             .text_size(px(10.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.foreground)
@@ -954,7 +960,7 @@ impl Overlay {
             .rounded_full()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.muted)
+            .bg(self.surfaces().muted())
             .text_size(px(10.5))
             .text_color(theme.foreground)
             .cursor_pointer()
@@ -987,7 +993,7 @@ impl Overlay {
             .rounded_full()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.muted)
+            .bg(self.surfaces().muted())
             .text_size(px(10.5))
             .text_color(theme.foreground)
             .cursor_pointer()
@@ -1009,7 +1015,7 @@ impl Overlay {
             }),
         );
         if active {
-            button = button.bg(theme.accent);
+            button = button.bg(self.surfaces().accent());
         }
         button
     }
@@ -1024,9 +1030,14 @@ impl Overlay {
             }),
         );
         if active {
-            button = button.bg(theme.accent);
+            button = button.bg(self.surfaces().accent());
         }
         button
+    }
+
+    /// Surface colours at this window's opacity, so every child fades together.
+    fn surfaces(&self) -> crate::features::theme::Surfaces {
+        self.theme.surfaces(self.opacity)
     }
 
     /// Alpha for opaque surfaces. Kept slightly above the body opacity so text
@@ -1229,7 +1240,7 @@ impl Overlay {
                     .rounded(px(radius::MD))
                     .border_1()
                     .border_color(theme.border)
-                    .bg(theme.card)
+                    .bg(self.surfaces().card())
                     .px(px(space::MD))
                     .py(px(space::SM))
                     .child(icons::icon(&theme, Icon::Image, 12.0))
@@ -1273,7 +1284,7 @@ impl Overlay {
                             .w(px(120.0))
                             .h(px(4.0))
                             .rounded_full()
-                            .bg(theme.muted)
+                            .bg(self.surfaces().muted())
                             .child(
                                 div()
                                     .w(px(width))
@@ -1546,12 +1557,11 @@ impl Overlay {
                 );
             } else {
                 // Assistant answers are markdown and render as formatted blocks.
-                list = list.child(
-                    div()
-                        .flex()
-                        .justify_start()
-                        .child(render_markdown(&theme, &message.content)),
-                );
+                list = list.child(div().flex().justify_start().child(render_markdown(
+                    &theme,
+                    self.surfaces(),
+                    &message.content,
+                )));
             }
         }
 
@@ -1562,7 +1572,11 @@ impl Overlay {
                     .flex()
                     .justify_start()
                     .gap(px(6.0))
-                    .child(render_markdown(&theme, &self.streaming_text))
+                    .child(render_markdown(
+                        &theme,
+                        self.surfaces(),
+                        &self.streaming_text,
+                    ))
                     .child(div().size(px(6.0)).rounded_full().bg(theme.success)),
             );
         }
@@ -1581,7 +1595,7 @@ impl Overlay {
 
         let labels = self.visible_follow_ups();
         for (index, label) in labels.into_iter().enumerate() {
-            let chip = pill(("follow-up", index), &theme, false)
+            let chip = pill(("follow-up", index), &theme, self.surfaces(), false)
                 .flex_shrink_0()
                 .child(icons::icon(&theme, Icon::ArrowUpRight, 10.0))
                 .child(label.clone());
@@ -1639,7 +1653,7 @@ impl Overlay {
             .rounded_full()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.muted);
+            .bg(self.surfaces().muted());
 
         for (index, tool) in Tool::ALL.into_iter().enumerate() {
             if index > 0 {
@@ -1652,7 +1666,7 @@ impl Overlay {
                 .h(px(26.0))
                 .rounded_full()
                 .cursor_pointer()
-                .hover(|style| style.bg(theme.accent))
+                .hover(|style| style.bg(self.surfaces().accent()))
                 .id(("tool", index))
                 .child(icons::icon(&theme, tool.icon(), 13.0));
             button = if labelled {
@@ -1699,8 +1713,8 @@ impl Overlay {
             } else {
                 "Push to talk"
             })
-            .child(kbd(&theme, "⌃"))
-            .child(kbd(&theme, "Space"))
+            .child(kbd(&theme, self.surfaces(), "⌃"))
+            .child(kbd(&theme, self.surfaces(), "Space"))
     }
 
     fn image_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1720,7 +1734,7 @@ impl Overlay {
         button = if active {
             button
                 .border_color(theme.primary)
-                .bg(theme.accent)
+                .bg(self.surfaces().accent())
                 .text_color(theme.primary)
         } else {
             button
@@ -1784,7 +1798,7 @@ impl Overlay {
             .rounded(px(radius::MD))
             .border_1()
             .border_color(theme.border)
-            .bg(theme.card)
+            .bg(self.surfaces().card())
             .p(px(3.0));
         if models.is_empty() {
             menu = menu.child(
@@ -1801,7 +1815,7 @@ impl Overlay {
             let mut item = div()
                 .flex()
                 .items_center()
-                .forge_model_item(&theme, active)
+                .forge_model_item(&theme, self.surfaces(), active)
                 .id(("model-option", index))
                 .child(*model);
             item = item.on_click(cx.listener(move |this, _, _, cx| {
@@ -1858,14 +1872,14 @@ impl Overlay {
             .rounded(px(radius::MD))
             .border_1()
             .border_color(theme.border)
-            .bg(theme.card)
+            .bg(self.surfaces().card())
             .p(px(3.0));
         for (index, (id, name, _)) in self.prompt_choices.clone().into_iter().enumerate() {
             let active = self.active_prompt == Some(id);
             let mut item = div()
                 .flex()
                 .items_center()
-                .forge_model_item(&theme, active)
+                .forge_model_item(&theme, self.surfaces(), active)
                 .id(("prompt-option", index))
                 .child(name);
             item = item.on_click(cx.listener(move |this, _, _, cx| {
@@ -1973,7 +1987,7 @@ impl Overlay {
                                 draft
                             }),
                     )
-                    .child(kbd(&theme, "↵"))
+                    .child(kbd(&theme, self.surfaces(), "↵"))
                     .child(
                         div()
                             .size(px(28.0))
@@ -2016,7 +2030,7 @@ impl Overlay {
             .rounded(px(radius::MD))
             .border_1()
             .border_color(theme.border)
-            .bg(theme.muted);
+            .bg(self.surfaces().muted());
 
         for size in OverlaySize::ALL {
             let active = size == self.size;
@@ -2039,7 +2053,7 @@ impl Overlay {
                 .id(("size", size as usize))
                 .child(size.label());
             if active {
-                chip = chip.bg(theme.background);
+                chip = chip.bg(self.surfaces().background());
             }
             switcher = switcher.child(chip.on_click(cx.listener(move |this, _, _, cx| {
                 this.size = size;
@@ -2064,8 +2078,8 @@ impl Overlay {
             .child(switcher)
             .child(div().flex_1())
             .child(self.opacity_controls(cx))
-            .child(kbd(&theme, "Ctrl"))
-            .child(kbd(&theme, "\\"))
+            .child(kbd(&theme, self.surfaces(), "Ctrl"))
+            .child(kbd(&theme, self.surfaces(), "\\"))
             .child(
                 div()
                     .flex_shrink_0()
@@ -2115,11 +2129,21 @@ fn local_offset_seconds() -> i64 {
 
 /// Menu row styling shared by the two pickers.
 trait ModelItemStyle: Sized {
-    fn forge_model_item(self, theme: &Theme, active: bool) -> Self;
+    fn forge_model_item(
+        self,
+        theme: &Theme,
+        surfaces: crate::features::theme::Surfaces,
+        active: bool,
+    ) -> Self;
 }
 
 impl ModelItemStyle for gpui::Div {
-    fn forge_model_item(mut self, theme: &Theme, active: bool) -> Self {
+    fn forge_model_item(
+        mut self,
+        theme: &Theme,
+        surfaces: crate::features::theme::Surfaces,
+        active: bool,
+    ) -> Self {
         self = self
             .h(px(24.0))
             .px(px(8.0))
@@ -2132,17 +2156,25 @@ impl ModelItemStyle for gpui::Div {
                 theme.muted_foreground
             });
         if active {
-            self = self.bg(theme.muted);
+            self = self.bg(surfaces.muted());
         }
         self
     }
 }
 
 /// Render markdown into styled GPUI blocks.
-pub fn render_markdown(theme: &Theme, text: &str) -> gpui::AnyElement {
+pub fn render_markdown(
+    theme: &Theme,
+    surfaces: crate::features::theme::Surfaces,
+    text: &str,
+) -> gpui::AnyElement {
     use crate::features::markdown::{Block, Span};
 
-    fn span_element(theme: &Theme, span: &Span) -> gpui::AnyElement {
+    fn span_element(
+        theme: &Theme,
+        surfaces: crate::features::theme::Surfaces,
+        span: &Span,
+    ) -> gpui::AnyElement {
         let mut text = div().text_size(px(12.5)).child(span.text.clone());
         let colour = if span.style.code {
             theme.success
@@ -2166,7 +2198,7 @@ pub fn render_markdown(theme: &Theme, text: &str) -> gpui::AnyElement {
                 .font_family("monospace")
                 .px(px(3.0))
                 .rounded(px(3.0))
-                .bg(theme.card);
+                .bg(surfaces.card());
         }
         text.into_any_element()
     }
@@ -2189,14 +2221,14 @@ pub fn render_markdown(theme: &Theme, text: &str) -> gpui::AnyElement {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.foreground);
                 for span in &spans {
-                    row = row.child(span_element(theme, span));
+                    row = row.child(span_element(theme, surfaces, span));
                 }
                 row.into_any_element()
             }
             Block::Paragraph { spans } => {
                 let mut row = div().flex().flex_wrap().items_baseline();
                 for span in &spans {
-                    row = row.child(span_element(theme, span));
+                    row = row.child(span_element(theme, surfaces, span));
                 }
                 row.into_any_element()
             }
@@ -2209,7 +2241,7 @@ pub fn render_markdown(theme: &Theme, text: &str) -> gpui::AnyElement {
                     .border_color(theme.accent)
                     .text_color(theme.muted_foreground);
                 for span in &spans {
-                    row = row.child(span_element(theme, span));
+                    row = row.child(span_element(theme, surfaces, span));
                 }
                 row.into_any_element()
             }
@@ -2222,7 +2254,7 @@ pub fn render_markdown(theme: &Theme, text: &str) -> gpui::AnyElement {
                         .child(marker),
                 );
                 for span in &spans {
-                    row = row.child(span_element(theme, span));
+                    row = row.child(span_element(theme, surfaces, span));
                 }
                 row.into_any_element()
             }
@@ -2234,7 +2266,7 @@ pub fn render_markdown(theme: &Theme, text: &str) -> gpui::AnyElement {
                     .rounded(px(8.0))
                     .border_1()
                     .border_color(theme.border)
-                    .bg(theme.card)
+                    .bg(surfaces.card())
                     .px(px(10.0))
                     .py(px(8.0));
                 if let Some(language) = language {
@@ -2269,7 +2301,7 @@ pub fn render_markdown(theme: &Theme, text: &str) -> gpui::AnyElement {
                     .border_1()
                     .border_color(theme.border);
 
-                let mut header_row = div().flex().bg(theme.card);
+                let mut header_row = div().flex().bg(surfaces.card());
                 for index in 0..columns {
                     header_row = header_row.child(
                         div()
@@ -2316,12 +2348,16 @@ pub fn render_markdown(theme: &Theme, text: &str) -> gpui::AnyElement {
 }
 
 /// A small keyboard chip.
-fn kbd(theme: &Theme, label: &'static str) -> impl IntoElement {
+fn kbd(
+    theme: &Theme,
+    surfaces: crate::features::theme::Surfaces,
+    label: &'static str,
+) -> impl IntoElement {
     div()
         .rounded(px(4.0))
         .border_1()
         .border_color(theme.border)
-        .bg(theme.muted)
+        .bg(surfaces.muted())
         .px(px(4.0))
         .text_size(px(9.5))
         .text_color(theme.muted_foreground)

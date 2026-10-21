@@ -87,10 +87,14 @@ pub fn label(configured: Option<&str>, provider_id: Option<&str>) -> String {
     if let Some(model) = configured.map(str::trim).filter(|model| !model.is_empty()) {
         return model.to_owned();
     }
-    provider_id
-        .and_then(default_for)
-        .map(str::to_owned)
-        .unwrap_or_else(|| "No model".to_owned())
+    match provider_id {
+        Some(provider) => default_for(provider)
+            .map(str::to_owned)
+            .unwrap_or_else(|| provider.to_owned()),
+        // No provider at all: say so plainly rather than "No model", which reads
+        // like a picker that failed.
+        None => "Add a provider".to_owned(),
+    }
 }
 
 /// Whether a provider id is known to the catalog.
@@ -127,7 +131,7 @@ mod tests {
             label(Some("   "), Some("gemini")),
             "gemini-flash-lite-latest"
         );
-        assert_eq!(label(None, None), "No model");
+        assert_eq!(label(None, None), "Add a provider");
     }
 
     #[test]

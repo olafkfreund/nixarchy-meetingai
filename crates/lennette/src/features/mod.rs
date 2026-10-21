@@ -29,4 +29,5 @@ pub mod theme;
 pub mod transcription;
 pub mod tray;
 pub mod vault;
+pub mod wayland;
 pub mod window;

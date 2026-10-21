@@ -53,7 +53,12 @@ pub fn card(
 }
 
 /// A clickable pill, used for follow-up chips and segmented choices.
-pub fn pill(id: impl Into<ElementId>, theme: &Theme, active: bool) -> gpui::Stateful<gpui::Div> {
+pub fn pill(
+    id: impl Into<ElementId>,
+    theme: &Theme,
+    surfaces: crate::features::theme::Surfaces,
+    active: bool,
+) -> gpui::Stateful<gpui::Div> {
     let mut element = div()
         .h(px(26.0))
         .px(px(10.0))
@@ -67,13 +72,13 @@ pub fn pill(id: impl Into<ElementId>, theme: &Theme, active: bool) -> gpui::Stat
 
     element = if active {
         element
-            .bg(theme.primary)
+            .bg(surfaces.primary())
             .border_color(theme.primary)
             .text_color(theme.background)
     } else {
         element
-            .bg(theme.muted)
-            .border_color(theme.border)
+            .bg(surfaces.muted())
+            .border_color(surfaces.border())
             .text_color(theme.foreground)
     };
 
@@ -93,7 +98,7 @@ pub fn icon_button(
         .justify_center()
         .rounded(px(radius::MD))
         .cursor_pointer()
-        .hover(|style| style.bg(theme.accent))
+        .hover(|style| style.bg(theme.surfaces(0.6).accent()))
         .id(id)
         .child(crate::features::icons::icon(theme, glyph, 13.0))
 }

@@ -76,6 +76,17 @@ impl Theme {
 }
 
 impl Theme {
+    /// Surface colours at a given window opacity.
+    ///
+    /// Every panel, pill and button must use these rather than the raw tokens,
+    /// otherwise opaque children float over a see-through window.
+    pub fn surfaces(self, opacity: f32) -> Surfaces {
+        Surfaces {
+            opacity,
+            theme: self,
+        }
+    }
+
     /// The same colour at a given opacity, for see-through surfaces.
     pub fn with_alpha(colour: Rgba, alpha: f32) -> Rgba {
         Rgba {
@@ -91,9 +102,71 @@ impl Default for Theme {
     }
 }
 
+/// A theme viewed at a specific window opacity.
+#[derive(Debug, Clone, Copy)]
+pub struct Surfaces {
+    pub opacity: f32,
+    pub theme: Theme,
+}
+
+impl Surfaces {
+    /// Scale a colour's alpha by the window opacity.
+    fn fade(self, colour: Rgba) -> Rgba {
+        Rgba {
+            a: (colour.a * self.opacity).clamp(0.0, 1.0),
+            ..colour
+        }
+    }
+
+    pub fn background(self) -> Rgba {
+        self.fade(self.theme.background)
+    }
+
+    pub fn card(self) -> Rgba {
+        self.fade(self.theme.card)
+    }
+
+    pub fn muted(self) -> Rgba {
+        self.fade(self.theme.muted)
+    }
+
+    pub fn accent(self) -> Rgba {
+        self.fade(self.theme.accent)
+    }
+
+    pub fn input(self) -> Rgba {
+        self.fade(self.theme.input)
+    }
+
+    /// The primary fill stays mostly opaque so labels keep their contrast.
+    pub fn primary(self) -> Rgba {
+        let boosted = (self.opacity + 0.35).clamp(0.0, 1.0);
+        Rgba {
+            a: boosted,
+            ..self.theme.primary
+        }
+    }
+
+    pub fn border(self) -> Rgba {
+        self.fade(self.theme.border)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surfaces_scale_alpha_and_keep_primary_readable() {
+        let theme = Theme::DARK;
+        let half = theme.surfaces(0.5);
+        assert!((half.card().a - 0.5).abs() < 1e-6);
+        assert!((half.background().a - 0.5).abs() < 1e-6);
+        // Primary stays readable at low opacity rather than vanishing.
+        assert!(half.primary().a > 0.5);
+        let full = theme.surfaces(1.0);
+        assert!((full.card().a - 1.0).abs() < 1e-6);
+    }
 
     #[test]
     fn hex_maps_channels_correctly() {
