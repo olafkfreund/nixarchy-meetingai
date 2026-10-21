@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Git pre-commit hook: checks format, linter, and typecheck before committing.
+set -euo pipefail
+
+echo "======================================================"
+echo " Running pre-commit checks (format, clippy, typecheck)"
+echo "======================================================"
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$REPO_ROOT"
+
+if command -v devenv >/dev/null 2>&1 && [ -f "$REPO_ROOT/devenv.nix" ]; then
+    devenv shell -- just pre-commit
+else
+    just pre-commit
+fi

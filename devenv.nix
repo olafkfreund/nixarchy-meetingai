@@ -137,6 +137,7 @@
             pkgs.coreutils
             pkgs.gcc
             pkgs.glibc.bin
+            pkgs.llvmPackages.clang
           ]
         }"
         export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
@@ -152,16 +153,16 @@
 
   tasks = {
     "lennette:build" = {
-      exec = "cargo build --workspace";
+      exec = "cargo build";
     };
     "lennette:test" = {
-      exec = "cargo nextest run --workspace";
+      exec = "cargo nextest run";
     };
     "lennette:check" = {
-      exec = "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings";
+      exec = "cargo fmt --check && cargo clippy --all-targets -- -D warnings";
     };
     "lennette:run" = {
-      exec = "cargo run -p lennette";
+      exec = "cargo run";
     };
   };
 
@@ -175,7 +176,7 @@
 
   enterTest = ''
     cargo fmt --check
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo nextest run --workspace
+    cargo clippy --all-targets -- -D warnings
+    cargo nextest run
   '';
 }
