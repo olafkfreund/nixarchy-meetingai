@@ -44,13 +44,32 @@ your Home Manager user. Home Manager must already be integrated with NixOS:
 }
 ```
 
-The modules select the patched compositor and Lua configuration, install a
-protected desktop launcher and six compositor bindings, and disable compositor
-plugins. Existing overview and glass plugins can replay cached images and use a
-different compositor ABI; they have not been audited for this patch. Remove
-configuration for disabled plugins from your Lua files or guard it with
-`hl.get_loaded_plugins()`. Existing Lua configuration can coexist with the
+The modules select the patched compositor and Lua configuration and install a
+protected desktop launcher and six compositor bindings. Plugins are supported
+when upgraded to this compositor's API, rebuilt against its patched headers,
+and listed by exact library path in `programs.lennettePrivateOverlay.allowedPluginPaths`.
+The launcher rejects loaded libraries outside that list. Existing Lua configuration can coexist with the
 module. Existing Hyprlang configurations must be migrated to Lua first.
+
+Use `inputs.lennette-private.legacyPackages.${system}` to build plugins with the
+same Hyprland, compiler, Lua and graphics libraries as the private compositor.
+For custom derivations, use that package set's `gcc16Stdenv`, and include its
+`hyprland` in build inputs. Updating only the headers is insufficient: plugins
+must implement the new render-context, window-presentation and window-state APIs.
+Given a list of rebuilt plugin derivations named `plugins`, configure Home Manager:
+
+```nix
+wayland.windowManager.hyprland.plugins = plugins;
+programs.lennettePrivateOverlay.allowedPluginPaths =
+  map (plugin: "${plugin}/lib/lib${plugin.pname}.so") plugins;
+```
+
+Capture recomposition bypasses overview workspace hooks, plugin render-stage
+callbacks and cached window decorations. Your local desktop retains its plugin
+effects; monitor shares show the underlying public scene. Closing snapshots are
+omitted from shares because even a public window's glass snapshot can contain
+pixels sampled from a protected overlay. The compositor reports each loaded
+plugin's library path and capture-compatibility capability to the launcher.
 
 The application is installed separately. From a Lennette checkout, run
 `devenv shell -- just install`, and ensure `~/.local/bin` is on your `PATH`.
@@ -89,7 +108,7 @@ performed by the build or QA scripts. The additional desktop entry is named
 **Lennette** app-menu entry through the protected launcher.
 
 The launcher verifies that its Wayland display and Hyprland instance match,
-requires the compositor to accept the protection rule, rejects loaded plugins,
+requires the compositor to accept the protection rule, checks loaded plugin paths,
 and removes X11/headless overrides before starting Lennette. Use this launcher
 for launches and shortcut commands. The Home Manager module owns `lennette.lua`
 so Lennette's automatic shortcut installer cannot replace it. Configure these
@@ -148,9 +167,11 @@ otherwise see its pixels. This happens only inside the isolated compositor.
 
 `--shortcut-module FILE` additionally loads the generated Home Manager Lua module
 and exercises real virtual-keyboard window/input/dashboard bindings.
+`--plugins FILE` loads a JSON array of absolute plugin library paths into the
+isolated compositor and verifies they all load together before capture tests.
 `--doty-config-dir /path/to/doty/modules/features/wm/hyprland/hypr`
 checks the input, binding, decoration, layout, miscellaneous, window, and
-workspace modules with plugins disabled. This does not run desktop autostart
+workspace modules with the selected plugins. This does not run desktop autostart
 commands or validate physical monitor configuration.
 
 Artifacts are written below `target/hyprland-private-qa` (or `--artifacts`):
@@ -164,8 +185,8 @@ This cannot guarantee “undetectable under all circumstances.” It protects th
 patched compositor's supported window/monitor capture paths. The compositor
 must be running, its rule must remain enabled, and launches must use the
 protected configuration. Ordinary launches on an unpatched desktop are unsafe
-for this purpose. Loading plugins or changing rules after launch invalidates
-the tested configuration; the launcher is a launch-time check.
+for this purpose. Changing plugin binaries or protection rules after launch
+invalidates the tested configuration; the launcher is a launch-time check.
 
 Window metadata, notifications, input-method windows, clipboard/drag
 surfaces, and copies of Lennette's content displayed by another application are

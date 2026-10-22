@@ -17,6 +17,7 @@ let
     ];
     text = ''
       export LENNETTE_BINARY=${lib.escapeShellArg cfg.executable}
+      export LENNETTE_ALLOWED_PLUGIN_PATHS=${lib.escapeShellArg (builtins.toJSON cfg.allowedPluginPaths)}
       ${builtins.readFile ./launch.sh}
     '';
   };
@@ -30,6 +31,11 @@ in
       default = "${config.home.homeDirectory}/.local/bin/lennette";
       description = "Absolute path to the installed Lennette binary.";
     };
+    allowedPluginPaths = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = "Exact shared-library paths of plugins rebuilt for the private compositor and verified with capture exclusion.";
+    };
   };
   config = lib.mkIf cfg.enable {
     wayland.windowManager.hyprland = {
@@ -37,9 +43,6 @@ in
       configType = "lua";
       package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.hyprland-private;
     };
-    # Overview/render plugins can copy display snapshots back into a clean render.
-    # They also target a different Hyprland ABI. Audit before enabling any plugin.
-    wayland.windowManager.hyprland.plugins = lib.mkForce [ ];
     wayland.windowManager.hyprland.extraConfig = lib.mkAfter ''
       require('lennette')
     '';

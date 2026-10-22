@@ -10,12 +10,14 @@ if [[ "$actual" != "$expected" ]]; then
     echo "Unsupported Hyprland revision: $actual (expected $expected)" >&2
     exit 1
 fi
-if git -C "$source_dir" apply --reverse --check "$package_dir/private-overlay.patch" 2>/dev/null; then
-    echo 'Private overlay patch is already applied.'
-else
-    git -C "$source_dir" apply --check "$package_dir/private-overlay.patch"
-    git -C "$source_dir" apply "$package_dir/private-overlay.patch"
-fi
+for patch in private-overlay.patch plugin-compat.patch; do
+    if git -C "$source_dir" apply --reverse --check "$package_dir/$patch" 2>/dev/null; then
+        echo "$patch is already applied."
+    else
+        git -C "$source_dir" apply --check "$package_dir/$patch"
+        git -C "$source_dir" apply "$package_dir/$patch"
+    fi
+done
 cmake -S "$source_dir" -B "$build_dir" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE:-Release}" \
     -DCMAKE_CXX_FLAGS_DEBUG='-O0 -g0' \

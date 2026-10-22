@@ -1,0 +1,179 @@
+diff --git a/src/ipc/s1/Commands.cpp b/src/ipc/s1/Commands.cpp
+index da514c5..7c85378 100644
+--- a/src/ipc/s1/Commands.cpp
++++ b/src/ipc/s1/Commands.cpp
+@@ -1825,12 +1825,14 @@ static SResponse dispatchPlugin(const SRequest& request) {
+                     R"#(
+ {{
+     "name": "{}",
++    "path": "{}",
++    "privateCaptureCompatible": true,
+     "author": "{}",
+     "handle": "{:x}",
+     "version": "{}",
+     "description": "{}"
+ }},)#",
+-                    escapeJSONStrings(p->m_name), escapeJSONStrings(p->m_author), rc<uintptr_t>(p->m_handle), escapeJSONStrings(p->m_version), escapeJSONStrings(p->m_description));
++                    escapeJSONStrings(p->m_name), escapeJSONStrings(p->m_path), escapeJSONStrings(p->m_author), rc<uintptr_t>(p->m_handle), escapeJSONStrings(p->m_version), escapeJSONStrings(p->m_description));
+             }
+             trimTrailingComma(result);
+             result += "]";
+diff --git a/src/managers/screenshare/ScreenshareFrame.cpp b/src/managers/screenshare/ScreenshareFrame.cpp
+index 7488838..533a13d 100644
+--- a/src/managers/screenshare/ScreenshareFrame.cpp
++++ b/src/managers/screenshare/ScreenshareFrame.cpp
+@@ -215,11 +215,11 @@ bool CScreenshareFrame::preparePrivateCapture() {
+     });
+     auto&                     ctx = g_pHyprRenderer->context();
+     ctx.m_privateOverlayCapture   = true;
++    ctx.m_renderingSnapshot       = true; // Plugins must leave standalone scene rendering alone.
+     ctx.m_blockSurfaceFeedback    = true;
+     ctx.m_data.blockScreenShader  = true;
+     g_pHyprRenderer->draw(ctx, CClearPassElement::SClearData{{0, 0, 0, 1}}, damage);
+-    Render::CMonitorScene scene{SOURCE};
+-    scene.draw(ctx, Time::steadyNow());
++    g_pHyprRenderer->renderPrivateScene(ctx, SOURCE, Time::steadyNow());
+     finishing = true;
+     g_pHyprRenderer->endRender();
+     return true;
+diff --git a/src/render/Renderer.cpp b/src/render/Renderer.cpp
+index a73e83d..51ff53a 100644
+--- a/src/render/Renderer.cpp
++++ b/src/render/Renderer.cpp
+@@ -354,7 +354,8 @@ void IHyprRenderer::renderWorkspaceWindowsFullscreen(CRenderContext& ctx, PHLMON
+     PHLWINDOW  pWorkspaceWindow = nullptr;
+     const bool SPECIAL          = pWorkspace->type() == Workspace::eWorkspaceType::SPECIAL;
+ 
+-    Event::bus()->m_events.render.stage.emit({RENDER_PRE_WINDOWS, pMonitor, ctx});
++    if (!ctx.m_privateOverlayCapture)
++        Event::bus()->m_events.render.stage.emit({RENDER_PRE_WINDOWS, pMonitor, ctx});
+ 
+     // pre-filter renderable windows once for the tiled + floating passes
+     std::vector<PHLWINDOW> windows;
+@@ -473,7 +474,8 @@ void IHyprRenderer::renderWorkspaceWindows(CRenderContext& ctx, PHLMONITOR pMoni
+     PHLWINDOW  lastWindow;
+     const bool SPECIAL = pWorkspace->type() == Workspace::eWorkspaceType::SPECIAL;
+ 
+-    Event::bus()->m_events.render.stage.emit({RENDER_PRE_WINDOWS, pMonitor, ctx});
++    if (!ctx.m_privateOverlayCapture)
++        Event::bus()->m_events.render.stage.emit({RENDER_PRE_WINDOWS, pMonitor, ctx});
+ 
+     std::vector<PHLWINDOWREF> windows;
+     windows.reserve(Desktop::windowState()->windows().size());
+@@ -593,6 +595,9 @@ void IHyprRenderer::renderWindow(CRenderContext& ctx, PHLWINDOW pWindow, PHLMONI
+     if (ctx.m_privateOverlayCapture && pWindow->m_ruleApplicator->privateOverlay().valueOrDefault())
+         return;
+ 
++    if (ctx.m_privateOverlayCapture)
++        decorate = false;
++
+     if (pWindow->isHidden() && !standalone)
+         return;
+ 
+@@ -654,7 +659,8 @@ void IHyprRenderer::renderWindow(CRenderContext& ctx, PHLWINDOW pWindow, PHLMONI
+     // for plugins
+     ctx.m_data.currentWindow = pWindow;
+ 
+-    Event::bus()->m_events.render.stage.emit({RENDER_PRE_WINDOW, pMonitor, ctx});
++    if (!ctx.m_privateOverlayCapture)
++        Event::bus()->m_events.render.stage.emit({RENDER_PRE_WINDOW, pMonitor, ctx});
+ 
+     const auto fullAlpha = renderdata.alpha * renderdata.fadeAlpha;
+ 
+@@ -872,7 +878,8 @@ void IHyprRenderer::renderWindow(CRenderContext& ctx, PHLWINDOW pWindow, PHLMONI
+         }
+     }
+ 
+-    Event::bus()->m_events.render.stage.emit({RENDER_POST_WINDOW, pMonitor, ctx});
++    if (!ctx.m_privateOverlayCapture)
++        Event::bus()->m_events.render.stage.emit({RENDER_POST_WINDOW, pMonitor, ctx});
+ 
+     ctx.m_data.currentWindow.reset();
+ }
+@@ -1209,7 +1216,8 @@ void IHyprRenderer::renderAllClientsForWorkspace(CRenderContext& ctx, PHLMONITOR
+ 
+         renderMonitorBackground(ctx, pMonitor, time, nullptr, mode);
+ 
+-        Event::bus()->m_events.render.stage.emit({RENDER_POST_WALLPAPER, pMonitor, ctx});
++        if (!ctx.m_privateOverlayCapture)
++            Event::bus()->m_events.render.stage.emit({RENDER_POST_WALLPAPER, pMonitor, ctx});
+ 
+         for (auto const& ls : pMonitor->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM]) {
+             renderLayer(ctx, ls.lock(), pMonitor, time);
+@@ -1233,7 +1241,8 @@ void IHyprRenderer::renderAllClientsForWorkspace(CRenderContext& ctx, PHLMONITOR
+     if LIKELY (sceneIncludesShell(mode) && !*PXPMODE) {
+         renderMonitorBackground(ctx, pMonitor, time, SHELL_WORKSPACE, mode);
+ 
+-        Event::bus()->m_events.render.stage.emit({RENDER_POST_WALLPAPER, pMonitor, ctx});
++        if (!ctx.m_privateOverlayCapture)
++            Event::bus()->m_events.render.stage.emit({RENDER_POST_WALLPAPER, pMonitor, ctx});
+ 
+         for (auto const& ls : pMonitor->m_layerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM]) {
+             renderLayer(ctx, ls.lock(), pMonitor, time);
+@@ -1308,7 +1317,8 @@ void IHyprRenderer::renderAllClientsForWorkspace(CRenderContext& ctx, PHLMONITOR
+         }
+     }
+ 
+-    Event::bus()->m_events.render.stage.emit({RENDER_POST_WINDOWS, pMonitor, ctx});
++    if (!ctx.m_privateOverlayCapture)
++        Event::bus()->m_events.render.stage.emit({RENDER_POST_WINDOWS, pMonitor, ctx});
+ 
+     if (!sceneIncludesShell(mode)) {
+         renderFadeouts(ctx, pMonitor, Desktop::FADEOUT_PLANE_POPUP, pWorkspace, mode);
+@@ -2380,7 +2390,8 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
+             pMonitor->m_forceFullFrames = 0;
+     }
+ 
+-    Event::bus()->m_events.render.stage.emit({RENDER_BEGIN, pMonitor, ctx});
++    if (!ctx.m_privateOverlayCapture)
++        Event::bus()->m_events.render.stage.emit({RENDER_BEGIN, pMonitor, ctx});
+ 
+     bool renderCursor = true;
+ 
+@@ -2441,7 +2452,8 @@ void IHyprRenderer::renderMonitor(PHLMONITOR pMonitor, bool commit) {
+         ctx.m_pass.add(makeUnique<CRectPassElement>(data));
+     }
+ 
+-    Event::bus()->m_events.render.stage.emit({RENDER_LAST_MOMENT, pMonitor, ctx});
++    if (!ctx.m_privateOverlayCapture)
++        Event::bus()->m_events.render.stage.emit({RENDER_LAST_MOMENT, pMonitor, ctx});
+ 
+     finishing               = true;
+     const auto renderResult = endRender();
+@@ -2723,6 +2735,15 @@ bool IHyprRenderer::commitPendingAndDoExplicitSync(PHLMONITOR pMonitor, std::opt
+     return ok;
+ }
+ 
++// Compose public surfaces directly. Overview hooks and their cached display
++// snapshots belong to the local monitor, never to the private export scene.
++void IHyprRenderer::renderPrivateScene(CRenderContext& ctx, PHLMONITOR monitor, const Time::steady_tp& now) {
++    renderAllClientsForWorkspace(ctx, monitor, monitor->m_activeWorkspace, now, {}, 1.F);
++    const CBox geometry{0, 0, monitor->m_transformedSize.x, monitor->m_transformedSize.y};
++    renderLockscreen(ctx, monitor, now, geometry);
++    renderIME(ctx, monitor, now, geometry);
++}
++
+ void IHyprRenderer::renderWorkspace(CRenderContext& ctx, PHLMONITOR pMonitor, PHLWORKSPACE pWorkspace, const Time::steady_tp& now, const CBox& geometry) {
+     Vector2D translate = {geometry.x, geometry.y};
+     float    scale     = sc<float>(geometry.width) / pMonitor->m_transformedSize.x;
+@@ -3502,6 +3523,8 @@ void IHyprRenderer::renderFadeouts(CRenderContext& ctx, PHLMONITOR monitor, Desk
+ }
+ 
+ void IHyprRenderer::renderFadeouts(CRenderContext& ctx, PHLMONITOR monitor, Desktop::eFadeoutPlane plane, PHLWORKSPACE workspace, eSceneMode mode) {
++    if (ctx.m_privateOverlayCapture)
++        return;
+     if (!monitor)
+         return;
+ 
+diff --git a/src/render/Renderer.hpp b/src/render/Renderer.hpp
+index 9d1e219..ec67417 100644
+--- a/src/render/Renderer.hpp
++++ b/src/render/Renderer.hpp
+@@ -278,6 +278,7 @@ namespace Render {
+ 
+         // old private:
+         void arrangeLayerArray(PHLMONITOR, const std::vector<PHLLSREF>&, bool, CBox*);
++        void renderPrivateScene(CRenderContext& ctx, PHLMONITOR monitor, const Time::steady_tp& now);
+         void renderWorkspace(CRenderContext& ctx, PHLMONITOR pMonitor, PHLWORKSPACE pWorkspace, const Time::steady_tp& now, const CBox& geometry);
+         void renderWorkspace(CRenderContext& ctx, PHLWORKSPACE workspace, const Time::steady_tp& now, eSceneMode mode);
+         void renderIME(CRenderContext& ctx, PHLMONITOR pMonitor, const Time::steady_tp& now, const CBox& geometry);

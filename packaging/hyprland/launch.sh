@@ -20,8 +20,10 @@ if ! response=$(hyprctl eval "$rule" 2>&1) || [[ "$response" != 'ok' ]]; then
     exit 1
 fi
 if ! plugins=$(hyprctl -j plugin list 2>&1) || \
-    ! jq -e 'type == "array" and length == 0' <<< "$plugins" >/dev/null 2>&1; then
-    echo 'Lennette was not opened: private mode requires all compositor plugins to be unloaded.' >&2
+    ! jq -e --argjson allowed "${LENNETTE_ALLOWED_PLUGIN_PATHS:-[]}" \
+      'type == "array" and all(.[]; .privateCaptureCompatible == true and (.path as $path | $allowed | index($path) != null))' \
+      <<< "$plugins" >/dev/null 2>&1; then
+    echo 'Lennette was not opened: a loaded plugin is not approved for this private compositor build.' >&2
     exit 1
 fi
 if [[ ${1:-} == --check ]]; then

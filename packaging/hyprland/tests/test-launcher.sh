@@ -50,6 +50,18 @@ export FAKE_SUPPORT=unsupported
 if bash "$here/../launch.sh" 2>/dev/null; then echo 'old app without tray suppression accepted' >&2; exit 1; fi
 [[ ! -e "$LAUNCHED_FILE" ]]
 unset FAKE_SUPPORT
+export LENNETTE_ALLOWED_PLUGIN_PATHS='["/nix/store/test-plugin/lib/liboverview.so"]'
+export FAKE_PLUGINS='[{"name":"overview","path":"/nix/store/test-plugin/lib/liboverview.so","privateCaptureCompatible":true}]'
+bash "$here/../launch.sh" --toggle-window
+[[ $(cat "$LAUNCHED_FILE") == --toggle-window ]]
+rm "$LAUNCHED_FILE"
+export FAKE_PLUGINS='[{"name":"overview","path":"/nix/store/other-plugin/lib/liboverview.so","privateCaptureCompatible":true}]'
+if bash "$here/../launch.sh" 2>/dev/null; then echo 'unapproved plugin path accepted' >&2; exit 1; fi
+export FAKE_PLUGINS='[{"name":"overview","path":"/nix/store/test-plugin/lib/liboverview.so"}]'
+if bash "$here/../launch.sh" 2>/dev/null; then echo 'old compositor plugin status accepted' >&2; exit 1; fi
+[[ ! -e "$LAUNCHED_FILE" ]]
+unset LENNETTE_ALLOWED_PLUGIN_PATHS
+export FAKE_PLUGINS='[]'
 bash "$here/../launch.sh" --toggle-window
 [[ $(cat "$LAUNCHED_FILE") == --toggle-window ]]
 rm "$LAUNCHED_FILE"

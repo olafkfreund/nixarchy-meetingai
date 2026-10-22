@@ -22,6 +22,7 @@ parser.add_argument("--drm-node", default=os.environ.get("TEST_DRM_NODE"))
 parser.add_argument("--lennette-binary", type=Path)
 parser.add_argument("--shortcut-module", type=Path)
 parser.add_argument("--doty-config-dir", type=Path)
+parser.add_argument("--plugins", type=Path, help="JSON array of plugin shared-library paths to load in the isolated compositor")
 parser.add_argument("--config-only", action="store_true")
 parser.add_argument("--ordinary-launch", action="store_true")
 args = parser.parse_args()
@@ -46,6 +47,8 @@ parent_env["WAYLAND_DISPLAY"] = args.parent_socket
 env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime), XDG_CACHE_HOME=str(artifacts / "cache"),
            WAYLAND_DISPLAY=args.parent_socket, TEST_DRM_NODE=args.drm_node)
 env.update(XDG_CONFIG_HOME=str(artifacts / "user-config"), XDG_DATA_HOME=str(artifacts / "user-data"))
+env["HOME"] = str(artifacts / "user-home")
+(artifacts / "user-home/.cache").mkdir(parents=True, exist_ok=True)
 (artifacts / "user-config/hypr").mkdir(parents=True, exist_ok=True)
 for key in ("HYPRLAND_INSTANCE_SIGNATURE", "DISPLAY", "AQ_BACKEND", "AQ_DRM_DEVICES", "LIBGL_ALWAYS_SOFTWARE"):
     env.pop(key, None)
@@ -62,6 +65,12 @@ hl.config({input={resolve_binds_by_sym=false}})
 hl.window_rule({match={class="test\\\\.background.*"},float=true,border_size=0,rounding=0})
 hl.window_rule({match={class="test\\\\.public"},float=true,pin=true,border_size=0,rounding=0})
 ''' + ("" if args.ordinary_launch else f'dofile({json.dumps(str(PACKAGE / "lennette-private.lua"))})\n'))
+plugin_paths = json.loads(args.plugins.read_text()) if args.plugins else []
+if plugin_paths:
+    with config.open("a") as handle:
+        for path in plugin_paths:
+            handle.write(f"hl.plugin.load({json.dumps(path)})\n")
+    env["LENNETTE_ALLOWED_PLUGIN_PATHS"] = json.dumps(plugin_paths)
 processes = []
 checks = []
 log = (artifacts / "compositor.log").open("w")
@@ -164,7 +173,7 @@ def check_doty_config():
     for module in ("core.input", "binds", "decorations", "layout", "misc", "windowrules", "workspace.rules"):
         lua(f'require("modules.{module}")')
     assert not ctl("configerrors"), ctl("configerrors")
-    checks.append({"test": "doty input, bindings, decorations, layout, misc, window and workspace rules load without plugins"})
+    checks.append({"test": "doty input, bindings, decorations, layout, misc, window and workspace rules load", "plugins": plugin_paths})
 
 try:
     wait_for(lambda: bool(list((runtime / "hypr").glob("*/.socket.sock"))), "compositor IPC", 60)
@@ -182,6 +191,11 @@ try:
     env["WAYLAND_DISPLAY"] = next(p.name for p in runtime.glob("wayland-*") if not p.name.endswith(".lock"))
     bound_host_window()
     assert not ctl("configerrors"), ctl("configerrors")
+    loaded_plugins = json.loads(ctl("-j", "plugin", "list"))
+    if plugin_paths:
+        assert sorted(p["path"] for p in loaded_plugins) == sorted(plugin_paths), loaded_plugins
+        assert all(p.get("privateCaptureCompatible") for p in loaded_plugins), loaded_plugins
+        checks.append({"test": "all configured plugins loaded together", "plugins": loaded_plugins})
     for output in ("HEADLESS-1", "HEADLESS-2"):
         assert ctl("output", "create", "headless", output) == "ok"
     if args.config_only:
@@ -224,6 +238,41 @@ try:
     for protocol in ("wlr", "ext"):
         for storage in ("shm", "dma"):
             clean(capture("overlay-and-popup", protocol, storage), f"{protocol}/{storage} overlay and popup")
+    if plugin_paths:
+        # Open each overview while the protected fixture is visible. Capture
+        # must still compose public surfaces instead of replaying its snapshots.
+        for name, open_call, close_call in (
+            ("scrolloverview", 'hl.dispatch(hl.plugin.scrolloverview.overview("open HEADLESS-1"))', 'hl.dispatch(hl.plugin.scrolloverview.overview("close"))'),
+            ("hymission", 'hl.plugin.hymission.open()', 'hl.plugin.hymission.close()'),
+        ):
+            dispatch('hl.dsp.cursor.move({x=800,y=500})')
+            dispatch('hl.dsp.focus({monitor="HEADLESS-1"})')
+            if name == "scrolloverview":
+                lua('lennette_qa_overview_clicked=false; hl.define_submap("scrolloverview", function() hl.bind("mouse:272", function() lennette_qa_overview_clicked=true end) end)')
+            else:
+                # Keep the public search helper out of the solid-color fixture
+                # comparison; exercise the overview in its keyboard mode.
+                lua('hl.config({plugin={hymission={vim_keys=true}}})')
+            lua(open_call)
+            time.sleep(0.5)
+            if name == "hymission":
+                assert json.loads(ctl("hymission-overview-state"))["active"]
+            for protocol in ("wlr", "ext"):
+                for storage in ("shm", "dma"):
+                    clean(capture(f"{name}-open", protocol, storage), f"{name} active, {protocol}/{storage}")
+            if name == "scrolloverview":
+                assert ctl("submap") == "scrolloverview", ctl("submap")
+                dispatch('hl.dsp.cursor.move({x=800,y=500})')
+                run(["wlrctl", "pointer", "click"])
+                (artifacts / "overview-input-state.json").write_text(json.dumps({"binds": json.loads(ctl("-j", "binds")), "submap": ctl("submap"), "cursor": json.loads(ctl("-j", "cursorpos"))}, indent=2))
+                def overview_clicked():
+                    result = subprocess.run(["hyprctl", "eval", "assert(lennette_qa_overview_clicked)"], env=env, text=True, capture_output=True, timeout=5)
+                    return result.returncode == 0 and result.stdout.strip() == "ok"
+                wait_for(overview_clicked, "overview mouse bind invokes its retained Lua callback")
+                checks.append({"test": "scroll overview mouse submap invokes the current bind callback"})
+            lua(close_call)
+            time.sleep(0.5)
+            clean(capture(f"{name}-closed"), f"{name} closed")
     # Direct window capture must not reveal the protected window either.
     assert colors(capture("direct-window", "window", "shm", "dev.lennette.overlay"))[(255, 0, 255)] == 0
     checks.append({"test": "direct protected window capture denied"})
@@ -375,7 +424,9 @@ try:
 
     evidence = {"passed": True, "checks": checks,
                 "compositor": str(args.compositor.resolve()),
-                "patch_sha256": hashlib.sha256((PACKAGE / "private-overlay.patch").read_bytes()).hexdigest()}
+                "patch_sha256": hashlib.sha256((PACKAGE / "private-overlay.patch").read_bytes()).hexdigest(),
+                "plugin_compat_sha256": hashlib.sha256((PACKAGE / "plugin-compat.patch").read_bytes()).hexdigest(),
+                "plugins": loaded_plugins}
     if args.lennette_binary:
         evidence["lennette_sha256"] = hashlib.sha256(args.lennette_binary.read_bytes()).hexdigest()
     (artifacts / "results.json").write_text(json.dumps(evidence, indent=2) + "\n")

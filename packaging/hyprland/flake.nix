@@ -14,10 +14,21 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
       compositor = hyprland.packages.${system}.hyprland.overrideAttrs (old: {
-        patches = (old.patches or [ ]) ++ [ ./private-overlay.patch ];
+        patches = (old.patches or [ ]) ++ [
+          ./private-overlay.patch
+          ./plugin-compat.patch
+        ];
       });
     in
     {
+      # Build plugins with the compositor's compiler and dependency closure.
+      legacyPackages.${system} = import nixpkgs {
+        inherit system;
+        overlays = [
+          hyprland.overlays.hyprland-packages
+          (_final: _prev: { hyprland = compositor; })
+        ];
+      };
       packages.${system} = {
         default = compositor;
         hyprland-private = compositor;
@@ -48,8 +59,12 @@
       homeManagerModules.default = import ./home-module.nix { inherit self; };
       checks.${system} = {
         patch = pkgs.runCommand "lennette-private-patch-check" { nativeBuildInputs = [ pkgs.git ]; } ''
-          cd ${hyprland.packages.${system}.hyprland.src}
+          cp -r ${hyprland.packages.${system}.hyprland.src} source
+          chmod -R u+w source
+          cd source
           git apply --check ${./private-overlay.patch}
+          git apply ${./private-overlay.patch}
+          git apply --check ${./plugin-compat.patch}
           touch "$out"
         '';
         launcher =
