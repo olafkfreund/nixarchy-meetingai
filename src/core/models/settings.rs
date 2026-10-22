@@ -136,6 +136,8 @@ impl PrimaryTab {
 pub struct Settings {
     pub theme: ThemeChoice,
     pub transparency: u32,
+    /// UI text size as a percentage of the base scale (85 to 140).
+    pub font_scale: u32,
     pub show_borders: bool,
     pub autostart: bool,
     pub hide_app_icon: bool,
@@ -161,6 +163,7 @@ impl Default for Settings {
         Self {
             theme: ThemeChoice::Dark,
             transparency: 50,
+            font_scale: 100,
             show_borders: true,
             autostart: false,
             hide_app_icon: false,
@@ -187,6 +190,7 @@ impl Default for Settings {
 mod keys {
     pub const THEME: &str = "theme";
     pub const TRANSPARENCY: &str = "transparency";
+    pub const FONT_SCALE: &str = "font_scale";
     pub const SHOW_BORDERS: &str = "show_borders";
     pub const AUTOSTART: &str = "autostart";
     pub const HIDE_APP_ICON: &str = "hide_app_icon";
@@ -230,6 +234,8 @@ impl Settings {
                 .map(ThemeChoice::parse)
                 .unwrap_or(defaults.theme),
             transparency: number(keys::TRANSPARENCY, defaults.transparency).min(100),
+            // Clamped so the layout never collapses or overflows its panels.
+            font_scale: number(keys::FONT_SCALE, defaults.font_scale).clamp(85, 140),
             show_borders: flag(keys::SHOW_BORDERS, defaults.show_borders),
             autostart: flag(keys::AUTOSTART, defaults.autostart),
             hide_app_icon: flag(keys::HIDE_APP_ICON, defaults.hide_app_icon),
@@ -276,6 +282,7 @@ impl Settings {
         let pairs = [
             (keys::THEME, self.theme.as_str().to_owned()),
             (keys::TRANSPARENCY, self.transparency.to_string()),
+            (keys::FONT_SCALE, self.font_scale.to_string()),
             (keys::SHOW_BORDERS, self.show_borders.to_string()),
             (keys::AUTOSTART, self.autostart.to_string()),
             (keys::HIDE_APP_ICON, self.hide_app_icon.to_string()),
@@ -339,6 +346,7 @@ mod tests {
         let settings = Settings {
             theme: ThemeChoice::Light,
             transparency: 80,
+            font_scale: 120,
             show_borders: false,
             autostart: true,
             hide_app_icon: true,

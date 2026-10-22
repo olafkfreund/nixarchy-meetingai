@@ -16,6 +16,7 @@ use crate::ui::controls::{
 };
 use crate::ui::dashboard::nav::Route;
 use crate::ui::icons;
+use crate::ui::theme::scaled;
 use crate::ui::theme::{Theme, radius, space};
 
 /// Shortcut catalog shown on the shortcuts page, derived from the real bindings
@@ -120,14 +121,14 @@ fn page_header(theme: &Theme, title: &str, description: &str) -> impl IntoElemen
         .gap(px(6.0))
         .child(
             div()
-                .text_size(px(20.0))
+                .text_size(scaled(20.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.foreground)
                 .child(title.to_owned()),
         )
         .child(
             div()
-                .text_size(px(12.0))
+                .text_size(scaled(12.0))
                 .text_color(theme.muted_foreground)
                 .child(description.to_owned()),
         )
@@ -191,7 +192,7 @@ pub fn app_settings(
                 "transparency-slider",
                 theme,
                 s.transparency,
-                10,
+                0,
                 100,
                 cx,
                 |view: &mut crate::ui::dashboard::view::DashboardView, new_val, cx| {
@@ -200,6 +201,28 @@ pub fn app_settings(
                 },
             ))
             .child(value_chip(theme, &format!("{}%", s.transparency))),
+    ))
+    .child(row(
+        theme,
+        "Text size",
+        "Scale text in the overlay and dashboard",
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .child(slider(
+                "font-scale-slider",
+                theme,
+                s.font_scale,
+                85,
+                140,
+                cx,
+                |view: &mut crate::ui::dashboard::view::DashboardView, new_val, cx| {
+                    view.settings_mut().settings.font_scale = new_val;
+                    view.schedule_settings_save(cx);
+                },
+            ))
+            .child(value_chip(theme, &format!("{}%", s.font_scale))),
     ))
     .child(row(
         theme,
@@ -392,7 +415,7 @@ pub fn screenshot_settings(
         ),
     ));
 
-    stack(vec![capture.child(div().py(px(space::SM)).text_size(px(11.0)).text_color(theme.muted_foreground)
+    stack(vec![capture.child(div().py(px(space::SM)).text_size(scaled(11.0)).text_color(theme.muted_foreground)
         .child("Captures use the active monitor and are scaled to at most 1920 pixels. Interval mode refreshes context while recording; it does not send questions.")).into_any_element()])
 }
 
@@ -582,7 +605,7 @@ pub fn response_settings(
             .py(px(space::SM))
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(scaled(12.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
                     .child("Instruction"),
@@ -595,7 +618,7 @@ pub fn response_settings(
                     .bg(theme.muted)
                     .px(px(space::MD))
                     .py(px(space::SM))
-                    .text_size(px(11.5))
+                    .text_size(scaled(11.5))
                     .text_color(theme.muted_foreground)
                     .child(s.smart_follow_ups_prompt.clone()),
             ),
@@ -707,7 +730,7 @@ fn credentials_section(
                 .py(px(space::SM))
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(scaled(12.0))
                         .text_color(theme.foreground)
                         .child(label),
                 )
@@ -727,7 +750,7 @@ fn credentials_section(
                         })
                         .bg(theme.input)
                         .px(px(space::SM))
-                        .text_size(px(12.0))
+                        .text_size(scaled(12.0))
                         .text_color(theme.foreground)
                         .cursor_text()
                         .child(div().flex_1().min_w(px(0.0)).truncate().child(shown))
@@ -755,7 +778,7 @@ fn credentials_section(
     if let Some(status) = state.key_status.as_deref() {
         card = card.child(
             div()
-                .text_size(px(11.0))
+                .text_size(scaled(11.0))
                 .text_color(theme.muted_foreground)
                 .child(status.to_owned()),
         );
@@ -789,7 +812,7 @@ fn credentials_section(
     if state.stored_chat.is_empty() && state.stored_speech.is_empty() {
         card = card.child(
             div()
-                .text_size(px(11.0))
+                .text_size(scaled(11.0))
                 .text_color(theme.muted_foreground)
                 .child(
                     "No keys stored yet. Chat and transcription stay disabled until you add one.",
@@ -875,7 +898,7 @@ pub fn render(
             .h(px(26.0))
             .px(px(14.0))
             .rounded(px(radius::FULL))
-            .text_size(px(11.5))
+            .text_size(scaled(11.5))
             .font_weight(if is_active {
                 FontWeight::SEMIBOLD
             } else {
@@ -947,7 +970,7 @@ pub fn hint(theme: &Theme, message: &str) -> impl IntoElement {
         .flex()
         .items_center()
         .gap(px(8.0))
-        .text_size(px(11.5))
+        .text_size(scaled(11.5))
         .text_color(theme.muted_foreground)
         .child(icons::icon(theme, Icon::Info, 12.0))
         .child(message.to_owned())

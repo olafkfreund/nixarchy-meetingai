@@ -10,6 +10,7 @@
 
 use std::ops::Range;
 
+use crate::ui::theme::scaled;
 use gpui::{
     App, Bounds, Context, ElementInputHandler, Entity, EntityInputHandler, Pixels, Point,
     UTF16Selection, Window, px,
@@ -291,7 +292,7 @@ pub fn render(
         .relative()
         .w_full()
         .h(px(22.0))
-        .text_size(px(13.5))
+        .text_size(scaled(13.5))
         .overflow_hidden()
         .child(content)
         .children(caret.then(|| {

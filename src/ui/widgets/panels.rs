@@ -10,6 +10,7 @@ use gpui::{
 };
 
 use crate::ui::theme::Theme;
+use crate::ui::theme::scaled;
 pub use crate::ui::theme::{radius, space};
 
 /// A rounded container used for cards and grouped settings.
@@ -30,7 +31,7 @@ pub fn card(
 ) -> impl IntoElement {
     let mut head = div().flex().flex_col().gap(px(2.0)).child(
         div()
-            .text_size(px(13.0))
+            .text_size(scaled(13.0))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme.foreground)
             .child(title),
@@ -38,7 +39,7 @@ pub fn card(
     if let Some(description) = description {
         head = head.child(
             div()
-                .text_size(px(11.5))
+                .text_size(scaled(11.5))
                 .text_color(theme.muted_foreground)
                 .child(description),
         );
@@ -67,7 +68,7 @@ pub fn pill(
         .gap(px(4.0))
         .rounded_full()
         .border_1()
-        .text_size(px(11.0))
+        .text_size(scaled(11.0))
         .cursor_pointer();
 
     element = if active {
@@ -118,14 +119,14 @@ pub fn setting_row(
 ) -> impl IntoElement {
     let mut text = div().flex().flex_col().gap(px(1.0)).child(
         div()
-            .text_size(px(12.5))
+            .text_size(scaled(12.5))
             .text_color(theme.foreground)
             .child(title),
     );
     if let Some(description) = description {
         text = text.child(
             div()
-                .text_size(px(11.0))
+                .text_size(scaled(11.0))
                 .text_color(theme.muted_foreground)
                 .child(description),
         );
@@ -147,7 +148,7 @@ pub fn notice(theme: &Theme, colour: Rgba, message: &'static str) -> impl IntoEl
         .bg(theme.muted)
         .px(px(space::MD))
         .py(px(space::SM))
-        .text_size(px(11.5))
+        .text_size(scaled(11.5))
         .text_color(colour)
         .child(message)
 }

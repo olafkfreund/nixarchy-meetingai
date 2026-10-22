@@ -181,30 +181,48 @@ impl Surfaces {
         if colour.a == 0.0 {
             return colour;
         }
+        // Below the old 35% floor a surface kept a visible tint, so 0% never
+        // reached a truly clear window. Scale straight from the chosen value.
         Rgba {
-            a: (colour.a * (0.35 + self.opacity * 0.65)).clamp(0.0, 1.0),
+            a: (colour.a * self.opacity).clamp(0.0, 1.0),
             ..colour
         }
     }
 
+    /// Surfaces that carry text keep a floor so labels stay readable even when
+    /// the background is fully transparent. Only the page behind them clears.
+    fn fade_readable(self, colour: Rgba) -> Rgba {
+        if colour.a == 0.0 {
+            return colour;
+        }
+        let weight = 0.35 + self.opacity * 0.65;
+        Rgba {
+            a: (colour.a * weight).clamp(0.0, 1.0),
+            ..colour
+        }
+    }
+
+    /// The page behind everything. This is the only surface that goes fully
+    /// clear at 0%, so the window can sit invisibly over the desktop.
     pub fn background(self) -> Rgba {
         self.fade(self.theme.background)
     }
 
+    /// Panels behind text keep a legibility floor.
     pub fn card(self) -> Rgba {
-        self.fade(self.theme.card)
+        self.fade_readable(self.theme.card)
     }
 
     pub fn muted(self) -> Rgba {
-        self.fade(self.theme.muted)
+        self.fade_readable(self.theme.muted)
     }
 
     pub fn accent(self) -> Rgba {
-        self.fade(self.theme.accent)
+        self.fade_readable(self.theme.accent)
     }
 
     pub fn input(self) -> Rgba {
-        self.fade(self.theme.input)
+        self.fade_readable(self.theme.input)
     }
 
     /// The primary fill stays mostly opaque so labels keep their contrast.
@@ -235,9 +253,37 @@ pub fn ui_font_family() -> gpui::SharedString {
     "Satoshi".into()
 }
 
+/// Base em size. Every text size in the UI is expressed in rems against this,
+/// so one value scales the whole interface.
+pub const BASE_REM: f32 = 16.0;
+
+/// The em size for a stored font-scale percentage.
+///
+/// GPUI resolves `text_size` written in rems against the window's rem size, so
+/// setting this on the window scales labels as well as their line heights.
+pub fn rem_size_for(font_scale: u32) -> gpui::Pixels {
+    gpui::px(BASE_REM * font_scale.clamp(85, 140) as f32 / 100.0)
+}
+
+/// A pixel size expressed as a scale-independent length.
+pub fn scaled(font_size: f32) -> gpui::Rems {
+    gpui::rems(font_size / BASE_REM)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_scale_moves_rem_size_and_stays_readable() {
+        assert_eq!(rem_size_for(100), gpui::px(16.0));
+        assert_eq!(rem_size_for(125), gpui::px(20.0));
+        // Out-of-range values from hand-edited settings are clamped, never tiny.
+        assert_eq!(rem_size_for(10), gpui::px(16.0 * 0.85));
+        assert_eq!(rem_size_for(500), gpui::px(16.0 * 1.40));
+        // A 12px label stays 12px at 100% and grows with the setting.
+        assert_eq!(scaled(12.0), gpui::rems(0.75));
+    }
 
     #[test]
     fn border_preference_keeps_focus_and_error_colours() {

@@ -11,6 +11,7 @@ use gpui::{
 
 use crate::features::icons;
 use crate::features::theme::{Theme, radius, space};
+use crate::ui::theme::scaled;
 
 /// A two-state pill switch. Clicking anywhere on it toggles.
 pub fn switch<V: 'static>(
@@ -77,7 +78,7 @@ pub fn segmented<V: 'static>(
             .h(px(22.0))
             .px(px(9.0))
             .rounded(px(radius::SM))
-            .text_size(px(11.0))
+            .text_size(scaled(11.0))
             .font_weight(FontWeight::MEDIUM)
             .cursor_pointer()
             .text_color(if *active {
@@ -343,14 +344,14 @@ pub fn row(
                 .gap(px(2.0))
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(scaled(12.5))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.foreground)
                         .child(title.to_owned()),
                 )
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(scaled(11.0))
                         .text_color(theme.muted_foreground)
                         .child(description.to_owned()),
                 ),
@@ -387,14 +388,14 @@ pub fn section(theme: &Theme, title: &str, description: &str) -> gpui::Div {
                 .pb(px(space::SM))
                 .child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(scaled(13.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.foreground)
                         .child(title.to_owned()),
                 )
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(scaled(11.0))
                         .text_color(theme.muted_foreground)
                         .child(description.to_owned()),
                 ),
@@ -415,7 +416,7 @@ pub fn value_chip(theme: &Theme, value: &str) -> impl IntoElement {
         .bg(theme.muted)
         .px(px(space::SM))
         .py(px(4.0))
-        .text_size(px(11.0))
+        .text_size(scaled(11.0))
         .text_color(theme.foreground)
         .child(value.to_owned())
 }
@@ -439,7 +440,7 @@ pub fn warning(theme: &Theme, message: &str) -> impl IntoElement {
         .child(
             div()
                 .flex_1()
-                .text_size(px(11.0))
+                .text_size(scaled(11.0))
                 .text_color(theme.foreground)
                 .child(message.to_owned()),
         )
@@ -454,7 +455,7 @@ pub fn keycap(theme: &Theme, label: &str) -> impl IntoElement {
         .bg(theme.muted)
         .px(px(5.0))
         .py(px(1.0))
-        .text_size(px(10.0))
+        .text_size(scaled(10.0))
         .text_color(theme.muted_foreground)
         .child(label.to_owned())
 }
@@ -475,7 +476,7 @@ pub fn action<V: 'static>(
         .px(px(space::MD))
         .rounded(px(radius::MD))
         .bg(theme.primary)
-        .text_size(px(11.5))
+        .text_size(scaled(11.5))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.background)
         .cursor_pointer()
