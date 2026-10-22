@@ -1,7 +1,18 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 // The binary reuses the library's modules so the CLI and the app agree.
 use lennette::cli;
 
 fn main() {
+    #[cfg(windows)]
+    if std::env::args_os().len() > 1 {
+        // A portable GUI launch has no console, but CLI flags should print to
+        // the invoking terminal without creating a console during normal use.
+        unsafe {
+            windows_sys::Win32::System::Console::AttachConsole(
+                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+    }
     // Shortcut flags run one-shot and exit; anything else launches the app.
     if let Some(output) = cli::handle_args() {
         if !output.is_empty() {

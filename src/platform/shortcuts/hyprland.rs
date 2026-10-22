@@ -14,6 +14,9 @@ use crate::platform::shortcuts::{Action, Binding};
 
 /// Whether Hyprland is the running compositor.
 pub fn is_hyprland() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
     let env_set = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some();
     if env_set {
         return true;

@@ -42,7 +42,14 @@ impl Tray {
                 Err(error) => Tray::Unavailable(error),
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            match windows_tray::start() {
+                Ok(backend) => Tray::Live(Box::new(backend)),
+                Err(error) => Tray::Unavailable(error),
+            }
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             Tray::Unavailable("the tray is not implemented on this platform yet".to_owned())
         }
@@ -108,7 +115,12 @@ fn icon_rgba() -> (Vec<u8>, u32, u32) {
 }
 
 /// Sizes a panel may ask for, largest first.
+#[cfg(target_os = "linux")]
 const ICON_SIZES: [u32; 4] = [64, 48, 32, 22];
+
+#[cfg(windows)]
+#[path = "tray_windows.rs"]
+mod windows_tray;
 
 #[cfg(target_os = "linux")]
 mod ksni_tray {

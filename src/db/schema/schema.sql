@@ -154,3 +154,11 @@ CREATE TABLE IF NOT EXISTS cached_summaries (
 
 CREATE INDEX IF NOT EXISTS idx_cached_summaries_ref
     ON cached_summaries (kind, ref_id);
+
+CREATE TABLE IF NOT EXISTS context_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    personal_context TEXT NOT NULL DEFAULT '',
+    meeting_context TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

@@ -41,6 +41,31 @@ pub fn now_millis() -> i64 {
         .unwrap_or_default()
 }
 
+/// Bound previous exchanges in long meetings while preserving the current
+/// question verbatim. The live transcript and user-selected context are supplied
+/// separately, so dropping old assistant suggestions never rewrites what was said.
+fn recent_history(mut history: Vec<Message>) -> Vec<Message> {
+    let Some(latest) = history.pop() else {
+        return Vec::new();
+    };
+    let mut remaining = 32_000usize.saturating_sub(latest.content.chars().count());
+    let mut recent = vec![latest];
+    for message in history.into_iter().rev().take(23) {
+        let size = message.content.chars().count();
+        if size > remaining {
+            break;
+        }
+        remaining -= size;
+        recent.push(message);
+    }
+    recent.reverse();
+    // Keep complete user/assistant pairs at the leading edge of the window.
+    while recent.len() > 1 && recent[0].role != crate::core::domain::Role::User {
+        recent.remove(0);
+    }
+    recent
+}
+
 /// The active conversation and its in-flight answer.
 #[derive(Default)]
 pub struct ChatSession {
@@ -140,10 +165,10 @@ impl ChatSession {
             && last.content == question.trim()
         {
             // Already represented by the trailing user message.
-            return Ok(history);
+            return Ok(recent_history(history));
         }
         history.push(Message::user(question.trim().to_owned()));
-        Ok(history)
+        Ok(recent_history(history))
     }
 
     /// Append a streamed delta and persist it.
@@ -226,6 +251,41 @@ mod tests {
 
     fn database() -> Database {
         Database::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn long_meetings_bound_old_answers_without_truncating_the_latest_question() {
+        let mut history = Vec::new();
+        for i in 0..100 {
+            history.push(Message::user(format!("Question {i}")));
+            history.push(Message::assistant("é".repeat(4000)));
+        }
+        history.push(Message::user("Latest question with context"));
+        let recent = recent_history(history);
+        assert!(recent.len() <= 24);
+        assert!(
+            recent
+                .iter()
+                .map(|m| m.content.chars().count())
+                .sum::<usize>()
+                <= 32_000
+        );
+        assert_eq!(
+            recent.last().unwrap().content,
+            "Latest question with context"
+        );
+        assert_eq!(
+            recent.first().unwrap().role,
+            crate::core::domain::Role::User
+        );
+        assert!(!recent.iter().any(|m| m.content == "Question 0"));
+        let huge_question = "x".repeat(40_000);
+        let recent = recent_history(vec![
+            Message::assistant("old"),
+            Message::user(&huge_question),
+        ]);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].content, huge_question);
     }
 
     #[test]

@@ -161,6 +161,9 @@ fn format_display(ctrl: bool, shift: bool, alt: bool, key: &str) -> String {
 
 /// Whether global shortcuts can work in this session.
 pub fn support() -> (bool, &'static str) {
+    if cfg!(windows) {
+        return (true, "Global shortcuts use Windows hotkeys.");
+    }
     if std::env::var_os("WAYLAND_DISPLAY").is_some() && std::env::var_os("DISPLAY").is_none() {
         return (
             true,
@@ -190,7 +193,7 @@ impl ShortcutListener {
     ///
     /// Returns the bindings that could not be grabbed alongside the listener, so
     /// a conflict is reported rather than silently dropped.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn start(bindings: &[Binding]) -> Result<(Self, Vec<String>), String> {
         let (event_tx, event_rx) = std_mpsc::channel();
         let (stop_tx, stop_rx) = std_mpsc::channel();
@@ -198,7 +201,10 @@ impl ShortcutListener {
         let bindings = bindings.to_vec();
 
         let worker = thread::spawn(move || {
+            #[cfg(target_os = "linux")]
             x11::run(bindings, event_tx, stop_rx, ready_tx);
+            #[cfg(windows)]
+            windows::run(bindings, event_tx, stop_rx, ready_tx);
         });
 
         match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
@@ -221,7 +227,7 @@ impl ShortcutListener {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     pub fn start(_bindings: &[Binding]) -> Result<(Self, Vec<String>), String> {
         Err("global shortcuts are not implemented on this platform yet".to_owned())
     }
@@ -236,6 +242,10 @@ impl ShortcutListener {
         self.events.try_recv().ok()
     }
 }
+
+#[cfg(windows)]
+#[path = "windows.rs"]
+mod windows;
 
 impl Drop for ShortcutListener {
     fn drop(&mut self) {

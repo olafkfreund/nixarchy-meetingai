@@ -122,6 +122,7 @@ impl gpui::AssetSource for EmbeddedAssets {
 }
 
 pub fn run() {
+    crate::core::install_tls_provider();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -172,6 +173,7 @@ pub fn run() {
             let services_for_overlay = services.clone();
             let bounds = Bounds::centered(None, size(px(OVERLAY_WIDTH), px(OVERLAY_HEIGHT)), cx);
             let overlay_options = WindowOptions {
+                show: !cfg!(windows),
                 app_id: Some("dev.lennette.overlay".into()),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 // A transparent window lets the opacity control show the desktop
@@ -188,7 +190,7 @@ pub fn run() {
             // The tray appears without needing a window, so start it together with
             // the shortcuts.
             // A tray is drawn by the desktop shell, outside the protected window.
-            let tray_state = if std::env::var("LENNETTE_PRIVATE_OVERLAY").as_deref() == Ok("1") {
+            let tray_state = if crate::cli::private_overlay_enabled() {
                 tracing::info!("tray disabled for private overlay");
                 None
             } else {
@@ -312,7 +314,17 @@ pub fn run() {
             cx.open_window(overlay_options, move |window, cx| {
                 window.set_window_title("lennette");
                 window.set_app_id("dev.lennette.overlay");
-                window.activate_window();
+                let protected = crate::platform::window::protect_from_capture(window);
+                #[cfg(windows)]
+                if protected.is_ok() {
+                    crate::platform::window::set_visible(window, true);
+                }
+                if let Err(error) = protected {
+                    tracing::error!(%error, "refusing to show an unprotected window");
+                    cx.quit();
+                } else {
+                    window.activate_window();
+                }
                 let overlay = cx.new(|_| {
                     Overlay::new(
                         services_for_overlay,
@@ -323,8 +335,8 @@ pub fn run() {
                     )
                 });
                 let weak = overlay.downgrade();
-                window.on_window_should_close(cx, move |_, cx| {
-                    weak.update(cx, |overlay, cx| overlay.close_to_tray(cx))
+                window.on_window_should_close(cx, move |window, cx| {
+                    weak.update(cx, |overlay, cx| overlay.close_to_tray(window, cx))
                         .unwrap_or(true)
                 });
                 overlay
@@ -383,6 +395,7 @@ pub fn open_dashboard_at(
     }
     let bounds = Bounds::centered(None, size(px(DASHBOARD_WIDTH), px(DASHBOARD_HEIGHT)), cx);
     let options = WindowOptions {
+        show: !cfg!(windows),
         app_id: Some("dev.lennette.overlay".into()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_background: gpui::WindowBackgroundAppearance::Transparent,
@@ -396,6 +409,16 @@ pub fn open_dashboard_at(
 
     if let Err(error) = cx.open_window(options, move |window, cx| {
         window.set_window_title("lennette dashboard");
+        let protected = crate::platform::window::protect_from_capture(window);
+        #[cfg(windows)]
+        if protected.is_ok() {
+            crate::platform::window::set_visible(window, true);
+            window.activate_window();
+        }
+        if let Err(error) = protected {
+            tracing::error!(%error, "refusing to show an unprotected dashboard");
+            cx.quit();
+        }
         // Each window gets its own connection so a slow page never blocks the
         // overlay's writes.
         let title_config = preferred_chat_config(&services);

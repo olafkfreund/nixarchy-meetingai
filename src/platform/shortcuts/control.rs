@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 
+pub use super::parse_command;
 use crate::platform::shortcuts::Action;
 
 /// Commands received and not yet handled.
@@ -68,19 +69,6 @@ impl Drop for ControlListener {
         // The accept loop exits when the process ends; the handle is detached
         // rather than joined so shutdown never blocks on a blocked accept.
         let _ = self.worker.take();
-    }
-}
-
-/// Map a forwarded command to an action.
-pub fn parse_command(command: &str) -> Option<Action> {
-    match command {
-        "toggle-dashboard" => Some(Action::ToggleDashboard),
-        "toggle-window" => Some(Action::ToggleWindow),
-        "focus-input" => Some(Action::FocusInput),
-        "toggle-system-audio" => Some(Action::SystemAudio),
-        "toggle-voice" => Some(Action::VoiceInput),
-        "screenshot" => Some(Action::Screenshot),
-        _ => None,
     }
 }
 

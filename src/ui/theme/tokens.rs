@@ -44,7 +44,7 @@ const fn rgba(r: u32, g: u32, b: u32, a: f32) -> Rgba {
     }
 }
 
-/// Default window opacity: half-see-through glass.
+/// Default opacity for shaded themes; glass surfaces remain completely clear.
 pub const DEFAULT_OPACITY: f32 = 0.5;
 
 /// Semantic surface and text colours.
@@ -75,14 +75,14 @@ impl Theme {
 
     /// Pure Glass mode: no background shade behind the app window, pure transparent background.
     pub const GLASS: Theme = Theme {
-        background: rgba(0x08, 0x08, 0x08, 0.12),
-        card: rgba(0x18, 0x18, 0x18, 0.24),
+        background: rgba(0x08, 0x08, 0x08, 0.0),
+        card: rgba(0x18, 0x18, 0x18, 0.0),
         foreground: rgb_hex(0xf5f5f5),
-        muted: rgba(0xff, 0xff, 0xff, 0.10),
-        muted_foreground: rgba(0xf3, 0xf3, 0xf3, 0.65),
-        border: rgba(0xff, 0xff, 0xff, 0.18),
-        input: rgba(0x18, 0x18, 0x18, 0.20),
-        accent: rgba(0xff, 0xff, 0xff, 0.15),
+        muted: rgba(0x24, 0x27, 0x2d, 0.0),
+        muted_foreground: rgb_hex(0xd0d4dc),
+        border: rgba(0xff, 0xff, 0xff, 0.45),
+        input: rgba(0x16, 0x19, 0x1f, 0.0),
+        accent: rgba(0x38, 0x3d, 0x47, 0.0),
         primary: rgb_hex(0xf7f7f7),
         destructive: rgb_hex(0xe5837f),
         success: rgb_hex(0x8fd9b0),
@@ -120,6 +120,49 @@ impl Theme {
         success: rgb_hex(0x16a34a),
         warning: rgb_hex(0xd97706),
     };
+
+    /// Primary fills need opaque inverse text; page alpha must never affect glyphs.
+    pub fn primary_foreground(self) -> Rgba {
+        if self.is_glass() {
+            self.foreground
+        } else {
+            Self::with_alpha(self.background, 1.0)
+        }
+    }
+
+    pub fn is_glass(self) -> bool {
+        self.background.a < 0.2
+    }
+
+    /// Glass mode uses borders and text without a background fill.
+    pub fn fill(self, colour: Rgba) -> Rgba {
+        if self.is_glass() {
+            Self::with_alpha(colour, 0.0)
+        } else {
+            colour
+        }
+    }
+
+    pub fn primary_fill(self) -> Rgba {
+        self.fill(self.primary)
+    }
+
+    /// Popups follow the same transparency policy as the rest of the app.
+    pub fn popover(self) -> Rgba {
+        if self.is_glass() {
+            self.card
+        } else {
+            Self::with_alpha(self.card, 0.98)
+        }
+    }
+
+    pub fn menu_hover(self) -> Rgba {
+        if self.is_glass() {
+            self.accent
+        } else {
+            self.muted
+        }
+    }
 
     pub const DEFAULT: Theme = Self::DARK;
 
@@ -208,25 +251,44 @@ impl Surfaces {
         self.fade(self.theme.background)
     }
 
-    /// Panels behind text keep a legibility floor.
+    /// Glass panels stay clear; other themes retain a legibility floor.
     pub fn card(self) -> Rgba {
-        self.fade_readable(self.theme.card)
+        if self.theme.is_glass() {
+            self.theme.card
+        } else {
+            self.fade_readable(self.theme.card)
+        }
     }
 
     pub fn muted(self) -> Rgba {
-        self.fade_readable(self.theme.muted)
+        if self.theme.is_glass() {
+            self.theme.muted
+        } else {
+            self.fade_readable(self.theme.muted)
+        }
     }
 
     pub fn accent(self) -> Rgba {
-        self.fade_readable(self.theme.accent)
+        if self.theme.is_glass() {
+            self.theme.accent
+        } else {
+            self.fade_readable(self.theme.accent)
+        }
     }
 
     pub fn input(self) -> Rgba {
-        self.fade_readable(self.theme.input)
+        if self.theme.is_glass() {
+            self.theme.input
+        } else {
+            self.fade_readable(self.theme.input)
+        }
     }
 
-    /// The primary fill stays mostly opaque so labels keep their contrast.
+    /// Primary actions use outlines in glass and shaded fills in other themes.
     pub fn primary(self) -> Rgba {
+        if self.theme.is_glass() {
+            return self.theme.primary_fill();
+        }
         let boosted = (self.opacity + 0.35).clamp(0.0, 1.0);
         Rgba {
             a: boosted,
@@ -235,11 +297,19 @@ impl Surfaces {
     }
 
     pub fn muted_foreground(self) -> Rgba {
-        self.fade(self.theme.muted_foreground)
+        if self.theme.is_glass() {
+            self.theme.muted_foreground
+        } else {
+            self.fade(self.theme.muted_foreground)
+        }
     }
 
     pub fn border(self) -> Rgba {
-        self.fade(self.theme.border)
+        if self.theme.is_glass() {
+            self.theme.border
+        } else {
+            self.fade(self.theme.border)
+        }
     }
 }
 
@@ -286,6 +356,33 @@ mod tests {
     }
 
     #[test]
+    fn glass_has_no_fills_at_any_opacity() {
+        let theme = Theme::GLASS;
+        for opacity in [0.0, 0.5, 1.0] {
+            let surfaces = theme.surfaces(opacity);
+            for colour in [
+                surfaces.background(),
+                surfaces.card(),
+                surfaces.muted(),
+                surfaces.input(),
+                surfaces.accent(),
+                surfaces.primary(),
+                theme.popover(),
+                theme.menu_hover(),
+                theme.fill(theme.destructive),
+            ] {
+                assert_eq!(colour.a, 0.0);
+            }
+            assert_eq!(surfaces.border().a, theme.border.a);
+            assert_eq!(theme.primary_foreground(), theme.foreground);
+            assert_eq!(theme.foreground.a, 1.0);
+        }
+        assert!(Theme::DARK.primary_fill().a > 0.0);
+        assert!(Theme::DARK.popover().a > 0.0);
+        assert!(Theme::LIGHT.primary_fill().a > 0.0);
+    }
+
+    #[test]
     fn border_preference_keeps_focus_and_error_colours() {
         let settings = crate::core::settings::Settings {
             show_borders: false,
@@ -295,16 +392,6 @@ mod tests {
         assert_eq!(theme.surfaces(1.0).border().a, 0.0);
         assert!(theme.primary.a > 0.0);
         assert!(theme.destructive.a > 0.0);
-    }
-
-    #[test]
-    fn surfaces_preserve_glass_layering() {
-        let theme = Theme::GLASS;
-        let half = theme.surfaces(0.5);
-        assert!(half.card().a < 0.25, "card alpha {}", half.card().a);
-        assert!(half.background().a < 0.5);
-        assert!(half.primary().a > 0.5);
-        assert!(half.border().a > 0.05);
     }
 
     #[test]

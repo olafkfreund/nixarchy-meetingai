@@ -131,6 +131,74 @@ impl PrimaryTab {
     }
 }
 
+/// Which remote utterances may request an automatic answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoResponse {
+    Off,
+    #[default]
+    Questions,
+    Pauses,
+}
+
+impl AutoResponse {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Questions, Self::Pauses];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Questions => "When a question is asked",
+            Self::Pauses => "After every pause",
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Questions => "questions",
+            Self::Pauses => "pauses",
+        }
+    }
+    fn parse(value: &str) -> Self {
+        match value {
+            "off" => Self::Off,
+            "pauses" => Self::Pauses,
+            _ => Self::Questions,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResponsePace {
+    Fast,
+    #[default]
+    Balanced,
+    Relaxed,
+}
+impl ResponsePace {
+    pub const ALL: [Self; 3] = [Self::Fast, Self::Balanced, Self::Relaxed];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "Fast",
+            Self::Balanced => "Balanced",
+            Self::Relaxed => "Relaxed",
+        }
+    }
+    pub fn delay(self) -> std::time::Duration {
+        std::time::Duration::from_millis(match self {
+            Self::Fast => 400,
+            Self::Balanced => 1000,
+            Self::Relaxed => 2000,
+        })
+    }
+    fn parse(value: &str) -> Self {
+        match value {
+            "Fast" => Self::Fast,
+            "Relaxed" => Self::Relaxed,
+            _ => Self::Balanced,
+        }
+    }
+}
+
+pub const FOLLOW_UP_PROMPT: &str = "Using the latest exchange and the user's meeting context, suggest three distinct, useful questions the user could ask next. Prefer clarifications, concrete next steps or deeper follow-ups. Do not answer the questions, repeat something already answered, or invent facts. Return one short question per line, without numbering or commentary.";
+
 /// All persisted settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -156,6 +224,10 @@ pub struct Settings {
     pub smart_follow_ups: bool,
     pub smart_follow_ups_prompt: String,
     pub cli_connection: String,
+    pub personal_context: String,
+    pub meeting_context: String,
+    pub auto_response: AutoResponse,
+    pub response_pace: ResponsePace,
 }
 
 impl Default for Settings {
@@ -180,8 +252,12 @@ impl Default for Settings {
             speech_provider: String::new(),
             speech_model: String::new(),
             smart_follow_ups: true,
-            smart_follow_ups_prompt: "Suggest three short follow-up questions.".to_owned(),
+            smart_follow_ups_prompt: FOLLOW_UP_PROMPT.to_owned(),
             cli_connection: String::new(),
+            personal_context: String::new(),
+            meeting_context: String::new(),
+            auto_response: AutoResponse::default(),
+            response_pace: ResponsePace::default(),
         }
     }
 }
@@ -258,11 +334,21 @@ impl Settings {
             speech_provider: text(keys::SPEECH_PROVIDER, &defaults.speech_provider),
             speech_model: text(keys::SPEECH_MODEL, &defaults.speech_model),
             smart_follow_ups: flag(keys::SMART_FOLLOW_UPS, defaults.smart_follow_ups),
-            smart_follow_ups_prompt: text(
-                keys::SMART_FOLLOW_UPS_PROMPT,
-                &defaults.smart_follow_ups_prompt,
-            ),
+            smart_follow_ups_prompt: match get(keys::SMART_FOLLOW_UPS_PROMPT) {
+                None | Some("Suggest three short follow-up questions.") => {
+                    FOLLOW_UP_PROMPT.to_owned()
+                }
+                Some(prompt) => prompt.to_owned(),
+            },
             cli_connection: text(keys::CLI_CONNECTION, &defaults.cli_connection),
+            personal_context: text("personal_context", "").chars().take(16_000).collect(),
+            meeting_context: text("meeting_context", "").chars().take(16_000).collect(),
+            auto_response: get("auto_response")
+                .map(AutoResponse::parse)
+                .unwrap_or_default(),
+            response_pace: get("response_pace")
+                .map(ResponsePace::parse)
+                .unwrap_or_default(),
         })
     }
 
@@ -278,8 +364,25 @@ impl Settings {
 
     /// Persist every setting.
     pub fn save(&self, database: &Database) -> Result<()> {
-        let connection = database.connection();
-        let pairs = [
+        for (key, value) in self.pairs() {
+            store::set(database.connection(), key, &value)?;
+        }
+        Ok(())
+    }
+
+    /// Write only fields this window changed, preserving context saved elsewhere.
+    pub fn save_changed(&self, previous: &Self, database: &Database) -> Result<()> {
+        let previous: std::collections::BTreeMap<_, _> = previous.pairs().into_iter().collect();
+        for (key, value) in self.pairs() {
+            if previous.get(key) != Some(&value) {
+                store::set(database.connection(), key, &value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn pairs(&self) -> Vec<(&'static str, String)> {
+        vec![
             (keys::THEME, self.theme.as_str().to_owned()),
             (keys::TRANSPARENCY, self.transparency.to_string()),
             (keys::FONT_SCALE, self.font_scale.to_string()),
@@ -310,11 +413,17 @@ impl Settings {
                 self.smart_follow_ups_prompt.clone(),
             ),
             (keys::CLI_CONNECTION, self.cli_connection.clone()),
-        ];
-        for (key, value) in pairs {
-            store::set(connection, key, &value)?;
-        }
-        Ok(())
+            (
+                "personal_context",
+                self.personal_context.chars().take(16_000).collect(),
+            ),
+            (
+                "meeting_context",
+                self.meeting_context.chars().take(16_000).collect(),
+            ),
+            ("auto_response", self.auto_response.as_str().to_owned()),
+            ("response_pace", self.response_pace.label().to_owned()),
+        ]
     }
 
     /// Write a single setting without touching the rest.
@@ -329,6 +438,44 @@ mod tests {
 
     fn database() -> Database {
         Database::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn window_saves_preserve_context_updated_by_another_window() {
+        let db = database();
+        let previous = Settings::default();
+        previous.save(&db).unwrap();
+        Settings::set(&db, "personal_context", "New profile from the overlay").unwrap();
+        let mut settings = previous.clone();
+        settings.response_pace = ResponsePace::Fast;
+        settings.auto_response = AutoResponse::Off;
+        settings.save_changed(&previous, &db).unwrap();
+        let loaded = Settings::load(&db).unwrap();
+        assert_eq!(loaded.personal_context, "New profile from the overlay");
+        assert_eq!(loaded.auto_response, AutoResponse::Off);
+        assert_eq!(loaded.response_pace, ResponsePace::Fast);
+        assert!(ResponsePace::Fast.delay() < ResponsePace::Balanced.delay());
+        assert!(ResponsePace::Balanced.delay() < ResponsePace::Relaxed.delay());
+    }
+
+    #[test]
+    fn question_prompt_migration_preserves_custom_instructions_and_bounds_context() {
+        let db = database();
+        Settings::set(
+            &db,
+            "smart_follow_ups_prompt",
+            "Suggest three short follow-up questions.",
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::load(&db).unwrap().smart_follow_ups_prompt,
+            FOLLOW_UP_PROMPT
+        );
+        Settings::set(&db, "smart_follow_ups_prompt", "My custom questions").unwrap();
+        Settings::set(&db, "personal_context", &"é".repeat(17_000)).unwrap();
+        let loaded = Settings::load(&db).unwrap();
+        assert_eq!(loaded.smart_follow_ups_prompt, "My custom questions");
+        assert_eq!(loaded.personal_context.chars().count(), 16_000);
     }
 
     #[test]
@@ -365,6 +512,10 @@ mod tests {
             smart_follow_ups: false,
             smart_follow_ups_prompt: "custom".into(),
             cli_connection: "".into(),
+            personal_context: "I build Rust apps".into(),
+            meeting_context: "Interview for a platform role".into(),
+            auto_response: AutoResponse::Pauses,
+            response_pace: ResponsePace::Relaxed,
         };
         settings.save(&database).unwrap();
         assert_eq!(Settings::load(&database).unwrap(), settings);

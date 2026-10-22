@@ -43,6 +43,7 @@ pub const KEY_PROVIDERS: &[(&str, &str)] = &[
 /// Settings state shared by every settings page.
 pub struct SettingsState {
     pub settings: Settings,
+    pub baseline: Settings,
     pub database: Option<crate::db::Database>,
     /// Last error from a failed save, surfaced inline.
     pub error: Option<String>,
@@ -55,6 +56,10 @@ pub struct SettingsState {
     /// Model override typed alongside the key.
     pub key_model: String,
     pub key_field: Option<CredentialField>,
+    pub model_menu_open: bool,
+    pub model_options: Vec<String>,
+    pub model_loading: bool,
+    pub model_status: Option<String>,
     pub replace_key_field: bool,
     /// Result of the last save attempt.
     pub key_status: Option<String>,
@@ -84,15 +89,25 @@ impl SettingsState {
                 crate::core::credentials::list(vault, crate::core::credentials::Kind::Speech).ok()
             })
             .unwrap_or_default();
+        let key_model = stored_chat
+            .iter()
+            .find(|credential| credential.provider == "gemini")
+            .map(|credential| credential.to_config().model)
+            .unwrap_or_else(|| crate::ai::models::default_for("gemini").unwrap().to_owned());
         Self {
+            baseline: settings.clone(),
             settings,
             database,
             error: None,
             notice: None,
             key_input: String::new(),
             key_provider: crate::ai::providers::CHAT_PROVIDERS[0].id.to_owned(),
-            key_model: crate::ai::models::default_for("gemini").unwrap().to_owned(),
+            key_model,
             key_field: None,
+            model_menu_open: false,
+            model_options: Vec::new(),
+            model_loading: false,
+            model_status: None,
             replace_key_field: false,
             key_status: None,
             stored_chat,
@@ -107,8 +122,12 @@ impl SettingsState {
             self.error = Some("The local database is not available.".to_owned());
             return;
         };
-        match self.settings.save(database) {
-            Ok(()) => self.error = None,
+        match self.settings.save_changed(&self.baseline, database) {
+            Ok(()) => {
+                self.error = None;
+                self.settings = Settings::load(database).unwrap_or_else(|_| self.settings.clone());
+                self.baseline = self.settings.clone();
+            }
             Err(error) => self.error = Some(format!("Could not save: {error}")),
         }
     }
@@ -568,8 +587,20 @@ pub fn audio_settings(
     ])
 }
 
+fn help_text(theme: &Theme, text: &str) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w(px(0.0))
+        .py(px(8.0))
+        .text_size(scaled(11.0))
+        .text_color(theme.muted_foreground)
+        .whitespace_normal()
+        .child(text.to_owned())
+}
+
 /// Follow-up suggestions and answer style.
 pub fn response_settings(
+    view: &crate::ui::dashboard::view::DashboardView,
     state: &SettingsState,
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
@@ -596,35 +627,33 @@ pub fn response_settings(
                 view.save_settings();
             },
         ),
-    ))
-    .child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .py(px(space::SM))
-            .child(
-                div()
-                    .text_size(scaled(12.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
-                    .child("Instruction"),
-            )
-            .child(
-                div()
-                    .rounded(px(radius::MD))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.muted)
-                    .px(px(space::MD))
-                    .py(px(space::SM))
-                    .text_size(scaled(11.5))
-                    .text_color(theme.muted_foreground)
-                    .child(s.smart_follow_ups_prompt.clone()),
-            ),
-    );
+    ));
 
-    stack(vec![follow_ups.into_any_element()])
+    let follow_ups = follow_ups.child(
+        view.editable_setting("smart_follow_ups_prompt", "Question generation prompt", &s.smart_follow_ups_prompt, cx)
+    ).child(help_text(theme, "Follow-up suggestions use an additional AI request after each answer when enabled. Titles use a separate request when a session is named."));
+    use crate::core::settings::{AutoResponse, ResponsePace};
+    let choices: Vec<_> = AutoResponse::ALL
+        .iter()
+        .map(|choice| (choice.label(), *choice == s.auto_response))
+        .collect();
+    let pace: Vec<_> = ResponsePace::ALL
+        .iter()
+        .map(|choice| (choice.label(), *choice == s.response_pace))
+        .collect();
+    let automatic = section(theme, "Automatic responses", "When to respond during the conversation. What it says comes from your selected prompt (and its attached files) + the live transcript.")
+        .child(segmented("auto-response", theme, &choices, cx, |view: &mut crate::ui::dashboard::view::DashboardView, index, _| {
+            view.settings_mut().settings.auto_response = AutoResponse::ALL[index]; view.save_settings();
+        }))
+        .child(help_text(theme, "When a question is asked: responds when someone asks something. After every pause: responds continuously — uses more AI requests. Off: manual requests only."))
+        .child(row(theme, "Pace", "Wait for a complete thought before responding", segmented("response-pace", theme, &pace, cx, |view: &mut crate::ui::dashboard::view::DashboardView, index, _| {
+            view.settings_mut().settings.response_pace = ResponsePace::ALL[index]; view.save_settings();
+        })))
+        .child(help_text(theme, "Each response uses 1 AI request. Short remarks never trigger one on their own. Only the other participants trigger automatic responses; your own speech supplies context."));
+    stack(vec![
+        automatic.into_any_element(),
+        follow_ups.into_any_element(),
+    ])
 }
 
 /// Keyboard shortcuts.
@@ -685,17 +714,27 @@ fn credentials_section(
             cx,
             |view: &mut crate::ui::dashboard::view::DashboardView, index, _| {
                 let id = KEY_PROVIDERS[index].1;
+                view.reset_credential_models();
                 let state = view.settings_mut();
                 state.key_provider = id.to_owned();
                 state.key_input.clear();
                 state.key_field = None;
                 state.key_status = None;
-                state.key_model = crate::ai::models::default_for(id)
-                    .or_else(|| {
-                        crate::ai::providers::SttProvider::by_id(id).map(|p| p.default_model)
-                    })
-                    .unwrap_or_default()
-                    .to_owned();
+                state.key_model = state
+                    .stored_chat
+                    .iter()
+                    .chain(state.stored_speech.iter())
+                    .find(|credential| credential.provider == id)
+                    .map(|credential| credential.to_config().model)
+                    .unwrap_or_else(|| {
+                        crate::ai::models::default_for(id)
+                            .or_else(|| {
+                                crate::ai::providers::SttProvider::by_id(id)
+                                    .map(|p| p.default_model)
+                            })
+                            .unwrap_or_default()
+                            .to_owned()
+                    });
             },
         ),
     ));
@@ -719,7 +758,8 @@ fn credentials_section(
         ),
     ] {
         let focused = state.key_field == Some(field);
-        let locked = field == CredentialField::Model && state.key_provider == "merge-gateway";
+        let chat_model = field == CredentialField::Model
+            && crate::ai::providers::ChatProvider::by_id(&state.key_provider).is_some();
         card = card.child(
             div()
                 .flex()
@@ -758,13 +798,75 @@ fn credentials_section(
                         .on_mouse_down(
                             gpui::MouseButton::Left,
                             cx.listener(move |view, _, window, cx| {
-                                if !locked {
+                                if chat_model {
+                                    view.toggle_credential_models(false, cx);
+                                } else {
                                     view.focus_credential_field(field, window, cx);
                                 }
                             }),
                         ),
                 ),
         );
+        if chat_model && state.model_menu_open {
+            let mut dropdown = div()
+                .id("credential-model-options")
+                .flex()
+                .flex_col()
+                .w_full()
+                .max_h(px(220.0))
+                .overflow_y_scroll()
+                .p(px(6.0))
+                .gap(px(4.0))
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover())
+                .text_color(theme.foreground)
+                .child(action(
+                    "refresh-credential-models",
+                    theme,
+                    if state.model_loading {
+                        "Loading models…"
+                    } else {
+                        "Refresh live models"
+                    },
+                    cx,
+                    |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
+                        view.toggle_credential_models(true, cx)
+                    },
+                ));
+            if let Some(status) = &state.model_status {
+                dropdown = dropdown.child(warning(theme, status));
+            }
+            for (index, model) in state.model_options.iter().enumerate() {
+                let chosen = model.clone();
+                dropdown = dropdown.child(
+                    div()
+                        .id(("credential-model-option", index))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .cursor_pointer()
+                        .text_size(scaled(12.0))
+                        .child(model.clone())
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.settings_mut().key_model = chosen.clone();
+                            view.settings_mut().model_menu_open = false;
+                            cx.notify();
+                        })),
+                );
+            }
+            dropdown = dropdown.child(action(
+                "custom-model-id",
+                theme,
+                "Enter custom model ID",
+                cx,
+                |view: &mut crate::ui::dashboard::view::DashboardView, cx, window| {
+                    view.settings_mut().model_menu_open = false;
+                    view.focus_credential_field(CredentialField::Model, window, cx);
+                },
+            ));
+            card = card.child(dropdown);
+        }
     }
     card = card.child(div().flex().items_center().py(px(8.0)).child(action(
         "save-key",
@@ -862,6 +964,7 @@ pub fn dev_space(
 
 /// Render the settings body for a route.
 pub fn render(
+    view: &crate::ui::dashboard::view::DashboardView,
     route: Route,
     state: &SettingsState,
     theme: &Theme,
@@ -874,6 +977,7 @@ pub fn render(
     };
     let subtabs = [
         ("General", Route::Settings),
+        ("Profiles", Route::Profiles),
         ("Audio", Route::Audio),
         ("AI & Keys", Route::DevSpace),
         ("Shortcuts", Route::Shortcuts),
@@ -932,9 +1036,10 @@ pub fn render(
         Route::Settings => {
             let app = app_settings(state, theme, cx);
             let screenshots = screenshot_settings(state, theme, cx);
-            let responses = response_settings(state, theme, cx);
+            let responses = response_settings(view, state, theme, cx);
             stack(vec![app, screenshots, responses])
         }
+        Route::Profiles => view.profiles_body(cx),
         Route::Audio => audio_settings(state, theme, cx),
         Route::DevSpace => dev_space(state, theme, cx),
         Route::Shortcuts => shortcut_settings(theme, cx),

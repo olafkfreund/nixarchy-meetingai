@@ -88,6 +88,16 @@ pub struct Microphone {
 impl Microphone {
     /// Start capturing from the named device, or the system default.
     pub fn start(device: Option<&str>) -> Result<Self, AudioError> {
+        Self::start_device(device, false)
+    }
+
+    /// WASAPI treats an output endpoint opened for input as loopback capture.
+    #[cfg(windows)]
+    pub(super) fn start_loopback(device: Option<&str>) -> Result<Self, AudioError> {
+        Self::start_device(device, true)
+    }
+
+    fn start_device(device: Option<&str>, loopback: bool) -> Result<Self, AudioError> {
         let requested = device
             .map(str::trim)
             .filter(|name| !name.is_empty() && *name != "default")
@@ -106,7 +116,7 @@ impl Microphone {
         let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<String, AudioError>>(1);
 
         let worker = thread::spawn(move || {
-            let outcome = run_capture(requested, sink, ready_tx.clone(), stop_rx);
+            let outcome = run_capture(requested, loopback, sink, ready_tx.clone(), stop_rx);
             if let Err(error) = outcome {
                 // If startup already succeeded, this is a runtime failure.
                 let _ = ready_tx.try_send(Err(error));
@@ -211,6 +221,7 @@ impl Drop for Microphone {
 
 fn run_capture(
     requested: Option<String>,
+    loopback: bool,
     sink: Arc<Mutex<Buffer>>,
     ready: std_mpsc::SyncSender<Result<String, AudioError>>,
     stop: std_mpsc::Receiver<()>,
@@ -219,25 +230,37 @@ fn run_capture(
     let device = match &requested {
         Some(name) => {
             let bare = name.strip_prefix("cpal:").unwrap_or(name);
-            host.input_devices()
-                .map_err(|error| AudioError::Config(error.to_string()))?
-                .find(|device| {
-                    device
-                        .description()
-                        .is_ok_and(|description| description.name() == bare)
-                })
-                .ok_or_else(|| AudioError::DeviceMissing(bare.to_owned()))?
+            (if loopback {
+                host.output_devices()
+            } else {
+                host.input_devices()
+            })
+            .map_err(|error| AudioError::Config(error.to_string()))?
+            .find(|device| {
+                device
+                    .description()
+                    .is_ok_and(|description| description.name() == bare)
+            })
+            .ok_or_else(|| AudioError::DeviceMissing(bare.to_owned()))?
         }
-        None => host.default_input_device().ok_or(AudioError::NoDevice)?,
+        None => (if loopback {
+            host.default_output_device()
+        } else {
+            host.default_input_device()
+        })
+        .ok_or(AudioError::NoDevice)?,
     };
     let device_name = device
         .description()
         .map(|description| description.name().to_owned())
         .unwrap_or_else(|_| "Microphone".to_owned());
 
-    let supported = device
-        .default_input_config()
-        .map_err(|error| AudioError::Config(error.to_string()))?;
+    let supported = (if loopback {
+        device.default_output_config()
+    } else {
+        device.default_input_config()
+    })
+    .map_err(|error| AudioError::Config(error.to_string()))?;
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
     let channels = config.channels as usize;

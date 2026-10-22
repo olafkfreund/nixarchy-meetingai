@@ -1,6 +1,7 @@
 //! Reusable GPUI widgets, interactive controls, panels, and text rendering.
 
 pub mod controls;
+pub mod editor;
 pub mod markdown;
 pub mod panels;
 pub mod syntax;

@@ -88,12 +88,6 @@ impl Credential {
                 }
             }
         }
-        if self.provider == "merge-gateway"
-            && !self.model.trim().is_empty()
-            && self.model.trim() != crate::ai::models::MERGE_MODEL
-        {
-            return Err("Merge Gateway uses DeepSeek V4.1 Flash 1017.".into());
-        }
         let needs_key = ChatProvider::by_id(&self.provider)
             .map(|provider| provider.requires_key())
             .unwrap_or(true);
@@ -289,13 +283,13 @@ mod tests {
     }
 
     #[test]
-    fn merge_model_is_fixed_and_blank_models_have_working_defaults() {
+    fn gateway_models_are_selectable_and_blank_models_have_working_defaults() {
         let config = Credential::chat("merge-gateway", "test-key").to_config();
         assert_eq!(config.model, crate::ai::models::MERGE_MODEL);
         assert!(config.is_usable());
         let mut credential = Credential::chat("merge-gateway", "test-key");
         credential.model = "some-other-model".into();
-        assert!(credential.validate().is_err());
+        assert!(credential.validate().is_ok());
         assert_eq!(
             Credential::speech("deepgram-stt", "test-key")
                 .to_config()

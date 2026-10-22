@@ -39,6 +39,7 @@ pub enum SttError {
 }
 
 fn client() -> reqwest::Client {
+    crate::core::install_tls_provider();
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(120))
@@ -388,9 +389,7 @@ impl LiveTranscriber {
         if api_key.trim().is_empty() {
             return Err(SttError::MissingKey);
         }
-        // reqwest and GPUI enable different rustls backends; choose one explicitly
-        // before tungstenite builds TLS, including in standalone test tools.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        crate::core::install_tls_provider();
         let mut request = url
             .into_client_request()
             .map_err(|e| SttError::Socket(e.to_string()))?;

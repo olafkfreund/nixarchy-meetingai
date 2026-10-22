@@ -46,6 +46,7 @@ pub struct TurnContext {
 
 /// Shared HTTP client, so connections are reused across turns.
 pub fn http_client() -> reqwest::Client {
+    crate::core::install_tls_provider();
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(180))
@@ -76,7 +77,7 @@ pub fn build_body(
         messages.push(openai_message(message, images));
     }
     let mut body = json!({ "model": config.model, "messages": messages, "stream": true });
-    if provider.id == "merge-gateway" {
+    if provider.id == "merge-gateway" && config.model == crate::ai::models::MERGE_MODEL {
         // Meeting answers need the final response promptly, rather than a long
         // reasoning stream. This control is supported by the pinned DeepSeek model.
         body["reasoning_effort"] = json!("none");
@@ -159,11 +160,6 @@ pub async fn stream_chat(
     let provider = ChatProvider::by_id(&config.id).ok_or(ChatError::NotConfigured)?;
     if provider.requires_key() && config.api_key.trim().is_empty() {
         return Err(ChatError::MissingKey);
-    }
-    if config.id == "merge-gateway" && config.model != crate::ai::models::MERGE_MODEL {
-        return Err(ChatError::Protocol(
-            "Merge Gateway is restricted to DeepSeek V4.1 Flash 1017.".into(),
-        ));
     }
     let endpoint = config.endpoint().ok_or(ChatError::NotConfigured)?;
     if *cancel.borrow() {

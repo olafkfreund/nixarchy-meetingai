@@ -183,6 +183,8 @@ impl Vault {
 }
 
 fn restrict_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

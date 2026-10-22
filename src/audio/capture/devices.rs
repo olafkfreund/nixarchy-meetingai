@@ -92,7 +92,11 @@ pub fn mark_default(devices: &mut [Device], default_name: Option<&str>) {
 
 /// Enumerate devices on this machine.
 pub fn enumerate() -> Devices {
-    match enumerate_linux() {
+    #[cfg(windows)]
+    let result = enumerate_windows();
+    #[cfg(not(windows))]
+    let result = enumerate_linux();
+    match result {
         Ok(devices) => devices,
         Err(error) => Devices {
             error: Some(error),
@@ -101,6 +105,7 @@ pub fn enumerate() -> Devices {
     }
 }
 
+#[cfg(not(windows))]
 fn pactl(args: &[&str]) -> Result<String, String> {
     let output = std::process::Command::new("pactl")
         .args(args)
@@ -113,6 +118,7 @@ fn pactl(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+#[cfg(not(windows))]
 fn enumerate_linux() -> Result<Devices, String> {
     let mut inputs = parse_sources(&pactl(&["--format=json", "list", "sources"])?)?;
     let mut outputs = parse_sinks(&pactl(&["--format=json", "list", "sinks"])?)?;
@@ -128,6 +134,41 @@ fn enumerate_linux() -> Result<Devices, String> {
     mark_default(&mut inputs, default_input.as_deref());
     mark_default(&mut outputs, default_output.as_deref());
 
+    Ok(Devices {
+        inputs,
+        outputs,
+        error: None,
+    })
+}
+
+#[cfg(windows)]
+fn enumerate_windows() -> Result<Devices, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let inputs = crate::audio::microphone::input_devices()
+        .into_iter()
+        .map(|d| Device {
+            id: d.id,
+            name: d.name,
+            is_default: d.is_default,
+        })
+        .collect();
+    let default = host
+        .default_output_device()
+        .and_then(|d| d.description().ok())
+        .map(|d| d.name().to_owned());
+    let outputs = host
+        .output_devices()
+        .map_err(|e| e.to_string())?
+        .filter_map(|d| {
+            let name = d.description().ok()?.name().to_owned();
+            Some(Device {
+                id: format!("cpal:{name}"),
+                is_default: default.as_ref() == Some(&name),
+                name,
+            })
+        })
+        .collect();
     Ok(Devices {
         inputs,
         outputs,

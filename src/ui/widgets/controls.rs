@@ -28,7 +28,13 @@ pub fn switch<V: 'static>(
         .h(px(20.0))
         .p(px(2.0))
         .rounded_full()
-        .bg(if on { theme.primary } else { theme.input })
+        .border_1()
+        .border_color(if on { theme.primary } else { theme.border })
+        .bg(if on {
+            theme.primary_fill()
+        } else {
+            theme.input
+        })
         .cursor_pointer()
         .id(id);
     let track = if on {
@@ -37,11 +43,22 @@ pub fn switch<V: 'static>(
         track.justify_start()
     };
     track
-        .child(div().size(px(16.0)).rounded_full().bg(if on {
-            theme.background
-        } else {
-            theme.muted_foreground
-        }))
+        .child(
+            div()
+                .size(px(16.0))
+                .rounded_full()
+                .border_1()
+                .border_color(if on {
+                    theme.primary_foreground()
+                } else {
+                    theme.muted_foreground
+                })
+                .bg(theme.fill(if on {
+                    theme.primary_foreground()
+                } else {
+                    theme.muted_foreground
+                })),
+        )
         .on_click(cx.listener(move |view, _, window, cx| {
             handler(view, cx, window);
             cx.notify();
@@ -89,7 +106,10 @@ pub fn segmented<V: 'static>(
             .id(("segment", index))
             .child(*label);
         if *active {
-            chip = chip.bg(theme.background);
+            chip = chip
+                .bg(theme.background)
+                .border_1()
+                .border_color(theme.border);
         }
         let handler = handler.clone();
         chip = chip.on_click(cx.listener(move |view, _, _, cx| {
@@ -222,7 +242,7 @@ pub fn slider<V: 'static>(
                 .items_center()
                 .justify_center()
                 .rounded(px(5.0))
-                .bg(theme.foreground)
+                .bg(theme.fill(theme.foreground))
                 .border_1()
                 .border_color(theme.border)
                 .child(
@@ -230,7 +250,7 @@ pub fn slider<V: 'static>(
                         .w(px(2.0))
                         .h(px(8.0))
                         .rounded_full()
-                        .bg(Theme::with_alpha(theme.background, 0.5)),
+                        .bg(theme.fill(Theme::with_alpha(theme.background, 0.5))),
                 ),
         )
         .child(pointer)
@@ -475,10 +495,12 @@ pub fn action<V: 'static>(
         .h(px(28.0))
         .px(px(space::MD))
         .rounded(px(radius::MD))
-        .bg(theme.primary)
+        .border_1()
+        .border_color(theme.primary)
+        .bg(theme.primary_fill())
         .text_size(scaled(11.5))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.background)
+        .text_color(theme.primary_foreground())
         .cursor_pointer()
         .id(id)
         .child(label.to_owned())

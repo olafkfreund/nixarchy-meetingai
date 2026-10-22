@@ -22,6 +22,7 @@ pub enum PageData {
     Conversations(Vec<ConversationRecord>),
     Prompts(Vec<PromptRecord>),
     Meetings(Vec<MeetingRecord>),
+    Profiles(Vec<crate::db::profiles::Profile>),
 }
 
 /// Errors shown inline when a page cannot load.
@@ -84,6 +85,16 @@ impl Dashboard {
                     PageData::Empty
                 }
             },
+            Route::Profiles => {
+                match database.map(|db| crate::db::profiles::list(db.connection())) {
+                    Some(Ok(profiles)) => PageData::Profiles(profiles),
+                    Some(Err(error)) => {
+                        self.error = Some(error.to_string());
+                        PageData::Empty
+                    }
+                    None => PageData::Profiles(Vec::new()),
+                }
+            }
             Route::Prompts => match Self::load_prompts(database) {
                 Ok(records) => PageData::Prompts(records),
                 Err(error) => {

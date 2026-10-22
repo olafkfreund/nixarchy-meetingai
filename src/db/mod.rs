@@ -10,6 +10,7 @@ pub mod schema;
 pub use repos::conversations;
 pub use repos::library;
 pub use repos::meetings;
+pub use repos::profiles;
 pub use repos::settings;
 pub use schema::seed;
 
@@ -58,6 +59,7 @@ impl Database {
         )?;
         connection.execute_batch(schema::SCHEMA)?;
         seed::seed_listen_modes(&connection)?;
+        profiles::migrate_legacy(&connection)?;
         Ok(Self { connection })
     }
 

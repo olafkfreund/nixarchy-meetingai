@@ -64,8 +64,26 @@ fn usage() -> String {
         "",
         "Run without a flag to launch the app.",
         "LENNETTE_PRIVATE_OVERLAY=1 disables the desktop tray for protected launches.",
+        "Windows launches privately by default; set LENNETTE_PRIVATE_OVERLAY=0 to show its tray.",
     ]
     .join("\n")
+}
+
+/// Explorer owns tray pixels, so app-window capture exclusion cannot hide them.
+/// Windows launches therefore omit the tray unless the user explicitly opts in.
+pub fn private_overlay_enabled() -> bool {
+    private_overlay_for(
+        cfg!(windows),
+        std::env::var("LENNETTE_PRIVATE_OVERLAY").ok().as_deref(),
+    )
+}
+
+fn private_overlay_for(windows: bool, value: Option<&str>) -> bool {
+    match value {
+        Some("1") => true,
+        Some("0") => false,
+        _ => windows,
+    }
 }
 
 /// If an instance is already running, activate its window and return true.
@@ -102,7 +120,13 @@ pub fn instance_lock_path() -> Option<std::path::PathBuf> {
 }
 
 fn runtime_path(name: &str) -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)?;
+    #[cfg(windows)]
+    let runtime = directories::ProjectDirs::from("dev", "lennette", "lennette")?
+        .data_local_dir()
+        .join("runtime");
+    std::fs::create_dir_all(&runtime).ok()?;
     Some(runtime.join(name))
 }
 
@@ -133,13 +157,8 @@ impl InstanceLock {
             .map_err(|error| tracing::warn!(%error, path = %path.display(), "could not open instance lock"))
             .ok()?;
 
-        // LOCK_EX without LOCK_NB would block; this launch must decide now.
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: the fd is owned by `file` and stays open for the lock's lifetime.
-        let taken = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0;
-        if !taken {
-            return None;
-        }
+        // std uses an OS file lock on Unix and Windows, released on crash too.
+        file.try_lock().ok()?;
 
         let _ = file.set_len(0);
         use std::io::Write;
@@ -147,13 +166,6 @@ impl InstanceLock {
         let _ = writeln!(writer, "{}", std::process::id());
         Some(Self { _file: file })
     }
-}
-
-const LOCK_EX: std::ffi::c_int = 2;
-const LOCK_NB: std::ffi::c_int = 4;
-
-unsafe extern "C" {
-    fn flock(fd: std::ffi::c_int, operation: std::ffi::c_int) -> std::ffi::c_int;
 }
 
 #[cfg(unix)]
@@ -174,14 +186,41 @@ fn send(command: &str) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-#[cfg(not(unix))]
-fn send(_command: &str) -> Result<(), String> {
-    Err("shortcut forwarding is not implemented on this platform yet".to_owned())
+#[cfg(windows)]
+fn send(command: &str) -> Result<(), String> {
+    use std::io::Write;
+    let name = crate::platform::control::pipe_name()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut pipe = loop {
+        match std::fs::OpenOptions::new().write(true).open(&name) {
+            Ok(pipe) => break pipe,
+            Err(error)
+                if error.raw_os_error()
+                    == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return Err("no running lennette instance was found".to_owned()),
+        }
+    };
+    writeln!(pipe, "{command}").map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_defaults_to_private_and_requires_an_explicit_tray_opt_in() {
+        for value in [None, Some("1"), Some(""), Some("invalid")] {
+            assert!(private_overlay_for(true, value));
+        }
+        assert!(!private_overlay_for(true, Some("0")));
+        assert!(!private_overlay_for(false, None));
+        assert!(private_overlay_for(false, Some("1")));
+        assert!(!private_overlay_for(false, Some("0")));
+    }
 
     #[test]
     fn control_socket_lives_in_the_runtime_dir() {

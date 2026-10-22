@@ -19,6 +19,7 @@ pub enum Route {
     Shortcuts,
     DevSpace,
     About,
+    Profiles,
 }
 
 /// A navigation entry.
@@ -81,6 +82,7 @@ impl Route {
             Route::Shortcuts => "Cursor & Shortcuts",
             Route::DevSpace => "AI Models & Keys",
             Route::About => "About Lennette",
+            Route::Profiles => "Context profiles",
         }
     }
 
@@ -96,6 +98,7 @@ impl Route {
             Route::Shortcuts => "Keyboard combinations that work from anywhere.",
             Route::DevSpace => "Gemini, Merge Gateway and Deepgram credentials.",
             Route::About => "A little help with what to say next.",
+            Route::Profiles => "Reusable background for meetings and interviews.",
         }
     }
 
@@ -103,7 +106,7 @@ impl Route {
     pub fn is_setting(self) -> bool {
         matches!(
             self,
-            Route::Settings | Route::Audio | Route::Shortcuts | Route::DevSpace
+            Route::Settings | Route::Audio | Route::Shortcuts | Route::DevSpace | Route::Profiles
         )
     }
 }

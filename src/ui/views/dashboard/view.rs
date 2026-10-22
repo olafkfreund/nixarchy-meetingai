@@ -14,6 +14,15 @@ use crate::features::settings_pages::{self, SettingsState};
 use crate::features::theme::{Theme, radius};
 use crate::ui::theme::scaled;
 
+#[derive(Clone, PartialEq)]
+enum EditTarget {
+    Setting(&'static str),
+    Prompt(i64, String),
+}
+
+#[path = "profiles.rs"]
+mod profiles;
+
 /// Shared dashboard handle. Wrapped so the view owns it.
 pub struct DashboardView {
     dashboard: Dashboard,
@@ -26,9 +35,13 @@ pub struct DashboardView {
     open_meeting: Option<String>,
     /// Inline rename state for the open conversation or meeting.
     renaming: bool,
+    edit_target: Option<EditTarget>,
+    profile_edit: Option<profiles::ProfileDraft>,
+    editor: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
     rename_buffer: String,
     credential_focus: Option<FocusHandle>,
     settings_save: Option<gpui::Task<()>>,
+    model_task: Option<gpui::Task<()>>,
     /// Background task naming meetings that still carry a timestamp title.
     title_task: Option<gpui::Task<()>>,
     /// Chat provider used to name old sessions, when one is configured.
@@ -69,9 +82,13 @@ impl DashboardView {
             open_conversation: None,
             open_meeting: None,
             renaming: false,
+            edit_target: None,
+            profile_edit: None,
+            editor: None,
             rename_buffer: String::new(),
             credential_focus: None,
             settings_save: None,
+            model_task: None,
             title_task: None,
             title_config,
         }
@@ -84,11 +101,16 @@ impl DashboardView {
         if let Some(database) = self.settings.database.as_ref()
             && let Ok(settings) = crate::core::settings::Settings::load(database)
         {
+            self.settings.baseline = settings.clone();
             self.settings.settings = settings;
         }
         self.renaming = false;
+        self.edit_target = None;
+        self.profile_edit = None;
+        self.editor = None;
         self.rename_buffer.clear();
         self.settings.key_field = None;
+        self.reset_credential_models();
         self.settings.notice = None;
         self.dashboard.navigate(route, self.database.as_ref());
     }
@@ -171,6 +193,209 @@ impl DashboardView {
         }));
     }
 
+    pub fn edit_setting(&mut self, key: &'static str, text: &str, cx: &mut Context<Self>) {
+        self.edit_target = Some(EditTarget::Setting(key));
+        self.editor =
+            Some(cx.new(|cx| crate::ui::widgets::editor::Editor::new(text, self.theme, cx)));
+    }
+
+    fn save_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_ref() else {
+            return;
+        };
+        let text = editor.read(cx).input.text().trim().to_owned();
+        let Some(target) = self.edit_target.as_ref() else {
+            return;
+        };
+        let Some(database) = self.database.as_ref() else {
+            return;
+        };
+        let result = match target {
+            EditTarget::Setting(key) => crate::db::settings::set(database.connection(), key, &text),
+            EditTarget::Prompt(id, name) => {
+                if text.is_empty() {
+                    self.settings.error = Some("A response prompt cannot be empty.".into());
+                    return;
+                }
+                crate::db::settings::update_prompt(database.connection(), *id, name, &text)
+            }
+        };
+        if let Err(error) = result {
+            self.settings.error = Some(error.to_string());
+            return;
+        }
+        self.settings.settings =
+            crate::core::settings::Settings::load(database).unwrap_or_default();
+        self.settings.baseline = self.settings.settings.clone();
+        self.dashboard
+            .navigate(self.dashboard.route(), Some(database));
+        self.editor = None;
+        self.edit_target = None;
+        self.settings.error = None;
+    }
+
+    pub fn editable_setting(
+        &self,
+        key: &'static str,
+        label: &'static str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        self.editable_text(EditTarget::Setting(key), label, text, cx)
+    }
+
+    fn editable_text(
+        &self,
+        target: EditTarget,
+        label: &'static str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let active = self.edit_target.as_ref() == Some(&target);
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .flex_shrink_0()
+            .w_full()
+            .gap(px(8.0))
+            .py(px(8.0))
+            .child(
+                div()
+                    .text_size(scaled(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(label),
+            );
+        if active {
+            block = block.children(self.editor.clone()).child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(action_button(
+                        "save-text-editor",
+                        &self.theme,
+                        "Save",
+                        cx,
+                        |this, cx, _| this.save_editor(cx),
+                    ))
+                    .child(action_button(
+                        "cancel-text-editor",
+                        &self.theme,
+                        "Cancel",
+                        cx,
+                        |this, _, _| {
+                            this.edit_target = None;
+                            this.editor = None;
+                        },
+                    )),
+            );
+        } else {
+            let initial = text.to_owned();
+            let id = match &target {
+                EditTarget::Setting(key) => format!("edit-{key}"),
+                EditTarget::Prompt(id, _) => format!("edit-prompt-{id}"),
+            };
+            block = block
+                .child(
+                    div()
+                        .text_size(scaled(12.0))
+                        .text_color(self.theme.muted_foreground)
+                        .whitespace_normal()
+                        .child(if text.is_empty() {
+                            "Nothing added yet.".to_owned()
+                        } else {
+                            text.chars().take(350).collect()
+                        }),
+                )
+                .child(action_button(
+                    gpui::ElementId::Name(id.into()),
+                    &self.theme,
+                    "Edit",
+                    cx,
+                    move |this, cx, _| {
+                        this.edit_target = Some(target.clone());
+                        this.editor = Some(cx.new(|cx| {
+                            crate::ui::widgets::editor::Editor::new(&initial, this.theme, cx)
+                        }));
+                    },
+                ));
+        }
+        block.into_any_element()
+    }
+
+    pub fn reset_credential_models(&mut self) {
+        self.model_task = None;
+        self.settings.model_menu_open = false;
+        self.settings.model_loading = false;
+        self.settings.model_options.clear();
+        self.settings.model_status = None;
+    }
+
+    pub fn toggle_credential_models(&mut self, force: bool, cx: &mut Context<Self>) {
+        if self.settings.model_loading {
+            return;
+        }
+        self.settings.model_menu_open = force || !self.settings.model_menu_open;
+        if !self.settings.model_menu_open {
+            return;
+        }
+        let provider = self.settings.key_provider.clone();
+        let mut credential = self
+            .settings
+            .vault
+            .as_ref()
+            .and_then(|v| {
+                crate::core::credentials::load(v, crate::core::credentials::Kind::Chat, &provider)
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_else(|| crate::core::credentials::Credential::chat(&provider, ""));
+        if !self.settings.key_input.trim().is_empty() {
+            credential.api_key = self.settings.key_input.trim().to_owned();
+        }
+        let config = credential.to_config();
+        self.settings.model_options = vec![self.settings.key_model.clone()];
+        if let Some(cache) = crate::ai::models::cached(
+            self.database
+                .as_ref()
+                .and_then(|db| db.connection().path())
+                .map(std::path::Path::new),
+            &config,
+        ) {
+            self.settings.model_options.extend(cache.models);
+        }
+        self.settings.model_options.sort();
+        self.settings.model_options.dedup();
+        if config.api_key.is_empty() {
+            self.settings.model_status = Some("Enter or save an API key to fetch live models. You can also enter a custom model ID.".into());
+            return;
+        }
+        let path = self
+            .database
+            .as_ref()
+            .and_then(|db| db.connection().path())
+            .map(std::path::PathBuf::from);
+        self.settings.model_loading = true;
+        self.settings.model_status = None;
+        self.model_task = Some(cx.spawn(async move |this, cx| {
+            let result = crate::ai::models::discover(path, config, force).await;
+            this.update(cx, |this, cx| {
+                this.settings.model_loading = false;
+                match result {
+                    Ok(mut models) => {
+                        models.push(this.settings.key_model.clone());
+                        models.sort();
+                        models.dedup();
+                        this.settings.model_options = models;
+                    }
+                    Err(error) => this.settings.model_status = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     /// Store the key typed on the Dev Space page.
     pub fn save_credential(&mut self) {
         use crate::features::credentials::{self, Credential};
@@ -179,11 +404,24 @@ impl DashboardView {
             return;
         };
         let provider = self.settings.key_provider.clone();
-        let mut credential = if crate::ai::providers::SttProvider::by_id(&provider).is_some() {
-            Credential::speech(provider, self.settings.key_input.trim())
+        let kind = if crate::ai::providers::SttProvider::by_id(&provider).is_some() {
+            credentials::Kind::Speech
         } else {
-            Credential::chat(provider, self.settings.key_input.trim())
+            credentials::Kind::Chat
         };
+        let mut credential = credentials::load(vault, kind, &provider)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| {
+                if kind == credentials::Kind::Speech {
+                    Credential::speech(&provider, "")
+                } else {
+                    Credential::chat(&provider, "")
+                }
+            });
+        if !self.settings.key_input.trim().is_empty() {
+            credential.api_key = self.settings.key_input.trim().to_owned();
+        }
         credential.model = self.settings.key_model.trim().to_owned();
         match credentials::save(vault, &credential) {
             Ok(()) => {
@@ -394,6 +632,9 @@ impl DashboardView {
     }
 
     pub fn type_into_key_field(&mut self, text: &str) {
+        if self.settings.key_field == Some(settings_pages::CredentialField::Key) {
+            self.reset_credential_models();
+        }
         let replace = std::mem::take(&mut self.settings.replace_key_field);
         if let Some(field) = self.credential_field_mut() {
             if replace {
@@ -404,6 +645,9 @@ impl DashboardView {
     }
 
     pub fn backspace_key_field(&mut self) {
+        if self.settings.key_field == Some(settings_pages::CredentialField::Key) {
+            self.reset_credential_models();
+        }
         let replace = std::mem::take(&mut self.settings.replace_key_field);
         if let Some(field) = self.credential_field_mut() {
             if replace {
@@ -823,7 +1067,7 @@ impl DashboardView {
         list
     }
 
-    fn prompts_body(&self) -> impl IntoElement {
+    fn prompts_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let PageData::Prompts(prompts) = self.dashboard.data() else {
             return div().child(self.empty_note("No prompts loaded."));
@@ -873,19 +1117,25 @@ impl DashboardView {
                                     .child(mode),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_size(scaled(11.5))
-                            .text_color(theme.muted_foreground)
-                            .child(prompt.prompt.clone()),
-                    ),
+                    .child(self.editable_text(
+                        EditTarget::Prompt(prompt.id, prompt.name.clone()),
+                        "Response instruction",
+                        &prompt.prompt,
+                        cx,
+                    )),
             );
         }
         list
     }
 
     fn settings_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        settings_pages::render(self.dashboard.route(), &self.settings, &self.theme, cx)
+        settings_pages::render(
+            self,
+            self.dashboard.route(),
+            &self.settings,
+            &self.theme,
+            cx,
+        )
     }
 
     fn page_heading(&self, title: &str, subtitle: &str) -> gpui::AnyElement {
@@ -1005,14 +1255,16 @@ impl DashboardView {
         let viewport = window.viewport_size();
         // Art heights follow the window rather than a fixed pixel size, so the
         // page stays a band instead of filling the screen when it grows.
-        let header_height = (viewport.height * 0.22).clamp(px(110.0), px(190.0));
+        let header_height = (viewport.height * 0.28).clamp(px(140.0), px(230.0));
         let footer_height = (viewport.height * 0.15).clamp(px(76.0), px(140.0));
         // Side-by-side icon and copy stop working once the column gets tight.
-        let narrow = viewport.width < px(620.0);
+        let available = (viewport.width - px(48.0)).max(px(180.0));
+        let narrow = available < px(580.0);
         // One width for every block. The dashboard content is a centred flex
         // column, so a fixed width centres here; auto margins do not exist in
         // this GPUI version, and `w_full` alone would just follow the edge.
-        let column = if narrow { px(340.0) } else { px(620.0) };
+        let column = available.min(px(620.0));
+        let header_width = (header_height * 2.0).min(column);
 
         let heading = div()
             .flex()
@@ -1089,24 +1341,35 @@ impl DashboardView {
                     ),
             );
 
-        div()
+        let content = div()
             .flex()
             .flex_col()
             .w(column)
+            .flex_shrink_0()
             .min_w(px(0.0))
             .gap(px(18.0))
             .pb(px(4.0))
             // Every child shares the column width, so all edges line up.
             .child(
-                img(asset("lennette_header.png"))
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .w_full()
                     .h(header_height)
                     .flex_shrink_0()
-                    .object_fit(gpui::ObjectFit::Cover)
-                    .rounded(px(16.0)),
+                    .rounded(px(16.0))
+                    .overflow_hidden()
+                    .child(
+                        img(asset("lennette_header.png"))
+                            .w(header_width)
+                            .h(header_width / 2.0)
+                            .flex_shrink_0()
+                            .object_fit(gpui::ObjectFit::Contain),
+                    ),
             )
-            .child(identity)
-            .child(description)
+            .child(div().w_full().flex_shrink_0().child(identity))
+            .child(div().w_full().flex_shrink_0().child(description))
             .child(
                 div()
                     .flex()
@@ -1141,7 +1404,14 @@ impl DashboardView {
                     .h(footer_height)
                     .flex_shrink_0()
                     .object_fit(gpui::ObjectFit::Contain),
-            )
+            );
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .w_full()
+            .flex_shrink_0()
+            .child(content)
             .into_any_element()
     }
 
@@ -1470,7 +1740,7 @@ impl DashboardView {
             super::nav::Route::ConversationDetail => self.conversation_detail(cx),
             super::nav::Route::Meetings => self.meetings_body(cx),
             super::nav::Route::MeetingDetail => self.meeting_detail(cx),
-            super::nav::Route::Prompts => self.prompts_body().into_any_element(),
+            super::nav::Route::Prompts => self.prompts_body(cx).into_any_element(),
             super::nav::Route::About => self.about_body(window, cx),
             _ => self.settings_body(cx),
         }
@@ -1495,7 +1765,7 @@ pub fn action_button<V: 'static>(
         .rounded(px(radius::SM))
         .border_1()
         .border_color(surfaces.border())
-        .bg(surfaces.card())
+        .bg(surfaces.muted())
         .text_size(scaled(11.0))
         .text_color(theme.foreground)
         .cursor_pointer()
@@ -1639,6 +1909,7 @@ impl Render for DashboardView {
                             div()
                                 .w_full()
                                 .max_w(px(960.0))
+                                .flex_shrink_0()
                                 .min_w(px(0.0))
                                 .child(self.body(window, cx)),
                         )

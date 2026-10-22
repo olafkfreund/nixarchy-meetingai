@@ -75,7 +75,7 @@ pub fn pill(
         element
             .bg(surfaces.primary())
             .border_color(theme.primary)
-            .text_color(theme.background)
+            .text_color(theme.primary_foreground())
     } else {
         element
             .bg(surfaces.muted())

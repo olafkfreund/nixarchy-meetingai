@@ -3,6 +3,7 @@
 pub mod conversations;
 pub mod library;
 pub mod meetings;
+pub mod profiles;
 pub mod settings;
 
 pub use conversations::ConversationRecord;

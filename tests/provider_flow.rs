@@ -276,3 +276,26 @@ async fn markdown_code_deltas_arrive_before_the_provider_finishes() {
     assert_eq!(snapshots, 2);
     assert_eq!(answer, format!("{first}{second}"));
 }
+
+#[tokio::test]
+async fn selecting_a_live_gateway_model_sends_that_model_without_pinned_model_options() {
+    let (url, request) = server(200, "text/event-stream", "data: {\"choices\":[{\"delta\":{\"content\":\"Selected model works\"}}]}\n\ndata: [DONE]\n\n".into());
+    let mut config = ProviderConfig::new("merge-gateway", "test-key", "vendor/live-model");
+    config.base_url = url;
+    let answer = engine::stream_chat(
+        &engine::http_client(),
+        &config,
+        &[Message::user("Please help")],
+        &TurnContext::default(),
+        Arc::new(tokio::sync::watch::channel(false).1),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer, "Selected model works");
+    let raw = request.join().unwrap();
+    let offset = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_slice(&raw[offset..]).unwrap();
+    assert_eq!(body["model"], "vendor/live-model");
+    assert!(body.get("reasoning_effort").is_none());
+}
