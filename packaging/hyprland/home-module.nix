@@ -69,20 +69,5 @@ in
       terminal = false;
       categories = [ "Utility" ];
     };
-    # Route the ordinary app-menu entry through the same protected launcher.
-    xdg.dataFile."applications/dev.lennette.overlay.desktop" = {
-      force = true;
-      text = ''
-        [Desktop Entry]
-        Type=Application
-        Name=Lennette
-        Comment=An ambient real-time meeting and discussion copilot
-        Exec=${command}
-        Icon=dev.lennette.overlay
-        Terminal=false
-        Categories=Utility;
-        StartupWMClass=dev.lennette.overlay
-      '';
-    };
   };
 }

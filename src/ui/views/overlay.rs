@@ -40,6 +40,9 @@ pub struct TranscriptEntry {
     pub speaker: Option<i64>,
 }
 
+/// Width of the live transcript rail beside the conversation.
+const TRANSCRIPT_RAIL_WIDTH: f32 = 244.0;
+
 /// Follow-up suggestions shown above the composer, in the reference's order.
 pub const FOLLOW_UPS: [&str; 4] = [
     "What should I say?",
@@ -262,6 +265,8 @@ pub struct Overlay {
     transcript: Vec<TranscriptEntry>,
     /// Meeting row for the running session.
     meeting_id: Option<String>,
+    /// Whether the transcript rail is open beside the conversation.
+    live_transcript: bool,
     /// Speech provider config, resolved when the session starts.
     speech: Option<crate::features::providers::ProviderConfig>,
     /// Chat session: conversation row plus the streaming answer.
@@ -439,6 +444,7 @@ impl Overlay {
             runtime_settings,
             transcript: Vec::new(),
             meeting_id: None,
+            live_transcript: true,
             speech: None,
             chat: crate::features::chat_session::ChatSession::new(),
             chat_error: None,
@@ -544,6 +550,8 @@ impl Overlay {
         }
         self.last_elapsed = 0.0;
         self.live_connected = false;
+        // The words you say belong beside the conversation, not under it.
+        self.live_transcript = true;
         self.live_interim = Default::default();
         self.live_turns = Default::default();
         self.live_speaking = None;
@@ -1702,6 +1710,12 @@ impl Overlay {
                 },
             ))
             .child(pill)
+            .children(
+                (self.mode == Mode::Listen
+                    && !self.live_transcript
+                    && (!self.transcript.is_empty() || recording))
+                    .then(|| self.transcript_toggle(cx)),
+            )
             .child(div().min_w(px(0.0)).with_animation(
                 ("pill-right", self.dock_generation),
                 animation(),
@@ -1711,6 +1725,42 @@ impl Overlay {
                     spacer
                 },
             ))
+    }
+
+    /// Bring the transcript rail back once it has been hidden.
+    fn transcript_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        div()
+            .id("show-transcript")
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(5.0))
+            .h(px(28.0))
+            .ml(px(6.0))
+            .px(px(9.0))
+            .flex_shrink_0()
+            .rounded_full()
+            .border_1()
+            .border_color(self.surfaces().border())
+            .bg(self.surfaces().card())
+            .text_size(px(10.5))
+            .text_color(theme.muted_foreground)
+            .cursor_pointer()
+            .hover(|s| s.bg(self.surfaces().muted()))
+            .tooltip(move |_, cx| {
+                cx.new(|_| HoverLabel {
+                    text: "Show transcript".into(),
+                    theme,
+                })
+                .into()
+            })
+            .child(icons::icon(&theme, Icon::PanelRightOpen, 12.0))
+            .child("Transcript")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.live_transcript = true;
+                cx.notify();
+            }))
     }
 
     fn pill_audio(&self, _: &mut Context<Self>) -> impl IntoElement {
@@ -2209,33 +2259,82 @@ impl Overlay {
         None
     }
 
-    /// The Listen tab's body: transcript while running, messages if chatting, or clean empty space.
+    /// Whether the transcript rail should be on screen.
+    fn shows_transcript_rail(&self) -> bool {
+        self.mode == Mode::Listen
+            && self.live_transcript
+            && (!self.transcript.is_empty() || self.is_listening())
+    }
+
+    /// The Listen tab's body: conversation on the left, live words in a rail on the right.
     fn listen_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rail = self.shows_transcript_rail();
+        let chatting = !self.conversation.messages().is_empty() || !self.streaming_text.is_empty();
+
+        let main: gpui::AnyElement = if chatting {
+            self.message_list(cx).into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
+                .into_any_element()
+        };
+
+        if !rail {
+            return main;
+        }
+
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(main)
+            .child(self.transcript_rail(cx))
+            .into_any_element()
+    }
+
+    /// The live transcript. Sits on the right edge of the panel, above the
+    /// composer, so the words you say never push the conversation sideways.
+    fn transcript_rail(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        let surfaces = self.surfaces();
+        let listening = self.is_listening();
 
-        // If a conversation is active, render the chat message thread.
-        if !self.conversation.messages().is_empty() || !self.streaming_text.is_empty() {
-            return self.message_list(cx).into_any_element();
-        }
-
-        if self.transcript.is_empty() && !self.is_listening() {
-            // Clean empty space when idle, removing the center listen section.
-            return div().flex().flex_col().flex_1().into_any_element();
-        }
-
-        // Live transcript: speaker, timestamp, then the words.
         let mut list = div()
             .id("live-transcript")
             .flex()
             .flex_col()
             .flex_1()
-            .gap(px(6.0))
+            .min_h(px(0.0))
+            .gap(px(8.0))
             .overflow_y_scroll()
-            .px(px(space::LG))
-            .py(px(space::MD));
+            .px(px(space::MD))
+            .pb(px(space::MD));
+
+        if listening
+            && self.transcript.is_empty()
+            && self.live_interim[0].is_empty()
+            && self.live_interim[1].is_empty()
+        {
+            list = list.child(
+                div()
+                    .pt(px(space::SM))
+                    .text_size(px(11.5))
+                    .text_color(theme.muted_foreground)
+                    .child(if self.live_connected {
+                        "Waiting for the first words…"
+                    } else {
+                        "Connecting to the speech provider…"
+                    }),
+            );
+        }
 
         for (index, entry) in self.transcript.iter().enumerate() {
-            let who = if entry.who == "me" {
+            let mine = entry.who == "me";
+            let who = if mine {
                 "You".to_owned()
             } else {
                 match entry.speaker {
@@ -2244,74 +2343,163 @@ impl Overlay {
                 }
             };
             let stamp = crate::features::db::meetings::format_duration(entry.start as i64);
+            // A quiet speaker line, then the words at reading size. Tint marks
+            // the source rather than boxing every line in a card.
             list = list.child(
                 div()
                     .id(("transcript-line", index))
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
-                    .rounded(px(8.0))
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .bg(if entry.who == "me" {
-                        self.surfaces().accent()
-                    } else {
-                        self.surfaces().card()
-                    })
+                    .gap(px(3.0))
+                    .py(px(2.0))
                     .child(
                         div()
                             .flex()
                             .items_center()
+                            .justify_between()
                             .gap(px(6.0))
                             .child(
                                 div()
-                                    .text_size(px(9.5))
+                                    .text_size(px(10.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.muted_foreground)
+                                    .text_color(if mine {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
                                     .child(who),
                             )
                             .child(
                                 div()
-                                    .text_size(px(9.5))
+                                    .text_size(px(10.0))
                                     .text_color(theme.muted_foreground)
                                     .child(stamp),
                             ),
                     )
                     .child(
                         div()
-                            .text_size(px(12.5))
-                            .text_color(theme.foreground)
+                            .text_size(px(12.0))
+                            .line_height(px(17.0))
+                            .text_color(if mine {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
                             .child(entry.text.clone()),
                     ),
             );
         }
 
-        if self.is_listening() {
-            list = list.child(
+        // Interim words land here before they are finalised.
+        if listening {
+            for (channel, text) in self.live_interim.iter().enumerate() {
+                if text.is_empty() {
+                    continue;
+                }
+                list = list.child(
+                    div()
+                        .id(("transcript-interim", channel))
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.muted_foreground)
+                                .child(if channel == 0 { "You" } else { "Them" }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .line_height(px(17.0))
+                                .text_color(theme.muted_foreground)
+                                .child(text.clone()),
+                        ),
+                );
+            }
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .w(px(TRANSCRIPT_RAIL_WIDTH))
+            .flex_shrink_0()
+            .min_h(px(0.0))
+            .rounded(px(radius::LG))
+            .border_1()
+            .border_color(surfaces.border())
+            .bg(surfaces.card())
+            .ml(px(space::LG))
+            .mr(px(space::SM))
+            .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .px(px(10.0))
-                    .child(div().size(px(6.0)).rounded_full().bg(theme.destructive))
+                    .h(px(36.0))
+                    .flex_shrink_0()
+                    .px(px(space::MD))
+                    .child(div().size(px(6.0)).rounded_full().bg(if listening {
+                        theme.destructive
+                    } else {
+                        theme.muted_foreground
+                    }))
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_size(px(10.5))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.muted_foreground)
-                            .child(if self.speech.is_some() {
-                                if self.level > 0.02 {
-                                    "Capturing speech…"
-                                } else {
-                                    "Listening for speech…"
-                                }
+                            .truncate()
+                            .child(if listening {
+                                "Live transcript"
                             } else {
-                                "Recording · add a speech key to transcribe"
+                                "Transcript"
                             }),
+                    )
+                    .child(
+                        div()
+                            .id("hide-transcript")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(22.0))
+                            .rounded_full()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(surfaces.muted()))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| HoverLabel {
+                                    text: "Hide transcript".into(),
+                                    theme,
+                                })
+                                .into()
+                            })
+                            .child(icons::icon(&theme, Icon::PanelRightClose, 12.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.live_transcript = false;
+                                cx.notify();
+                            })),
                     ),
-            );
-        }
-
-        list.into_any_element()
+            )
+            .child(
+                div()
+                    .h(px(1.0))
+                    .mx(px(space::SM))
+                    .flex_shrink_0()
+                    .bg(surfaces.border()),
+            )
+            .child(
+                div()
+                    .pt(px(space::SM))
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .child(list),
+            )
+            .into_any_element()
     }
 
     #[allow(dead_code)]
@@ -4273,6 +4461,42 @@ mod tests {
         ] {
             assert!(prompt.contains(context), "missing {context}");
         }
+        drop(overlay);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_stays_in_the_side_rail_and_can_be_reopened() {
+        use crate::speech::transcription::{LiveEvent, TranscriptLine};
+        let (path, mut overlay) = fixture();
+
+        // Idle with nothing said: no rail.
+        assert!(!overlay.shows_transcript_rail());
+
+        overlay.handle_live_event(LiveEvent::Transcript(TranscriptLine {
+            channel: 0,
+            text: "Let's start with the migration plan.".into(),
+            is_final: true,
+            speech_final: true,
+            start: 0.0,
+            end: 1.0,
+            speaker: Some(0),
+        }));
+
+        // Words exist, the rail is on by default.
+        assert!(overlay.shows_transcript_rail());
+
+        // Hiding it leaves the words out of the main column entirely.
+        overlay.live_transcript = false;
+        assert!(!overlay.shows_transcript_rail());
+
+        overlay.live_transcript = true;
+        assert!(overlay.shows_transcript_rail());
+
+        // Ask mode never shows the live rail.
+        overlay.set_mode(Mode::Ask);
+        assert!(!overlay.shows_transcript_rail());
+
         drop(overlay);
         std::fs::remove_dir_all(path).unwrap();
     }

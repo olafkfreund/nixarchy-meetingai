@@ -64,8 +64,8 @@ install: fmt-check lint typecheck
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/lennette.png
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/dev.lennette.overlay.png
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/lennette.png
-    cp packaging/dev.lennette.overlay.desktop ~/.local/share/applications/lennette.desktop
-    if [ -L ~/.local/share/applications/dev.lennette.overlay.desktop ]; then echo "Keeping the managed Lennette desktop launcher"; else cp packaging/dev.lennette.overlay.desktop ~/.local/share/applications/dev.lennette.overlay.desktop; fi
+    rm -f ~/.local/share/applications/lennette.desktop
+    cp -f packaging/dev.lennette.overlay.desktop ~/.local/share/applications/dev.lennette.overlay.desktop
     @command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database ~/.local/share/applications || true
     @command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor || true
     @echo "Lennette successfully built and installed to ~/.local/bin/lennette"
