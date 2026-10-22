@@ -13,6 +13,7 @@ use crate::core::domain::{Mode, OverlaySize, Role};
 use crate::ui::components::{radius, space};
 use crate::ui::icons;
 use crate::ui::theme::Theme;
+use crate::ui::theme::scaled;
 
 /// Messages from the network task to the UI task.
 enum StreamMsg {
@@ -27,6 +28,30 @@ enum CapturePurpose {
         consume_once: bool,
     },
     Interval,
+}
+
+/// Which stored record a generated title belongs to.
+mod scope {
+    /// A borrowed handle to the record being named.
+    pub enum Record<'a> {
+        Meeting(&'a str),
+        Conversation(&'a str),
+    }
+
+    /// The owned form moved into the background title task.
+    pub enum Target {
+        Meeting(String),
+        Conversation(String),
+    }
+
+    impl Record<'_> {
+        pub fn owned(self) -> Target {
+            match self {
+                Record::Meeting(id) => Target::Meeting(id.to_owned()),
+                Record::Conversation(id) => Target::Conversation(id.to_owned()),
+            }
+        }
+    }
 }
 
 /// One transcribed line in the live transcript.
@@ -305,6 +330,10 @@ pub struct Overlay {
     message_documents: Vec<Option<std::sync::Arc<Vec<crate::ui::markdown::Block>>>>,
     message_signature: (usize, usize),
     message_list_state: gpui::ListState,
+    /// Scroll position of the live transcript, kept pinned to the newest words.
+    transcript_scroll: gpui::ScrollHandle,
+    /// Line count and interim length last seen, so new words trigger a scroll.
+    transcript_tail: (usize, usize),
     /// Whether the overlay is shown; toggled by the Toggle Window shortcut.
     window_visible: bool,
     /// Generated follow-up questions for this conversation.
@@ -313,6 +342,10 @@ pub struct Overlay {
     follow_ups_loading: bool,
     /// Background follow-up task.
     follow_up_task: Option<gpui::Task<()>>,
+    /// Background task naming the session that just ended.
+    title_task: Option<gpui::Task<()>>,
+    /// Conversations already named, so a title is requested once.
+    named_conversations: Vec<String>,
     /// Set when a shortcut asked to focus the composer.
     focus_composer: bool,
     /// Whether the far side of the call is captured too.
@@ -323,8 +356,10 @@ pub struct Overlay {
     portal: Option<std::sync::Arc<crate::features::wayland::PortalShortcuts>>,
     /// System tray handle, polled alongside shortcuts.
     tray: Option<crate::features::tray::Tray>,
-    /// Overlay background opacity, 0.10 to 1.0.
+    /// Overlay surface opacity, 0.0 (fully transparent) to 1.0.
     opacity: f32,
+    /// UI text size as a percentage of the base scale.
+    font_scale: u32,
     /// Overlay theme choice.
     settings_theme: crate::core::models::settings::ThemeChoice,
     /// System-wide shortcut listener, polled on the UI thread.
@@ -347,19 +382,21 @@ impl Overlay {
         portal: Option<std::sync::Arc<crate::features::wayland::PortalShortcuts>>,
         control: Option<std::sync::Arc<crate::features::control::ControlListener>>,
     ) -> Self {
-        let (opacity, settings_theme, theme) = if let Some(settings) =
+        let (opacity, settings_theme, theme, font_scale) = if let Some(settings) =
             crate::features::settings::Settings::load_from_path(services.database_path.as_deref())
         {
             (
-                (settings.transparency as f32 / 100.0).clamp(0.10, 1.0),
+                (settings.transparency as f32 / 100.0).clamp(0.0, 1.0),
                 settings.theme,
                 Theme::from_settings(&settings),
+                settings.font_scale,
             )
         } else {
             (
                 0.5,
                 crate::core::models::settings::ThemeChoice::Dark,
                 Theme::DARK,
+                100,
             )
         };
         // Resolve the active credential and prompts once, so the pickers show
@@ -472,12 +509,17 @@ impl Overlay {
             message_documents: Vec::new(),
             message_signature: (0, 0),
             message_list_state: gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(240.0)),
+            transcript_scroll: gpui::ScrollHandle::new(),
+            transcript_tail: (0, 0),
             window_visible: true,
             opacity,
+            font_scale,
             shortcuts,
             follow_ups: Vec::new(),
             follow_ups_loading: false,
             follow_up_task: None,
+            title_task: None,
+            named_conversations: Vec::new(),
             focus_composer: false,
             system_audio: true,
             tray,
@@ -781,7 +823,9 @@ impl Overlay {
     }
 
     /// Stop capturing and flush the last utterance.
-    pub fn stop_listening(&mut self) {
+    /// Stop the session. Returns the meeting that just ended, when one did,
+    /// so the caller can have it named once its words are final.
+    pub fn stop_listening(&mut self) -> Option<String> {
         if let Some(mut session) = self.session.take() {
             self.last_elapsed = session.elapsed().as_secs_f64();
             for event in session.stop() {
@@ -809,6 +853,7 @@ impl Overlay {
         self.pulse = None;
         self.listening_device = None;
         self.set_dock_expanded(true);
+        self.meeting_id.take()
     }
 
     /// Tick the session a few times a second so the meter and clock stay live.
@@ -1031,6 +1076,7 @@ impl Overlay {
                     let _ = answer;
                     overlay.streaming_text.clear();
                     overlay.generate_follow_ups(cx);
+                    overlay.generate_conversation_title(cx);
                     cx.notify();
                 })
                 .ok();
@@ -1442,6 +1488,10 @@ impl Overlay {
     /// Start a fresh conversation without losing the old one.
     pub fn new_chat(&mut self) {
         self.interrupt_response();
+        // Leaving the old session behind must not leave its words on screen.
+        if self.is_listening() {
+            self.stop_listening();
+        }
         self.chat.reset();
         self.context_generation = self.context_generation.wrapping_add(1);
         self.context_import = None;
@@ -1462,6 +1512,17 @@ impl Overlay {
         self.message_signature = (0, 0);
         self.message_list_state.reset(0);
         self.user_scrolled = false;
+        // Transcript and live speech belong to the session that just ended.
+        self.transcript.clear();
+        self.live_interim = Default::default();
+        self.live_turns = Default::default();
+        self.live_speaking = None;
+        self.live_connected = false;
+        self.pending_audio.clear();
+        self.pending_question = None;
+        self.transcript_tail = (0, 0);
+        self.last_elapsed = 0.0;
+        self.meeting_id = None;
     }
 
     /// Act on tray clicks and menu choices.
@@ -1485,7 +1546,7 @@ impl Overlay {
                 }
                 TrayAction::ToggleListening => {
                     if self.is_listening() {
-                        self.stop_listening();
+                        self.finish_session_title(cx);
                     } else {
                         self.begin_capture(cx);
                     }
@@ -1510,7 +1571,7 @@ impl Overlay {
             }
             Action::VoiceInput => {
                 if self.is_listening() {
-                    self.stop_listening();
+                    self.finish_session_title(cx);
                 } else {
                     self.begin_capture(cx);
                 }
@@ -1647,7 +1708,7 @@ impl Overlay {
             pill = pill.child(
                 div().flex().items_center().gap(px(6.0)).px(px(6.0)).child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(scaled(11.0))
                         .text_color(theme.foreground)
                         .child(crate::features::db::meetings::format_duration(
                             self.elapsed_seconds() as i64,
@@ -2021,6 +2082,133 @@ impl Overlay {
         }));
     }
 
+    /// Name a finished meeting from what was said, on the user's own chat model.
+    ///
+    /// Runs once when the session ends. A failure leaves the timestamped title
+    /// in place rather than blanking it.
+    pub fn generate_meeting_title(&mut self, meeting_id: String, cx: &mut Context<Self>) {
+        let body = self.transcript_body_for_title();
+        self.generate_title(scope::Record::Meeting(&meeting_id), body, cx);
+    }
+
+    /// Name the current conversation once it has a real exchange in it.
+    fn generate_conversation_title(&mut self, cx: &mut Context<Self>) {
+        let Some(conversation_id) = self.chat.conversation_id().map(str::to_owned) else {
+            return;
+        };
+        // One title per conversation: only the first finished answer names it.
+        if self.named_conversations.contains(&conversation_id) {
+            return;
+        }
+        let mut body = String::new();
+        for message in self.conversation.messages().iter().take(6) {
+            let role = if message.role == Role::User {
+                "You"
+            } else {
+                "Assistant"
+            };
+            body.push_str(role);
+            body.push_str(": ");
+            body.extend(message.content.chars().take(800));
+            body.push('\n');
+        }
+        if body.trim().is_empty() {
+            return;
+        }
+        self.named_conversations.push(conversation_id.clone());
+        self.generate_title(scope::Record::Conversation(&conversation_id), body, cx);
+    }
+
+    /// Ask the model for a short title and store it on the given record.
+    fn generate_title(&mut self, target: scope::Record<'_>, body: String, cx: &mut Context<Self>) {
+        let Some(config) = self.selected_chat_config() else {
+            return;
+        };
+        let Some(path) = self.services.database_path.clone() else {
+            return;
+        };
+        let target = target.owned();
+        if body.trim().is_empty() {
+            return;
+        }
+        let prompt = crate::ai::titling::title_prompt(&body);
+        let client = crate::features::chat_engine::http_client();
+        let cancel = std::sync::Arc::new(tokio::sync::watch::channel(false).1);
+        self.title_task = Some(cx.spawn(async move |_, cx| {
+            let context = crate::features::chat_engine::TurnContext {
+                system: Some(crate::ai::titling::TITLE_INSTRUCTION.to_owned()),
+                images: Vec::new(),
+            };
+            let history = vec![crate::core::domain::Message::user(prompt)];
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                crate::features::chat_engine::stream_chat(
+                    &client,
+                    &config,
+                    &history,
+                    &context,
+                    cancel,
+                    |_| {},
+                ),
+            )
+            .await;
+            let Ok(Ok(reply)) = result else {
+                return;
+            };
+            let Some(title) = crate::ai::titling::clean_title(&reply) else {
+                return;
+            };
+            if let Ok(database) = crate::features::db::Database::open(&path) {
+                let connection = database.connection();
+                let _ = match &target {
+                    scope::Target::Meeting(id) => {
+                        crate::features::db::meetings::rename(connection, id, &title)
+                    }
+                    scope::Target::Conversation(id) => {
+                        crate::features::db::conversations::rename(connection, id, &title)
+                    }
+                };
+            }
+            // The dashboard lists meetings; ask any open window to redraw.
+            let _ = cx.refresh();
+        }));
+    }
+
+    /// Stop the running session and name it from what was said.
+    fn finish_session_title(&mut self, cx: &mut Context<Self>) {
+        if let Some(meeting_id) = self.stop_listening() {
+            // An empty session has nothing to name.
+            if self.transcript.len() >= 2 || self.transcript_body_for_title().len() > 120 {
+                self.generate_meeting_title(meeting_id, cx);
+            }
+        }
+    }
+
+    /// The transcript as plain text, speaker-labelled, for a title request.
+    fn transcript_body_for_title(&self) -> String {
+        let mut body = String::new();
+        for entry in self
+            .transcript
+            .iter()
+            .rev()
+            .take(60)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            if entry.who == "me" {
+                body.push_str("You: ");
+            } else if let Some(speaker) = entry.speaker {
+                body.push_str(&format!("Speaker {}: ", speaker + 1));
+            } else {
+                body.push_str("Them: ");
+            }
+            body.extend(entry.text.chars().take(600));
+            body.push('\n');
+        }
+        body
+    }
+
     /// The follow-ups to show: generated ones, else the defaults.
     fn visible_follow_ups(&self) -> Vec<String> {
         if !self.runtime_settings.smart_follow_ups {
@@ -2040,6 +2228,7 @@ impl Overlay {
         }
         let before = (
             self.opacity,
+            self.font_scale,
             self.settings_theme,
             self.chat_choices.clone(),
             self.speech_ready,
@@ -2055,13 +2244,15 @@ impl Overlay {
             }
             self.runtime_settings = settings.clone();
             self.reduce_motion = settings.reduce_motion;
-            self.opacity = (settings.transparency as f32 / 100.0).clamp(0.10, 1.0);
+            self.opacity = (settings.transparency as f32 / 100.0).clamp(0.0, 1.0);
+            self.font_scale = settings.font_scale;
             self.settings_theme = settings.theme;
             self.theme = Theme::from_settings(&settings);
         }
         before
             != (
                 self.opacity,
+                self.font_scale,
                 self.settings_theme,
                 self.chat_choices.clone(),
                 self.speech_ready,
@@ -2143,7 +2334,7 @@ impl Overlay {
 
     /// Change overlay opacity and persist it.
     pub fn set_opacity(&mut self, opacity: f32) {
-        self.opacity = opacity.clamp(0.10, 1.0);
+        self.opacity = opacity.clamp(0.0, 1.0);
         let percent = (self.opacity * 100.0).round() as u32;
         if let Some(path) = self.services.database_path.as_deref()
             && let Ok(database) = crate::features::db::Database::open(path)
@@ -2185,7 +2376,7 @@ impl Overlay {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.0))
+                            .text_size(scaled(11.0))
                             .text_color(theme.foreground)
                             .child(message.to_owned()),
                     )
@@ -2221,6 +2412,16 @@ impl Overlay {
                 || !self.streaming_text.is_empty())
     }
 
+    /// Scroll to the newest words whenever a line lands or the interim text grows.
+    fn keep_transcript_at_bottom(&mut self) {
+        let interim = self.live_interim[0].len() + self.live_interim[1].len();
+        let tail = (self.transcript.len(), interim);
+        if tail != self.transcript_tail {
+            self.transcript_tail = tail;
+            self.transcript_scroll.scroll_to_bottom();
+        }
+    }
+
     /// The Listen tab's body: the words you hear in the top half, answers below.
     fn listen_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.shows_transcript() {
@@ -2231,6 +2432,8 @@ impl Overlay {
                 .min_h(px(0.0))
                 .into_any_element();
         }
+
+        self.keep_transcript_at_bottom();
 
         let divider = self.surfaces().border();
         let transcript: gpui::AnyElement = self.transcript_panel().into_any_element();
@@ -2259,7 +2462,6 @@ impl Overlay {
     /// conversation below keeps its own space.
     fn transcript_panel(&self) -> impl IntoElement {
         let theme = self.theme;
-        let surfaces = self.surfaces();
         let listening = self.is_listening();
 
         let mut list = div()
@@ -2270,6 +2472,7 @@ impl Overlay {
             .min_h(px(0.0))
             .gap(px(8.0))
             .overflow_y_scroll()
+            .track_scroll(&self.transcript_scroll)
             .pb(px(space::SM));
 
         if listening
@@ -2280,7 +2483,7 @@ impl Overlay {
             list = list.child(
                 div()
                     .pt(px(space::SM))
-                    .text_size(px(11.5))
+                    .text_size(scaled(11.5))
                     .text_color(theme.muted_foreground)
                     .child(if self.live_connected {
                         "Waiting for the first words…"
@@ -2315,7 +2518,7 @@ impl Overlay {
                             .gap(px(6.0))
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(scaled(10.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(if mine {
                                         theme.foreground
@@ -2326,15 +2529,15 @@ impl Overlay {
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(scaled(10.0))
                                     .text_color(theme.muted_foreground)
                                     .child(stamp),
                             ),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .line_height(px(17.0))
+                            .text_size(scaled(12.0))
+                            .line_height(scaled(17.0))
                             .text_color(if mine {
                                 theme.foreground
                             } else {
@@ -2359,15 +2562,15 @@ impl Overlay {
                         .gap(px(3.0))
                         .child(
                             div()
-                                .text_size(px(10.0))
+                                .text_size(scaled(10.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(theme.muted_foreground)
                                 .child(if channel == 0 { "You" } else { "Them" }),
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
-                                .line_height(px(17.0))
+                                .text_size(scaled(12.0))
+                                .line_height(scaled(17.0))
                                 .text_color(theme.muted_foreground)
                                 .child(text.clone()),
                         ),
@@ -2396,40 +2599,17 @@ impl Overlay {
                     .mx_auto()
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
                             .flex_shrink_0()
                             .pb(px(space::SM))
-                            .child(div().size(px(6.0)).rounded_full().bg(if listening {
-                                theme.destructive
+                            .text_size(scaled(10.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child(if listening {
+                                "Live transcript"
                             } else {
-                                theme.muted_foreground
-                            }))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .text_size(px(10.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(theme.muted_foreground)
-                                    .truncate()
-                                    .child(if listening {
-                                        "Live transcript"
-                                    } else {
-                                        "Transcript"
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.muted_foreground)
-                                    .child(crate::features::db::meetings::format_duration(
-                                        self.elapsed_seconds() as i64,
-                                    )),
-                            ),
+                                "Transcript"
+                            }),
                     )
-                    .child(div().h(px(1.0)).flex_shrink_0().bg(surfaces.border()))
                     .child(list),
             )
             .into_any_element()
@@ -2450,7 +2630,7 @@ impl Overlay {
                 .px(px(14.0))
                 .rounded_full()
                 .bg(theme.primary)
-                .text_size(px(12.0))
+                .text_size(scaled(12.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.background)
                 .cursor_pointer()
@@ -2471,7 +2651,7 @@ impl Overlay {
                 .child(icons::icon_colored(theme.primary, Icon::Sparkles, 18.0))
                 .child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(scaled(13.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(theme.foreground)
                         .child("Connect an AI first"),
@@ -2479,7 +2659,7 @@ impl Overlay {
                 .child(
                     div()
                         .max_w(px(320.0))
-                        .text_size(px(11.5))
+                        .text_size(scaled(11.5))
                         .text_color(theme.muted_foreground)
                         .child(
                             "Add a provider key in Dev Space and answers work right here. Keys are \
@@ -2500,7 +2680,7 @@ impl Overlay {
             .child(icons::icon_colored(theme.primary, Icon::Sparkles, 18.0))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(scaled(13.0))
                     .text_color(theme.muted_foreground)
                     .child(if self.mode == Mode::Ask {
                         "Ask anything — or start listening and I'll follow the conversation."
@@ -2576,7 +2756,7 @@ impl Overlay {
                             .rounded(px(radius::LG))
                             .px(px(space::MD))
                             .py(px(space::SM))
-                            .text_size(px(12.5))
+                            .text_size(scaled(12.5))
                             .text_color(theme.foreground)
                             .bg(surfaces.accent())
                             .child(text.clone()),
@@ -2650,7 +2830,7 @@ impl Overlay {
                             .bg(surfaces.card())
                             .px(px(12.0))
                             .py(px(6.0))
-                            .text_size(px(11.0))
+                            .text_size(scaled(11.0))
                             .cursor_pointer()
                             .child(icons::icon(&theme, Icon::ArrowDown, 12.0))
                             .child("Latest")
@@ -2668,13 +2848,16 @@ impl Overlay {
 
     fn follow_ups(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        // Wrap rather than scroll: a long question moves onto the next row
+        // instead of being clipped at the edge.
         let mut chips = div()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(px(16.0))
+            .gap(px(12.0))
             .flex_1()
-            .id("follow-up-chips")
-            .overflow_x_scroll();
+            .min_w(px(0.0))
+            .id("follow-up-chips");
 
         let labels = self.visible_follow_ups();
         for (index, label) in labels.into_iter().enumerate() {
@@ -2683,14 +2866,22 @@ impl Overlay {
                 .items_center()
                 .gap(px(3.0))
                 .id(("follow-up", index))
-                .flex_shrink_0()
+                .min_w(px(0.0))
                 .py(px(2.0))
-                .text_size(px(11.0))
+                .text_size(scaled(11.0))
+                .line_height(scaled(15.0))
+                .whitespace_normal()
                 .text_color(theme.muted_foreground)
                 .cursor_pointer()
                 .hover(|style| style.underline().text_color(theme.foreground))
                 .child(icons::icon(&theme, Icon::ArrowUpRight, 10.0))
-                .child(label.clone());
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .whitespace_normal()
+                        .child(label.clone()),
+                );
             let send = label;
             chips = chips.child(chip.on_click(cx.listener(move |this, _, _, cx| {
                 // Fill the composer and send, so a chip is one click.
@@ -2707,16 +2898,18 @@ impl Overlay {
 
         div()
             .flex()
-            .items_center()
+            .items_start()
             .gap(px(space::SM))
             .w_full()
+            .min_w(px(0.0))
             .px(px(space::MD))
             .py(px(3.0))
             .child(
                 div()
                     .flex_shrink_0()
+                    .pt(px(2.0))
                     .font_weight(FontWeight::BOLD)
-                    .text_size(px(10.0))
+                    .text_size(scaled(10.0))
                     .text_color(theme.foreground)
                     .child("Follow-ups"),
             )
@@ -2727,7 +2920,8 @@ impl Overlay {
                     .flex_shrink_0()
                     .items_center()
                     .gap(px(4.0))
-                    .text_size(px(11.0))
+                    .pt(px(2.0))
+                    .text_size(scaled(11.0))
                     .text_color(theme.muted_foreground)
                     .cursor_pointer()
                     .id("edit-follow-ups")
@@ -2757,7 +2951,7 @@ impl Overlay {
             .rounded_full()
             .hover(|s| s.bg(self.surfaces().accent()))
             .cursor_pointer()
-            .text_size(px(11.0))
+            .text_size(scaled(11.0))
             .text_color(self.theme.foreground)
             .child(label)
             .child(icons::icon(&self.theme, Icon::ChevronDown, 10.0))
@@ -2780,7 +2974,7 @@ impl Overlay {
             .rounded_full()
             .hover(|s| s.bg(self.surfaces().accent()))
             .cursor_pointer()
-            .text_size(px(11.0))
+            .text_size(scaled(11.0))
             .text_color(self.theme.muted_foreground)
             .child(
                 div()
@@ -2842,7 +3036,7 @@ impl Overlay {
                     div()
                         .px(px(8.0))
                         .py(px(8.0))
-                        .text_size(px(11.0))
+                        .text_size(scaled(11.0))
                         .text_color(theme.muted_foreground)
                         .child("Connect an AI in Settings"),
                 );
@@ -2862,7 +3056,7 @@ impl Overlay {
                         .rounded(px(7.0))
                         .hover(|s| s.bg(self.surfaces().accent()))
                         .cursor_pointer()
-                        .text_size(px(11.0))
+                        .text_size(scaled(11.0))
                         .text_color(theme.foreground)
                         .child(if id == "merge-gateway" {
                             "DeepSeek 4.1"
@@ -2921,7 +3115,7 @@ impl Overlay {
             })
             .hover(|s| s.bg(self.surfaces().muted()))
             .text_color(self.theme.foreground)
-            .text_size(px(11.0))
+            .text_size(scaled(11.0))
             .child(name)
             .children(active.then(|| icons::icon(&self.theme, Icon::Check, 12.0)))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -2991,7 +3185,7 @@ impl Overlay {
                                 .child(icons::icon_colored(theme.warning, Icon::KeyRound, 13.0))
                                 .child(
                                     div()
-                                        .text_size(px(11.5))
+                                        .text_size(scaled(11.5))
                                         .text_color(theme.foreground)
                                         .child("Connect Deepgram for speech and Gemini or Merge Gateway for answers in Settings."),
                                 ),
@@ -3006,7 +3200,7 @@ impl Overlay {
                                 .rounded_full()
                                 .bg(self.surfaces().muted())
                                 .hover(|style| style.bg(self.surfaces().accent()))
-                                .text_size(px(10.5))
+                                .text_size(scaled(10.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.foreground)
                                 .cursor_pointer()
@@ -3154,7 +3348,7 @@ impl Overlay {
             .id("context-tray")
             .overflow_y_scroll();
         if self.context_loading {
-            tray = tray.child(div().text_size(px(11.0)).child("Reading attachments…"));
+            tray = tray.child(div().text_size(scaled(11.0)).child("Reading attachments…"));
         }
         for (index, item) in self.context_sources.iter().enumerate() {
             let id = item.id.clone();
@@ -3184,7 +3378,7 @@ impl Overlay {
                             .flex_1()
                             .min_w(px(0.0))
                             .truncate()
-                            .text_size(px(11.0))
+                            .text_size(scaled(11.0))
                             .child(format!(
                                 "{}{}",
                                 item.name,
@@ -3207,16 +3401,16 @@ impl Overlay {
         }
         let mut menu = div().id("context-menu").occlude().flex().flex_col().w(px(320.0)).max_h(px(340.0)).overflow_y_scroll().p(px(10.0)).gap(px(6.0)).rounded(px(14.0)).border_1().border_color(self.surfaces().border()).bg(Theme::with_alpha(self.theme.card, 0.98)).shadow_md()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.context_menu_open = false; cx.notify(); }))
-            .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).child("Conversation context"))
-            .child(div().text_size(px(11.0)).text_color(self.theme.muted_foreground).child("Files and past transcripts stay attached until removed or you start a new conversation."))
-            .child(div().id("import-context-file").p(px(9.0)).rounded(px(8.0)).bg(self.surfaces().accent()).cursor_pointer().text_size(px(12.0)).child("Attach files…").on_click(cx.listener(|this, _, _, cx| { this.import_context(cx); cx.notify(); })))
-            .child(div().text_size(px(10.5)).text_color(self.theme.muted_foreground).child("Text, code, PDF, PNG and JPEG · 10 MB per file"))
-            .child(div().mt(px(6.0)).text_size(px(12.0)).child("Saved transcripts"));
+            .child(div().text_size(scaled(13.0)).font_weight(FontWeight::SEMIBOLD).child("Conversation context"))
+            .child(div().text_size(scaled(11.0)).text_color(self.theme.muted_foreground).child("Files and past transcripts stay attached until removed or you start a new conversation."))
+            .child(div().id("import-context-file").p(px(9.0)).rounded(px(8.0)).bg(self.surfaces().accent()).cursor_pointer().text_size(scaled(12.0)).child("Attach files…").on_click(cx.listener(|this, _, _, cx| { this.import_context(cx); cx.notify(); })))
+            .child(div().text_size(scaled(10.5)).text_color(self.theme.muted_foreground).child("Text, code, PDF, PNG and JPEG · 10 MB per file"))
+            .child(div().mt(px(6.0)).text_size(scaled(12.0)).child("Saved transcripts"));
         if self.context_choices.is_empty() {
             menu = menu.child(
                 div()
                     .py(px(8.0))
-                    .text_size(px(11.0))
+                    .text_size(scaled(11.0))
                     .child("Saved meetings and conversations will appear here."),
             );
         }
@@ -3241,7 +3435,7 @@ impl Overlay {
                             .flex_1()
                             .min_w(px(0.0))
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(scaled(11.5))
                             .child(item.name.clone()),
                     )
                     .children(attached.then(|| icons::icon(&self.theme, Icon::Check, 12.0)))
@@ -3676,7 +3870,7 @@ fn render_code_rows(
                 .items_center()
                 .justify_between()
                 .pb(px(6.0))
-                .text_size(px(10.0))
+                .text_size(scaled(10.0))
                 .text_color(theme.muted_foreground)
                 .child(language.clone().unwrap_or_else(|| "Code".into()))
                 .child(crate::ui::controls::CopyCode {
@@ -3711,7 +3905,7 @@ fn render_code_rows(
             .w_full()
             .min_w(px(0.0))
             .font_family(crate::ui::theme::code_font_family())
-            .text_size(px(11.5))
+            .text_size(scaled(11.5))
             .child(gpui::StyledText::new(visible).with_highlights(highlights)),
     )
     .into_any_element()
@@ -3806,14 +4000,14 @@ fn render_markdown_blocks(
         .min_w(px(0.0))
         .gap(px(6.0))
         .max_w(px(640.0))
-        .text_size(px(12.5));
+        .text_size(scaled(12.5));
 
     for (block_index, block) in blocks.iter().cloned().enumerate() {
         let element: gpui::AnyElement = match block {
             Block::Heading { level, spans } => div()
                 .w_full()
                 .min_w(px(0.0))
-                .text_size(px(match level {
+                .text_size(scaled(match level {
                     1 => 16.0,
                     2 => 14.5,
                     3 => 13.5,
@@ -3903,7 +4097,7 @@ fn render_markdown_blocks(
                             .items_center()
                             .justify_between()
                             .gap(px(8.0))
-                            .text_size(px(10.0))
+                            .text_size(scaled(10.0))
                             .text_color(theme.muted_foreground)
                             .child(language.unwrap_or_else(|| "Code".into()))
                             .child(crate::ui::controls::CopyCode {
@@ -3917,7 +4111,7 @@ fn render_markdown_blocks(
                             .w_full()
                             .min_w(px(0.0))
                             .font_family(crate::ui::theme::code_font_family())
-                            .text_size(px(11.5))
+                            .text_size(scaled(11.5))
                             .child(gpui::StyledText::new(text).with_highlights(highlights)),
                     )
                     .into_any_element()
@@ -3944,7 +4138,7 @@ fn render_markdown_blocks(
                             .flex_shrink_0()
                             .px(px(8.0))
                             .py(px(5.0))
-                            .text_size(px(11.0))
+                            .text_size(scaled(11.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child(headers.get(index).cloned().unwrap_or_default()),
@@ -3961,7 +4155,7 @@ fn render_markdown_blocks(
                                 .flex_shrink_0()
                                 .px(px(8.0))
                                 .py(px(4.0))
-                                .text_size(px(11.5))
+                                .text_size(scaled(11.5))
                                 .text_color(theme.muted_foreground)
                                 .child(row.get(index).cloned().unwrap_or_default()),
                         );
@@ -3997,6 +4191,8 @@ fn render_markdown_blocks(
 
 impl Render for Overlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Text sizes are written in rems, so this one value scales the window.
+        window.set_rem_size(crate::ui::theme::rem_size_for(self.font_scale));
         for preview in self.retired_previews.drain(..) {
             if let Some(rendered) = preview.clone().use_render_image(window, cx) {
                 cx.drop_image(rendered, Some(window));
@@ -4118,7 +4314,7 @@ impl Render for HoverLabel {
             .bg(Theme::with_alpha(self.theme.card, 0.96))
             .text_color(self.theme.foreground)
             .font_family(crate::ui::theme::ui_font_family())
-            .text_size(px(11.0))
+            .text_size(scaled(11.0))
             .child(self.text.clone())
     }
 }
@@ -4223,6 +4419,34 @@ mod tests {
             crate::core::settings::AutoScreenshot::EveryQuestion
         );
         drop(database);
+        drop(overlay);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn new_chat_drops_the_previous_transcript() {
+        use crate::speech::transcription::{LiveEvent, TranscriptLine};
+        let (path, mut overlay) = fixture();
+        overlay.handle_live_event(LiveEvent::Transcript(TranscriptLine {
+            channel: 0,
+            text: "Old session words".into(),
+            is_final: true,
+            speech_final: true,
+            start: 0.0,
+            end: 1.0,
+            speaker: Some(0),
+        }));
+        overlay.meeting_id = Some("old-meeting".into());
+        overlay.transcript_tail = (1, 0);
+        assert!(!overlay.transcript.is_empty());
+
+        overlay.new_chat();
+
+        assert!(overlay.transcript.is_empty(), "transcript must not survive");
+        assert!(overlay.meeting_id.is_none(), "old meeting must be released");
+        assert_eq!(overlay.transcript_tail, (0, 0));
+        assert!(!overlay.shows_transcript());
+
         drop(overlay);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -4401,6 +4625,47 @@ mod tests {
         ] {
             assert!(prompt.contains(context), "missing {context}");
         }
+        drop(overlay);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_follows_new_words_without_fighting_the_reader() {
+        use crate::speech::transcription::{LiveEvent, TranscriptLine};
+        let (path, mut overlay) = fixture();
+        let line = |text: &str, is_final| TranscriptLine {
+            channel: 0,
+            text: text.into(),
+            is_final,
+            speech_final: is_final,
+            start: 0.0,
+            end: 1.0,
+            speaker: Some(0),
+        };
+
+        // First words register a new tail.
+        overlay.handle_live_event(LiveEvent::Transcript(line("Hello there", false)));
+        overlay.keep_transcript_at_bottom();
+        assert_eq!(overlay.transcript_tail.1, "Hello there".len());
+
+        // The same frame again must not re-request a scroll.
+        let settled = overlay.transcript_tail;
+        overlay.keep_transcript_at_bottom();
+        assert_eq!(overlay.transcript_tail, settled);
+
+        // Interim text growing moves the tail again.
+        overlay.handle_live_event(LiveEvent::Transcript(line("Hello there, how", false)));
+        overlay.keep_transcript_at_bottom();
+        assert!(overlay.transcript_tail.1 > settled.1);
+
+        // A final line advances the line count and clears the interim length.
+        overlay.handle_live_event(LiveEvent::Transcript(line(
+            "Hello there, how are you",
+            true,
+        )));
+        overlay.keep_transcript_at_bottom();
+        assert_eq!(overlay.transcript_tail, (1, 0));
+
         drop(overlay);
         std::fs::remove_dir_all(path).unwrap();
     }
