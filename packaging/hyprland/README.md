@@ -125,8 +125,8 @@ bindings in Nix; application-side remapping cannot overwrite the managed file.
 
 These forward Lennette's existing command-line actions to its running instance.
 The window command hides the overlay on a private special workspace and restores
-it to the active workspace, floating and pinned. Ctrl+Shift+I also restores a
-hidden overlay and focuses its input. The Hyprland binding uses physical keycode
+it to the active workspace, floating and pinned. While hidden, only Ctrl+Shift+Backslash acts; Ctrl+Shift+I and the other
+shortcuts resume after restoring the overlay. The Hyprland binding uses physical keycode
 51 for the US backslash key so Shift does not change its match into `bar`.
 The dashboard command opens the dashboard. The compositor does not implement the
 application's audio, transcription, or meeting-response features.
@@ -209,7 +209,7 @@ corner. Hyprland animates the window movement and the panel fades in.
 
 The footer offers **Full**, **Follow-ups**, and **Hide** modes. The dashboard
 and screenshot controls are icons at the left and right of the input. Dark
-mode uses neutral charcoal; glass elements preserve their alpha and the app's
+mode uses neutral charcoal; glass elements have clear backgrounds with outlines and the app's
 window rules disable compositor blur. Text uses the system UI font.
 
 Recording is disabled until a configured speech provider has a key. All start
