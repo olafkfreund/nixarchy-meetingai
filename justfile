@@ -1,41 +1,43 @@
 # lennette — development tasks
 
+devenv := if env_var_or_default("DEVENV_PROFILE", "") != "" { "" } else { "devenv shell -- " }
+
 default:
     @just --list
 
 # Format all code.
 fmt:
-    cargo fmt --all
+    {{devenv}}cargo fmt --all
 
 # Check formatting without modifying files.
 fmt-check:
-    cargo fmt --all -- --check
+    {{devenv}}cargo fmt --all -- --check
 
 # Lint with clippy (warnings denied).
 lint:
-    cargo clippy --all-targets -- -D warnings
+    {{devenv}}cargo clippy --all-targets -- -D warnings
 
 # Format and lint together in a single command.
 style: fmt lint
 
 # Fast type & borrow checking across all targets.
 typecheck:
-    cargo check --all-targets
+    {{devenv}}cargo check --all-targets
 
 # Fast type & borrow checking alias.
 check: typecheck
 
 # Build binaries.
 build:
-    cargo build
+    {{devenv}}cargo build
 
 # Run the desktop application.
 run:
-    cargo run
+    {{devenv}}cargo run
 
 # Run the unit test suite.
 test:
-    cargo nextest run
+    {{devenv}}cargo nextest run
 
 # Full pre-commit check: style + typecheck.
 pre-commit: fmt-check lint typecheck
@@ -45,7 +47,7 @@ pre-push: pre-commit test
 
 # Bump version (patch, minor, major, or auto).
 bump type="patch":
-    ./scripts/bump-version.sh {{type}}
+    {{devenv}}./scripts/bump-version.sh {{type}}
 
 # Install repository git hooks into .git/hooks/
 install-hooks:
@@ -55,13 +57,14 @@ install-hooks:
 
 # Validate lints, format, types, compile optimized release binary and install locally.
 install: fmt-check lint typecheck
-    cargo build --release
+    {{devenv}}cargo build --release
     mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/512x512/apps ~/.local/share/icons/hicolor/scalable/apps
-    ./scripts/install-binary.sh target/release/lennette ~/.local/bin/lennette
+    {{devenv}}./scripts/install-binary.sh target/release/lennette ~/.local/bin/lennette
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/dev.lennette.overlay.png
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/lennette.png
+    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/dev.lennette.overlay.png
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/lennette.png
-    rm -f ~/.local/share/applications/lennette.desktop
+    cp packaging/dev.lennette.overlay.desktop ~/.local/share/applications/lennette.desktop
     if [ -L ~/.local/share/applications/dev.lennette.overlay.desktop ]; then echo "Keeping the managed Lennette desktop launcher"; else cp packaging/dev.lennette.overlay.desktop ~/.local/share/applications/dev.lennette.overlay.desktop; fi
     @command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database ~/.local/share/applications || true
     @command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor || true
