@@ -86,7 +86,7 @@ fn default_database_path() -> Option<std::path::PathBuf> {
     Some(directory.join("lennette.db"))
 }
 
-/// Start the application. Blocks until the last window closes.
+/// Assets bundled with the native application.
 pub struct EmbeddedAssets;
 
 impl gpui::AssetSource for EmbeddedAssets {
@@ -136,6 +136,8 @@ pub fn run() {
         .build()
         .expect("could not start the provider runtime");
     let _runtime_guard = runtime.enter();
+    // Grammar decoding is CPU work and must not delay the first window.
+    std::thread::spawn(crate::ui::widgets::syntax::warm_up);
     let services = Services::open();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -144,10 +146,14 @@ pub fn run() {
         "starting lennette"
     );
 
+    let startup = std::time::Instant::now();
     Application::new()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
-            crate::ui::widgets::syntax::warm_up();
+            tracing::info!(
+                elapsed_ms = startup.elapsed().as_millis(),
+                "native platform ready"
+            );
             // Register bundled UI and icon fonts once for every native window.
             // Satoshi ships as static weights: GPUI matches the requested weight
             // against these faces, so Regular, Medium and Bold are all needed.
@@ -159,6 +165,8 @@ pub fn run() {
             ]) {
                 tracing::error!(%error, "could not register bundled fonts");
             }
+
+            tracing::info!(elapsed_ms = startup.elapsed().as_millis(), "UI fonts ready");
 
             // The overlay opens first and can open the dashboard.
             let services_for_overlay = services.clone();
@@ -305,7 +313,7 @@ pub fn run() {
                 window.set_window_title("lennette");
                 window.set_app_id("dev.lennette.overlay");
                 window.activate_window();
-                cx.new(|_| {
+                let overlay = cx.new(|_| {
                     Overlay::new(
                         services_for_overlay,
                         shortcut_listener.clone(),
@@ -313,11 +321,21 @@ pub fn run() {
                         portal_clone,
                         control_handle,
                     )
-                })
+                });
+                let weak = overlay.downgrade();
+                window.on_window_should_close(cx, move |_, cx| {
+                    weak.update(cx, |overlay, cx| overlay.close_to_tray(cx))
+                        .unwrap_or(true)
+                });
+                overlay
             })
             .expect("failed to open the overlay window");
 
             cx.activate(true);
+            tracing::info!(
+                elapsed_ms = startup.elapsed().as_millis(),
+                "overlay window ready"
+            );
         });
 }
 

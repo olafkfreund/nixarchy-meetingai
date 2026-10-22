@@ -1610,6 +1610,17 @@ impl Overlay {
         crate::features::hyprland::focus_overlay();
     }
 
+    /// Keep the window entity, tray service and control listener alive on close.
+    pub(crate) fn close_to_tray(&mut self, cx: &mut Context<Self>) -> bool {
+        if !matches!(self.tray, Some(crate::features::tray::Tray::Live(_))) {
+            return true;
+        }
+        if self.window_visible {
+            self.toggle_window(cx);
+        }
+        false
+    }
+
     fn toggle_window(&mut self, cx: &mut Context<Self>) {
         if self.window_visible {
             if crate::features::hyprland::is_hyprland() {

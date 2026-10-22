@@ -216,3 +216,29 @@ Recording is disabled until a configured speech provider has a key. All start
 paths share that check; recording shows a red stop square, elapsed time, and
 an audio-level waveform. Removing a key never prevents stopping an active
 recording. The provider/model picker selects the provider used by chat requests.
+
+## Overview compatibility regression
+
+The `hyprbars` and `scrolloverview` compatibility patches in `~/doty` exchange
+button sizes through `hyprbarsOverviewButtonSizesV1`. Overview must never cast
+hyprbars' `g_pGlobalState` to a copied C++ structure: changes to `SHyprButton`
+change the vector stride and can corrupt memory while drawing floating windows.
+Both plugins must be rebuilt with their patches.
+
+Run `tests/overview-compat.py` from a Wayland session, supplying `--compositor`,
+`--plugins` (a JSON array of absolute plugin library paths), `--lennette`,
+`--client-dir` (from `tests/build-fixture.sh`), and `--artifacts`. It starts an
+isolated compositor and exercises both overviews with three decorated floating
+windows and multiple titlebar buttons, first without Lennette, then in normal
+and private modes. It also checks normal close-to-tray, menu/shortcut restore,
+and private-mode exit without a tray. It never reloads the desktop's plugins.
+
+Normal mode keeps its tray and control socket alive when the overlay is closed;
+use **Quit** in the tray menu to exit. Private mode has no tray and closing the
+last window exits. Syntax grammars warm in the background so decoding them does
+not delay the initial window.
+
+On Intel-boot/NVIDIA hybrid laptops, Lennette uses the installed Intel Vulkan
+ICD by default. This avoids waking a suspended discrete GPU during startup.
+Explicit Vulkan driver settings, `ZED_DEVICE_ID`, `DRI_PRIME`, and NVIDIA offload
+settings take precedence; other hardware keeps the Vulkan loader's default.

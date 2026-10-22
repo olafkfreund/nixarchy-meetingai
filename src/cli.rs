@@ -5,6 +5,11 @@
 //! starting a second copy.
 
 /// A one-shot command requested by a shortcut.
+///
+/// Returns `None` when this invocation should launch the app instead: no control
+/// flag, or a toggle requested while nothing is listening on the socket. That
+/// second case is what makes a toggle key launch the app when it is not running;
+/// forwarding to nobody and exiting would leave the key doing nothing.
 pub fn handle_args() -> Option<String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = args.first()?;
@@ -26,8 +31,20 @@ pub fn handle_args() -> Option<String> {
     // spawn a duplicate window.
     match send(command) {
         Ok(()) => Some(String::new()),
+        Err(error) if launches_when_absent(command) => {
+            tracing::debug!(%error, %command, "no instance accepted the command; launching");
+            None
+        }
         Err(error) => Some(format!("lennette: {error}")),
     }
+}
+
+/// Toggles are safe to treat as "start the app" when no instance is listening.
+fn launches_when_absent(command: &str) -> bool {
+    matches!(
+        command,
+        "toggle-window" | "toggle-dashboard" | "focus-input"
+    )
 }
 
 fn usage() -> String {
@@ -56,10 +73,87 @@ pub fn activate_existing_instance() -> bool {
     send("focus-input").is_ok()
 }
 
+/// Wait for the instance holding the lock to become reachable, then focus it.
+///
+/// A launch that loses the race may face an instance that has claimed the lock
+/// but not yet bound its socket. Retrying turns that into a normal "bring it up"
+/// instead of a silent no-op.
+pub fn wait_for_running_instance(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if send("focus-input").is_ok() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// Path of the control socket shared with the running instance.
 pub fn control_socket() -> Option<std::path::PathBuf> {
+    runtime_path("lennette-shortcut.sock")
+}
+
+/// Path of the exclusive launch lock held by the running instance.
+pub fn instance_lock_path() -> Option<std::path::PathBuf> {
+    runtime_path("lennette-instance.lock")
+}
+
+fn runtime_path(name: &str) -> Option<std::path::PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)?;
-    Some(runtime.join("lennette-shortcut.sock"))
+    Some(runtime.join(name))
+}
+
+/// Exclusive claim on being the one running instance.
+///
+/// A socket probe alone cannot stop a double launch: two processes can both
+/// find no listener and both start. `flock` is atomic, so exactly one launch
+/// obtains the lock and every later launch sees it taken. The kernel releases
+/// the lock when the process exits, so a crash never leaves it stuck.
+pub struct InstanceLock {
+    _file: std::fs::File,
+}
+
+impl InstanceLock {
+    /// Claim the instance slot, or return `None` when another instance holds it.
+    pub fn acquire() -> Option<Self> {
+        Self::acquire_at(&instance_lock_path()?)
+    }
+
+    /// Claim an explicit lock path. Used by tests to avoid the live instance.
+    fn acquire_at(path: &std::path::Path) -> Option<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|error| tracing::warn!(%error, path = %path.display(), "could not open instance lock"))
+            .ok()?;
+
+        // LOCK_EX without LOCK_NB would block; this launch must decide now.
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: the fd is owned by `file` and stays open for the lock's lifetime.
+        let taken = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0;
+        if !taken {
+            return None;
+        }
+
+        let _ = file.set_len(0);
+        use std::io::Write;
+        let mut writer = &file;
+        let _ = writeln!(writer, "{}", std::process::id());
+        Some(Self { _file: file })
+    }
+}
+
+const LOCK_EX: std::ffi::c_int = 2;
+const LOCK_NB: std::ffi::c_int = 4;
+
+unsafe extern "C" {
+    fn flock(fd: std::ffi::c_int, operation: std::ffi::c_int) -> std::ffi::c_int;
 }
 
 #[cfg(unix)]
@@ -95,6 +189,55 @@ mod tests {
         if control_socket().is_some() {
             let path = control_socket().unwrap();
             assert!(path.ends_with("lennette-shortcut.sock"));
+        }
+    }
+
+    #[test]
+    fn instance_lock_exists_in_the_runtime_dir() {
+        if let Some(path) = instance_lock_path() {
+            assert!(path.ends_with("lennette-instance.lock"));
+        }
+    }
+
+    #[test]
+    fn only_one_instance_may_hold_the_lock() {
+        // Use a private lock file: the developer's own running app legitimately
+        // holds the real one, and the test must not depend on that.
+        let path = std::env::temp_dir().join(format!(
+            "lennette-lock-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let first = InstanceLock::acquire_at(&path).expect("the slot should be free");
+        // While held, a second claim must fail; that is what stops a double launch.
+        assert!(
+            InstanceLock::acquire_at(&path).is_none(),
+            "a second instance was allowed"
+        );
+        drop(first);
+        // Releasing returns the slot, so the app can start again after quitting.
+        assert!(
+            InstanceLock::acquire_at(&path).is_some(),
+            "the slot should be reusable"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn toggles_heal_a_missing_instance_by_launching() {
+        // A toggle must start the app when nothing is listening, or the bound key
+        // silently does nothing before the first launch.
+        for command in ["toggle-window", "toggle-dashboard", "focus-input"] {
+            assert!(launches_when_absent(command), "{command} should launch");
+        }
+        // A failed one-shot must not launch: the user asked for an action, not a start.
+        for command in ["screenshot", "toggle-voice", "toggle-system-audio"] {
+            assert!(
+                !launches_when_absent(command),
+                "{command} should not launch"
+            );
         }
     }
 

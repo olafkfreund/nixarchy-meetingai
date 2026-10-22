@@ -3,7 +3,12 @@
 //! Completed lines retain Syntect parser/highlighter state. Only newly completed
 //! lines and the unfinished tail are processed on append. Unknown fence languages
 //! stay readable as plain text. No HTML, JavaScript or network assets are involved.
-use std::{cell::RefCell, collections::VecDeque, ops::Range, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    ops::Range,
+    sync::{Arc, LazyLock},
+};
 use two_face::{
     re_exports::syntect::{
         easy::HighlightLines,
@@ -32,19 +37,31 @@ struct Entry {
     rendered: Arc<Vec<CodeRun>>,
     parsed_lines: usize,
 }
-struct Cache {
+struct Resources {
     syntaxes: SyntaxSet,
     dark: Theme,
     light: Theme,
+}
+static RESOURCES: LazyLock<Resources> = LazyLock::new(|| {
+    let themes = two_face::theme::extra();
+    Resources {
+        syntaxes: two_face::syntax::extra_newlines(),
+        dark: themes[EmbeddedThemeName::Base16EightiesDark].clone(),
+        light: themes[EmbeddedThemeName::InspiredGithub].clone(),
+    }
+});
+struct Cache {
+    syntaxes: &'static SyntaxSet,
+    dark: &'static Theme,
+    light: &'static Theme,
     entries: VecDeque<Entry>,
 }
 impl Cache {
     fn new() -> Self {
-        let themes = two_face::theme::extra();
         Self {
-            syntaxes: two_face::syntax::extra_newlines(),
-            dark: themes[EmbeddedThemeName::Base16EightiesDark].clone(),
-            light: themes[EmbeddedThemeName::InspiredGithub].clone(),
+            syntaxes: &RESOURCES.syntaxes,
+            dark: &RESOURCES.dark,
+            light: &RESOURCES.light,
             entries: VecDeque::new(),
         }
     }
@@ -65,7 +82,7 @@ impl Cache {
             other => other,
         }
         .to_owned();
-        let theme = if light { &self.light } else { &self.dark };
+        let theme = if light { self.light } else { self.dark };
         let candidate = self.entries.iter().rposition(|entry| {
             entry.language == language && entry.light == light && text.starts_with(&entry.source)
         });
@@ -100,7 +117,7 @@ impl Cache {
         for line in LinesWithEndings::from(&text[entry.committed..end]) {
             append_line(
                 &mut highlighter,
-                &self.syntaxes,
+                self.syntaxes,
                 line,
                 offset,
                 &mut entry.stable,
@@ -114,7 +131,7 @@ impl Cache {
         if end < text.len() {
             let mut tail =
                 HighlightLines::from_state(theme, entry.state.0.clone(), entry.state.1.clone());
-            append_line(&mut tail, &self.syntaxes, &text[end..], end, &mut rendered);
+            append_line(&mut tail, self.syntaxes, &text[end..], end, &mut rendered);
             entry.parsed_lines += 1;
         }
         entry.source = text.to_owned();
@@ -157,9 +174,7 @@ fn append_line(
 }
 thread_local! { static CACHE: RefCell<Cache> = RefCell::new(Cache::new()); }
 pub fn warm_up() {
-    CACHE.with(|cache| {
-        cache.borrow();
-    });
+    LazyLock::force(&RESOURCES);
 }
 pub fn highlight(language: Option<&str>, text: &str, light: bool) -> Arc<Vec<CodeRun>> {
     CACHE.with(|cache| {
