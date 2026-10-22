@@ -1,0 +1,139 @@
+name: Build and release
+
+on:
+  # A merged PR pushes to main too; no second merge event is needed.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Keep every main commit's release, without duplicate jobs on a rerun.
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.99.1
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - platform: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux build and runtime dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config libclang-dev \
+            libasound2-dev libdbus-1-dev libfontconfig1-dev libfreetype6-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libxcb-randr0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxcb-xinput-dev libxcb-cursor-dev \
+            libx11-dev libxi-dev libxrandr-dev libxcursor-dev libwayland-dev \
+            libegl1-mesa-dev libvulkan-dev libpipewire-0.3-dev libssl-dev libgbm-dev \
+            pulseaudio-utils fonts-dejavu-core
+      - name: Install Rust
+        shell: bash
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+      - name: Use the static Windows C runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "RUSTFLAGS=-C target-feature=+crt-static" >> $env:GITHUB_ENV
+          # GPUI compiles its release shaders using the installed Windows SDK.
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc.exe was not found' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Test
+        run: cargo test --locked --all-targets --target ${{ matrix.target }}
+      - name: Test release publisher
+        run: python -m unittest discover -s tests -p test_release.py
+      - name: Build release
+        run: cargo build --locked --release --bin lennette --target ${{ matrix.target }}
+      - name: Verify Windows native windows and shortcuts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/windows-smoke.ps1 -Binary target/${{ matrix.target }}/release/lennette.exe
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist/lennette-linux-x86_64
+          cp target/${{ matrix.target }}/release/lennette dist/lennette-linux-x86_64/
+          cp .github/README.md dist/lennette-linux-x86_64/README.md
+          cp LICENSE packaging/dev.lennette.overlay.desktop dist/lennette-linux-x86_64/
+          cp src/assets/lennette_app_icon.png dist/lennette-linux-x86_64/
+          { rustc --version; ldd --version | sed -n '1p'; printf 'Commit: %s\n' "$GITHUB_SHA"; } > dist/lennette-linux-x86_64/BUILDINFO.txt
+          dist/lennette-linux-x86_64/lennette --version
+          tar -C dist -czf dist/lennette-linux-x86_64.tar.gz lennette-linux-x86_64
+          rm -r dist/lennette-linux-x86_64
+      - name: Package portable Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/lennette.exe dist/lennette-windows-x86_64.exe
+          $version = Start-Process -FilePath (Resolve-Path dist/lennette-windows-x86_64.exe).Path -ArgumentList '--version' -Wait -PassThru
+          if ($version.ExitCode -ne 0) { throw 'Portable executable failed to start' }
+          # Only OS DLLs should be imported: no separately installed VC runtime.
+          $dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe was not found' }
+          $imports = & $dumpbin.FullName /dependents dist/lennette-windows-x86_64.exe
+          if ($imports -match 'VCRUNTIME\d+.*\.dll|MSVCP\d+.*\.dll') { throw 'Executable requires a separate Visual C++ runtime' }
+          New-Item -ItemType Directory -Path windows-package | Out-Null
+          Copy-Item dist/lennette-windows-x86_64.exe windows-package/lennette.exe
+          Copy-Item .github/README.md windows-package/README.md
+          Copy-Item LICENSE windows-package/
+          Compress-Archive -Path windows-package/* -DestinationPath dist/lennette-windows-x86_64.zip
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS-${{ matrix.platform }}.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish both platforms
+    needs: build
+    # Manual runs from feature branches can validate builds but cannot publish.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/publish-release.py

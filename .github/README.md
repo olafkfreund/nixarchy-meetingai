@@ -3,7 +3,7 @@
 <p align="center">A native desktop copilot for meetings, interviews, and live discussions.<br />Live transcripts, useful context, and answers when you need them. Built with Rust + GPUI.</p>
 
 
-## What it does
+### What it does
 
 - **Listen to both sides.** Microphone and system-audio transcription with separate speaker context.
 - **Answer with context.** Streamed suggestions using your prompt, reusable profiles, previous conversations, screenshots, and PDF/text/image attachments.
@@ -18,19 +18,7 @@ Bring your own keys: **Google Gemini** or **Merge Gateway** for chat; **Deepgram
   <img src="https://swr2.itssingularity.com/lennette/lennette_header.png" alt="Lennette — know exactly what to say, live" width="100%" />
 </p>
 
-## Getting started
-
 Download a build from [Releases](https://github.com/parazeeknova/lennette/releases). SHA-256 checksums are included.
-
-| Platform | Run it | Current support |
-| --- | --- | --- |
-| Linux x86_64 | Extract, then `./lennette` | X11 / Wayland; PulseAudio or PipeWire-Pulse for system audio. |
-| Windows x86_64 | Run the portable `.exe`, or extract the ZIP | Windows 10 **2004+** / Windows 11; native hotkeys and WASAPI audio. |
-| NixOS / Hyprland | Build below; optionally install the compositor patch | Protected launcher and capture exclusion with patched Hyprland. |
-
-Open **Settings → AI & Keys**, add your keys, and select a model. Create background profiles in **Settings → Profiles**, then select one beside **General / Interview** in the overlay.
-
-Linux release builds need a recent glibc desktop with Vulkan, fontconfig, XKB, ALSA, and X11/Wayland libraries. Install `pulseaudio-utils` for system audio and `grim` for Hyprland screenshots. The archive includes its build/glibc versions. Windows builds need no installer, WebView, Node.js, or separate Visual C++ runtime. macOS and other architectures have no supported release yet.
 
 ### Screen sharing
 
@@ -38,9 +26,6 @@ Linux release builds need a recent glibc desktop with Vulkan, fontconfig, XKB, A
 
 **Linux:** capture exclusion requires the **patched Hyprland compositor** below. Ordinary X11/Wayland launches do not provide it. [Protection boundary](https://github.com/parazeeknova/lennette/blob/main/packaging/hyprland/README.md#protection-boundary).
 
-## Build from source
-
-Rust **1.99.1** is pinned in `rust-toolchain.toml`. A native desktop/GPU is required.
 
 ### Linux / NixOS
 
@@ -70,7 +55,7 @@ cargo build --locked --release --target x86_64-pc-windows-msvc
 .\target\x86_64-pc-windows-msvc\release\lennette.exe
 ```
 
-## Hyprland / your own config
+### Hyprland / your own config
 
 The optional `private_overlay` patch excludes protected windows and their popups from supported capture paths. It is a pinned compositor build, not a loadable plugin.
 
@@ -97,7 +82,13 @@ With integrated Home Manager, add to your NixOS configuration:
 
 Install Lennette separately, update your flake lock, rebuild, then **log out and back in**. Run `lennette-private-user --check`, then `lennette-private-user`. The module adds the protected launcher and bindings to your Lua config. Keep this input's pinned `nixpkgs`; plugins must be rebuilt for its compositor and explicitly allowed. [Full integration guide](https://github.com/parazeeknova/lennette/blob/main/packaging/hyprland/README.md).
 
-## Shortcuts
+<p align="center">
+  <img src="https://swr2.itssingularity.com/lennette/lennette.png" alt="Lennette himself" width="100" />
+  <br />
+  <sub>Know exactly what to say, live.</sub>
+</p>
+
+### Shortcuts
 
 | Keys | Action |
 | --- | --- |
@@ -111,25 +102,9 @@ Install Lennette separately, update your flake lock, rebuild, then **log out and
 
 While hidden, only **Show / hide** works; active meeting capture continues. Wayland hotkeys need a supported desktop portal or compositor bindings. The Hyprland module configures protected bindings using the physical backslash keycode.
 
-## Your data
+### Your data
 
 History, settings, profiles, and the AES-256-GCM credential vault live locally in your user data directory. The vault key is a local file. Audio goes to your speech provider; generation sends your prompt, selected context/attachments, bounded chat history, and both sides of the live transcript to your chat provider. Suggestions stay in the app; Lennette does not speak or send them into your call.
-
-## Development
-
-```sh
-devenv shell -- cargo test --locked --all-targets
-devenv shell -- cargo clippy --locked --all-targets -- -D warnings
-devenv shell -- cargo fmt --all -- --check
-```
-
-Pushes and merges to `main` build/test Linux and Windows on `-latest` GitHub runners. Both builds must pass before publishing a release with the banner, Linux archive, portable EXE/ZIP, and checksums. Manual runs on other branches build without publishing.
-
-<p align="center">
-  <img src="https://swr2.itssingularity.com/lennette/lennette.png" alt="Lennette himself" width="100" />
-  <br />
-  <sub>Know exactly what to say, live.</sub>
-</p>
 
 <p align="center">
   <img src="https://swr2.itssingularity.com/lennette/lennette_footer.png" alt="Lennette" width="100%" />
