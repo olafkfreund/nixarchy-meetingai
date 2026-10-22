@@ -12,20 +12,15 @@ let
   );
 in
 {
-  # https://devenv.sh/reference/options/
   name = "lennette";
   cachix.enable = true;
   dotenv.enable = true;
   dotenv.disableHint = true;
-
-  # Pin the exact current stable toolchain from rust-overlay.
   overlays = [ (import inputs.rust-overlay) ];
 
   env = {
     RUST_BACKTRACE = "1";
-    # wayland/x11 + mesa for gpui's blade/wgpu renderer
     LD_LIBRARY_PATH = runtimeLibraryPath;
-    # Embed the same paths at installation; desktop launchers have no dev shell.
     LENNETTE_RUNTIME_LIBRARY_PATH = runtimeLibraryPath;
   };
 
@@ -43,7 +38,6 @@ in
     llvmPackages.clang
     llvmPackages.libclang
     openssl
-    # gpui native dependency surface
     vulkan-loader
     vulkan-headers
     mesa
@@ -54,12 +48,12 @@ in
     wayland-protocols
     libxkbcommon
     libx11
+    libxcb
     libxcursor
     libxrandr
     libxi
     fontconfig
     freetype
-    # audio + capture
     pipewire
     alsa-lib
     alsa-lib.dev
@@ -70,7 +64,6 @@ in
     imagemagick
     grim
     wlrctl
-    # secure storage / http
     sqlite
     zlib
     cacert
@@ -79,8 +72,6 @@ in
   languages.rust = {
     enable = true;
     channel = "stable";
-    # Pin the exact current stable toolchain (1.99.1) from rust-overlay rather
-    # than following whatever nixpkgs happens to ship.
     toolchain = {
       rustc = pkgs.rust-bin.stable."1.99.1".rustc;
       cargo = pkgs.rust-bin.stable."1.99.1".cargo;
@@ -97,10 +88,6 @@ in
     ];
   };
 
-  # CPAL links against ALSA; pkg-config must find its headers or `cargo clippy`
-  # fails inside git hooks where the shell env is not inherited.
-  # libspa-sys generates bindings with bindgen, which needs the C standard
-  # headers on clang's search path.
   env.CPATH = "${pkgs.glibc.dev}/include";
 
   env.BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
@@ -119,9 +106,6 @@ in
       package = pkgs.nixfmt;
     };
     rustfmt.enable = true;
-    # The pre-commit hook runs outside the shell env with the user's PATH, which
-    # can contain a newer nightly rustc. Build the PATH explicitly instead of
-    # appending to it, so the pinned toolchain always wins.
     clippy = {
       enable = true;
       entry = "${pkgs.writeShellScript "lennette-clippy" ''

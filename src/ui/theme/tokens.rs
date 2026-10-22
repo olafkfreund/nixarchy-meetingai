@@ -232,7 +232,7 @@ pub fn code_font_family() -> gpui::SharedString {
 
 /// Bundled proportional UI face, consistent even when the desktop uses a code font.
 pub fn ui_font_family() -> gpui::SharedString {
-    "Inter".into()
+    "Satoshi".into()
 }
 
 #[cfg(test)]

@@ -149,9 +149,13 @@ pub fn run() {
         .run(move |cx: &mut App| {
             crate::ui::widgets::syntax::warm_up();
             // Register bundled UI and icon fonts once for every native window.
+            // Satoshi ships as static weights: GPUI matches the requested weight
+            // against these faces, so Regular, Medium and Bold are all needed.
             if let Err(error) = cx.text_system().add_fonts(vec![
                 std::borrow::Cow::Borrowed(crate::features::icons::FONT_BYTES),
-                std::borrow::Cow::Borrowed(include_bytes!("assets/fonts/Inter.ttf")),
+                std::borrow::Cow::Borrowed(include_bytes!("assets/fonts/OTF/Satoshi-Regular.otf")),
+                std::borrow::Cow::Borrowed(include_bytes!("assets/fonts/OTF/Satoshi-Medium.otf")),
+                std::borrow::Cow::Borrowed(include_bytes!("assets/fonts/OTF/Satoshi-Bold.otf")),
             ]) {
                 tracing::error!(%error, "could not register bundled fonts");
             }
