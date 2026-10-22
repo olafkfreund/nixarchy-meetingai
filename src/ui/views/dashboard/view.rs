@@ -12,6 +12,7 @@ use crate::features::db::{Database, conversations};
 use crate::features::icons;
 use crate::features::settings_pages::{self, SettingsState};
 use crate::features::theme::{Theme, radius};
+use crate::ui::theme::scaled;
 
 /// Shared dashboard handle. Wrapped so the view owns it.
 pub struct DashboardView {
@@ -28,16 +29,28 @@ pub struct DashboardView {
     rename_buffer: String,
     credential_focus: Option<FocusHandle>,
     settings_save: Option<gpui::Task<()>>,
+    /// Background task naming meetings that still carry a timestamp title.
+    title_task: Option<gpui::Task<()>>,
+    /// Chat provider used to name old sessions, when one is configured.
+    title_config: Option<crate::features::providers::ProviderConfig>,
 }
 
 impl DashboardView {
     /// Surface colours at current transparency opacity.
     fn surfaces(&self) -> crate::features::theme::Surfaces {
-        let opacity = (self.settings.settings.transparency as f32 / 100.0).clamp(0.10, 1.0);
+        let opacity = (self.settings.settings.transparency as f32 / 100.0).clamp(0.0, 1.0);
         self.theme.surfaces(opacity)
     }
 
     pub fn new(database: Option<Database>) -> Self {
+        Self::with_titles(database, None)
+    }
+
+    /// Build the view, optionally with a chat provider for naming old sessions.
+    pub fn with_titles(
+        database: Option<Database>,
+        title_config: Option<crate::features::providers::ProviderConfig>,
+    ) -> Self {
         let mut dashboard = Dashboard::new();
         if let Some(database) = database.as_ref() {
             dashboard.navigate(super::nav::Route::Conversations, Some(database));
@@ -59,6 +72,8 @@ impl DashboardView {
             rename_buffer: String::new(),
             credential_focus: None,
             settings_save: None,
+            title_task: None,
+            title_config,
         }
     }
 
@@ -81,6 +96,55 @@ impl DashboardView {
     /// Navigate to a page, loading its data.
     pub fn navigate_to(&mut self, route: super::nav::Route) {
         self.navigate(route);
+    }
+
+    /// Navigate, then start any follow-up work the page needs.
+    fn navigate_with(&mut self, route: super::nav::Route, cx: &mut Context<Self>) {
+        self.navigate(route);
+        if route == super::nav::Route::Meetings {
+            self.name_untitled_meetings(cx);
+        }
+    }
+
+    /// Give older sessions real titles, using the configured chat model.
+    ///
+    /// Only meetings still titled `Session · HH:MM` are touched, and only when a
+    /// provider is available; otherwise the timestamp title simply stays.
+    fn name_untitled_meetings(&mut self, cx: &mut Context<Self>) {
+        if self.title_task.is_some() {
+            return;
+        }
+        let Some(path) = self
+            .database
+            .as_ref()
+            .and_then(|database| database.connection().path())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let Some(config) = self.title_config.clone() else {
+            return;
+        };
+        self.title_task = Some(cx.spawn(async move |this, cx| {
+            let Some(database) = crate::db::Database::open(&path)
+                .ok()
+                .map(std::sync::Arc::new)
+            else {
+                return;
+            };
+            let renamed = crate::ai::titling::name_untitled_meetings(&database, config).await;
+            if renamed > 0 {
+                this.update(cx, |view, cx| {
+                    view.title_task = None;
+                    view.dashboard
+                        .navigate(super::nav::Route::Meetings, view.database.as_ref());
+                    cx.notify();
+                })
+                .ok();
+            } else {
+                let _ = cx.refresh();
+            }
+        }));
     }
 
     /// Mutable settings state, for page controls.
@@ -462,7 +526,7 @@ impl DashboardView {
                     )
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(scaled(13.0))
                             .font_weight(FontWeight::BOLD)
                             .text_color(self.theme.foreground)
                             .child("lennette"),
@@ -503,7 +567,7 @@ impl DashboardView {
             .px(px(14.0))
             .flex_shrink_0()
             .rounded(px(radius::FULL))
-            .text_size(px(12.0))
+            .text_size(scaled(12.0))
             .font_weight(if active {
                 FontWeight::MEDIUM
             } else {
@@ -539,7 +603,7 @@ impl DashboardView {
             pill = pill.bg(surfaces.muted());
         }
         pill.on_click(cx.listener(move |this, _, _, cx| {
-            this.navigate(item.route);
+            this.navigate_with(item.route, cx);
             cx.notify();
         }))
     }
@@ -554,7 +618,7 @@ impl DashboardView {
                 .border_color(theme.destructive)
                 .px(px(12.0))
                 .py(px(8.0))
-                .text_size(px(12.0))
+                .text_size(scaled(12.0))
                 .text_color(theme.destructive)
                 .child(message.to_owned())
         })
@@ -576,7 +640,7 @@ impl DashboardView {
             .gap(px(6.0))
             .child(
                 div()
-                    .text_size(px(12.5))
+                    .text_size(scaled(12.5))
                     .text_color(theme.muted_foreground)
                     .child(message),
             )
@@ -601,13 +665,13 @@ impl DashboardView {
                         .gap(px(5.0))
                         .child(
                             div()
-                                .text_size(px(20.0))
+                                .text_size(scaled(20.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child("Conversations"),
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(scaled(12.0))
                                 .text_color(theme.muted_foreground)
                                 .child(format!(
                                     "{count} saved {}",
@@ -639,13 +703,13 @@ impl DashboardView {
                     .child(icons::icon(&theme, Icon::MessagesSquare, 28.0))
                     .child(
                         div()
-                            .text_size(px(14.0))
+                            .text_size(scaled(14.0))
                             .font_weight(FontWeight::MEDIUM)
                             .child("Your conversations will appear here"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(scaled(12.0))
                             .text_color(theme.muted_foreground)
                             .child("Ask a question in the overlay to start one."),
                     ),
@@ -707,14 +771,14 @@ impl DashboardView {
                                             .flex_1()
                                             .min_w(px(0.0))
                                             .truncate()
-                                            .text_size(px(13.0))
+                                            .text_size(scaled(13.0))
                                             .font_weight(FontWeight::MEDIUM)
                                             .child(record.title.clone()),
                                     )
                                     .child(
                                         div()
                                             .flex_shrink_0()
-                                            .text_size(px(10.5))
+                                            .text_size(scaled(10.5))
                                             .text_color(theme.muted_foreground)
                                             .child(relative_time(record.updated_at, now)),
                                     ),
@@ -723,7 +787,7 @@ impl DashboardView {
                                 div()
                                     .w_full()
                                     .truncate()
-                                    .text_size(px(11.5))
+                                    .text_size(scaled(11.5))
                                     .text_color(theme.muted_foreground)
                                     .child(if preview.is_empty() {
                                         "No messages yet".into()
@@ -733,7 +797,7 @@ impl DashboardView {
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(scaled(10.0))
                                     .text_color(theme.muted_foreground)
                                     .child(format!(
                                         "{} {}",
@@ -797,21 +861,21 @@ impl DashboardView {
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .text_size(px(12.5))
+                                    .text_size(scaled(12.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.foreground)
                                     .child(prompt.name.clone()),
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(scaled(10.0))
                                     .text_color(theme.muted_foreground)
                                     .child(mode),
                             ),
                     )
                     .child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(scaled(11.5))
                             .text_color(theme.muted_foreground)
                             .child(prompt.prompt.clone()),
                     ),
@@ -832,13 +896,13 @@ impl DashboardView {
             .pb(px(8.0))
             .child(
                 div()
-                    .text_size(px(20.0))
+                    .text_size(scaled(20.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(title.to_owned()),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(scaled(12.0))
                     .text_color(self.theme.muted_foreground)
                     .child(subtitle.to_owned()),
             )
@@ -894,7 +958,7 @@ impl DashboardView {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(14.0))
+                                    .text_size(scaled(14.0))
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(if meeting.title.is_empty() {
                                         "Untitled session".to_owned()
@@ -904,7 +968,7 @@ impl DashboardView {
                             )
                             .child(
                                 div()
-                                    .text_size(px(11.5))
+                                    .text_size(scaled(11.5))
                                     .text_color(theme.muted_foreground)
                                     .child(format!(
                                         "{} · {} · {} lines{}",
@@ -931,22 +995,153 @@ impl DashboardView {
         list.into_any_element()
     }
 
-    fn about_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn about_body(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let asset =
             |name: &'static str| gpui::ImageSource::Resource(gpui::Resource::Embedded(name.into()));
+        let theme = self.theme;
         let surfaces = self.surfaces();
-        div().flex().flex_col().gap(px(24.0))
-            .child(img(asset("lennette_header.png")).w_full().h(px(240.0)).object_fit(gpui::ObjectFit::Contain).rounded(px(18.0)))
-            .child(div().flex().items_center().gap(px(18.0))
-                .child(img(asset("lennette_app_icon.png")).size(px(72.0)).rounded(px(18.0)))
-                .child(div().flex().flex_col().gap(px(7.0)).child(self.page_heading("About Lennette", "An ambient meeting and discussion copilot."))
-                    .child(div().text_size(px(11.0)).text_color(self.theme.muted_foreground).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))))
-            .child(div().flex().items_center().gap(px(20.0)).p(px(20.0)).rounded(px(16.0)).bg(surfaces.card())
-                .child(img(asset("lennette.png")).w(px(100.0)).h(px(80.0)).object_fit(gpui::ObjectFit::Contain))
-                .child(div().flex_1().min_w(px(0.0)).text_size(px(13.0)).child("Listen to your microphone and call audio, follow speaker transcripts, and get streamed suggestions for what to say next. Add screenshots, files or past transcripts to give each conversation more context. Choose your own AI and speech providers in Settings.")))
-            .child(div().flex().items_center().child(action_button("about-github", &self.theme, "View Lennette on GitHub ↗", cx, |_, cx, _| cx.open_url("https://github.com/parazeeknova/lennette"))))
-            .child(div().text_size(px(12.0)).text_color(self.theme.muted_foreground).child("Built for Linux with Rust and GPUI. Your provider keys are stored in the encrypted local vault. Selected context is sent to your configured AI provider when you ask a question."))
-            .child(img(asset("lennette_footer.png")).w_full().h(px(190.0)).object_fit(gpui::ObjectFit::Contain))
+        let version = env!("CARGO_PKG_VERSION");
+
+        let viewport = window.viewport_size();
+        // Art heights follow the window rather than a fixed pixel size, so the
+        // page stays a band instead of filling the screen when it grows.
+        let header_height = (viewport.height * 0.22).clamp(px(110.0), px(190.0));
+        let footer_height = (viewport.height * 0.15).clamp(px(76.0), px(140.0));
+        // Side-by-side icon and copy stop working once the column gets tight.
+        let narrow = viewport.width < px(620.0);
+        // One width for every block. The dashboard content is a centred flex
+        // column, so a fixed width centres here; auto margins do not exist in
+        // this GPUI version, and `w_full` alone would just follow the edge.
+        let column = if narrow { px(340.0) } else { px(620.0) };
+
+        let heading = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(0.0))
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(scaled(21.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .whitespace_normal()
+                    .child("About Lennette"),
+            )
+            .child(
+                div()
+                    .text_size(scaled(12.5))
+                    .line_height(scaled(17.0))
+                    .text_color(theme.muted_foreground)
+                    .whitespace_normal()
+                    .child("An ambient meeting and discussion copilot."),
+            )
+            .child(
+                div()
+                    .text_size(scaled(11.0))
+                    .text_color(theme.muted_foreground)
+                    .child(format!("Version {version}")),
+            );
+
+        let identity = div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(16.0))
+            .w_full()
+            .children((!narrow).then(|| {
+                img(asset("lennette_app_icon.png"))
+                    .w(px(72.0))
+                    .h(px(72.0))
+                    .flex_shrink_0()
+                    .object_fit(gpui::ObjectFit::Contain)
+            }))
+            .child(heading);
+
+        let description = div()
+            .flex()
+            .items_center()
+            .gap(px(16.0))
+            .p(px(16.0))
+            .w_full()
+            .rounded(px(16.0))
+            .bg(surfaces.card())
+            .children((!narrow).then(|| {
+                img(asset("lennette.png"))
+                    .w(px(84.0))
+                    .h(px(70.0))
+                    .flex_shrink_0()
+                    .object_fit(gpui::ObjectFit::Contain)
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(scaled(13.0))
+                    .line_height(scaled(20.0))
+                    .whitespace_normal()
+                    .text_color(theme.foreground)
+                    .child(
+                        "Listen to your microphone and call audio, follow speaker transcripts, and \
+                         get streamed suggestions for what to say next. Add screenshots, files or \
+                         past transcripts to give each conversation more context. Choose your own \
+                         AI and speech providers in Settings.",
+                    ),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .w(column)
+            .min_w(px(0.0))
+            .gap(px(18.0))
+            .pb(px(4.0))
+            // Every child shares the column width, so all edges line up.
+            .child(
+                img(asset("lennette_header.png"))
+                    .w_full()
+                    .h(header_height)
+                    .flex_shrink_0()
+                    .object_fit(gpui::ObjectFit::Cover)
+                    .rounded(px(16.0)),
+            )
+            .child(identity)
+            .child(description)
+            .child(
+                div()
+                    .flex()
+                    .w_full()
+                    .items_center()
+                    .justify_center()
+                    .child(action_button(
+                        "about-github",
+                        &self.theme,
+                        "View Lennette on GitHub ↗",
+                        cx,
+                        |_, cx, _| cx.open_url("https://github.com/parazeeknova/lennette"),
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .text_center()
+                    .text_size(scaled(12.0))
+                    .line_height(scaled(18.0))
+                    .whitespace_normal()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        "Built for Linux with Rust and GPUI. Your provider keys are stored in the \
+                         encrypted local vault. Selected context is sent to your configured AI \
+                         provider when you ask a question.",
+                    ),
+            )
+            .child(
+                img(asset("lennette_footer.png"))
+                    .w_full()
+                    .h(footer_height)
+                    .flex_shrink_0()
+                    .object_fit(gpui::ObjectFit::Contain),
+            )
             .into_any_element()
     }
 
@@ -1027,7 +1222,7 @@ impl DashboardView {
                     .bg(theme.card)
                     .px(px(10.0))
                     .py(px(6.0))
-                    .text_size(px(12.0))
+                    .text_size(scaled(12.0))
                     .text_color(theme.foreground)
                     .child(if self.rename_buffer.is_empty() {
                         "Type a name, Enter to save".to_owned()
@@ -1060,14 +1255,14 @@ impl DashboardView {
                         div()
                             .w(px(105.0))
                             .flex_shrink_0()
-                            .text_size(px(10.5))
+                            .text_size(scaled(10.5))
                             .text_color(theme.muted_foreground)
                             .child(format!("{stamp} {who}")),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.5))
+                            .text_size(scaled(12.5))
                             .text_color(theme.foreground)
                             .child(line.text),
                     ),
@@ -1108,7 +1303,7 @@ impl DashboardView {
                             .gap(px(5.0))
                             .h(px(30.0))
                             .cursor_pointer()
-                            .text_size(px(11.5))
+                            .text_size(scaled(11.5))
                             .text_color(theme.muted_foreground)
                             .hover(|s| s.text_color(theme.foreground))
                             .child(icons::icon(&theme, Icon::ArrowLeft, 13.0))
@@ -1166,13 +1361,13 @@ impl DashboardView {
                     .pb(px(8.0))
                     .child(
                         div()
-                            .text_size(px(20.0))
+                            .text_size(scaled(20.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(scaled(11.0))
                             .text_color(theme.muted_foreground)
                             .child(format!("{} messages", messages.len())),
                     ),
@@ -1180,7 +1375,7 @@ impl DashboardView {
         if let Some(notice) = &self.settings.notice {
             list = list.child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(scaled(11.0))
                     .text_color(theme.muted_foreground)
                     .child(notice.clone()),
             );
@@ -1193,7 +1388,7 @@ impl DashboardView {
                     .border_color(theme.primary)
                     .bg(surfaces.input())
                     .p(px(10.0))
-                    .text_size(px(13.0))
+                    .text_size(scaled(13.0))
                     .child(if self.rename_buffer.is_empty() {
                         "Type a name, Enter to save".into()
                     } else {
@@ -1210,7 +1405,7 @@ impl DashboardView {
             let is_user = message.role == "user";
             let content = if is_user {
                 div()
-                    .text_size(px(13.0))
+                    .text_size(scaled(13.0))
                     .child(message.content)
                     .into_any_element()
             } else {
@@ -1237,7 +1432,7 @@ impl DashboardView {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.0))
-                                    .text_size(px(10.5))
+                                    .text_size(scaled(10.5))
                                     .text_color(theme.muted_foreground)
                                     .child(icons::icon(
                                         &theme,
@@ -1269,14 +1464,14 @@ impl DashboardView {
         list.into_any_element()
     }
 
-    fn body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn body(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         match self.dashboard.route() {
             super::nav::Route::Conversations => self.conversations_body(cx).into_any_element(),
             super::nav::Route::ConversationDetail => self.conversation_detail(cx),
             super::nav::Route::Meetings => self.meetings_body(cx),
             super::nav::Route::MeetingDetail => self.meeting_detail(cx),
             super::nav::Route::Prompts => self.prompts_body().into_any_element(),
-            super::nav::Route::About => self.about_body(cx),
+            super::nav::Route::About => self.about_body(window, cx),
             _ => self.settings_body(cx),
         }
     }
@@ -1301,7 +1496,7 @@ pub fn action_button<V: 'static>(
         .border_1()
         .border_color(surfaces.border())
         .bg(surfaces.card())
-        .text_size(px(11.0))
+        .text_size(scaled(11.0))
         .text_color(theme.foreground)
         .cursor_pointer()
         .hover(|style| style.bg(surfaces.muted()).border_color(theme.primary))
@@ -1334,6 +1529,10 @@ fn truncate(text: &str, limit: usize) -> String {
 
 impl Render for DashboardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Text sizes are written in rems, so this one value scales the window.
+        window.set_rem_size(crate::ui::theme::rem_size_for(
+            self.settings.settings.font_scale,
+        ));
         self.theme = Theme::from_settings(&self.settings.settings);
         let theme = self.theme;
         let surfaces = self.surfaces();
@@ -1441,7 +1640,7 @@ impl Render for DashboardView {
                                 .w_full()
                                 .max_w(px(960.0))
                                 .min_w(px(0.0))
-                                .child(self.body(cx)),
+                                .child(self.body(window, cx)),
                         )
                     }),
             )
@@ -1468,7 +1667,7 @@ impl Render for NavTooltip {
             .rounded(px(6.0))
             .bg(self.theme.card)
             .text_color(self.theme.foreground)
-            .text_size(px(11.0))
+            .text_size(scaled(11.0))
             .child(self.text.clone())
     }
 }

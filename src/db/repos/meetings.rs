@@ -91,6 +91,35 @@ pub fn rename(connection: &Connection, meeting_id: &str, title: &str) -> Result<
     Ok(())
 }
 
+/// Finished sessions still carrying the timestamp title from creation, with
+/// their transcript as plain text so a title can be generated for each.
+pub fn untitled(connection: &Connection, limit: usize) -> Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare(
+        "SELECT id FROM meetings
+         WHERE title LIKE 'Session · %'
+         ORDER BY started_at DESC
+         LIMIT ?1",
+    )?;
+    let ids: Vec<String> = statement
+        .query_map(params![limit as i64], |row| row.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut found = Vec::new();
+    for id in ids {
+        let lines = lines(connection, &id)?;
+        if lines.len() < 2 {
+            continue;
+        }
+        let mut body = String::new();
+        for line in lines.iter().take(60) {
+            body.push_str(if line.who == "me" { "You: " } else { "Them: " });
+            body.extend(line.text.chars().take(600));
+            body.push('\n');
+        }
+        found.push((id, body));
+    }
+    Ok(found)
+}
+
 /// Delete a session; its lines go with it through the cascade.
 pub fn delete(connection: &Connection, meeting_id: &str) -> Result<()> {
     connection.execute("DELETE FROM meetings WHERE id = ?1", params![meeting_id])?;

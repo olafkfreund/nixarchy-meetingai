@@ -330,6 +330,20 @@ pub fn open_dashboard(cx: &mut App, services: Services) {
     );
 }
 
+/// The chat provider used for background naming, when one is configured.
+///
+/// Mirrors how the overlay picks its first usable chat credential.
+fn preferred_chat_config(
+    services: &Services,
+) -> Option<crate::features::providers::ProviderConfig> {
+    let vault = services.vault.as_ref().as_ref()?;
+    crate::features::credentials::list(vault, crate::features::credentials::Kind::Chat)
+        .ok()?
+        .into_iter()
+        .map(|credential| credential.to_config())
+        .find(|config| config.is_usable())
+}
+
 /// Open the dashboard on a specific page.
 pub fn open_dashboard_at(
     cx: &mut App,
@@ -366,8 +380,9 @@ pub fn open_dashboard_at(
         window.set_window_title("lennette dashboard");
         // Each window gets its own connection so a slow page never blocks the
         // overlay's writes.
+        let title_config = preferred_chat_config(&services);
         cx.new(|_| {
-            let mut view = DashboardView::new(services.connect());
+            let mut view = DashboardView::with_titles(services.connect(), title_config);
             view.navigate_to(route);
             view
         })

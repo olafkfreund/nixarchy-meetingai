@@ -2,6 +2,7 @@
 
 pub mod catalog;
 pub mod chat;
+pub mod titling;
 
 // Direct re-exports
 pub use catalog::models;
