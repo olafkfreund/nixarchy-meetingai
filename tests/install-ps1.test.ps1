@@ -84,10 +84,12 @@ printf '%s\n' "$@" >"$LENNETTE_TEST_LAUNCH_LOG"
     Check '-NoLaunch does not open the app' (-not (Test-Path $env:LENNETTE_TEST_LAUNCH_LOG))
     $output = Run-Lenny @('--version')
     Check 'app flags are forwarded through the command' ($code -eq 0 -and $output.Contains('lennette test'))
+    & (Join-Path $work 'fixture.exe') --fail
+    Check 'the test executable returns the expected failure code' ($LASTEXITCODE -eq 37)
     $output = Run-Lenny @('--fail')
     Check 'the launcher preserves a failing app exit code' ($code -eq 37) "exit=$code; output=$output"
-    $output = Run-Lenny @('argument with spaces', "apostrophe's argument")
-    Check 'arguments keep their spaces and apostrophes' ($code -eq 0 -and ([IO.File]::ReadAllLines($env:LENNETTE_TEST_LAUNCH_LOG) -join '|') -eq "argument with spaces|apostrophe's argument")
+    $output = Run-Lenny @('argument with spaces', "apostrophe's argument", 'bang!argument')
+    Check 'arguments keep their spaces, apostrophes, and exclamation marks' ($code -eq 0 -and ([IO.File]::ReadAllLines($env:LENNETTE_TEST_LAUNCH_LOG) -join '|') -eq "argument with spaces|apostrophe's argument|bang!argument")
     Remove-Item $env:LENNETTE_TEST_LAUNCH_LOG
     $output = Run-Setup @('-NoModifyPath')
     for ($attempt = 0; $attempt -lt 30 -and -not (Test-Path $env:LENNETTE_TEST_LAUNCH_LOG); $attempt++) { Start-Sleep -Milliseconds 100 }

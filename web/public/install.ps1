@@ -163,8 +163,9 @@ try {
     [IO.File]::WriteAllText((Join-Path $binDir 'lenny-launch.ps1'), $manager, (New-Object Text.UTF8Encoding($true)))
     # cmd.exe reads batch files incrementally. Keep dispatch and exit in one
     # parsed block because uninstall deletes this .cmd while PowerShell runs.
-    # Bare exit /b preserves the child's code without expanding it before run.
-    $cmd = "@echo off`r`n(`r`npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"%~dp0lenny-launch.ps1`" %*`r`nexit /b`r`n)`r`n"
+    # CALL expands ERRORLEVEL after PowerShell finishes. Delayed expansion stays
+    # off so exclamation marks in forwarded arguments are not changed.
+    $cmd = "@echo off`r`nsetlocal DisableDelayedExpansion`r`n(`r`npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"%~dp0lenny-launch.ps1`" %*`r`ncall exit /b %%errorlevel%%`r`n)`r`n"
     [IO.File]::WriteAllText((Join-Path $binDir 'lenny.cmd'), $cmd, [Text.Encoding]::ASCII)
     # Remove obsolete wrappers from the previous installer, including the .ps1
     # that PowerShell would otherwise choose ahead of our single .cmd command.
