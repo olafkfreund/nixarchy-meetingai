@@ -101,6 +101,15 @@ CREATE TABLE IF NOT EXISTS meeting_lines (
 CREATE INDEX IF NOT EXISTS idx_meeting_lines_meeting ON meeting_lines (meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meetings_started ON meetings (started_at DESC);
 
+CREATE TABLE IF NOT EXISTS meeting_recaps (
+    meeting_id TEXT PRIMARY KEY,
+    content TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

@@ -79,6 +79,12 @@ const PREVIOUS_DEFAULTS: &[(i64, &str)] = &[
 /// Only exact previous built-in text is upgraded. User edits are retained.
 pub fn seed_listen_modes(connection: &rusqlite::Connection) -> Result<()> {
     for mode in DEFAULT_LISTEN_MODES {
+        if crate::db::settings::get(connection, &format!("deleted_listen_slot_{}", mode.slot))?
+            .as_deref()
+            == Some("true")
+        {
+            continue;
+        }
         // Every superseded wording for this mode upgrades, so a user who never
         // edited the text still receives the current default.
         for (_, previous) in PREVIOUS_DEFAULTS

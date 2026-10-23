@@ -23,6 +23,164 @@ use std::{
     time::Duration,
 };
 
+#[tokio::test]
+async fn custom_chat_uses_its_method_auth_model_and_response_pointer() {
+    use lennette::ai::catalog::custom::CustomProvider;
+    let (url, request) = server(
+        200,
+        "application/json",
+        r#"{"answer":{"text":"Custom answer"}}"#.into(),
+    );
+    let mut config = ProviderConfig::new("custom-chat-test", "local-test-key", "my-model");
+    config.base_url = url;
+    config.custom = Some(CustomProvider {
+        method: "PUT".into(),
+        auth: "header".into(),
+        auth_header: "x-api-key".into(),
+        response_path: "/answer/text".into(),
+        ..Default::default()
+    });
+    let answer = engine::stream_chat(
+        &engine::http_client(),
+        &config,
+        &[Message::user("Hello")],
+        &TurnContext::default(),
+        Arc::new(tokio::sync::watch::channel(false).1),
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(answer, "Custom answer");
+    let bytes = request.join().unwrap();
+    let raw = String::from_utf8_lossy(&bytes);
+    assert!(raw.starts_with("PUT /test"));
+    assert!(raw.to_lowercase().contains("x-api-key: local-test-key"));
+    assert!(!raw.to_lowercase().contains("authorization:"));
+    let body: serde_json::Value =
+        serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["model"], "my-model");
+    assert_eq!(body["stream"], false);
+}
+
+#[tokio::test]
+async fn custom_speech_uploads_each_format_and_extracts_configured_text() {
+    use lennette::{ai::catalog::custom::CustomProvider, speech::transcription};
+    for format in ["raw-wav", "multipart-wav", "json-wav"] {
+        let (url, request) = server(
+            200,
+            "application/json",
+            r#"{"text":"Words from custom speech"}"#.into(),
+        );
+        let mut config = ProviderConfig::new("custom-speech-test", "", "my-stt-model");
+        config.base_url = url;
+        config.custom = Some(CustomProvider {
+            auth: "none".into(),
+            request_format: format.into(),
+            response_path: "/text".into(),
+            ..Default::default()
+        });
+        let wav = encode_wav(&[0.25; 1600]).unwrap();
+        assert_eq!(
+            transcription::transcribe(&config, wav.clone(), Some("de"))
+                .await
+                .unwrap(),
+            "Words from custom speech"
+        );
+        let bytes = request.join().unwrap();
+        let offset = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let headers = String::from_utf8_lossy(&bytes[..offset]).to_lowercase();
+        assert!(!headers.contains("authorization:"));
+        let body = &bytes[offset..];
+        match format {
+            "raw-wav" => {
+                assert_eq!(body, wav);
+                assert!(headers.contains("audio/wav"));
+            }
+            "multipart-wav" => {
+                assert!(headers.contains("multipart/form-data; boundary=lennette-"));
+                assert!(body.windows(wav.len()).any(|part| part == wav));
+                assert!(String::from_utf8_lossy(body).contains("my-stt-model"));
+            }
+            _ => {
+                let body: serde_json::Value = serde_json::from_slice(body).unwrap();
+                assert_eq!(
+                    STANDARD.decode(body["audio"].as_str().unwrap()).unwrap(),
+                    wav
+                );
+                assert_eq!(body["model"], "my-stt-model");
+                assert_eq!(body["language"], "de");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn batch_listen_flushes_the_remote_channel_on_stop() {
+    use lennette::{
+        ai::catalog::custom::CustomProvider,
+        speech::transcription::{LiveEvent, LiveTranscriber},
+    };
+    let (url, request) = server(200, "text/plain", "Remote question?".into());
+    let mut config = ProviderConfig::new("custom-batch-listen", "", "speech-model");
+    config.base_url = url;
+    config.custom = Some(CustomProvider {
+        auth: "none".into(),
+        request_format: "raw-wav".into(),
+        response_format: "text".into(),
+        ..Default::default()
+    });
+    let mut live = LiveTranscriber::connect_config(&config).await.unwrap();
+    live.push(&[0.0, 0.25].repeat(3200)).await.unwrap();
+    live.finish();
+    let mut transcript = None;
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), live.next_event())
+        .await
+        .unwrap()
+    {
+        match event {
+            LiveEvent::Transcript(line) => transcript = Some(line),
+            LiveEvent::Failed(error) => panic!("{error}"),
+            _ => {}
+        }
+    }
+    let line = transcript.unwrap();
+    assert_eq!(line.channel, 1);
+    assert_eq!(line.text, "Remote question?");
+    assert!(line.speech_final);
+    let bytes = request.join().unwrap();
+    let offset = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    let mut wav = hound::WavReader::new(std::io::Cursor::new(&bytes[offset..])).unwrap();
+    assert_eq!(wav.spec().channels, 1);
+    assert!(wav.samples::<i16>().all(|sample| sample.unwrap() > 0));
+}
+
+#[test]
+fn custom_providers_are_encrypted_managed_and_do_not_reactivate_retired_ids() {
+    use lennette::ai::catalog::custom::CustomProvider;
+    let directory = std::env::temp_dir().join(format!("lennette-custom-{}", uuid::Uuid::new_v4()));
+    let vault = Vault::open(&directory).unwrap();
+    let mut credential = Credential::chat("custom-my-provider", "custom-secret-key");
+    credential.base_url = "http://localhost:12345/chat/completions".into();
+    credential.model = "local-model".into();
+    credential.custom = Some(CustomProvider::default());
+    credentials::save(&vault, &credential).unwrap();
+    assert_eq!(
+        credentials::list(&vault, Kind::Chat).unwrap(),
+        vec![credential.clone()]
+    );
+    assert!(credential.to_config().is_usable());
+    let bytes = std::fs::read(directory.join("vault.bin")).unwrap();
+    assert!(
+        !bytes
+            .windows(17)
+            .any(|window| window == b"custom-secret-key")
+    );
+    credential.provider = "ollama".into();
+    assert!(credential.validate().is_err());
+    credentials::remove(&vault, Kind::Chat, "custom-my-provider").unwrap();
+    assert!(credentials::list(&vault, Kind::Chat).unwrap().is_empty());
+}
+
 fn server(
     status: u16,
     content_type: &str,
@@ -63,6 +221,66 @@ fn server(
         request
     });
     (url, thread)
+}
+
+#[tokio::test]
+async fn meeting_recap_uses_final_persisted_words_and_survives_reopen() {
+    use lennette::ai::catalog::custom::CustomProvider;
+    let directory = std::env::temp_dir().join(format!("lennette-recap-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("test.db");
+    let db = Database::open(&path).unwrap();
+    let id = meetings::start(db.connection(), "Review", "", "en").unwrap();
+    meetings::add_line(
+        db.connection(),
+        &id,
+        "me",
+        None,
+        "Let's decide tomorrow.",
+        0.0,
+        1.0,
+    )
+    .unwrap();
+    meetings::finish(db.connection(), &id, 2).unwrap();
+    meetings::add_line(
+        db.connection(),
+        &id,
+        "them",
+        None,
+        "Final words: Sam owns the task by Friday.",
+        1.0,
+        2.0,
+    )
+    .unwrap();
+    let (url, request) = server(
+        200,
+        "text/plain",
+        "## Summary\nReviewed the task.\n## Decisions\nProceed.\n## Action items\nSam — Friday."
+            .into(),
+    );
+    let mut config = ProviderConfig::new("custom-recap", "", "model");
+    config.base_url = url;
+    config.custom = Some(CustomProvider {
+        auth: "none".into(),
+        response_format: "text".into(),
+        ..Default::default()
+    });
+    lennette::ai::recap::generate(&path, &id, Some(config), "French")
+        .await
+        .unwrap();
+    let bytes = request.join().unwrap();
+    let raw = String::from_utf8_lossy(&bytes);
+    assert!(raw.contains("Final words: Sam owns the task by Friday."));
+    assert!(raw.contains("French"));
+    assert!(raw.contains("Decisions"));
+    assert!(raw.contains("Action items"));
+    let db = Database::open(&path).unwrap();
+    let recap = meetings::recap(db.connection(), &id).unwrap().unwrap();
+    assert_eq!(recap.status, "ready");
+    assert!(recap.content.contains("Sam"));
+    meetings::delete(db.connection(), &id).unwrap();
+    meetings::finish_recap(db.connection(), &id, Ok("late reply")).unwrap();
+    assert!(meetings::recap(db.connection(), &id).unwrap().is_none());
 }
 
 #[tokio::test]

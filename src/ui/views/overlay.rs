@@ -293,6 +293,9 @@ pub struct Overlay {
     theme: Theme,
     /// Provider id backing the active credential.
     model_provider: Option<String>,
+    native_icon_hidden: Option<bool>,
+    conversation_response: Option<(crate::core::settings::ResponseLength, String)>,
+    finishing_meeting_id: Option<String>,
     /// Model in use; falls back to the provider's first suggestion.
     model: Option<String>,
     /// Listen/system prompts available as context.
@@ -613,6 +616,9 @@ impl Overlay {
             window_visible: true,
             #[cfg(windows)]
             native_always_on_top: None,
+            native_icon_hidden: None,
+            conversation_response: None,
+            finishing_meeting_id: None,
             opacity,
             font_scale,
             shortcuts,
@@ -696,6 +702,7 @@ impl Overlay {
         self.interrupt_response();
         self.chat.reset();
         self.conversation = Conversation::new();
+        self.conversation_response = None;
         self.runtime_settings =
             crate::core::settings::Settings::load_from_path(self.services.database_path.as_deref())
                 .unwrap_or_default();
@@ -719,6 +726,8 @@ impl Overlay {
         let config = crate::features::listen::SessionConfig {
             device,
             system_audio: self.system_audio,
+            output_device: (!self.runtime_settings.output_device.is_empty())
+                .then(|| self.runtime_settings.output_device.clone()),
             speech: self.speech.clone(),
         };
         let (session, events) = crate::features::listen::ListenSession::start(&config);
@@ -746,7 +755,7 @@ impl Overlay {
         self.transcription_busy = true;
         self.transcription = Some(cx.spawn(async move |this, cx| {
             use crate::speech::transcription::{LiveEvent, LiveTranscriber};
-            let connected = LiveTranscriber::connect(config.api_key, config.model, None).await;
+            let connected = LiveTranscriber::connect_config(&config).await;
             match connected {
                 Err(error) => {
                     this.update(cx, |overlay, cx| {
@@ -827,6 +836,9 @@ impl Overlay {
                 overlay.live_turns = Default::default();
                 if overlay.session.is_some() {
                     overlay.stop_listening();
+                }
+                if let Some(id) = overlay.finishing_meeting_id.take() {
+                    overlay.finish_meeting_artifacts(id, cx);
                 }
                 cx.notify();
             })
@@ -931,7 +943,11 @@ impl Overlay {
         speaker: Option<i64>,
     ) {
         let who = if channel == 0 { "me" } else { "them" };
-        if let Some(meeting_id) = self.meeting_id.as_ref() {
+        if let Some(meeting_id) = self
+            .meeting_id
+            .as_ref()
+            .or(self.finishing_meeting_id.as_ref())
+        {
             let path = self.services.database_path.clone();
             if let Some(path) = path
                 && let Ok(database) = crate::features::db::Database::open(&path)
@@ -1015,7 +1031,11 @@ impl Overlay {
         self.pulse = None;
         self.listening_device = None;
         self.set_dock_expanded(true);
-        self.meeting_id.take()
+        let id = self.meeting_id.take();
+        if self.transcription_busy && id.is_some() {
+            self.finishing_meeting_id = id.clone();
+        }
+        id
     }
 
     /// Tick the session a few times a second so the meter and clock stay live.
@@ -1135,7 +1155,8 @@ impl Overlay {
             .as_deref()
             .and_then(|path| crate::features::db::Database::open(path).ok());
         if self.context_sources.iter().any(|item| item.image.is_some())
-            && !crate::ai::providers::ChatProvider::by_id(&config.id)
+            && !config
+                .chat_definition()
                 .is_some_and(|provider| provider.supports_images)
         {
             self.chat_error = Some(
@@ -1143,6 +1164,12 @@ impl Overlay {
                     .into(),
             );
             return;
+        }
+        if self.conversation_response.is_none() {
+            self.conversation_response = Some((
+                self.runtime_settings.response_length,
+                self.runtime_settings.response_language.clone(),
+            ));
         }
         let history = match self.chat.begin(database.as_ref(), &question) {
             Ok(history) => history,
@@ -1455,6 +1482,18 @@ impl Overlay {
             }
             prompt.push_str("</meeting_transcript>");
         }
+        let (length, language) = self
+            .conversation_response
+            .as_ref()
+            .map(|(length, language)| (*length, language.as_str()))
+            .unwrap_or((
+                self.runtime_settings.response_length,
+                self.runtime_settings.response_language.as_str(),
+            ));
+        prompt.push_str("\n\n");
+        prompt.push_str(&crate::core::settings::response_instruction(
+            length, language,
+        ));
         crate::core::context::append_prompt(&mut prompt, &self.context_sources);
         prompt
     }
@@ -1731,6 +1770,7 @@ impl Overlay {
 
     /// Start a fresh conversation without losing the old one.
     pub fn new_chat(&mut self) {
+        self.conversation_response = None;
         self.cancel_dictation();
         self.profile_menu_open = false;
         self.interrupt_response();
@@ -1813,6 +1853,18 @@ impl Overlay {
         cx: &mut Context<Self>,
     ) {
         use crate::features::shortcuts::Action;
+        if matches!(action, Action::PrivacyMode | Action::NormalMode) {
+            let private = action == Action::PrivacyMode;
+            crate::cli::set_private_mode(private);
+            self.tray = if private {
+                None
+            } else {
+                Some(crate::features::tray::Tray::start())
+            };
+            self.show_window(cx);
+            cx.refresh_windows();
+            return;
+        }
         // X11, the Wayland portal and compositor control commands all enter here.
         // While hidden, only the visibility shortcut may act on the app.
         if !self.shortcut_enabled(action) {
@@ -1820,6 +1872,7 @@ impl Overlay {
         }
         cx.notify();
         match action {
+            Action::PrivacyMode | Action::NormalMode => unreachable!(),
             Action::Screenshot => self.capture_screen(cx),
             Action::ToggleWindow => self.toggle_window(cx),
             Action::ToggleDashboard => {
@@ -1988,6 +2041,7 @@ impl Overlay {
         let recording = self.is_listening();
         let mut pill = div()
             .id("session-pill")
+            .relative()
             .window_control_area(gpui::WindowControlArea::Drag)
             .cursor(gpui::CursorStyle::OpenHand)
             .flex()
@@ -1996,8 +2050,6 @@ impl Overlay {
             .h(px(40.0))
             .px(px(8.0))
             .rounded_full()
-            .border_1()
-            .border_color(self.surfaces().border())
             .bg(self.surfaces().muted())
             .child(
                 div()
@@ -2009,13 +2061,9 @@ impl Overlay {
                     .w(px(18.0))
                     .h(px(28.0))
                     .cursor(gpui::CursorStyle::OpenHand)
-                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                        // Windows uses the native caption hit-test above. GPUI's
-                        // explicit move request is implemented on X11/Wayland.
-                        #[cfg(not(windows))]
-                        window.start_window_move();
-                        #[cfg(windows)]
-                        let _ = window;
+                    .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                        crate::platform::window::start_drag(window);
+                        cx.stop_propagation();
                     })
                     .child(icons::icon_colored(
                         theme.muted_foreground,
@@ -2090,7 +2138,9 @@ impl Overlay {
                     })),
             );
         }
-        pill = pill.child(self.play_pause_button(cx));
+        pill = pill
+            .child(self.play_pause_button(cx))
+            .child(crate::ui::widgets::window_frame::surface_edge(theme, 20.0));
         let right = recording && !self.dock_expanded;
         let duration = if self.reduce_motion { 1 } else { 240 };
         let animation = || {
@@ -2530,12 +2580,34 @@ impl Overlay {
 
     /// Stop the running session and name it from what was said.
     fn finish_session_title(&mut self, cx: &mut Context<Self>) {
-        if let Some(meeting_id) = self.stop_listening() {
-            // An empty session has nothing to name.
-            if self.transcript.len() >= 2 || self.transcript_body_for_title().len() > 120 {
-                self.generate_meeting_title(meeting_id, cx);
-            }
+        if let Some(meeting_id) = self.stop_listening()
+            && !self.transcription_busy
+        {
+            self.finish_meeting_artifacts(meeting_id, cx);
         }
+    }
+
+    fn finish_meeting_artifacts(&mut self, meeting_id: String, cx: &mut Context<Self>) {
+        if self.transcript.len() >= 2 || self.transcript_body_for_title().len() > 120 {
+            self.generate_meeting_title(meeting_id.clone(), cx);
+        }
+        let settings =
+            crate::core::settings::Settings::load_from_path(self.services.database_path.as_deref())
+                .unwrap_or_else(|| self.runtime_settings.clone());
+        if !settings.auto_recap {
+            return;
+        }
+        let Some(path) = self.services.database_path.clone() else {
+            return;
+        };
+        let config = self.selected_chat_config();
+        cx.spawn(async move |_, cx| {
+            let _ =
+                crate::ai::recap::generate(&path, &meeting_id, config, &settings.response_language)
+                    .await;
+            let _ = cx.refresh();
+        })
+        .detach();
     }
 
     /// The transcript as plain text, speaker-labelled, for a title request.
@@ -2599,6 +2671,15 @@ impl Overlay {
                 self.cancel_follow_ups();
             }
             self.runtime_settings = settings.clone();
+            if self.model_provider.as_deref() != Some(settings.chat_provider.as_str())
+                && let Some((id, model)) = self
+                    .chat_choices
+                    .iter()
+                    .find(|(id, _)| id == &settings.chat_provider)
+            {
+                self.model_provider = Some(id.clone());
+                self.model = Some(model.clone());
+            }
             self.reduce_motion = settings.reduce_motion;
             self.opacity = (settings.transparency as f32 / 100.0).clamp(0.0, 1.0);
             self.font_scale = settings.font_scale;
@@ -2666,6 +2747,10 @@ impl Overlay {
     }
 
     fn speech_config(&self) -> Option<crate::features::providers::ProviderConfig> {
+        let settings = crate::features::settings::Settings::load_from_path(
+            self.services.database_path.as_deref(),
+        )
+        .unwrap_or_else(|| self.runtime_settings.clone());
         self.services
             .vault
             .as_ref()
@@ -2677,8 +2762,16 @@ impl Overlay {
             .into_iter()
             .map(|c| c.to_config())
             .find(|c| {
-                !c.api_key.trim().is_empty()
-                    && crate::features::providers::SttProvider::by_id(&c.id).is_some()
+                (c.id == settings.speech_provider
+                    || settings.speech_provider.is_empty() && c.id == "deepgram-stt")
+                    && c.speech_usable()
+            })
+            .map(|mut config| {
+                config.language = settings.speech_language;
+                if !settings.speech_model.is_empty() {
+                    config.model = settings.speech_model;
+                }
+                config
             })
     }
 
@@ -2791,7 +2884,9 @@ impl Overlay {
         let tail = (self.transcript.len(), interim);
         if tail != self.transcript_tail {
             self.transcript_tail = tail;
-            self.transcript_scroll.scroll_to_bottom();
+            if self.runtime_settings.auto_scroll {
+                self.transcript_scroll.scroll_to_bottom();
+            }
         }
     }
 
@@ -3108,7 +3203,7 @@ impl Overlay {
                 &self.message_list_state,
                 prefix..self.message_rows.len(),
                 rows.len() - prefix,
-                self.user_scrolled,
+                self.user_scrolled || !self.runtime_settings.auto_scroll,
             );
             self.message_rows = std::rc::Rc::new(rows);
             self.message_signature = signature;
@@ -3347,8 +3442,6 @@ impl Overlay {
             .h(px(26.0))
             .px(px(6.0))
             .rounded_full()
-            .border_1()
-            .border_color(self.theme.border)
             .bg(if self.profile_menu_open {
                 self.surfaces().accent()
             } else {
@@ -3607,9 +3700,9 @@ impl Overlay {
         .id("push-to-talk")
         .bg(if self.dictation.is_some() {
             self.theme
-                .fill(Theme::with_alpha(self.theme.destructive, 0.3))
+                .fill(Theme::with_alpha(self.theme.destructive, 0.12))
         } else {
-            self.surfaces().card()
+            self.surfaces().muted()
         })
         .opacity(if self.dictation_busy { 0.4 } else { 1.0 })
         .on_mouse_down(
@@ -3642,15 +3735,10 @@ impl Overlay {
             .h(px(26.0))
             .px(px(6.0))
             .rounded_full()
-            .border_1()
-            .border_color(self.theme.border)
             .when(self.theme.is_glass(), |style| {
                 style.bg(self.surfaces().muted())
             })
-            .hover(|s| {
-                s.bg(self.surfaces().accent())
-                    .border_color(self.theme.control_border(true))
-            })
+            .hover(|s| s.bg(self.surfaces().accent()))
             .cursor_pointer()
             .text_size(scaled(11.0))
             .text_color(self.theme.foreground)
@@ -3680,15 +3768,10 @@ impl Overlay {
             .h(px(26.0))
             .px(px(6.0))
             .rounded_full()
-            .border_1()
-            .border_color(self.theme.border)
             .when(self.theme.is_glass(), |style| {
                 style.bg(self.surfaces().muted())
             })
-            .hover(|s| {
-                s.bg(self.surfaces().accent())
-                    .border_color(self.theme.control_border(true))
-            })
+            .hover(|s| s.bg(self.surfaces().accent()))
             .cursor_pointer()
             .text_size(scaled(11.0))
             .text_color(self.theme.muted_foreground)
@@ -3964,6 +4047,12 @@ impl Overlay {
     pub fn select_model(&mut self, model: &str) {
         self.model = Some(model.to_owned());
         self.model_menu_open = false;
+        if let Some(path) = self.services.database_path.as_deref()
+            && let Ok(database) = crate::db::Database::open(path)
+            && let Some(provider) = &self.model_provider
+        {
+            let _ = crate::core::settings::Settings::set(&database, "chat_provider", provider);
+        }
         if let Some(vault) = self.services.vault.as_ref().as_ref()
             && let Some(provider) = self.model_provider.clone()
             && let Ok(Some(mut credential)) = crate::features::credentials::load(
@@ -4393,16 +4482,7 @@ impl Overlay {
                     .h(px(46.0))
                     .px(px(8.0))
                     .rounded_full()
-                    .border_1()
-                    .border_color(if self.composer_focused {
-                        if theme.is_glass() {
-                            theme.focus_border()
-                        } else {
-                            theme.border
-                        }
-                    } else {
-                        self.surfaces().border()
-                    })
+                    .relative()
                     .bg(self.surfaces().input())
                     .id("composer")
                     .track_focus(&focus)
@@ -4445,7 +4525,8 @@ impl Overlay {
                     )
                     .child(self.attach_button(cx))
                     .child(self.dictation_button(cx))
-                    .child(self.send_button(can_submit, cx)),
+                    .child(self.send_button(can_submit, cx))
+                    .child(crate::ui::widgets::window_frame::surface_edge(theme, 23.0)),
             )
     }
 
@@ -4677,7 +4758,7 @@ fn text_tool(
         .size(px(30.0))
         .rounded(px(radius::MD))
         .border_1()
-        .border_color(surfaces.border())
+        .border_color(theme.control_border(false))
         .when(theme.is_glass(), |style| style.bg(surfaces.muted()))
         .hover(|style| {
             style
@@ -5080,6 +5161,11 @@ fn render_markdown_blocks(
 
 impl Render for Overlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let hidden = self.runtime_settings.hide_app_icon || crate::cli::private_overlay_enabled();
+        if self.native_icon_hidden != Some(hidden) {
+            crate::platform::window::set_icon_hidden(window, hidden);
+            self.native_icon_hidden = Some(hidden);
+        }
         #[cfg(windows)]
         if self.native_always_on_top != Some(self.runtime_settings.always_on_top) {
             let above = self.runtime_settings.always_on_top;
@@ -5175,8 +5261,7 @@ impl Render for Overlay {
             )
             .rounded(px(radius::XL))
             .overflow_hidden()
-            .border_1()
-            .border_color(self.theme.frame_border)
+            .p(px(1.0))
             .bg(self.surfaces().background());
         root =
             root.child(
@@ -5237,6 +5322,7 @@ impl Render for Overlay {
         )
         .children(self.selection_menu(cx))
         .children(self.context_menu(cx))
+        .child(crate::ui::widgets::window_frame::window_edge(theme))
     }
 }
 
@@ -6048,5 +6134,30 @@ mod tests {
             crate::ai::models::MERGE_MODEL
         );
         std::fs::remove_dir_all(path).unwrap();
+    }
+    #[test]
+    fn answer_preferences_are_kept_until_a_new_conversation_starts() {
+        let (_path, mut overlay) = fixture();
+        overlay.runtime_settings.response_length = crate::core::settings::ResponseLength::Short;
+        overlay.runtime_settings.response_language = "Hindi".into();
+        assert!(
+            overlay
+                .selected_system_prompt()
+                .contains("Keep the answer short")
+        );
+        assert!(overlay.selected_system_prompt().contains("Hindi"));
+        overlay.conversation_response = Some((
+            crate::core::settings::ResponseLength::Medium,
+            "French".into(),
+        ));
+        assert!(overlay.selected_system_prompt().contains("balanced detail"));
+        assert!(overlay.selected_system_prompt().contains("French"));
+        overlay.new_chat();
+        assert!(
+            overlay
+                .selected_system_prompt()
+                .contains("Keep the answer short")
+        );
+        assert!(overlay.selected_system_prompt().contains("Hindi"));
     }
 }

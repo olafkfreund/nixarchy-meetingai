@@ -283,9 +283,15 @@ async fn fetch_catalog(config: &super::providers::ProviderConfig) -> Result<Vec<
         if let Some((parameter, cursor)) = &continuation {
             url.query_pairs_mut().append_pair(parameter, cursor);
         }
-        let response = client
-            .get(url)
-            .bearer_auth(&config.api_key)
+        let mut request = client.get(url);
+        if let Some(custom) = &config.custom {
+            if let Some((name, value)) = custom.header(&config.api_key) {
+                request = request.header(name, value);
+            }
+        } else {
+            request = request.bearer_auth(&config.api_key);
+        }
+        let response = request
             .timeout(std::time::Duration::from_secs(15))
             .send()
             .await

@@ -69,6 +69,51 @@ pub async fn transcribe(
     wav: Vec<u8>,
     language: Option<&str>,
 ) -> Result<String, SttError> {
+    let language =
+        language.or_else(|| (!config.language.is_empty()).then_some(config.language.as_str()));
+    if let Some(custom) = &config.custom {
+        custom.validate(true).map_err(SttError::Protocol)?;
+        let method = reqwest::Method::from_bytes(custom.method.as_bytes())
+            .map_err(|_| SttError::Protocol("invalid request method".into()))?;
+        let mut endpoint = reqwest::Url::parse(&config.base_url)
+            .map_err(|_| SttError::Protocol("invalid speech endpoint".into()))?;
+        if custom.request_format == "raw-wav" {
+            if !config.model.is_empty() {
+                endpoint
+                    .query_pairs_mut()
+                    .append_pair("model", &config.model);
+            }
+            if let Some(language) = language {
+                endpoint.query_pairs_mut().append_pair("language", language);
+            }
+        }
+        let mut request = client().request(method, endpoint);
+        if let Some((header, value)) = custom.header(&config.api_key) {
+            request = request.header(header, value);
+        }
+        request = match custom.request_format.as_str() {
+            "json-wav" => request.json(&json!({"audio": STANDARD.encode(wav), "model": config.model, "language": language})),
+            "multipart-wav" => {
+                // Generated boundary never appears in audio; no intermediate file.
+                let boundary = format!("lennette-{}", uuid::Uuid::new_v4());
+                let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n", config.model).into_bytes();
+                body.extend(wav);
+                body.extend(format!("\r\n--{boundary}--\r\n").as_bytes());
+                request.header("Content-Type", format!("multipart/form-data; boundary={boundary}")).body(body)
+            }
+            _ => request.header("Content-Type", "audio/wav").body(wav),
+        };
+        let response = request.send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(SttError::Status {
+                status: status.as_u16(),
+                message: text,
+            });
+        }
+        return custom.text(&text).map_err(SttError::Protocol);
+    }
     let provider = SttProvider::by_id(&config.id).ok_or(SttError::NotConfigured)?;
     if config.api_key.trim().is_empty() {
         return Err(SttError::MissingKey);
@@ -138,7 +183,9 @@ pub fn deepgram_url(model: &str, language: Option<&str>) -> String {
         "wss://api.deepgram.com/v1/listen?model={model}&encoding=linear16&sample_rate={SAMPLE_RATE}&channels=2&multichannel=true&diarize_model=latest&interim_results=true&smart_format=true&punctuate=true&vad_events=true&endpointing=300&utterance_end_ms=1000"
     );
     if let Some(language) = language.filter(|value| !value.is_empty() && *value != "en") {
-        url.push_str(&format!("&language={language}"));
+        let mut parsed = reqwest::Url::parse(&url).expect("bundled Deepgram endpoint");
+        parsed.query_pairs_mut().append_pair("language", language);
+        url = parsed.into();
     }
     url
 }
@@ -375,6 +422,126 @@ pub struct LiveTranscriber {
 }
 
 impl LiveTranscriber {
+    pub async fn connect_config(config: &ProviderConfig) -> Result<Self, SttError> {
+        if !config.speech_usable() {
+            return Err(SttError::NotConfigured);
+        }
+        if !config.speech_streaming() {
+            return Ok(Self::connect_batch(config.clone()));
+        }
+        let Some(custom) = &config.custom else {
+            let mut url = deepgram_url(validate_model(&config.model)?, Some(&config.language));
+            if !config.base_url.is_empty() {
+                let endpoint = config
+                    .base_url
+                    .replace("https://", "wss://")
+                    .replace("http://", "ws://");
+                let query = url.split_once('?').map(|(_, q)| q).unwrap_or_default();
+                url = format!(
+                    "{endpoint}{}{query}",
+                    if endpoint.contains('?') { "&" } else { "?" }
+                );
+            }
+            return Self::connect_url(config.api_key.clone(), url).await;
+        };
+        custom.validate(true).map_err(SttError::Protocol)?;
+        let mut url = reqwest::Url::parse(&custom.stream_url)
+            .map_err(|_| SttError::Protocol("invalid stream endpoint".into()))?;
+        url.query_pairs_mut().extend_pairs([
+            ("model", config.model.as_str()),
+            ("encoding", "linear16"),
+            ("sample_rate", "16000"),
+            ("channels", "2"),
+            ("multichannel", "true"),
+            ("interim_results", "true"),
+            ("punctuate", "true"),
+            ("endpointing", "300"),
+            ("utterance_end_ms", "1000"),
+        ]);
+        if !config.language.is_empty() {
+            url.query_pairs_mut()
+                .append_pair("language", &config.language);
+        }
+        Self::connect_authenticated(url.into(), custom.header(&config.api_key)).await
+    }
+
+    /// A bounded batch adapter keeps microphone and remote speakers separate.
+    /// Silence closes an utterance; long speech is split at fifteen seconds.
+    fn connect_batch(config: ProviderConfig) -> Self {
+        let (audio, mut incoming) = mpsc::channel::<Vec<i16>>(64);
+        let (stop, mut stopping) = watch::channel(false);
+        let (sender, events) = mpsc::channel(128);
+        let task = tokio::spawn(async move {
+            let mut chunks = BatchChunks::default();
+            let mut requests = futures_util::stream::FuturesOrdered::new();
+            loop {
+                let finished;
+                let ready = tokio::select! {
+                    _ = stopping.changed() => {
+                        let mut ready = Vec::new();
+                        while let Ok(pcm) = incoming.try_recv() { ready.extend(chunks.push(&pcm)); }
+                        ready.extend(chunks.finish());
+                        finished = true; ready
+                    }
+                    pcm = incoming.recv() => {
+                        match pcm { Some(pcm) => { finished = false; chunks.push(&pcm) }, None => { finished = true; chunks.finish() } }
+                    }
+                    result = requests.next(), if !requests.is_empty() => {
+                        match result {
+                            Some(Ok(line)) => { let _ = sender.send(LiveEvent::Transcript(line)).await; }
+                            Some(Err(error)) => { let _ = sender.send(LiveEvent::Failed(error)).await; break; }
+                            None => {}
+                        }
+                        continue;
+                    }
+                };
+                for channel in chunks.started.drain(..) {
+                    let _ = sender.send(LiveEvent::SpeechStarted { channel }).await;
+                }
+                for (channel, start, end, samples) in ready {
+                    if requests.len() >= 4 {
+                        let _ = sender.send(LiveEvent::Failed("The speech service fell behind. Recording stopped; start again to reconnect.".into())).await;
+                        return;
+                    }
+                    let config = config.clone();
+                    requests.push_back(async move {
+                        let text = transcribe_samples(&config, &samples, None)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        Ok::<_, String>(TranscriptLine {
+                            channel,
+                            speaker: None,
+                            text,
+                            is_final: true,
+                            speech_final: true,
+                            start,
+                            end,
+                        })
+                    });
+                }
+                if finished {
+                    while let Some(result) = requests.next().await {
+                        match result {
+                            Ok(line) => {
+                                let _ = sender.send(LiveEvent::Transcript(line)).await;
+                            }
+                            Err(error) => {
+                                let _ = sender.send(LiveEvent::Failed(error)).await;
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        });
+        Self {
+            audio,
+            stop,
+            events,
+            task: Some(task),
+        }
+    }
     pub async fn connect(
         api_key: String,
         model: String,
@@ -389,14 +556,28 @@ impl LiveTranscriber {
         if api_key.trim().is_empty() {
             return Err(SttError::MissingKey);
         }
+        Self::connect_authenticated(
+            url,
+            Some(("Authorization".into(), format!("Token {api_key}"))),
+        )
+        .await
+    }
+
+    async fn connect_authenticated(
+        url: String,
+        auth: Option<(String, String)>,
+    ) -> Result<Self, SttError> {
         crate::core::install_tls_provider();
         let mut request = url
             .into_client_request()
             .map_err(|e| SttError::Socket(e.to_string()))?;
-        request.headers_mut().insert(
-            "Authorization",
-            HeaderValue::from_str(&format!("Token {api_key}")).map_err(|_| SttError::MissingKey)?,
-        );
+        if let Some((name, value)) = auth {
+            request.headers_mut().insert(
+                tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|_| SttError::Protocol("invalid authentication header".into()))?,
+                HeaderValue::from_str(&value).map_err(|_| SttError::MissingKey)?,
+            );
+        }
         let (socket, _) = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             tokio_tungstenite::connect_async(request),
@@ -497,6 +678,56 @@ impl LiveTranscriber {
     /// Request finalization; continue receiving events until the stream closes.
     pub fn finish(&self) {
         let _ = self.stop.send(true);
+    }
+}
+
+type BatchChunk = (u8, f64, f64, Vec<f32>);
+#[derive(Default)]
+struct BatchChunks {
+    started: Vec<u8>,
+    samples: [Vec<f32>; 2],
+    silence: [usize; 2],
+    position: usize,
+    start: [usize; 2],
+}
+impl BatchChunks {
+    fn push(&mut self, pcm: &[i16]) -> Vec<BatchChunk> {
+        let mut ready = Vec::new();
+        for frame in pcm.as_chunks::<2>().0 {
+            for (channel, value) in frame.iter().enumerate() {
+                let sample = f32::from(*value) / f32::from(i16::MAX);
+                let speech = sample.abs() > 0.008;
+                if self.samples[channel].is_empty() {
+                    if !speech {
+                        continue;
+                    }
+                    self.start[channel] = self.position;
+                    self.started.push(channel as u8);
+                }
+                self.samples[channel].push(sample);
+                self.silence[channel] = if speech { 0 } else { self.silence[channel] + 1 };
+                if (self.silence[channel] >= 9600 || self.samples[channel].len() >= 240_000)
+                    && let Some(chunk) = self.take(channel)
+                {
+                    ready.push(chunk);
+                }
+            }
+            self.position += 1;
+        }
+        ready
+    }
+    fn take(&mut self, channel: usize) -> Option<BatchChunk> {
+        let samples = std::mem::take(&mut self.samples[channel]);
+        self.silence[channel] = 0;
+        (samples.len() >= 1600).then_some((
+            channel as u8,
+            self.start[channel] as f64 / 16000.0,
+            self.position as f64 / 16000.0,
+            samples,
+        ))
+    }
+    fn finish(&mut self) -> Vec<BatchChunk> {
+        (0..2).filter_map(|c| self.take(c)).collect()
     }
 }
 

@@ -19,6 +19,8 @@ pub enum Action {
     SystemAudio,
     VoiceInput,
     Screenshot,
+    PrivacyMode,
+    NormalMode,
 }
 
 impl Action {
@@ -40,6 +42,8 @@ impl Action {
             Action::SystemAudio => "system_audio",
             Action::VoiceInput => "audio_recording",
             Action::Screenshot => "screenshot",
+            Action::PrivacyMode => "privacy_mode",
+            Action::NormalMode => "normal_mode",
         }
     }
 
@@ -51,6 +55,8 @@ impl Action {
             Action::SystemAudio => "System Audio",
             Action::VoiceInput => "Voice Input",
             Action::Screenshot => "Screenshot",
+            Action::PrivacyMode => "Privacy mode",
+            Action::NormalMode => "Normal mode",
         }
     }
 

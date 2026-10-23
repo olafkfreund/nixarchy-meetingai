@@ -70,10 +70,7 @@ pub fn prompts(connection: &Connection) -> Result<Vec<PromptRecord>> {
 
 /// The five listen-mode prompts, in tab order.
 pub fn listen_modes(connection: &Connection) -> Result<Vec<PromptRecord>> {
-    Ok(prompts(connection)?
-        .into_iter()
-        .filter(|prompt| prompt.listen_slot.is_some())
-        .collect())
+    prompts(connection)
 }
 
 /// Create a prompt.
@@ -96,6 +93,19 @@ pub fn update_prompt(connection: &Connection, id: i64, name: &str, prompt: &str)
 
 /// Delete a prompt.
 pub fn delete_prompt(connection: &Connection, id: i64) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let slot: Option<i64> = connection
+        .query_row(
+            "SELECT listen_slot FROM system_prompts WHERE id=?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(slot) = slot {
+        set(connection, &format!("deleted_listen_slot_{slot}"), "true")?;
+    }
+
     connection.execute("DELETE FROM system_prompts WHERE id = ?1", params![id])?;
     Ok(())
 }
@@ -104,6 +114,33 @@ pub fn delete_prompt(connection: &Connection, id: i64) -> Result<()> {
 mod tests {
     use super::*;
     use crate::features::db::Database;
+
+    #[test]
+    fn built_in_deletions_survive_reopen_and_custom_prompts_are_selectable() {
+        let db = Database::in_memory().unwrap();
+        let connection = db.connection();
+        let interview = prompts(connection)
+            .unwrap()
+            .into_iter()
+            .find(|p| p.listen_slot == Some(1))
+            .unwrap();
+        delete_prompt(connection, interview.id).unwrap();
+        crate::db::seed::seed_listen_modes(connection).unwrap();
+        assert!(
+            !prompts(connection)
+                .unwrap()
+                .iter()
+                .any(|p| p.listen_slot == Some(1))
+        );
+        let id = create_prompt(connection, "My interview", "Answer honestly").unwrap();
+        update_prompt(connection, id, "My meeting", "Use meeting context").unwrap();
+        assert!(
+            listen_modes(connection)
+                .unwrap()
+                .iter()
+                .any(|p| p.id == id && p.name == "My meeting" && p.prompt == "Use meeting context")
+        );
+    }
 
     #[test]
     fn settings_upsert_and_read_back() {

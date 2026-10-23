@@ -157,8 +157,15 @@ pub async fn stream_chat(
     cancel: Arc<watch::Receiver<bool>>,
     mut on_text: impl FnMut(&str),
 ) -> Result<String, ChatError> {
-    let provider = ChatProvider::by_id(&config.id).ok_or(ChatError::NotConfigured)?;
-    if provider.requires_key() && config.api_key.trim().is_empty() {
+    let definition = config.chat_definition().ok_or(ChatError::NotConfigured)?;
+    let provider = &definition;
+    if config
+        .custom
+        .as_ref()
+        .map(|c| c.auth != "none")
+        .unwrap_or(true)
+        && config.api_key.trim().is_empty()
+    {
         return Err(ChatError::MissingKey);
     }
     let endpoint = config.endpoint().ok_or(ChatError::NotConfigured)?;
@@ -167,11 +174,21 @@ pub async fn stream_chat(
     }
     let mut cancellation = (*cancel).clone();
 
-    let body = build_body(provider, config, history, context);
-    let request = client
-        .post(endpoint)
-        .bearer_auth(&config.api_key)
-        .json(&body);
+    let mut body = build_body(provider, config, history, context);
+    let streaming = config.custom.as_ref().is_none_or(|custom| custom.streaming);
+    body["stream"] = json!(streaming);
+    let mut request = if let Some(custom) = &config.custom {
+        let method = reqwest::Method::from_bytes(custom.method.as_bytes())
+            .map_err(|_| ChatError::Protocol("invalid request method".into()))?;
+        let mut request = client.request(method, endpoint);
+        if let Some((header, value)) = custom.header(&config.api_key) {
+            request = request.header(header, value);
+        }
+        request
+    } else {
+        client.post(endpoint).bearer_auth(&config.api_key)
+    };
+    request = request.json(&body);
     let response = tokio::select! {
         result = request.send() => result?,
         _ = wait_for_cancellation(&mut cancellation) => return Ok(String::new()),
@@ -186,6 +203,20 @@ pub async fn stream_chat(
         });
     }
 
+    if !streaming {
+        let text = tokio::select! {
+            text = response.text() => text?,
+            _ = wait_for_cancellation(&mut cancellation) => return Ok(String::new()),
+        };
+        let answer = config
+            .custom
+            .as_ref()
+            .expect("batch chat has custom settings")
+            .text(&text)
+            .map_err(ChatError::Protocol)?;
+        on_text(&answer);
+        return completed_answer(answer);
+    }
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
     let mut answer = String::new();

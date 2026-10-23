@@ -80,31 +80,15 @@ impl Tray {
 
 /// Render the mark at one size, in RGBA.
 ///
-/// A rounded ring with a bright core: legible on both light and dark panels, and
-/// drawn in code so no external asset can go missing.
+/// Reuse the user's app artwork in both the Windows and Linux trays.
 fn icon_at(size: u32) -> Vec<u8> {
-    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
-    let centre = (size as f32 - 1.0) / 2.0;
-    let radius = size as f32 * 0.42;
-    let core = size as f32 * 0.20;
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 - centre;
-            let dy = y as f32 - centre;
-            let distance = (dx * dx + dy * dy).sqrt();
-            // Anti-alias the outer edge over one pixel.
-            let alpha = ((radius - distance) * 255.0).clamp(0.0, 255.0);
-            let (r, g, b) = if distance < core {
-                (255, 255, 255)
-            } else if distance < radius {
-                (150, 152, 158)
-            } else {
-                (0, 0, 0)
-            };
-            pixels.extend_from_slice(&[r, g, b, alpha as u8]);
-        }
-    }
-    pixels
+    static ARTWORK: std::sync::OnceLock<image::RgbaImage> = std::sync::OnceLock::new();
+    let artwork = ARTWORK.get_or_init(|| {
+        image::load_from_memory(include_bytes!("../../assets/lennette_app_icon.png"))
+            .expect("bundled Lennette artwork")
+            .into_rgba8()
+    });
+    image::imageops::resize(artwork, size, size, image::imageops::FilterType::Lanczos3).into_raw()
 }
 
 /// The default 16×16 icon, used by tests and as a fallback.
@@ -281,10 +265,10 @@ mod tests {
         assert_eq!(width, 16);
         assert_eq!(height, 16);
         assert_eq!(rgba.len(), 16 * 16 * 4);
-        // The centre is opaque, the corners are transparent.
+        // The bundled artwork remains visible at notification-area size.
         let centre = (8 * 16 + 8) * 4;
         assert_eq!(rgba[centre + 3], 255);
-        assert_eq!(rgba[3], 0);
+        assert!(rgba.as_chunks::<4>().0.iter().any(|p| p[2] > p[0]));
     }
 
     #[test]

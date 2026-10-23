@@ -20,6 +20,8 @@ pub fn handle_args() -> Option<String> {
         "--toggle-system-audio" => "toggle-system-audio",
         "--toggle-voice" => "toggle-voice",
         "--screenshot" => "screenshot",
+        "--privacy" => "privacy-mode",
+        "--normal" => "normal-mode",
         "--version" | "-V" => return Some(format!("lennette {}", env!("CARGO_PKG_VERSION"))),
         "--help" | "-h" => {
             return Some(usage());
@@ -43,7 +45,7 @@ pub fn handle_args() -> Option<String> {
 fn launches_when_absent(command: &str) -> bool {
     matches!(
         command,
-        "toggle-window" | "toggle-dashboard" | "focus-input"
+        "toggle-window" | "toggle-dashboard" | "focus-input" | "privacy-mode" | "normal-mode"
     )
 }
 
@@ -64,25 +66,43 @@ fn usage() -> String {
         "",
         "Run without a flag to launch the app.",
         "LENNETTE_PRIVATE_OVERLAY=1 disables the desktop tray for protected launches.",
-        "Windows launches privately by default; set LENNETTE_PRIVATE_OVERLAY=0 to show its tray.",
+        "  --privacy               launch without a tray or taskbar icon",
+        "  --normal                launch with a tray icon (default)",
     ]
     .join("\n")
 }
 
 /// Explorer owns tray pixels, so app-window capture exclusion cannot hide them.
-/// Windows launches therefore omit the tray unless the user explicitly opts in.
+/// Privacy launches omit the tray; normal launches include it.
 pub fn private_overlay_enabled() -> bool {
+    MODE.get_or_init(|| std::sync::atomic::AtomicBool::new(launch_private()))
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static MODE: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+pub fn set_private_mode(private: bool) {
+    MODE.get_or_init(|| std::sync::atomic::AtomicBool::new(launch_private()))
+        .store(private, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn launch_private() -> bool {
+    if std::env::args().any(|arg| arg == "--privacy") {
+        return true;
+    }
+    if std::env::args().any(|arg| arg == "--normal") {
+        return false;
+    }
     private_overlay_for(
         cfg!(windows),
         std::env::var("LENNETTE_PRIVATE_OVERLAY").ok().as_deref(),
     )
 }
 
-fn private_overlay_for(windows: bool, value: Option<&str>) -> bool {
+fn private_overlay_for(_windows: bool, value: Option<&str>) -> bool {
     match value {
         Some("1") => true,
         Some("0") => false,
-        _ => windows,
+        _ => false,
     }
 }
 
@@ -212,10 +232,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn windows_defaults_to_private_and_requires_an_explicit_tray_opt_in() {
-        for value in [None, Some("1"), Some(""), Some("invalid")] {
-            assert!(private_overlay_for(true, value));
+    fn normal_launch_has_a_tray_unless_privacy_is_requested() {
+        for value in [None, Some(""), Some("invalid")] {
+            assert!(!private_overlay_for(true, value));
         }
+        assert!(private_overlay_for(true, Some("1")));
         assert!(!private_overlay_for(true, Some("0")));
         assert!(!private_overlay_for(false, None));
         assert!(private_overlay_for(false, Some("1")));

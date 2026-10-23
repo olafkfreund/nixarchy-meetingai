@@ -47,6 +47,7 @@ pub struct SessionConfig {
     pub device: Option<String>,
     /// Capture the far side of the call through a monitor source.
     pub system_audio: bool,
+    pub output_device: Option<String>,
     /// Speech provider used by the live network task.
     pub speech: Option<ProviderConfig>,
 }
@@ -58,6 +59,7 @@ pub struct ListenSession {
     started: std::time::Instant,
     sent_samples: usize,
     elapsed: Duration,
+    output_device: Option<String>,
 }
 
 impl ListenSession {
@@ -82,7 +84,7 @@ impl ListenSession {
         // The far side of the call, when requested. A failure here is reported
         // but must not stop microphone capture.
         let system = if config.system_audio && microphone.is_some() {
-            match crate::audio::system_audio::SystemAudio::start(None) {
+            match crate::audio::system_audio::SystemAudio::start(config.output_device.as_deref()) {
                 Ok(system) => {
                     events.push(SessionEvent::Started {
                         device: format!("microphone + {}", system.source()),
@@ -113,6 +115,7 @@ impl ListenSession {
             started: std::time::Instant::now(),
             sent_samples: 0,
             elapsed: Duration::ZERO,
+            output_device: config.output_device.clone(),
         };
         (session, events)
     }
@@ -132,7 +135,7 @@ impl ListenSession {
         if self.system.is_some() {
             return Vec::new();
         }
-        match crate::audio::system_audio::SystemAudio::start(None) {
+        match crate::audio::system_audio::SystemAudio::start(self.output_device.as_deref()) {
             Ok(system) => {
                 let device = format!("microphone + {}", system.source());
                 self.system = Some(system);
@@ -323,6 +326,7 @@ mod tests {
         let config = SessionConfig {
             device: Some("cpal:lennette-no-such-device".into()),
             system_audio: false,
+            output_device: None,
             speech: None,
         };
         let (session, events) = ListenSession::start(&config);
@@ -342,6 +346,7 @@ mod tests {
         let config = SessionConfig {
             device: Some("cpal:lennette-no-such-device".into()),
             system_audio: false,
+            output_device: None,
             speech: None,
         };
         let (mut session, _) = ListenSession::start(&config);
@@ -365,6 +370,7 @@ mod tests {
         let config = SessionConfig {
             device: Some("cpal:lennette-no-such-device".into()),
             system_audio: false,
+            output_device: None,
             speech: None,
         };
         let (mut session, _) = ListenSession::start(&config);

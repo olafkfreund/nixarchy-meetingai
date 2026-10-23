@@ -17,11 +17,12 @@ use crate::ui::theme::scaled;
 #[derive(Clone, PartialEq)]
 enum EditTarget {
     Setting(&'static str),
-    Prompt(i64, String),
 }
 
 #[path = "profiles.rs"]
 mod profiles;
+#[path = "prompts.rs"]
+mod prompts;
 
 /// Shared dashboard handle. Wrapped so the view owns it.
 pub struct DashboardView {
@@ -42,6 +43,17 @@ pub struct DashboardView {
     credential_focus: Option<FocusHandle>,
     settings_save: Option<gpui::Task<()>>,
     model_task: Option<gpui::Task<()>>,
+    devices_task: Option<gpui::Task<()>>,
+    capture_task: Option<gpui::Task<()>>,
+    native_icon_hidden: Option<bool>,
+    update_task: Option<gpui::Task<()>>,
+    update_status: Option<String>,
+    update_available: bool,
+    recap_task: Option<gpui::Task<()>>,
+    prompt_edit: Option<prompts::PromptDraft>,
+    prompt_search: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
+    prompt_observer: Option<gpui::Subscription>,
+    prompt_menu: Option<i64>,
     /// Background task naming meetings that still carry a timestamp title.
     title_task: Option<gpui::Task<()>>,
     /// Chat provider used to name old sessions, when one is configured.
@@ -89,6 +101,17 @@ impl DashboardView {
             credential_focus: None,
             settings_save: None,
             model_task: None,
+            devices_task: None,
+            capture_task: None,
+            native_icon_hidden: None,
+            update_task: None,
+            update_status: None,
+            update_available: false,
+            recap_task: None,
+            prompt_edit: None,
+            prompt_search: None,
+            prompt_observer: None,
+            prompt_menu: None,
             title_task: None,
             title_config,
         }
@@ -110,6 +133,8 @@ impl DashboardView {
         self.editor = None;
         self.rename_buffer.clear();
         self.settings.key_field = None;
+        self.prompt_edit = None;
+        self.prompt_menu = None;
         self.reset_credential_models();
         self.settings.notice = None;
         self.dashboard.navigate(route, self.database.as_ref());
@@ -180,6 +205,210 @@ impl DashboardView {
         self.theme = Theme::from_settings(&self.settings.settings);
     }
 
+    pub fn set_autostart(&mut self, enabled: bool) {
+        match crate::platform::system::startup::set_enabled(
+            enabled,
+            self.settings.settings.startup_privacy,
+        ) {
+            Ok(()) => {
+                self.settings.settings.autostart = enabled;
+                self.save_settings();
+                self.settings.notice = None;
+            }
+            Err(error) => self.settings.notice = Some(error),
+        }
+    }
+
+    fn check_updates(&mut self, cx: &mut Context<Self>) {
+        if self.update_task.is_some() {
+            return;
+        }
+        self.update_status = Some("Checking GitHub…".into());
+        self.update_available = false;
+        self.update_task = Some(cx.spawn(async move |this, cx| {
+            let result = crate::platform::system::updates::latest().await.and_then(|release| {
+                let newer = crate::platform::system::updates::newer(env!("CARGO_PKG_VERSION"), &release.tag_name)?;
+                Ok((newer, release.tag_name))
+            });
+            this.update(cx, |this, cx| {
+                this.update_task = None;
+                this.update_status = Some(match result {
+                    Ok((true, version)) => { this.update_available = true; format!("Update available: {version}. Open the release to download the installer for your system.") }
+                    Ok((false, _)) => "You're up to date with the latest stable GitHub release.".into(),
+                    Err(error) => error,
+                });
+                cx.notify();
+            }).ok();
+        }));
+    }
+
+    fn request_recap(&mut self, cx: &mut Context<Self>) {
+        if self.recap_task.is_some() {
+            return;
+        }
+        let Some(id) = self.open_meeting.clone() else {
+            return;
+        };
+        let Some(path) = self
+            .database
+            .as_ref()
+            .and_then(|db| db.connection().path())
+            .map(std::path::PathBuf::from)
+        else {
+            return;
+        };
+        let config = self
+            .settings
+            .stored_chat
+            .iter()
+            .find(|credential| credential.provider == self.settings.settings.chat_provider)
+            .or_else(|| {
+                self.settings
+                    .stored_chat
+                    .iter()
+                    .find(|credential| credential.to_config().is_usable())
+            })
+            .map(|c| c.to_config());
+        let language = self.settings.settings.response_language.clone();
+        self.recap_task = Some(cx.spawn(async move |this, cx| {
+            let _ = crate::ai::recap::generate(&path, &id, config, &language).await;
+            this.update(cx, |this, cx| {
+                this.recap_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub fn set_startup_privacy(&mut self, private: bool) {
+        if self.settings.settings.autostart
+            && let Err(error) = crate::platform::system::startup::set_enabled(true, private)
+        {
+            self.settings.notice = Some(error);
+            return;
+        }
+        self.settings.settings.startup_privacy = private;
+        self.save_settings();
+    }
+
+    pub fn refresh_audio_devices(&mut self, cx: &mut Context<Self>) {
+        if self.settings.devices_loading {
+            return;
+        }
+        self.settings.devices_loading = true;
+        let task = cx
+            .background_executor()
+            .spawn(async { crate::audio::devices::enumerate() });
+        self.devices_task = Some(cx.spawn(async move |this, cx| {
+            let devices = task.await;
+            this.update(cx, |this, cx| {
+                this.settings.devices = devices;
+                this.settings.devices_loading = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub fn test_capture(&mut self, check: settings_pages::CaptureCheck, cx: &mut Context<Self>) {
+        if self.capture_task.is_some() {
+            return;
+        }
+        self.settings.capture_status = Some("Checking local access…".into());
+        let device = self.settings.settings.input_device.clone();
+        let output = self.settings.settings.output_device.clone();
+        let task = cx.background_executor().spawn(async move {
+            if matches!(check, settings_pages::CaptureCheck::Screen) {
+                crate::platform::screen::capture_monitor(None).map(|frame| format!("Screen capture works: {} × {}. The test frame was discarded.", frame.width(), frame.height())).map_err(|e| format!("Screen capture failed: {e}. Check your desktop capture permissions."))
+            } else if matches!(check, settings_pages::CaptureCheck::SystemAudio) {
+                crate::audio::system_audio::SystemAudio::start((!output.is_empty()).then_some(output.as_str())).map(|mut capture| {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let samples = capture.take(32_000); let name = capture.source().to_owned(); let running = capture.is_running(); capture.stop();
+                    if !running { format!("System audio stopped unexpectedly: {name}.") } else if samples.is_empty() { format!("{name} opened. Play meeting audio and test again to confirm samples arrive.") } else { format!("System audio access works: {name}. Test audio was discarded.") }
+                }).map_err(|e| format!("System audio access failed: {e}. Check your selected output and audio server."))
+            } else {
+                crate::audio::Microphone::start((!device.is_empty()).then_some(device.as_str())).map(|mic| {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let samples = mic.take(32_000); let name = mic.device_name().to_owned(); mic.stop();
+                    if samples.is_empty() { format!("{name} opened, but no samples arrived. Check the device and microphone privacy settings.") } else { format!("Microphone access works: {name}. Test audio was discarded.") }
+                }).map_err(|e| format!("Microphone access failed: {e}. Check your device and microphone privacy settings."))
+            }
+        });
+        self.capture_task = Some(cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.settings.capture_status = Some(result.unwrap_or_else(|e| e));
+                this.capture_task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub fn edit_custom_provider(
+        &mut self,
+        credential: Option<crate::core::credentials::Credential>,
+        speech: bool,
+    ) {
+        use crate::ai::catalog::custom::CustomProvider;
+        let mut credential = credential.unwrap_or_else(|| {
+            let id = format!("custom-{}", uuid::Uuid::new_v4());
+            let mut credential = if speech {
+                crate::core::credentials::Credential::speech(id, "")
+            } else {
+                crate::core::credentials::Credential::chat(id, "")
+            };
+            credential.custom = Some(if speech {
+                CustomProvider {
+                    name: "Custom speech".into(),
+                    request_format: "multipart-wav".into(),
+                    response_path: "/text".into(),
+                    supports_images: false,
+                    ..Default::default()
+                }
+            } else {
+                CustomProvider::default()
+            });
+            credential
+        });
+        credential.api_key.clear();
+        self.settings.custom_draft = Some(credential);
+        self.settings.key_field = None;
+        self.settings.key_status = None;
+    }
+
+    pub fn save_custom_provider(&mut self) {
+        use crate::core::credentials;
+        let Some(mut credential) = self.settings.custom_draft.clone() else {
+            return;
+        };
+        let Some(vault) = &self.settings.vault else {
+            self.settings.key_status = Some("The credential vault is unavailable.".into());
+            return;
+        };
+        if credential.api_key.is_empty()
+            && let Ok(Some(saved)) = credentials::load(vault, credential.kind, &credential.provider)
+        {
+            credential.api_key = saved.api_key;
+        }
+        match credentials::save(vault, &credential) {
+            Ok(()) => {
+                if credential.kind == credentials::Kind::Speech
+                    && self.settings.settings.speech_provider == credential.provider
+                {
+                    self.settings.settings.speech_model = credential.model.clone();
+                    self.save_settings();
+                }
+                self.settings.custom_draft = None;
+                self.settings.key_field = None;
+                self.settings.key_status =
+                    Some("Custom provider saved in the encrypted vault.".into());
+                self.reload_credentials();
+            }
+            Err(error) => self.settings.key_status = Some(error),
+        }
+    }
+
     pub fn schedule_settings_save(&mut self, cx: &mut Context<Self>) {
         self.settings_save = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -212,13 +441,6 @@ impl DashboardView {
         };
         let result = match target {
             EditTarget::Setting(key) => crate::db::settings::set(database.connection(), key, &text),
-            EditTarget::Prompt(id, name) => {
-                if text.is_empty() {
-                    self.settings.error = Some("A response prompt cannot be empty.".into());
-                    return;
-                }
-                crate::db::settings::update_prompt(database.connection(), *id, name, &text)
-            }
         };
         if let Err(error) = result {
             self.settings.error = Some(error.to_string());
@@ -293,7 +515,6 @@ impl DashboardView {
             let initial = text.to_owned();
             let id = match &target {
                 EditTarget::Setting(key) => format!("edit-{key}"),
-                EditTarget::Prompt(id, _) => format!("edit-prompt-{id}"),
             };
             block = block
                 .child(
@@ -414,6 +635,14 @@ impl DashboardView {
         credential.model = self.settings.key_model.trim().to_owned();
         match credentials::save(vault, &credential) {
             Ok(()) => {
+                if kind == credentials::Kind::Speech
+                    && (self.settings.settings.speech_provider.is_empty()
+                        || self.settings.settings.speech_provider == provider)
+                {
+                    self.settings.settings.speech_provider = provider;
+                    self.settings.settings.speech_model = credential.model;
+                    self.save_settings();
+                }
                 let reused_key = self.settings.key_input.trim().is_empty();
                 self.settings.key_input.clear();
                 self.settings.key_status = Some(
@@ -625,6 +854,43 @@ impl DashboardView {
         match self.settings.key_field? {
             settings_pages::CredentialField::Key => Some(&mut self.settings.key_input),
             settings_pages::CredentialField::Model => Some(&mut self.settings.key_model),
+            settings_pages::CredentialField::CustomName => self
+                .settings
+                .custom_draft
+                .as_mut()?
+                .custom
+                .as_mut()
+                .map(|c| &mut c.name),
+            settings_pages::CredentialField::CustomEndpoint => {
+                Some(&mut self.settings.custom_draft.as_mut()?.base_url)
+            }
+            settings_pages::CredentialField::CustomKey => {
+                Some(&mut self.settings.custom_draft.as_mut()?.api_key)
+            }
+            settings_pages::CredentialField::CustomModel => {
+                Some(&mut self.settings.custom_draft.as_mut()?.model)
+            }
+            settings_pages::CredentialField::CustomHeader => self
+                .settings
+                .custom_draft
+                .as_mut()?
+                .custom
+                .as_mut()
+                .map(|c| &mut c.auth_header),
+            settings_pages::CredentialField::CustomPath => self
+                .settings
+                .custom_draft
+                .as_mut()?
+                .custom
+                .as_mut()
+                .map(|c| &mut c.response_path),
+            settings_pages::CredentialField::CustomStream => self
+                .settings
+                .custom_draft
+                .as_mut()?
+                .custom
+                .as_mut()
+                .map(|c| &mut c.stream_url),
         }
     }
 
@@ -747,7 +1013,13 @@ impl DashboardView {
         }
 
         div()
+            .id("dashboard-titlebar")
             .window_control_area(gpui::WindowControlArea::Drag)
+            .cursor(gpui::CursorStyle::OpenHand)
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                crate::platform::window::start_drag(window);
+                cx.stop_propagation();
+            })
             .flex()
             .items_center()
             .gap(px(14.0))
@@ -779,6 +1051,7 @@ impl DashboardView {
                 div()
                     .id("close-dashboard")
                     .occlude()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .flex()
                     .items_center()
                     .justify_center()
@@ -804,6 +1077,7 @@ impl DashboardView {
         let surfaces = self.surfaces();
         let mut pill = div()
             .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -859,7 +1133,7 @@ impl DashboardView {
                 .mt(px(8.0))
                 .rounded(px(8.0))
                 .border_1()
-                .border_color(theme.destructive)
+                .border_color(Theme::with_alpha(theme.destructive, 0.22))
                 .px(px(12.0))
                 .py(px(8.0))
                 .text_size(scaled(12.0))
@@ -985,7 +1259,10 @@ impl DashboardView {
                     .border_color(surfaces.border())
                     .bg(surfaces.card())
                     .cursor_pointer()
-                    .hover(|s| s.bg(surfaces.muted()).border_color(theme.muted_foreground))
+                    .hover(|s| {
+                        s.bg(surfaces.muted())
+                            .border_color(theme.control_border(true))
+                    })
                     .child(
                         div()
                             .flex()
@@ -1062,67 +1339,6 @@ impl DashboardView {
                             cx.notify();
                         }
                     })),
-            );
-        }
-        list
-    }
-
-    fn prompts_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let PageData::Prompts(prompts) = self.dashboard.data() else {
-            return div().child(self.empty_note("No prompts loaded."));
-        };
-        let mut list = div()
-            .flex()
-            .flex_col()
-            .gap(px(16.0))
-            .child(self.page_heading(
-                "Prompts",
-                "Instructions used by each meeting mode. Choose a mode in the overlay.",
-            ));
-        for prompt in prompts {
-            let mode = prompt
-                .listen_slot
-                .map(|_| "Meeting mode".to_owned())
-                .unwrap_or_else(|| "Prompt".to_owned());
-            let surfaces = self.surfaces();
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.0))
-                    .rounded(px(radius::LG))
-                    .border_1()
-                    .border_color(surfaces.border())
-                    .bg(surfaces.card())
-                    .hover(|style| style.bg(surfaces.muted()))
-                    .px(px(14.0))
-                    .py(px(12.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .text_size(scaled(12.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child(prompt.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(scaled(10.0))
-                                    .text_color(theme.muted_foreground)
-                                    .child(mode),
-                            ),
-                    )
-                    .child(self.editable_text(
-                        EditTarget::Prompt(prompt.id, prompt.name.clone()),
-                        "Response instruction",
-                        &prompt.prompt,
-                        cx,
-                    )),
             );
         }
         list
@@ -1370,6 +1586,11 @@ impl DashboardView {
             )
             .child(div().w_full().flex_shrink_0().child(identity))
             .child(div().w_full().flex_shrink_0().child(description))
+            .child(div().flex().flex_wrap().gap(px(8.0)).justify_center()
+                .child(action_button("about-website", &theme, "Visit Lennette ↗", cx, |_, cx, _| cx.open_url("https://lennette.itssingularity.com")))
+                .child(action_button("about-check-updates", &theme, if self.update_task.is_some() { "Checking…" } else { "Check for updates" }, cx, |this, cx, _| this.check_updates(cx)))
+                .children(self.update_available.then(|| action_button("about-open-update", &theme, "View update ↗", cx, |_, cx, _| cx.open_url("https://github.com/parazeeknova/lennette/releases/latest")))))
+            .children(self.update_status.as_ref().map(|status| div().text_size(scaled(12.0)).text_color(theme.muted_foreground).whitespace_normal().child(status.clone())))
             .child(
                 div()
                     .flex()
@@ -1393,7 +1614,7 @@ impl DashboardView {
                     .whitespace_normal()
                     .text_color(theme.muted_foreground)
                     .child(
-                        "Built for Linux with Rust and GPUI. Your provider keys are stored in the \
+                        "Built for Windows and Linux with Rust and GPUI. Your provider keys are stored in the \
                          encrypted local vault. Selected context is sent to your configured AI \
                          provider when you ask a question.",
                     ),
@@ -1501,6 +1722,12 @@ impl DashboardView {
                     }),
             );
         }
+        let mut transcript = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w(px(260.0))
+            .gap(px(12.0));
         for line in lines {
             let who = match line.who.as_str() {
                 "me" => "You".to_owned(),
@@ -1510,7 +1737,7 @@ impl DashboardView {
                 },
             };
             let stamp = crate::features::db::meetings::format_duration(line.start_time as i64);
-            list = list.child(
+            transcript = transcript.child(
                 div()
                     .flex()
                     .items_start()
@@ -1538,7 +1765,68 @@ impl DashboardView {
                     ),
             );
         }
-        list.into_any_element()
+        let recap = self
+            .database
+            .as_ref()
+            .zip(self.open_meeting.as_deref())
+            .and_then(|(db, id)| {
+                crate::db::meetings::recap(db.connection(), id)
+                    .ok()
+                    .flatten()
+            });
+        let mut panel = div()
+            .w(px(300.0))
+            .min_w(px(250.0))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .p(px(16.0))
+            .rounded(px(14.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(self.surfaces().card())
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(scaled(15.0))
+                    .child("Meeting recap"),
+            );
+        if let Some(recap) = recap {
+            let text = match recap.status.as_str() {
+                "ready" => recap.content,
+                "pending" => "Generating a recap from the finished transcript…".into(),
+                _ => format!("The recap could not be generated: {}", recap.error),
+            };
+            panel = panel.child(crate::ui::overlay::render_markdown(
+                &theme,
+                self.surfaces(),
+                &text,
+            ));
+        } else {
+            panel = panel.child(div().text_size(scaled(12.0)).text_color(theme.muted_foreground).whitespace_normal().child("No recap saved yet. Enable auto recap in Response settings, or generate one here."));
+        }
+        panel = panel.child(action_button(
+            "regenerate-recap",
+            &theme,
+            if self.recap_task.is_some() {
+                "Generating…"
+            } else {
+                "Generate / retry recap"
+            },
+            cx,
+            |this, cx, _| this.request_recap(cx),
+        ));
+        list.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_start()
+                .gap(px(18.0))
+                .child(transcript)
+                .child(panel),
+        )
+        .into_any_element()
     }
 
     fn conversation_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -1803,6 +2091,24 @@ fn truncate(text: &str, limit: usize) -> String {
 
 impl Render for DashboardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.dashboard.route() == super::nav::Route::Prompts && self.prompt_search.is_none() {
+            self.init_prompt_search(cx);
+        }
+        if self.dashboard.route() == super::nav::Route::About && self.update_status.is_none() {
+            self.check_updates(cx);
+        }
+        if self.dashboard.route() == super::nav::Route::Audio && self.devices_task.is_none() {
+            self.refresh_audio_devices(cx);
+        }
+        let hidden = self.settings.settings.hide_app_icon || crate::cli::private_overlay_enabled();
+        if self.native_icon_hidden != Some(hidden) {
+            self.settings.notice = match crate::platform::window::set_icon_hidden(window, hidden) {
+                crate::platform::window::Applied::Unsupported if hidden => Some("This compositor controls dock visibility. Use its window rules to hide Lennette's app icon.".into()),
+                crate::platform::window::Applied::Failed => Some("The desktop could not update the app icon visibility.".into()),
+                _ => self.settings.notice.take(),
+            };
+            self.native_icon_hidden = Some(hidden);
+        }
         // Text sizes are written in rems, so this one value scales the window.
         window.set_rem_size(crate::ui::theme::rem_size_for(
             self.settings.settings.font_scale,
@@ -1816,25 +2122,13 @@ impl Render for DashboardView {
             .clone();
         div()
             .track_focus(&focus)
+            .relative()
             .font_family(crate::ui::theme::ui_font_family())
             .flex()
             .size_full()
             .rounded(px(radius::XL))
-            .border_1()
-            .border_color(theme.frame_border)
-            .bg(
-                if self.settings.settings.theme == crate::core::models::settings::ThemeChoice::Glass
-                {
-                    gpui::Rgba {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 0.0,
-                    }
-                } else {
-                    surfaces.background()
-                },
-            )
+            .p(px(1.0))
+            .bg(surfaces.background())
             .text_color(theme.foreground)
             .overflow_hidden()
             // Dev Space owns the keyboard so the key field can be typed into.
@@ -1859,7 +2153,13 @@ impl Render for DashboardView {
                 }
                 match event.keystroke.key.as_str() {
                     "backspace" => this.backspace_key_field(),
-                    "enter" => this.save_credential(),
+                    "enter" => {
+                        if this.settings.custom_draft.is_some() {
+                            this.save_custom_provider();
+                        } else {
+                            this.save_credential();
+                        }
+                    }
                     "escape" => this.settings.key_field = None,
                     "a" if event.keystroke.modifiers.platform
                         || event.keystroke.modifiers.control =>
@@ -1919,6 +2219,7 @@ impl Render for DashboardView {
                         )
                     }),
             )
+            .child(crate::ui::widgets::window_frame::window_edge(theme))
     }
 }
 

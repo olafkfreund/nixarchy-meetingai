@@ -58,6 +58,8 @@ pub struct Theme {
     pub border: Rgba,
     /// Outer window frame, independent of decorative control outlines/opacity.
     pub frame_border: Rgba,
+    /// Dark outer edge; the light inner frame_border sits one physical pixel in.
+    pub frame_outer_border: Rgba,
     pub input: Rgba,
     pub accent: Rgba,
     pub primary: Rgba,
@@ -72,6 +74,7 @@ impl Theme {
         if !settings.show_borders {
             theme.border.a = 0.0;
             theme.frame_border.a = 0.0;
+            theme.frame_outer_border.a = 0.0;
         }
         theme
     }
@@ -83,8 +86,9 @@ impl Theme {
         foreground: rgb_hex(0xf5f5f5),
         muted: rgba(0xff, 0xff, 0xff, 0.045),
         muted_foreground: rgb_hex(0xd0d4dc),
-        border: rgba(0xff, 0xff, 0xff, 0.0),
+        border: rgba(0xff, 0xff, 0xff, 0.055),
         frame_border: rgba(0xff, 0xff, 0xff, 0.18),
+        frame_outer_border: rgba(0x00, 0x00, 0x00, 0.38),
         input: rgba(0x0c, 0x11, 0x1b, 0.12),
         accent: rgba(0xff, 0xff, 0xff, 0.09),
         primary: rgb_hex(0xf7f7f7),
@@ -100,8 +104,9 @@ impl Theme {
         foreground: rgb_hex(0xf4f4f4),
         muted: rgba(0xff, 0xff, 0xff, 0.08),
         muted_foreground: rgb_hex(0xa6a6a6),
-        border: rgba(0xff, 0xff, 0xff, 0.14),
+        border: rgba(0xff, 0xff, 0xff, 0.085),
         frame_border: rgba(0xff, 0xff, 0xff, 0.22),
+        frame_outer_border: rgba(0x00, 0x00, 0x00, 0.65),
         input: rgba(0x12, 0x12, 0x12, 0.42),
         accent: rgba(0xff, 0xff, 0xff, 0.12),
         primary: rgb_hex(0xf5f5f5),
@@ -117,8 +122,9 @@ impl Theme {
         foreground: rgb_hex(0x111827),
         muted: rgba(0x00, 0x00, 0x00, 0.06),
         muted_foreground: rgb_hex(0x6b7280),
-        border: rgba(0x00, 0x00, 0x00, 0.14),
-        frame_border: rgba(0x00, 0x00, 0x00, 0.20),
+        border: rgba(0x00, 0x00, 0x00, 0.075),
+        frame_border: rgba(0xff, 0xff, 0xff, 0.90),
+        frame_outer_border: rgba(0x00, 0x00, 0x00, 0.26),
         input: rgba(0xff, 0xff, 0xff, 0.90),
         accent: rgba(0x00, 0x00, 0x00, 0.08),
         primary: rgb_hex(0x111827),
@@ -153,22 +159,20 @@ impl Theme {
         self.fill(self.primary)
     }
 
-    /// Glass controls use their fill for separation; other themes keep outlines.
+    /// Interactive outlines stay quiet in every theme, including hover/focus.
     pub fn control_border(self, active: bool) -> Rgba {
-        if self.is_glass() || !active {
-            self.border
-        } else {
-            self.primary
-        }
+        Self::with_alpha(
+            self.border,
+            if active {
+                self.border.a * 1.35
+            } else {
+                self.border.a
+            },
+        )
     }
 
-    /// A quiet focus cue remains available even when decorative borders are off.
     pub fn focus_border(self) -> Rgba {
-        if self.is_glass() {
-            Self::with_alpha(self.foreground, 0.22)
-        } else {
-            self.primary
-        }
+        Self::with_alpha(self.foreground, 0.16)
     }
 
     /// Popups follow the same transparency policy as the rest of the app.
@@ -277,35 +281,19 @@ impl Surfaces {
 
     /// Glass panels keep a faint tint; other themes retain a legibility floor.
     pub fn card(self) -> Rgba {
-        if self.theme.is_glass() {
-            self.theme.card
-        } else {
-            self.fade_readable(self.theme.card)
-        }
+        self.fade_readable(self.theme.card)
     }
 
     pub fn muted(self) -> Rgba {
-        if self.theme.is_glass() {
-            self.theme.muted
-        } else {
-            self.fade_readable(self.theme.muted)
-        }
+        self.fade_readable(self.theme.muted)
     }
 
     pub fn accent(self) -> Rgba {
-        if self.theme.is_glass() {
-            self.theme.accent
-        } else {
-            self.fade_readable(self.theme.accent)
-        }
+        self.fade_readable(self.theme.accent)
     }
 
     pub fn input(self) -> Rgba {
-        if self.theme.is_glass() {
-            self.theme.input
-        } else {
-            self.fade_readable(self.theme.input)
-        }
+        self.fade_readable(self.theme.input)
     }
 
     /// Primary actions use a soft translucent fill in glass.
@@ -380,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn glass_keeps_soft_fills_and_opaque_text_without_decorative_outlines() {
+    fn glass_keeps_soft_fills_subtle_outlines_and_opaque_text() {
         let theme = Theme::GLASS;
         for opacity in [0.0, 0.5, 1.0] {
             let surfaces = theme.surfaces(opacity);
@@ -395,8 +383,8 @@ mod tests {
             ] {
                 assert!(colour.a > 0.0 && colour.a <= 0.13);
             }
-            assert_eq!(surfaces.border().a, 0.0);
-            assert_eq!(theme.control_border(true).a, 0.0);
+            assert!(surfaces.border().a <= 0.1);
+            assert!(theme.control_border(true).a <= 0.12);
             assert!(theme.focus_border().a > 0.0);
             assert!(surfaces.background().a <= 0.18);
             assert!(theme.popover().a > surfaces.card().a);
@@ -431,10 +419,28 @@ mod tests {
                 ..Default::default()
             };
             assert!(Theme::from_settings(&settings).frame_border.a > 0.0);
+            assert!(Theme::from_settings(&settings).frame_outer_border.a > 0.0);
             settings.show_borders = false;
             assert_eq!(Theme::from_settings(&settings).frame_border.a, 0.0);
+            assert_eq!(Theme::from_settings(&settings).frame_outer_border.a, 0.0);
         }
-        assert_eq!(Theme::GLASS.control_border(true).a, 0.0);
+        assert!(Theme::GLASS.control_border(true).a < 0.1);
+    }
+
+    #[test]
+    fn every_palette_fades_surfaces_and_keeps_interactive_edges_quiet() {
+        for theme in [Theme::DARK, Theme::LIGHT, Theme::GLASS] {
+            let low = theme.surfaces(0.0);
+            let high = theme.surfaces(1.0);
+            assert_eq!(low.background().a, 0.0);
+            assert!(low.card().a < high.card().a);
+            assert!(low.input().a < high.input().a);
+            assert!(low.muted().a < high.muted().a);
+            assert!(low.accent().a < high.accent().a);
+            assert!(theme.control_border(true).a <= 0.12);
+            assert!(theme.focus_border().a < 0.2);
+            assert_eq!(theme.foreground.a, 1.0);
+        }
     }
 
     #[test]

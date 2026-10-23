@@ -230,18 +230,25 @@ fn run_capture(
     let device = match &requested {
         Some(name) => {
             let bare = name.strip_prefix("cpal:").unwrap_or(name);
-            (if loopback {
-                host.output_devices()
+            if let Some(id) = bare.strip_prefix("id:") {
+                id.parse::<cpal::DeviceId>()
+                    .ok()
+                    .and_then(|id| host.device_by_id(&id))
+                    .ok_or_else(|| AudioError::DeviceMissing(name.clone()))?
             } else {
-                host.input_devices()
-            })
-            .map_err(|error| AudioError::Config(error.to_string()))?
-            .find(|device| {
-                device
-                    .description()
-                    .is_ok_and(|description| description.name() == bare)
-            })
-            .ok_or_else(|| AudioError::DeviceMissing(bare.to_owned()))?
+                (if loopback {
+                    host.output_devices()
+                } else {
+                    host.input_devices()
+                })
+                .map_err(|error| AudioError::Config(error.to_string()))?
+                .find(|device| {
+                    device
+                        .description()
+                        .is_ok_and(|description| description.name() == bare)
+                })
+                .ok_or_else(|| AudioError::DeviceMissing(bare.to_owned()))?
+            }
         }
         None => (if loopback {
             host.default_output_device()
@@ -324,6 +331,17 @@ where
                 }
             },
             move |error| {
+                // WASAPI reports recoverable discontinuities through this same
+                // callback. They do not mean the capture stream has stopped.
+                if matches!(
+                    error.kind(),
+                    cpal::ErrorKind::Xrun
+                        | cpal::ErrorKind::DeviceChanged
+                        | cpal::ErrorKind::RealtimeDenied
+                ) {
+                    tracing::warn!(%error, "audio capture recovered from a driver notification");
+                    return;
+                }
                 tracing::error!(%error, "microphone stream error");
                 if let Ok(mut buffer) = error_sink.lock() {
                     buffer.failure = Some(error.to_string());
@@ -337,23 +355,19 @@ where
 /// List input devices through CPAL.
 pub fn input_devices() -> Vec<InputDevice> {
     let host = cpal::default_host();
-    let default_name = host.default_input_device().and_then(|device| {
-        device
-            .description()
-            .ok()
-            .map(|description| description.name().to_owned())
-    });
+    let default_id = host
+        .default_input_device()
+        .and_then(|device| device.id().ok());
     let Ok(devices) = host.input_devices() else {
         return Vec::new();
     };
-    let mut seen = std::collections::HashSet::new();
     devices
         .filter_map(|device| {
             let name = device.description().ok()?.name().to_owned();
-            seen.insert(name.clone());
+            let id = device.id().ok()?;
             Some(InputDevice {
-                is_default: default_name.as_deref() == Some(name.as_str()),
-                id: format!("cpal:{name}"),
+                is_default: default_id.as_ref() == Some(&id),
+                id: format!("cpal:id:{id}"),
                 name,
             })
         })

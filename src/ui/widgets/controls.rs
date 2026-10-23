@@ -49,13 +49,7 @@ pub fn switch<V: 'static>(
                 .size(px(16.0))
                 .rounded_full()
                 .border_1()
-                .border_color(if theme.is_glass() {
-                    theme.border
-                } else if on {
-                    theme.primary_foreground()
-                } else {
-                    theme.muted_foreground
-                })
+                .border_color(theme.control_border(on))
                 .bg(if theme.is_glass() {
                     Theme::with_alpha(theme.foreground, if on { 0.85 } else { 0.4 })
                 } else {
@@ -471,7 +465,7 @@ pub fn warning(theme: &Theme, message: &str) -> impl IntoElement {
         .border_color(if theme.is_glass() {
             theme.border
         } else {
-            theme.warning
+            Theme::with_alpha(theme.warning, 0.18)
         })
         .when(theme.is_glass(), |style| {
             style.bg(theme.fill(theme.warning))

@@ -6,6 +6,7 @@ pub mod markdown;
 pub mod panels;
 pub mod syntax;
 pub mod text_input;
+pub mod window_frame;
 
 pub use controls::*;
 pub use markdown::*;

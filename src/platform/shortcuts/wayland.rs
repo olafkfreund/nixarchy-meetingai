@@ -45,6 +45,7 @@ pub fn accelerator(action: Action) -> &'static str {
         Action::SystemAudio => "CTRL+SHIFT+m",
         Action::VoiceInput => "CTRL+SHIFT+a",
         Action::Screenshot => "CTRL+SHIFT+s",
+        Action::PrivacyMode | Action::NormalMode => "",
     }
 }
 

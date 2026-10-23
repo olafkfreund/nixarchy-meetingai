@@ -52,6 +52,8 @@ pub fn command(action: Action) -> &'static str {
         Action::SystemAudio => "lennette --toggle-system-audio",
         Action::VoiceInput => "lennette --toggle-voice",
         Action::Screenshot => "lennette --screenshot",
+        Action::PrivacyMode => "lennette --privacy",
+        Action::NormalMode => "lennette --normal",
     }
 }
 

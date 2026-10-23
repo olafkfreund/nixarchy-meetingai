@@ -182,10 +182,10 @@ fn win32_window(window: &Window) -> Option<windows_sys::Win32::Foundation::HWND>
 /// Apply capture exclusion before making a Windows window visible. This is an
 /// OS capture policy, not protection from privileged software or external cameras.
 pub fn protect_from_capture(window: &Window) -> Result<(), String> {
+    configure_frame(window);
     #[cfg(windows)]
     {
         let handle = win32_window(window).ok_or("no Windows window handle")?;
-        configure_win32_frame(handle);
         if let Err(error) = protect_win32(handle) {
             let message: Vec<u16> =
                 format!("{error}\n\nLennette will close without showing an unprotected window.")
@@ -204,21 +204,115 @@ pub fn protect_from_capture(window: &Window) -> Result<(), String> {
             }
             return Err(error);
         }
-        use windows_sys::Win32::UI::WindowsAndMessaging::*;
-        // Keep app windows out of the taskbar and Alt+Tab. Failure of capture
-        // exclusion above is fatal; these presentation flags are independent.
-        unsafe {
-            let style = GetWindowLongPtrW(handle, GWL_EXSTYLE);
-            SetWindowLongPtrW(
-                handle,
-                GWL_EXSTYLE,
-                (style | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize),
-            );
-        }
+        set_icon_hidden(window, crate::cli::private_overlay_enabled());
     }
     #[cfg(not(windows))]
     let _ = window;
     Ok(())
+}
+
+/// Taskbar/dock visibility is independent of capture exclusion and the tray.
+pub fn set_icon_hidden(window: &Window, hidden: bool) -> Applied {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        let Some(handle) = win32_window(window) else {
+            return Applied::Unsupported;
+        };
+        unsafe {
+            let style = GetWindowLongPtrW(handle, GWL_EXSTYLE);
+            let desired = if hidden {
+                (style | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize)
+            } else {
+                (style | WS_EX_APPWINDOW as isize) & !(WS_EX_TOOLWINDOW as isize)
+            };
+            if desired == style {
+                return Applied::Yes;
+            }
+            let visible = IsWindowVisible(handle) != 0;
+            if visible {
+                ShowWindow(handle, SW_HIDE);
+            }
+            SetWindowLongPtrW(handle, GWL_EXSTYLE, desired);
+            SetWindowPos(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            // A style/frame refresh can clear DWM state. Restore both policies
+            // before exposing the changed window to the desktop again.
+            configure_frame(window);
+            if let Err(error) = protect_win32(handle) {
+                tracing::error!(%error, "refusing to expose a window after its icon style changed");
+                return Applied::Failed;
+            }
+            if visible {
+                ShowWindow(handle, SW_SHOWNOACTIVATE);
+            }
+        }
+        Applied::Yes
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{ClientMessageEvent, ConnectionExt, EventMask};
+        let Some(id) = x11_window(window) else {
+            return Applied::Unsupported;
+        };
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let (connection, screen) = x11rb::connect(None)?;
+            let state = connection
+                .intern_atom(false, b"_NET_WM_STATE")?
+                .reply()?
+                .atom;
+            let taskbar = connection
+                .intern_atom(false, b"_NET_WM_STATE_SKIP_TASKBAR")?
+                .reply()?
+                .atom;
+            let pager = connection
+                .intern_atom(false, b"_NET_WM_STATE_SKIP_PAGER")?
+                .reply()?
+                .atom;
+            let event =
+                ClientMessageEvent::new(32, id, state, [u32::from(hidden), taskbar, pager, 1, 0]);
+            connection.send_event(
+                false,
+                connection.setup().roots[screen].root,
+                EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                event,
+            )?;
+            connection.flush()?;
+            Ok(())
+        })();
+        if result.is_ok() {
+            Applied::Yes
+        } else {
+            Applied::Failed
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = (window, hidden);
+        Applied::Unsupported
+    }
+}
+
+/// Let the rendered surface own the window's shape and transparency.
+pub fn configure_frame(window: &Window) {
+    #[cfg(windows)]
+    if let Some(handle) = win32_window(window) {
+        // On GPUI's Windows backend this disables its native accent backdrop;
+        // it does not change the premultiplied DirectComposition swap chain.
+        // The backdrop otherwise tints pixels even when our surface alpha is 0.
+        window.set_background_appearance(gpui::WindowBackgroundAppearance::Opaque);
+        configure_win32_frame(handle);
+    }
+    #[cfg(not(windows))]
+    let _ = window;
 }
 
 #[cfg(windows)]
@@ -226,24 +320,23 @@ fn configure_win32_frame(handle: windows_sys::Win32::Foundation::HWND) {
     use windows_sys::Win32::Graphics::Dwm::*;
     use windows_sys::Win32::UI::Controls::MARGINS;
 
-    // GPUI keeps WS_THICKFRAME for native resizing. Extend the transparent
-    // surface across that frame instead of painting an opaque square around
-    // our rounded client UI. This also works on Windows 10.
-    let margins = MARGINS {
-        cxLeftWidth: -1,
-        cxRightWidth: -1,
-        cyTopHeight: -1,
-        cyBottomHeight: -1,
-    };
-    // Windows 11 adds its own 1px outline and corner treatment. These attributes
-    // are optional on Windows 10, which returns E_INVALIDARG for them.
+    // Keep WS_THICKFRAME hit-testing, but remove DWM's material, outline and
+    // different-radius clipping. GPUI draws the one shared 22px curve itself.
+    let margins = MARGINS::default();
     let border: u32 = 0xfffffffe; // DWMWA_COLOR_NONE
-    let corners = DWMWCP_ROUND;
+    let corners = DWMWCP_DONOTROUND;
+    let nonclient = DWMNCRP_DISABLED;
     // SAFETY: the HWND is live; DWM copies each value during the call.
     unsafe {
         if DwmExtendFrameIntoClientArea(handle, &margins) < 0 {
-            tracing::warn!("Windows could not extend the transparent window frame");
+            tracing::warn!("Windows could not clear the native window material");
         }
+        let _ = DwmSetWindowAttribute(
+            handle,
+            DWMWA_NCRENDERING_POLICY as u32,
+            (&nonclient as *const i32).cast(),
+            std::mem::size_of_val(&nonclient) as u32,
+        );
         let _ = DwmSetWindowAttribute(
             handle,
             DWMWA_BORDER_COLOR as u32,
@@ -326,6 +419,24 @@ pub fn focus(window: &Window) -> Applied {
     }
     window.activate_window();
     Applied::Yes
+}
+
+/// Begin an OS-managed move after a press on a custom titlebar.
+pub fn start_drag(window: &Window) {
+    #[cfg(windows)]
+    if let Some(handle) = win32_window(window) {
+        use windows_sys::Win32::UI::{
+            Input::KeyboardAndMouse::ReleaseCapture, WindowsAndMessaging::*,
+        };
+        // Post instead of Send: GPUI is still dispatching the pointer event.
+        // Re-entering its window procedure here would borrow the UI twice.
+        unsafe {
+            ReleaseCapture();
+            PostMessageW(handle, WM_SYSCOMMAND, (SC_MOVE | HTCAPTION) as usize, 0);
+        }
+    }
+    #[cfg(not(windows))]
+    window.start_window_move();
 }
 
 /// Resize the window to a preset, in logical pixels.

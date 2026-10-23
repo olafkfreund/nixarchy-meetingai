@@ -199,6 +199,90 @@ impl ResponsePace {
 
 pub const FOLLOW_UP_PROMPT: &str = "Using the latest exchange and the user's meeting context, suggest three distinct, useful questions the user could ask next. Prefer clarifications, concrete next steps or deeper follow-ups. Do not answer the questions, repeat something already answered, or invent facts. Return one short question per line, without numbering or commentary.";
 
+/// Global answer detail preference, captured when a new conversation starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResponseLength {
+    Short,
+    Medium,
+    #[default]
+    Auto,
+}
+impl ResponseLength {
+    pub const ALL: [Self; 3] = [Self::Short, Self::Medium, Self::Auto];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Short => "Short",
+            Self::Medium => "Medium",
+            Self::Auto => "Auto",
+        }
+    }
+    fn parse(value: &str) -> Self {
+        match value {
+            "Short" => Self::Short,
+            "Medium" => Self::Medium,
+            _ => Self::Auto,
+        }
+    }
+    pub fn instruction(self) -> &'static str {
+        match self {
+            Self::Short => {
+                "Keep the answer short: lead with the direct answer, use only essential supporting points, and avoid a long introduction."
+            }
+            Self::Medium => {
+                "Use balanced detail: explain the answer and key reasoning with enough context to act, without unnecessary repetition."
+            }
+            Self::Auto => {
+                "Choose the response length to match the complexity of the question: brief for simple questions, more detailed when the task needs explanation."
+            }
+        }
+    }
+}
+
+pub const RESPONSE_LANGUAGES: &[&str] = &[
+    "Auto",
+    "English",
+    "Hindi",
+    "Bengali",
+    "Tamil",
+    "Telugu",
+    "Marathi",
+    "Gujarati",
+    "Kannada",
+    "Malayalam",
+    "Punjabi",
+    "Urdu",
+    "Spanish",
+    "French",
+    "German",
+    "Italian",
+    "Portuguese",
+    "Dutch",
+    "Polish",
+    "Russian",
+    "Ukrainian",
+    "Arabic",
+    "Turkish",
+    "Chinese",
+    "Japanese",
+    "Korean",
+    "Indonesian",
+    "Vietnamese",
+];
+pub fn response_instruction(length: ResponseLength, language: &str) -> String {
+    let language = if language == "Auto" || language.trim().is_empty() {
+        "Use the language of the user's latest question unless they ask for another language."
+            .to_owned()
+    } else {
+        format!(
+            "Write your response in {language}, except code, names and quoted source material where translation would change their meaning."
+        )
+    };
+    format!(
+        "Global response preferences: {} {language}",
+        length.instruction()
+    )
+}
+
 /// All persisted settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -208,6 +292,8 @@ pub struct Settings {
     pub font_scale: u32,
     pub show_borders: bool,
     pub autostart: bool,
+    pub startup_privacy: bool,
+    pub chat_provider: String,
     pub hide_app_icon: bool,
     pub always_on_top: bool,
     pub reduce_motion: bool,
@@ -221,6 +307,11 @@ pub struct Settings {
     pub output_device: String,
     pub speech_provider: String,
     pub speech_model: String,
+    pub speech_language: String,
+    pub response_length: ResponseLength,
+    pub response_language: String,
+    pub auto_scroll: bool,
+    pub auto_recap: bool,
     pub smart_follow_ups: bool,
     pub smart_follow_ups_prompt: String,
     pub cli_connection: String,
@@ -238,6 +329,8 @@ impl Default for Settings {
             font_scale: 100,
             show_borders: true,
             autostart: false,
+            startup_privacy: false,
+            chat_provider: String::new(),
             hide_app_icon: false,
             always_on_top: true,
             reduce_motion: false,
@@ -249,8 +342,13 @@ impl Default for Settings {
             use_image_on_send: false,
             input_device: String::new(),
             output_device: String::new(),
-            speech_provider: String::new(),
+            speech_provider: "deepgram-stt".into(),
             speech_model: String::new(),
+            speech_language: String::new(),
+            response_length: ResponseLength::Auto,
+            response_language: "Auto".into(),
+            auto_scroll: true,
+            auto_recap: false,
             smart_follow_ups: true,
             smart_follow_ups_prompt: FOLLOW_UP_PROMPT.to_owned(),
             cli_connection: String::new(),
@@ -314,6 +412,8 @@ impl Settings {
             font_scale: number(keys::FONT_SCALE, defaults.font_scale).clamp(85, 140),
             show_borders: flag(keys::SHOW_BORDERS, defaults.show_borders),
             autostart: flag(keys::AUTOSTART, defaults.autostart),
+            startup_privacy: flag("startup_privacy", defaults.startup_privacy),
+            chat_provider: text("chat_provider", &defaults.chat_provider),
             hide_app_icon: flag(keys::HIDE_APP_ICON, defaults.hide_app_icon),
             always_on_top: flag(keys::ALWAYS_ON_TOP, defaults.always_on_top),
             reduce_motion: flag(keys::REDUCE_MOTION, defaults.reduce_motion),
@@ -333,6 +433,13 @@ impl Settings {
             output_device: text(keys::OUTPUT_DEVICE, &defaults.output_device),
             speech_provider: text(keys::SPEECH_PROVIDER, &defaults.speech_provider),
             speech_model: text(keys::SPEECH_MODEL, &defaults.speech_model),
+            speech_language: text("speech_language", &defaults.speech_language),
+            response_length: get("response_length")
+                .map(ResponseLength::parse)
+                .unwrap_or_default(),
+            response_language: text("response_language", &defaults.response_language),
+            auto_scroll: flag("auto_scroll", defaults.auto_scroll),
+            auto_recap: flag("auto_recap", defaults.auto_recap),
             smart_follow_ups: flag(keys::SMART_FOLLOW_UPS, defaults.smart_follow_ups),
             smart_follow_ups_prompt: match get(keys::SMART_FOLLOW_UPS_PROMPT) {
                 None | Some("Suggest three short follow-up questions.") => {
@@ -388,6 +495,8 @@ impl Settings {
             (keys::FONT_SCALE, self.font_scale.to_string()),
             (keys::SHOW_BORDERS, self.show_borders.to_string()),
             (keys::AUTOSTART, self.autostart.to_string()),
+            ("startup_privacy", self.startup_privacy.to_string()),
+            ("chat_provider", self.chat_provider.clone()),
             (keys::HIDE_APP_ICON, self.hide_app_icon.to_string()),
             (keys::ALWAYS_ON_TOP, self.always_on_top.to_string()),
             (keys::REDUCE_MOTION, self.reduce_motion.to_string()),
@@ -407,6 +516,14 @@ impl Settings {
             (keys::OUTPUT_DEVICE, self.output_device.clone()),
             (keys::SPEECH_PROVIDER, self.speech_provider.clone()),
             (keys::SPEECH_MODEL, self.speech_model.clone()),
+            ("response_length", self.response_length.label().into()),
+            ("response_language", self.response_language.clone()),
+            ("auto_scroll", self.auto_scroll.to_string()),
+            ("auto_recap", self.auto_recap.to_string()),
+            (
+                "speech_language",
+                self.speech_language.trim().chars().take(32).collect(),
+            ),
             (keys::SMART_FOLLOW_UPS, self.smart_follow_ups.to_string()),
             (
                 keys::SMART_FOLLOW_UPS_PROMPT,
@@ -496,6 +613,8 @@ mod tests {
             font_scale: 120,
             show_borders: false,
             autostart: true,
+            startup_privacy: true,
+            chat_provider: "gemini".into(),
             hide_app_icon: true,
             always_on_top: false,
             reduce_motion: true,
@@ -509,6 +628,11 @@ mod tests {
             output_device: "spk-1".into(),
             speech_provider: "deepgram-stt".into(),
             speech_model: "nova-3".into(),
+            speech_language: "en-US".into(),
+            response_length: ResponseLength::Medium,
+            response_language: "Hindi".into(),
+            auto_scroll: false,
+            auto_recap: true,
             smart_follow_ups: false,
             smart_follow_ups_prompt: "custom".into(),
             cli_connection: "".into(),

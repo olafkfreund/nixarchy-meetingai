@@ -96,6 +96,10 @@ pub struct ProviderConfig {
     pub model: String,
     #[serde(default)]
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<super::custom::CustomProvider>,
+    #[serde(default)]
+    pub language: String,
 }
 
 impl ProviderConfig {
@@ -109,11 +113,16 @@ impl ProviderConfig {
             api_key: api_key.into(),
             model: model.into(),
             base_url: String::new(),
+            custom: None,
+            language: String::new(),
         }
     }
 
     /// Endpoint to call, honouring a user override.
     pub fn endpoint(&self) -> Option<String> {
+        if self.id.starts_with("custom-") && self.custom.is_some() {
+            return (!self.base_url.is_empty()).then(|| self.base_url.clone());
+        }
         let provider = ChatProvider::by_id(&self.id)?;
         if !self.base_url.is_empty() {
             return Some(self.base_url.clone());
@@ -123,12 +132,47 @@ impl ProviderConfig {
 
     /// Whether this configuration is usable as-is.
     pub fn is_usable(&self) -> bool {
+        if let Some(custom) = &self.custom {
+            return self.endpoint().is_some()
+                && !self.model.trim().is_empty()
+                && (custom.auth == "none" || !self.api_key.trim().is_empty())
+                && custom.validate(false).is_ok();
+        }
         let needs_key = ChatProvider::by_id(&self.id)
             .map(|provider| provider.requires_key())
             .unwrap_or(true);
         self.endpoint().is_some()
             && !self.model.trim().is_empty()
             && (!needs_key || !self.api_key.trim().is_empty())
+    }
+
+    pub fn speech_usable(&self) -> bool {
+        if let Some(custom) = &self.custom {
+            self.id.starts_with("custom-")
+                && !self.base_url.is_empty()
+                && (custom.auth == "none" || !self.api_key.trim().is_empty())
+                && custom.validate(true).is_ok()
+        } else {
+            SttProvider::by_id(&self.id).is_some() && !self.api_key.trim().is_empty()
+        }
+    }
+
+    pub fn speech_streaming(&self) -> bool {
+        self.custom.as_ref().is_none_or(|custom| custom.streaming)
+    }
+
+    pub fn chat_definition(&self) -> Option<ChatProvider> {
+        if let Some(custom) = &self.custom {
+            self.id.starts_with("custom-").then_some(ChatProvider {
+                id: "custom",
+                name: "Custom",
+                endpoint: "",
+                wire: ChatWire::OpenAi,
+                supports_images: custom.supports_images,
+            })
+        } else {
+            ChatProvider::by_id(&self.id).copied()
+        }
     }
 }
 

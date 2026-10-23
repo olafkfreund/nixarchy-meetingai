@@ -4,11 +4,51 @@
 //! loses the conversation so far. Finished meetings are listed here with their
 //! line counts and durations.
 
+use rusqlite::OptionalExtension;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::Result;
+
+#[derive(Debug, PartialEq)]
+pub struct Recap {
+    pub content: String,
+    pub status: String,
+    pub error: String,
+}
+pub fn recap(connection: &Connection, id: &str) -> Result<Option<Recap>> {
+    Ok(connection
+        .query_row(
+            "SELECT content, status, error FROM meeting_recaps WHERE meeting_id = ?1",
+            params![id],
+            |row| {
+                Ok(Recap {
+                    content: row.get(0)?,
+                    status: row.get(1)?,
+                    error: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+pub fn begin_recap(connection: &Connection, id: &str) -> Result<()> {
+    connection.execute("INSERT INTO meeting_recaps (meeting_id) VALUES (?1) ON CONFLICT(meeting_id) DO UPDATE SET status='pending', error='', updated_at=datetime('now')", params![id])?;
+    Ok(())
+}
+pub fn finish_recap(
+    connection: &Connection,
+    id: &str,
+    result: std::result::Result<&str, &str>,
+) -> Result<()> {
+    let (status, content, error) = match result {
+        Ok(content) => ("ready", content, ""),
+        Err(error) => ("failed", "", error),
+    };
+    // UPDATE cannot recreate a meeting deleted while its AI request was running.
+    connection.execute("UPDATE meeting_recaps SET status=?2, content=?3, error=?4, updated_at=datetime('now') WHERE meeting_id=?1", params![id, status, content, error])?;
+    Ok(())
+}
 
 /// A recorded session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

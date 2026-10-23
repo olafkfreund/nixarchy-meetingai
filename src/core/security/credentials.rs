@@ -28,6 +28,8 @@ pub struct Credential {
     pub model: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<crate::ai::catalog::custom::CustomProvider>,
 }
 
 impl Credential {
@@ -38,6 +40,7 @@ impl Credential {
             api_key: api_key.into(),
             model: String::new(),
             base_url: String::new(),
+            custom: None,
         }
     }
 
@@ -48,6 +51,7 @@ impl Credential {
             api_key: api_key.into(),
             model: String::new(),
             base_url: String::new(),
+            custom: None,
         }
     }
 
@@ -65,6 +69,8 @@ impl Credential {
                 self.model.trim().to_owned()
             },
             base_url: self.base_url.clone(),
+            custom: self.custom.clone(),
+            language: String::new(),
         }
     }
 
@@ -72,6 +78,24 @@ impl Credential {
     pub fn validate(&self) -> Result<(), String> {
         if self.provider.trim().is_empty() {
             return Err("Choose a provider first.".to_owned());
+        }
+        if let Some(custom) = &self.custom {
+            if !self.provider.starts_with("custom-") {
+                return Err("Custom providers need their own identifier.".into());
+            }
+            custom.validate(self.kind == Kind::Speech)?;
+            let url = reqwest::Url::parse(&self.base_url)
+                .map_err(|_| "Enter a complete HTTP endpoint.")?;
+            if !matches!(url.scheme(), "http" | "https") {
+                return Err("Use an http:// or https:// endpoint.".into());
+            }
+            if custom.auth != "none" && self.api_key.trim().is_empty() {
+                return Err("Enter an API key or choose no authentication.".into());
+            }
+            if self.kind == Kind::Chat && self.model.trim().is_empty() {
+                return Err("Enter a model ID.".into());
+            }
+            return Ok(());
         }
         match self.kind {
             Kind::Chat => {
@@ -158,10 +182,11 @@ pub fn list(vault: &Vault, kind: Kind) -> Result<Vec<Credential>, String> {
         match serde_json::from_value::<Credential>(value) {
             Ok(credential) => {
                 let supported = credential.kind == kind
-                    && match kind {
-                        Kind::Chat => ChatProvider::by_id(&credential.provider).is_some(),
-                        Kind::Speech => SttProvider::by_id(&credential.provider).is_some(),
-                    };
+                    && (credential.custom.is_some() && credential.provider.starts_with("custom-")
+                        || match kind {
+                            Kind::Chat => ChatProvider::by_id(&credential.provider).is_some(),
+                            Kind::Speech => SttProvider::by_id(&credential.provider).is_some(),
+                        });
                 if supported {
                     credentials.push(credential);
                 }

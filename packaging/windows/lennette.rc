@@ -1,0 +1,2 @@
+// GPUI loads application icon resource 1. Explorer uses it for EXEs/shortcuts.
+1 ICON "src/assets/lennette.ico"

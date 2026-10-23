@@ -63,9 +63,9 @@ pub fn parse_monitors(json: &str) -> Vec<MonitorSource> {
         // `monitor_source`. Accept either, and fall back to the `.monitor`
         // naming convention so a third variant still works.
         #[serde(default)]
-        monitor_of_sink: Option<String>,
+        monitor_of_sink: Option<serde_json::Value>,
         #[serde(default)]
-        monitor_source: Option<String>,
+        monitor_source: Option<serde_json::Value>,
     }
 
     impl Source {
@@ -110,7 +110,11 @@ impl SystemAudio {
 
         let chosen = match source {
             Some(id) if !id.trim().is_empty() => MonitorSource {
-                id: id.to_owned(),
+                id: if id.ends_with(".monitor") {
+                    id.to_owned()
+                } else {
+                    format!("{id}.monitor")
+                },
                 name: id.to_owned(),
             },
             _ => {
@@ -243,6 +247,9 @@ impl SystemAudio {
     /// Samples discarded because the consumer fell behind.
     pub fn dropped(&self) -> u64 {
         self.dropped.lock().map(|count| *count).unwrap_or_default()
+    }
+    pub fn failure(&self) -> Option<String> {
+        (!self.is_running()).then(|| "The system audio recorder stopped.".into())
     }
 
     /// Stop recording and reap the child process.

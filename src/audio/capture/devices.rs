@@ -120,24 +120,32 @@ fn pactl(args: &[&str]) -> Result<String, String> {
 
 #[cfg(not(windows))]
 fn enumerate_linux() -> Result<Devices, String> {
-    let mut inputs = parse_sources(&pactl(&["--format=json", "list", "sources"])?)?;
-    let mut outputs = parse_sinks(&pactl(&["--format=json", "list", "sinks"])?)?;
+    // Use the same backend and identifiers as Microphone::start. Pulse source
+    // names cannot be passed to CPAL's ALSA device selector.
+    let inputs = crate::audio::microphone::input_devices()
+        .into_iter()
+        .map(|d| Device {
+            id: d.id,
+            name: d.name,
+            is_default: d.is_default,
+        })
+        .collect();
+    let outputs_result =
+        pactl(&["--format=json", "list", "sinks"]).and_then(|text| parse_sinks(&text));
+    let error = outputs_result.as_ref().err().cloned();
+    let mut outputs = outputs_result.unwrap_or_default();
 
     // `get-default-*` prints the name plus a description on the next line.
-    let default_input = pactl(&["get-default-source"])
-        .ok()
-        .and_then(|text| text.lines().next().map(str::to_owned));
     let default_output = pactl(&["get-default-sink"])
         .ok()
         .and_then(|text| text.lines().next().map(str::to_owned));
 
-    mark_default(&mut inputs, default_input.as_deref());
     mark_default(&mut outputs, default_output.as_deref());
 
     Ok(Devices {
         inputs,
         outputs,
-        error: None,
+        error,
     })
 }
 
@@ -155,16 +163,24 @@ fn enumerate_windows() -> Result<Devices, String> {
         .collect();
     let default = host
         .default_output_device()
-        .and_then(|d| d.description().ok())
-        .map(|d| d.name().to_owned());
-    let outputs = host
-        .output_devices()
-        .map_err(|e| e.to_string())?
-        .filter_map(|d| {
-            let name = d.description().ok()?.name().to_owned();
+        .and_then(|device| device.id().ok());
+    let devices = match host.output_devices() {
+        Ok(devices) => devices,
+        Err(error) => {
+            return Ok(Devices {
+                inputs,
+                outputs: Vec::new(),
+                error: Some(error.to_string()),
+            });
+        }
+    };
+    let outputs = devices
+        .filter_map(|device| {
+            let name = device.description().ok()?.name().to_owned();
+            let id = device.id().ok()?;
             Some(Device {
-                id: format!("cpal:{name}"),
-                is_default: default.as_ref() == Some(&name),
+                id: format!("cpal:id:{id}"),
+                is_default: default.as_ref() == Some(&id),
                 name,
             })
         })

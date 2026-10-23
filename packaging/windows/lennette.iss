@@ -27,7 +27,8 @@ OutputBaseFilename=lennette-windows-x86_64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\lennette.exe
+SetupIconFile=..\..\src\assets\lennette.ico
+UninstallDisplayIcon={app}\lennette.ico
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
@@ -39,10 +40,15 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 Source: "{#SourceBinary}"; DestDir: "{app}"; DestName: "lennette.exe"; Flags: ignoreversion
 Source: "..\..\.github\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\docs\windows.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "..\..\src\assets\lennette.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Lennette"; Filename: "{app}\lennette.exe"; WorkingDir: "{app}"
-Name: "{autodesktop}\Lennette"; Filename: "{app}\lennette.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\Lennette"; Filename: "{app}\lennette.exe"; Parameters: "--normal"; WorkingDir: "{app}"; IconFilename: "{app}\lennette.ico"
+Name: "{group}\Lennette (Privacy)"; Filename: "{app}\lennette.exe"; Parameters: "--privacy"; WorkingDir: "{app}"; IconFilename: "{app}\lennette.ico"
+Name: "{autodesktop}\Lennette"; Filename: "{app}\lennette.exe"; Parameters: "--normal"; WorkingDir: "{app}"; IconFilename: "{app}\lennette.ico"; Tasks: desktopicon
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Lennette"; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\lennette.exe"; Description: "Launch Lennette"; Flags: nowait postinstall skipifsilent

@@ -7,6 +7,7 @@ RELEASES=${LENNETTE_RELEASES_URL:-https://github.com/${LENNETTE_REPO:-parazeekno
 SELF_URL=${LENNETTE_INSTALL_URL:-${LENNETTE_SITE_URL:-https://lennette.itssingularity.com}/install}
 DATA_DIR=${LENNETTE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/lennette}
 BIN_DIR=${XDG_BIN_HOME:-$HOME/.local/bin}
+DESKTOP_DATA=${XDG_DATA_HOME:-$HOME/.local/share}
 VERSION=latest
 MODIFY_PATH=1
 LAUNCH=1
@@ -67,7 +68,7 @@ fi
 payload="$DATA_DIR/versions/$VERSION/linux-x86_64"
 binary="$payload/lennette"
 
-if [[ -x $binary ]] && "$binary" --version >/dev/null 2>&1; then
+if [[ -x $binary && -f $payload/lennette_app_icon.png ]] && "$binary" --version >/dev/null 2>&1; then
     info "Already installed: $VERSION"
 else
     [[ -n $TEMP ]] || TEMP=$(mktemp -d)
@@ -90,6 +91,10 @@ else
     staged=$(mktemp "$payload/.lennette.XXXXXXXX")
     install -m 755 "$TEMP/lennette" "$staged"
     mv -f -- "$staged" "$binary"
+    # The entire archive is checksummed; extract only these known artwork paths.
+    if tar -tzf "$TEMP/$ASSET" | grep -Fx 'lennette-linux-x86_64/lennette_app_icon.png' >/dev/null; then
+        tar -xOzf "$TEMP/$ASSET" lennette-linux-x86_64/lennette_app_icon.png >"$payload/lennette_app_icon.png"
+    fi
 fi
 
 mkdir -p "$BIN_DIR"
@@ -97,7 +102,7 @@ launcher=$(mktemp "$BIN_DIR/.lenny.XXXXXXXX")
 {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
     # Bash quoting handles spaces and apostrophes in home directories and URLs.
-    printf 'data=%q\nbin=%q\nnative=%q\ninstaller=%q\nreleases=%q\n' "$DATA_DIR" "$BIN_DIR" "$binary" "$SELF_URL" "$RELEASES"
+    printf 'data=%q\nbin=%q\nnative=%q\ninstaller=%q\nreleases=%q\ndesktop_data=%q\n' "$DATA_DIR" "$BIN_DIR" "$binary" "$SELF_URL" "$RELEASES" "$DESKTOP_DATA"
     cat <<'LAUNCHER'
 fetch_setup() {
     local setup status=0
@@ -109,7 +114,7 @@ fetch_setup() {
         wget --https-only --timeout=30 --tries=3 -qO "$setup" "$installer" || status=$?
     else printf '%s\n' 'lenny: install curl or wget to update or repair.' >&2; status=1; fi
     if (( status == 0 )); then
-        LENNETTE_HOME="$data" XDG_BIN_HOME="$bin" LENNETTE_RELEASES_URL="$releases" LENNETTE_INSTALL_URL="$installer" bash "$setup" --no-launch "$@" || status=$?
+        LENNETTE_HOME="$data" XDG_BIN_HOME="$bin" XDG_DATA_HOME="$desktop_data" LENNETTE_RELEASES_URL="$releases" LENNETTE_INSTALL_URL="$installer" bash "$setup" --no-launch "$@" || status=$?
     fi
     rm -f -- "$setup"
     return "$status"
@@ -125,6 +130,8 @@ case ${1:-} in
         if [[ -L $bin/lennette && $(readlink "$bin/lennette") == lenny ]]; then rm -- "$bin/lennette"; fi
         rm -rf -- "${data:?}/versions"
         rm -f -- "$data/launch.log"
+        rm -f -- "$desktop_data/applications/dev.lennette.overlay.desktop"
+        rm -f -- "$desktop_data/icons/hicolor/512x512/apps/dev.lennette.overlay.png"
         rmdir -- "$data" 2>/dev/null || true
         printf '%s\n' 'Lennette removed. Your settings, history, and API keys were kept.'
         exit 0 ;;
@@ -173,6 +180,25 @@ LAUNCHER
 chmod 755 "$launcher"
 mv -f -- "$launcher" "$BIN_DIR/lenny"
 if [[ ! -e $BIN_DIR/lennette || -L $BIN_DIR/lennette ]]; then ln -sfn lenny "$BIN_DIR/lennette"; fi
+
+# Register the launcher and the shipped artwork with Linux desktop shells.
+mkdir -p "$DESKTOP_DATA/applications" "$DESKTOP_DATA/icons/hicolor/512x512/apps"
+if [[ -f $payload/lennette_app_icon.png ]]; then
+    install -m 644 -- "$payload/lennette_app_icon.png" "$DESKTOP_DATA/icons/hicolor/512x512/apps/dev.lennette.overlay.png"
+fi
+# Desktop Exec quoting differs from shell quoting: escape reserved characters.
+desktop_exec=${BIN_DIR//\\/\\\\}
+desktop_exec=${desktop_exec//\"/\\\"}
+desktop_exec=${desktop_exec//\$/\\\$}
+desktop_exec=${desktop_exec//\`/\\\`}
+desktop_exec=${desktop_exec//%/%%}
+{
+    printf '[Desktop Entry]\nType=Application\nName=Lennette\n'
+    printf 'Comment=Live meeting copilot\nExec="%s/lenny"\n' "$desktop_exec"
+    printf 'Icon=dev.lennette.overlay\nStartupWMClass=dev.lennette.overlay\nTerminal=false\nCategories=Utility;AudioVideo;\n'
+} >"$DESKTOP_DATA/applications/dev.lennette.overlay.desktop"
+if have gtk-update-icon-cache; then gtk-update-icon-cache -f -t "$DESKTOP_DATA/icons/hicolor" >/dev/null 2>&1 || true; fi
+if have update-desktop-database; then update-desktop-database "$DESKTOP_DATA/applications" >/dev/null 2>&1 || true; fi
 
 # A child process cannot change the parent shell's PATH. Persist it for the next
 # terminal and use the absolute launcher path to open the app immediately.

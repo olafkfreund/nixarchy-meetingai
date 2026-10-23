@@ -13,6 +13,7 @@ public static class LennetteWindows {
     [DllImport("user32.dll")] public static extern bool GetWindowDisplayAffinity(IntPtr hwnd, out uint affinity);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
+    [DllImport("user32.dll", EntryPoint="GetClassLongPtrW")] static extern IntPtr GetClassLongPtr(IntPtr hwnd, int index);
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, uint attribute, out uint value, uint size);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
@@ -136,6 +137,20 @@ public static class LennetteWindows {
         if (HitTest(window, client.Right/2, (int)(120*scale)) != 1)
             throw new InvalidOperationException("Chat content became a window drag region");
     }
+    public static void AssertDashboardDrag(IntPtr window) {
+        Rect client;
+        if (!GetClientRect(window, out client)) throw new InvalidOperationException("Cannot read dashboard bounds");
+        double scale=GetDpiForWindow(window)/96.0;
+        int y=(int)(27*scale);
+        if (HitTest(window, (int)(35*scale), y) != 2 || HitTest(window, client.Right-(int)(72*scale), y) != 2)
+            throw new InvalidOperationException("Dashboard logo/empty header space is not draggable");
+        if (HitTest(window, client.Right-(int)(35*scale), y) != 1)
+            throw new InvalidOperationException("Dashboard close button became a drag region");
+    }
+    public static void AssertIcon(IntPtr window) {
+        if (GetClassLongPtr(window, -14) == IntPtr.Zero)
+            throw new InvalidOperationException("The application class has no branded icon resource");
+    }
     public static void ToggleHotkey() {
         keybd_event(0x11, 0, 0, UIntPtr.Zero); // Ctrl
         keybd_event(0x10, 0, 0, UIntPtr.Zero); // Shift
@@ -163,7 +178,7 @@ function Send-Command([string]$Flag) {
 function Assert-Protection([IntPtr]$Window) {
     [uint32]$affinity = 0
     if (-not [LennetteWindows]::GetWindowDisplayAffinity($Window, [ref]$affinity) -or $affinity -ne 0x11) {
-        throw 'The actual GPUI window is not excluded from capture'
+        throw "The actual GPUI window is not excluded from capture (stage=$script:stage handle=$Window affinity=$affinity)"
     }
     $style = [LennetteWindows]::GetWindowLongPtr($Window, -20).ToInt64()
     if (($style -band 0x80) -eq 0 -or ($style -band 0x40000) -ne 0) { throw 'Taskbar/Alt+Tab styling is missing' }
@@ -171,18 +186,23 @@ function Assert-Protection([IntPtr]$Window) {
     # Windows 10 does not implement these Windows 11 attributes.
     if ([LennetteWindows]::DwmGetWindowAttribute($Window, 34, [ref]$border, 4) -eq 0 -and $border -ne 0xfffffffeL) { throw 'Native square window border is still enabled' }
     [uint32]$corners = 0
-    if ([LennetteWindows]::DwmGetWindowAttribute($Window, 33, [ref]$corners, 4) -eq 0 -and $corners -ne 2) { throw 'Rounded Windows corners are not configured' }
+    if ([LennetteWindows]::DwmGetWindowAttribute($Window, 33, [ref]$corners, 4) -eq 0 -and $corners -ne 1) { throw 'Windows is clipping the app with a competing corner radius' }
+    [uint32]$nativeFrame = 0
+    if ([LennetteWindows]::DwmGetWindowAttribute($Window, 1, [ref]$nativeFrame, 4) -ne 0 -or $nativeFrame -ne 0) { throw 'Native frame material is interfering with app transparency' }
+    [LennetteWindows]::AssertIcon($Window)
 }
 $previousPrivate = $env:LENNETTE_PRIVATE_OVERLAY
 try {
-    # Exercise the Windows default, without relying on an environment override.
+    $script:stage = 'startup'
+    $diagnostics = Join-Path ([IO.Path]::GetTempPath()) ('lennette-native-' + [guid]::NewGuid().ToString('N'))
+    # Explicit privacy launch must omit shell-owned icons.
     $env:LENNETTE_PRIVATE_OVERLAY = $null
-    $app = Start-Process -FilePath $Binary -PassThru
+    $app = Start-Process -FilePath $Binary -ArgumentList '--privacy' -WindowStyle Hidden -RedirectStandardOutput "$diagnostics.out" -RedirectStandardError "$diagnostics.err" -PassThru
     Wait-For { $script:overlay = [LennetteWindows]::Find($app.Id, 'lennette'); $overlay -ne [IntPtr]::Zero -and [LennetteWindows]::IsWindowVisible($overlay) } 'protected overlay startup'
     Assert-Protection $overlay
     Start-Sleep -Milliseconds 500
     [LennetteWindows]::AssertPillDrag($overlay)
-    if ([LennetteWindows]::Find($app.Id, 'lennette tray') -ne [IntPtr]::Zero) { throw 'Default Windows launch created an Explorer tray icon' }
+    if ([LennetteWindows]::Find($app.Id, 'lennette tray') -ne [IntPtr]::Zero) { throw 'Privacy launch created an Explorer tray icon' }
     # Exercise RegisterHotKey, not just the one-shot control flags.
     [LennetteWindows]::ToggleHotkey()
     Wait-For { -not [LennetteWindows]::IsWindowVisible($overlay) } 'hotkey hide'
@@ -192,10 +212,14 @@ try {
     if ([LennetteWindows]::Find($app.Id, 'lennette dashboard') -ne [IntPtr]::Zero) { throw 'Hidden dashboard shortcut ran' }
     [LennetteWindows]::ToggleHotkey()
     Wait-For { [LennetteWindows]::IsWindowVisible($overlay) } 'hotkey restore'
+    $script:stage = 'hotkey restore'
     Assert-Protection $overlay
     Send-Command '--toggle-dashboard'
+    $script:stage = 'dashboard startup'
     Wait-For { $script:dashboard = [LennetteWindows]::Find($app.Id, 'lennette dashboard'); $dashboard -ne [IntPtr]::Zero -and [LennetteWindows]::IsWindowVisible($dashboard) } 'dashboard after restore'
     Assert-Protection $dashboard
+    Start-Sleep -Milliseconds 300
+    [LennetteWindows]::AssertDashboardDrag($dashboard)
     # Capture the whole desktop with a visible, unprotected black positive control.
     # A white backdrop makes even a black-rectangle fallback fail this check.
     [LennetteWindows]::ShowWindow($overlay, 0) | Out-Null
@@ -211,14 +235,29 @@ try {
     Start-Sleep -Milliseconds 300
     if ([LennetteWindows]::NonWhitePixels($controlBounds) -ne 0) { throw 'Capture backdrop is not stable' }
     foreach ($window in @($overlay, $dashboard)) {
+        $script:stage = 'desktop capture'
         $area = [LennetteWindows]::PlaceAbove($window, $app.Id)
         Assert-Protection $window
         Start-Sleep -Milliseconds 700
         if ([LennetteWindows]::NonWhitePixels($area) -ne 0) { throw 'Protected app pixels or a black fallback leaked into the full-desktop capture' }
         [LennetteWindows]::ShowWindow($window, 0) | Out-Null
     }
-    Write-Output 'PASS: rounded borderless frames, pill caption hit-tests and independent controls; full-desktop capture omits overlay/dashboard pixels; hotkeys, restore protection and hidden-state filtering work.'
+    Send-Command '--normal'
+    $script:stage = 'normal/privacy switching'
+    Wait-For { [LennetteWindows]::Find($app.Id, 'lennette tray') -ne [IntPtr]::Zero } 'normal-mode tray'
+    Wait-For { ([LennetteWindows]::GetWindowLongPtr($overlay, -20).ToInt64() -band 0x80) -eq 0 } 'normal-mode taskbar style'
+    Send-Command '--privacy'
+    Wait-For { [LennetteWindows]::Find($app.Id, 'lennette tray') -eq [IntPtr]::Zero } 'privacy-mode tray removal'
+    Wait-For { ([LennetteWindows]::GetWindowLongPtr($overlay, -20).ToInt64() -band 0x80) -ne 0 } 'privacy-mode taskbar style'
+    $script:stage = 'switched overlay'
+    Assert-Protection $overlay
+    $script:stage = 'switched dashboard'
+    Send-Command '--toggle-dashboard'
+    Wait-For { [LennetteWindows]::IsWindowVisible($dashboard) } 'protected dashboard restore after mode switch'
+    Assert-Protection $dashboard
+    Write-Output 'PASS: shared rounded frames, pill/dashboard drag regions and controls; desktop capture excludes overlay/dashboard; hotkeys and restore protection; Normal/Privacy switches tray and taskbar visibility.'
 } finally {
+    if ($diagnostics -and (Test-Path "$diagnostics.err") -and (Get-Item "$diagnostics.err").Length -gt 0) { Get-Content "$diagnostics.err" | Select-Object -Last 30 | Write-Output }
     foreach ($fixture in @($control, $backdrop)) {
         if ($fixture -and $fixture -ne [IntPtr]::Zero) { [LennetteWindows]::DestroyWindow($fixture) | Out-Null }
     }

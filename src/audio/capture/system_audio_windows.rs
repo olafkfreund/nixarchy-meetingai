@@ -23,6 +23,9 @@ impl SystemAudio {
     pub fn is_running(&self) -> bool {
         self.capture.is_running()
     }
+    pub fn failure(&self) -> Option<String> {
+        self.capture.failure()
+    }
     pub fn dropped(&self) -> u64 {
         self.capture.dropped()
     }

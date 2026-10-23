@@ -385,6 +385,10 @@ pub fn open_dashboard_at(
             && dashboard
                 .update(cx, |view, window, cx| {
                     view.navigate_to(route);
+                    #[cfg(windows)]
+                    if !crate::platform::window::set_visible(window, true).is_yes() {
+                        return;
+                    }
                     window.activate_window();
                     cx.notify();
                 })

@@ -18,6 +18,7 @@ use crate::ui::dashboard::nav::Route;
 use crate::ui::icons;
 use crate::ui::theme::scaled;
 use crate::ui::theme::{Theme, radius, space};
+mod custom;
 
 /// Shortcut catalog shown on the shortcuts page, derived from the real bindings
 /// that the shortcut layer registers.
@@ -32,6 +33,20 @@ pub fn shortcut_catalog() -> Vec<(String, &'static str)> {
 pub enum CredentialField {
     Key,
     Model,
+    CustomName,
+    CustomEndpoint,
+    CustomKey,
+    CustomModel,
+    CustomHeader,
+    CustomPath,
+    CustomStream,
+}
+
+#[derive(Clone, Copy)]
+pub enum CaptureCheck {
+    Microphone,
+    SystemAudio,
+    Screen,
 }
 
 pub const KEY_PROVIDERS: &[(&str, &str)] = &[
@@ -42,6 +57,12 @@ pub const KEY_PROVIDERS: &[(&str, &str)] = &[
 
 /// Settings state shared by every settings page.
 pub struct SettingsState {
+    pub custom_draft: Option<crate::core::credentials::Credential>,
+    pub devices: crate::audio::devices::Devices,
+    pub device_menu: Option<bool>,
+    pub devices_loading: bool,
+    pub capture_status: Option<String>,
+    pub language_menu: bool,
     pub settings: Settings,
     pub baseline: Settings,
     pub database: Option<crate::db::Database>,
@@ -97,8 +118,12 @@ impl SettingsState {
             .unwrap_or_default();
         let selected = stored_chat
             .iter()
-            .find(|credential| credential.to_config().is_usable())
-            .or_else(|| stored_speech.first());
+            .find(|credential| credential.custom.is_none() && credential.to_config().is_usable())
+            .or_else(|| {
+                stored_speech
+                    .iter()
+                    .find(|credential| credential.custom.is_none())
+            });
         let key_provider = selected
             .map(|credential| credential.provider.clone())
             .unwrap_or_else(|| KEY_PROVIDERS[0].1.into());
@@ -106,6 +131,12 @@ impl SettingsState {
             .map(|credential| credential.to_config().model)
             .unwrap_or_else(|| crate::ai::models::default_for("gemini").unwrap().to_owned());
         Self {
+            custom_draft: None,
+            devices: crate::audio::devices::Devices::default(),
+            device_menu: None,
+            devices_loading: false,
+            capture_status: None,
+            language_menu: false,
             baseline: settings.clone(),
             settings,
             database,
@@ -325,9 +356,25 @@ pub fn app_settings(
             s.autostart,
             cx,
             |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                let enabled = view.settings_mut().settings.autostart;
-                view.settings_mut().settings.autostart = !enabled;
-                view.save_settings();
+                let enabled = !view.settings_mut().settings.autostart;
+                view.set_autostart(enabled);
+            },
+        ),
+    ))
+    .child(row(
+        theme,
+        "Startup mode",
+        "Choose which Lennette launch opens when you sign in",
+        segmented(
+            "startup-mode",
+            theme,
+            &[
+                ("Normal", !s.startup_privacy),
+                ("Privacy", s.startup_privacy),
+            ],
+            cx,
+            |view: &mut crate::ui::dashboard::view::DashboardView, index, _| {
+                view.set_startup_privacy(index == 1);
             },
         ),
     ))
@@ -351,7 +398,7 @@ pub fn app_settings(
     .child(row(
         theme,
         "Hide app icon",
-        "Keep the window out of the dock or taskbar",
+        "Hide the taskbar or dock icon. Privacy mode also removes the tray icon.",
         switch(
             "hide-app-icon",
             theme,
@@ -490,151 +537,263 @@ pub fn screenshot_settings(
 
 /// Audio devices and speech providers.
 pub fn audio_settings(
+    view: &crate::ui::dashboard::view::DashboardView,
     state: &SettingsState,
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
 ) -> gpui::AnyElement {
     let s = &state.settings;
-    let devices = crate::audio::devices::enumerate();
-    let inputs = devices.inputs.clone();
-    let outputs = devices.outputs.clone();
-    let inputs_empty = inputs.is_empty();
-    let outputs_empty = outputs.is_empty();
-
-    let microphone = section(
+    let mut microphone = section(
         theme,
         "Microphone",
-        "The input used for push to talk and Listen.",
-    )
-    .child(row(
-        theme,
-        "Input device",
-        "Leave blank to use the system default",
-        value_chip(
-            theme,
-            if s.input_device.is_empty() {
-                "System default"
-            } else {
-                &s.input_device
-            },
-        ),
-    ));
-
-    let mut microphone = microphone;
-    for (index, device) in inputs.iter().take(8).enumerate() {
-        microphone = microphone.child(row(
-            theme,
-            &device.name,
-            if device.is_default {
-                "Default device"
-            } else {
-                "Available input"
-            },
-            action(
-                ("pick-input", index),
-                theme,
-                if s.input_device == device.id {
-                    "Selected"
-                } else {
-                    "Use"
-                },
-                cx,
-                {
-                    let id = device.id.clone();
-                    move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                        view.settings_mut().settings.input_device = id.clone();
-                        view.save_settings();
-                    }
-                },
-            ),
-        ));
-    }
-    if inputs_empty {
-        microphone = microphone.child(warning(
-            theme,
-            "No microphone was detected. Connect one or check your system audio settings.",
-        ));
-    }
-
+        "Used by Listen and push to talk. Hold the composer microphone button, release to transcribe, then review before sending.",
+    );
+    microphone = microphone.child(device_picker(state, theme, true, cx));
     let mut speakers = section(
         theme,
         "System Audio",
-        "The output whose sound is captured for the other side of a call.",
+        "Capture the speakers or headphones playing the meeting. Enable System Audio in Listen to hear the other participants.",
     );
-    for (index, device) in outputs.iter().take(8).enumerate() {
-        speakers = speakers.child(row(
-            theme,
-            &device.name,
-            if device.is_default {
-                "Default device"
-            } else {
-                "Available output"
-            },
-            action(
-                ("pick-output", index),
-                theme,
-                if s.output_device == device.id {
-                    "Selected"
-                } else {
-                    "Use"
-                },
-                cx,
-                {
-                    let id = device.id.clone();
-                    move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                        view.settings_mut().settings.output_device = id.clone();
-                        view.save_settings();
-                    }
-                },
-            ),
-        ));
-    }
-    if outputs_empty {
-        speakers = speakers.child(warning(
-            theme,
-            "No output device was detected, so system audio capture is unavailable.",
-        ));
-    }
-
+    speakers = speakers.child(device_picker(state, theme, false, cx));
     let mut providers = section(
         theme,
         "Speech to Text",
-        "Deepgram handles speech. Add its key in AI & Keys to enable recording.",
+        "Choose a configured service. Batch providers transcribe speech after a pause; live providers can show interim words.",
     );
-    for provider in crate::ai::providers::STT_PROVIDERS {
+    for credential in &state.stored_speech {
+        let provider = credential.provider.clone();
+        let model = credential.to_config().model;
+        let label = credential
+            .custom
+            .as_ref()
+            .map(|c| c.name.clone())
+            .or_else(|| {
+                crate::ai::providers::SttProvider::by_id(&provider).map(|p| p.name.to_owned())
+            })
+            .unwrap_or_else(|| provider.clone());
+        let display_model = model.clone();
         providers = providers.child(row(
             theme,
-            provider.name,
-            if s.speech_provider == provider.id {
-                "Selected provider"
-            } else if provider.default_model.is_empty() {
-                "Requires a project id"
-            } else {
-                provider.default_model
-            },
+            &label,
+            &display_model,
             action(
-                gpui::ElementId::Name(format!("pick-stt-{}", provider.id).into()),
+                gpui::ElementId::Name(format!("pick-stt-{provider}").into()),
                 theme,
-                if s.speech_provider == provider.id {
+                if s.speech_provider == provider {
                     "Selected"
                 } else {
                     "Choose"
                 },
                 cx,
                 move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    view.settings_mut().settings.speech_provider = provider.id.to_owned();
-                    view.settings_mut().settings.speech_model = provider.default_model.to_owned();
+                    view.settings_mut().settings.speech_provider = provider.clone();
+                    view.settings_mut().settings.speech_model = model.clone();
                     view.save_settings();
                 },
             ),
         ));
     }
-
+    providers = providers.child(view.editable_setting(
+        "speech_language",
+        "Speech language (blank uses provider default; for example en or de)",
+        &s.speech_language,
+        cx,
+    ));
+    if state.stored_speech.is_empty() {
+        providers = providers.child(help_text(
+            theme,
+            "Add a built-in or custom speech provider in AI & Keys to enable transcription.",
+        ));
+    }
+    let mut access = section(theme, "Access and checks", "Device detection does not prove permission to record. These checks run locally and do not send audio or screenshots to an AI service.")
+        .child(row(theme, "Microphone access", "Open the selected microphone briefly and check whether samples arrive", action("test-mic", theme, "Test microphone", cx,
+            |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| view.test_capture(CaptureCheck::Microphone, cx))))
+        .child(row(theme, "Screen context", "Capture one frame locally, then discard it", action("test-screen", theme, "Test screen capture", cx,
+            |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| view.test_capture(CaptureCheck::Screen, cx))));
+    access = access.child(row(
+        theme,
+        "System audio access",
+        "Open the selected output for loopback capture, then discard the samples",
+        action(
+            "test-system-audio",
+            theme,
+            "Test system audio",
+            cx,
+            |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
+                view.test_capture(CaptureCheck::SystemAudio, cx)
+            },
+        ),
+    ));
+    #[cfg(windows)]
+    {
+        access = access.child(row(
+            theme,
+            "Windows microphone privacy",
+            "Allow microphone access and let desktop apps access your microphone",
+            action(
+                "microphone-privacy",
+                theme,
+                "Open settings",
+                cx,
+                |_view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
+                    cx.open_url("ms-settings:privacy-microphone")
+                },
+            ),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        access = access.child(help_text(theme, "Linux: allow access to the audio server. System audio requires pactl and parec with PulseAudio or PipeWire-Pulse. Wayland screen capture may request permission through your desktop portal; Hyprland uses grim."));
+    }
+    if let Some(status) = &state.capture_status {
+        access = access.child(help_text(theme, status));
+    }
     stack(vec![
         microphone.into_any_element(),
         speakers.into_any_element(),
         providers.into_any_element(),
+        access.into_any_element(),
     ])
+}
+
+fn device_picker(
+    state: &SettingsState,
+    theme: &Theme,
+    input: bool,
+    cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
+) -> gpui::AnyElement {
+    let selected = if input {
+        &state.settings.input_device
+    } else {
+        &state.settings.output_device
+    };
+    let devices = if input {
+        &state.devices.inputs
+    } else {
+        &state.devices.outputs
+    };
+    let label = if selected.is_empty() {
+        "System default".to_owned()
+    } else {
+        devices
+            .iter()
+            .find(|d| &d.id == selected)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| format!("Unavailable: {selected}"))
+    };
+    let mut block = div().flex().flex_col().gap(px(8.0)).child(
+        div()
+            .flex()
+            .gap(px(8.0))
+            .child(action(
+                if input {
+                    "microphone-picker"
+                } else {
+                    "output-picker"
+                },
+                theme,
+                &label,
+                cx,
+                move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
+                    let state = view.settings_mut();
+                    state.device_menu = if state.device_menu == Some(input) {
+                        None
+                    } else {
+                        Some(input)
+                    };
+                },
+            ))
+            .child(action(
+                if input {
+                    "refresh-microphones"
+                } else {
+                    "refresh-outputs"
+                },
+                theme,
+                if state.devices_loading {
+                    "Refreshing…"
+                } else {
+                    "Refresh"
+                },
+                cx,
+                |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
+                    view.refresh_audio_devices(cx)
+                },
+            )),
+    );
+    if state.device_menu == Some(input) {
+        let mut menu = div()
+            .id(if input {
+                "microphone-options"
+            } else {
+                "output-options"
+            })
+            .max_h(px(240.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .p(px(8.0))
+            .rounded(px(12.0))
+            .bg(theme.popover())
+            .border_1()
+            .border_color(theme.border)
+            .child(action(
+                if input {
+                    "default-microphone"
+                } else {
+                    "default-output"
+                },
+                theme,
+                "System default",
+                cx,
+                move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
+                    let s = view.settings_mut();
+                    if input {
+                        s.settings.input_device.clear();
+                    } else {
+                        s.settings.output_device.clear();
+                    }
+                    s.device_menu = None;
+                    view.save_settings();
+                },
+            ));
+        for (index, device) in devices.iter().enumerate() {
+            let id = device.id.clone();
+            let label = format!(
+                "{}{}",
+                device.name,
+                if device.is_default { " · Default" } else { "" }
+            );
+            menu = menu.child(action(
+                gpui::ElementId::Name(format!("device-{input}-{index}").into()),
+                theme,
+                &label,
+                cx,
+                move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
+                    let s = view.settings_mut();
+                    if input {
+                        s.settings.input_device = id.clone();
+                    } else {
+                        s.settings.output_device = id.clone();
+                    }
+                    s.device_menu = None;
+                    view.save_settings();
+                },
+            ));
+        }
+        block = block.child(menu);
+    }
+    if let Some(error) = &state.devices.error {
+        block = block.child(warning(theme, error));
+    }
+    if devices.is_empty() && !state.devices_loading {
+        block = block.child(help_text(
+            theme,
+            "No devices detected. Connect a device, check system access, then Refresh.",
+        ));
+    }
+    block.into_any_element()
 }
 
 fn help_text(theme: &Theme, text: &str) -> impl IntoElement {
@@ -700,7 +859,52 @@ pub fn response_settings(
             view.settings_mut().settings.response_pace = ResponsePace::ALL[index]; view.save_settings();
         })))
         .child(help_text(theme, "Each response uses 1 AI request. Short remarks never trigger one on their own. Only the other participants trigger automatic responses; your own speech supplies context."));
+    use crate::core::settings::{RESPONSE_LANGUAGES, ResponseLength};
+    let length_options: Vec<_> = ResponseLength::ALL
+        .iter()
+        .map(|length| (length.label(), *length == s.response_length))
+        .collect();
+    let mut responses = section(theme, "Responses", "Length and language apply to new conversations across all AI providers. An existing conversation keeps the preferences it started with.")
+        .child(row(theme, "Response length", "How much explanation an answer should include", segmented("response-length", theme, &length_options, cx,
+            |view: &mut crate::ui::dashboard::view::DashboardView, index, _| { view.settings_mut().settings.response_length = ResponseLength::ALL[index]; view.save_settings(); })))
+        .child(help_text(theme, "Short: quick answers and summaries. Medium: balanced explanations for tasks. Auto: the AI chooses based on the complexity of your question."))
+        .child(row(theme, "Response language", "Language support depends on the selected AI provider", action("response-language", theme, &s.response_language, cx,
+            |view: &mut crate::ui::dashboard::view::DashboardView, _, _| { view.settings_mut().language_menu = !view.settings_mut().language_menu; })));
+    if state.language_menu {
+        let mut languages = div()
+            .id("response-language-options")
+            .flex()
+            .flex_col()
+            .max_h(px(240.0))
+            .overflow_y_scroll()
+            .gap(px(4.0))
+            .p(px(8.0))
+            .bg(theme.popover())
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme.border);
+        for (index, language) in RESPONSE_LANGUAGES.iter().enumerate() {
+            languages = languages.child(action(
+                ("response-language", index),
+                theme,
+                language,
+                cx,
+                move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
+                    view.settings_mut().settings.response_language = (*language).into();
+                    view.settings_mut().language_menu = false;
+                    view.save_settings();
+                },
+            ));
+        }
+        responses = responses.child(languages);
+    }
+    responses = responses.child(row(theme, "Auto-scroll", "Follow new answers and transcript lines as they arrive", switch("auto-scroll", theme, s.auto_scroll, cx,
+        |view: &mut crate::ui::dashboard::view::DashboardView, _, _| { view.settings_mut().settings.auto_scroll = !view.settings_mut().settings.auto_scroll; view.save_settings(); })))
+        .child(row(theme, "Auto recap when a meeting ends", "Save a summary, decisions and action items beside its transcript", switch("auto-recap", theme, s.auto_recap, cx,
+        |view: &mut crate::ui::dashboard::view::DashboardView, _, _| { view.settings_mut().settings.auto_recap = !view.settings_mut().settings.auto_recap; view.save_settings(); })))
+        .child(help_text(theme, "Auto recap sends the finished transcript to your selected AI provider in one additional request. It waits for the final words and saves the result to that meeting."));
     stack(vec![
+        responses.into_any_element(),
         automatic.into_any_element(),
         follow_ups.into_any_element(),
     ])
@@ -950,7 +1154,12 @@ fn credentials_section(
     }
 
     // Stored credentials, with the key masked.
-    for credential in state.stored_chat.iter().chain(state.stored_speech.iter()) {
+    for credential in state
+        .stored_chat
+        .iter()
+        .chain(state.stored_speech.iter())
+        .filter(|credential| credential.custom.is_none())
+    {
         let label = if credential.kind == Kind::Chat {
             "Chat"
         } else {
@@ -1021,6 +1230,7 @@ pub fn dev_space(
 
     stack(vec![
         credentials_section(state, theme, cx).into_any_element(),
+        custom::providers(state, theme, cx),
         storage.into_any_element(),
     ])
 }
@@ -1040,6 +1250,7 @@ pub fn render(
     };
     let subtabs = [
         ("General", Route::Settings),
+        ("Responses", Route::Responses),
         ("Profiles", Route::Profiles),
         ("Audio", Route::Audio),
         ("AI & Keys", Route::DevSpace),
@@ -1099,11 +1310,11 @@ pub fn render(
         Route::Settings => {
             let app = app_settings(state, theme, cx);
             let screenshots = screenshot_settings(state, theme, cx);
-            let responses = response_settings(view, state, theme, cx);
-            stack(vec![app, screenshots, responses])
+            stack(vec![app, screenshots])
         }
+        Route::Responses => response_settings(view, state, theme, cx),
         Route::Profiles => view.profiles_body(cx),
-        Route::Audio => audio_settings(state, theme, cx),
+        Route::Audio => audio_settings(view, state, theme, cx),
         Route::DevSpace => dev_space(state, theme, cx),
         Route::Shortcuts => shortcut_settings(theme, cx),
         _ => app_settings(state, theme, cx),

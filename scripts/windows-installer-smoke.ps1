@@ -27,6 +27,12 @@ try {
     if (-not (Test-Path -LiteralPath $shortcut)) { throw 'Start menu shortcut was not installed' }
     $shell = New-Object -ComObject WScript.Shell
     if ($shell.CreateShortcut($shortcut).TargetPath -ne $installed) { throw 'Start menu shortcut points at the wrong binary' }
+    if ($shell.CreateShortcut($shortcut).Arguments -ne '--normal') { throw 'Normal launch shortcut has the wrong mode' }
+    $privacyShortcut = Join-Path (Split-Path $shortcut) 'Lennette (Privacy).lnk'
+    if (-not (Test-Path -LiteralPath $privacyShortcut) -or $shell.CreateShortcut($privacyShortcut).Arguments -ne '--privacy') { throw 'Privacy launch shortcut is missing or has the wrong mode' }
+    $installedIcon = Join-Path $installDir 'lennette.ico'
+    if (-not (Test-Path -LiteralPath $installedIcon)) { throw 'Branded shortcut icon was not installed' }
+    if ($shell.CreateShortcut($shortcut).IconLocation -notlike "$installedIcon,*") { throw 'Shortcut is not using the branded app artwork' }
     if (-not (Test-Path -LiteralPath $registration)) { throw 'Per-user uninstall registration is missing' }
     if ((Get-ItemProperty -LiteralPath $registration).InstallLocation.TrimEnd('\') -ne $installDir) { throw 'Installation was not isolated to the test directory' }
     # Repeat setup in place, preserving unrelated user files.
