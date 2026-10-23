@@ -11,6 +11,7 @@ import {
 
 import skyHero from "@/assets/sky-hero.jpg";
 import { SiteFooter, SiteNav } from "@/components/page-shell";
+import { PlatformDownload } from "@/components/platform-download";
 
 const GITHUB_URL = "https://github.com/parazeeknova/lennette";
 
@@ -49,9 +50,7 @@ const Hero = () => (
         Lennette listens to your meeting, follows the conversation as it
         happens, and quietly hands you the next thing worth saying.
       </p>
-      <a id="download" href="#how" className="glass btn-liquid mt-8 glass-pill">
-        <span>Download for desktop</span>
-      </a>
+      <PlatformDownload />
 
       <div className="glass mt-14 w-full max-w-5xl p-2.5 sm:p-3">
         <img

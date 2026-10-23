@@ -57,14 +57,12 @@ export const SiteNav = () => (
           </Link>
         ))}
       </div>
-      <a
-        href={RELEASES_URL}
-        target="_blank"
-        rel="noreferrer"
+      <Link
+        to="/downloads"
         className="glass btn-liquid h-12 glass-pill px-5 text-sm"
       >
         <span>Get lennette</span>
-      </a>
+      </Link>
     </nav>
   </header>
 );
@@ -78,15 +76,6 @@ export const SiteFooter = () => (
       width={1920}
       height={1088}
       className="absolute inset-0 h-full w-full feather-top object-cover"
-    />
-    <img
-      src={footerArt}
-      alt=""
-      aria-hidden="true"
-      loading="lazy"
-      width={1983}
-      height={793}
-      className="pointer-events-none absolute inset-x-0 bottom-0 mx-auto w-full max-w-5xl"
     />
     <div className="relative z-10 mx-auto max-w-5xl px-6 pt-28 sm:px-10">
       <div className="flex flex-col items-center gap-10 text-center lg:flex-row lg:items-center lg:justify-between lg:gap-14 lg:text-left">
@@ -102,14 +91,12 @@ export const SiteFooter = () => (
             className="h-20 w-20 rounded-3xl"
           />
           <div className="flex flex-col gap-3">
-            <a
-              href={RELEASES_URL}
-              target="_blank"
-              rel="noreferrer"
+            <Link
+              to="/downloads"
               className="glass btn-liquid glass-pill glass-blue text-on-sky hover:bg-[oklch(0.5_0.15_252/0.25)]"
             >
               <span>Download lennette</span>
-            </a>
+            </Link>
             <a
               href={GITHUB_URL}
               target="_blank"
@@ -123,7 +110,22 @@ export const SiteFooter = () => (
         </div>
       </div>
 
-      <div className="mt-14 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-sm text-ink-soft">
+      {/* The mascot sits in flow so it can never overlap the links pill. */}
+      <img
+        src={footerArt}
+        alt=""
+        aria-hidden="true"
+        loading="lazy"
+        width={1983}
+        height={793}
+        className="pointer-events-none mt-10 w-full"
+      />
+    </div>
+
+    {/* Sits over the illustration's lower edge on a solid surface, so the links
+        stay legible instead of dissolving into the artwork. */}
+    <div className="relative z-20 flex justify-center px-6 pb-6 sm:px-10">
+      <nav className="flex flex-wrap items-center justify-center gap-x-6 gap-y-1 rounded-full border border-white/70 bg-cloud px-6 py-2 text-[0.8rem] font-medium text-ink-soft shadow-[inset_0_1px_0_oklch(1_0_0),0_2px_10px_-4px_oklch(0.45_0.08_250/0.35)]">
         <Link to="/tutorial" className="transition-colors hover:text-ink">
           Hyprland setup
         </Link>
@@ -149,11 +151,7 @@ export const SiteFooter = () => (
         >
           Creator
         </a>
-      </div>
-
-      {/* Room for the mascot illustration pinned to the bottom edge. Its height
-          is 40vw until the art hits max-w-5xl, then it caps at 409px. */}
-      <div aria-hidden="true" className="mt-10 h-[40vw] max-h-102.25 w-full" />
+      </nav>
     </div>
   </footer>
 );
@@ -162,21 +160,48 @@ export const PageShell = ({
   children,
   title,
   intro,
+  titleIcon,
 }: {
   children: ReactNode;
-  title: string;
   intro: string;
+  /** Heading text. Omit when `titleIcon` already spells the full heading. */
+  title?: string;
+  titleIcon?: [before: string, after: string];
 }) => (
   <main className="overflow-x-hidden bg-sky-wash">
     <SiteNav />
     <section className="px-6 pt-40 pb-16 sm:px-10">
       <div className="mx-auto max-w-5xl">
-        <h1 className="max-w-3xl font-display text-[clamp(2.6rem,6vw,4.8rem)] leading-[1.02] tracking-[-0.015em] text-ink">
-          {title}
-        </h1>
-        <p className="mt-6 max-w-2xl text-lg leading-relaxed text-ink-soft">
-          {intro}
-        </p>
+        {titleIcon ? (
+          <div className="text-center">
+            <h1 className="font-display text-[clamp(2.6rem,6vw,4.8rem)] leading-[1.05] tracking-[-0.015em] text-ink">
+              <span className="inline-flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
+                <span>{titleIcon[0]}</span>
+                <img
+                  src={appIcon}
+                  alt=""
+                  aria-hidden="true"
+                  width={96}
+                  height={96}
+                  className="inline-block size-[1.05em] shrink-0 rounded-[28%] align-middle"
+                />
+                <span>{titleIcon[1]}</span>
+              </span>
+            </h1>
+            <p className="mx-auto mt-5 max-w-xl text-lg leading-relaxed text-ink-soft">
+              {intro}
+            </p>
+          </div>
+        ) : (
+          <>
+            <h1 className="max-w-3xl font-display text-[clamp(2.6rem,6vw,4.8rem)] leading-[1.02] tracking-[-0.015em] text-ink">
+              {title}
+            </h1>
+            <p className="mt-6 max-w-2xl text-lg leading-relaxed text-ink-soft">
+              {intro}
+            </p>
+          </>
+        )}
       </div>
     </section>
     <div className="px-6 pb-24 sm:px-10">

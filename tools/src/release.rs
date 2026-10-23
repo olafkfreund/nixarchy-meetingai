@@ -226,8 +226,32 @@ fn publish(root: &Path, config: &Config, github: &mut impl Github) -> Result<Str
     let repo = &config.repo;
     let endpoint = format!("repos/{repo}/releases/tags/{tag}");
     let probe = github.call(&["api", &endpoint], None)?;
-    let exists = if probe.ok {
-        let existing: Release = serde_json::from_str(&probe.stdout)?;
+    // `gh api` exits 0 even for a 404; the status only appears in the body and
+    // on stderr. Only a genuine 404 means "create it" — anything else (auth,
+    // rate limit, network) must fail rather than silently publish.
+    let status = serde_json::from_str::<serde_json::Value>(&probe.stdout)
+        .ok()
+        .and_then(|v| v.get("status").cloned());
+    let not_found = status
+        .as_ref()
+        .is_some_and(|s| s == "404" || s == &serde_json::json!(404))
+        || probe.stderr.contains("HTTP 404");
+    ensure!(
+        not_found || probe.ok,
+        "Cannot inspect existing release: {}",
+        probe.stderr.trim()
+    );
+    let missing = not_found;
+
+    let exists = if missing {
+        false
+    } else {
+        let existing: Release = serde_json::from_str(&probe.stdout).with_context(|| {
+            format!(
+                "Unexpected response inspecting release: {}",
+                probe.stdout.trim()
+            )
+        })?;
         ensure!(
             existing.target_commitish == config.sha,
             "Existing release targets a different commit"
@@ -242,18 +266,6 @@ fn publish(root: &Path, config: &Config, github: &mut impl Github) -> Result<Str
             ));
         }
         true
-    } else {
-        let status = serde_json::from_str::<serde_json::Value>(&probe.stdout)
-            .ok()
-            .and_then(|v| v.get("status").cloned());
-        ensure!(
-            status == Some(serde_json::json!("404"))
-                || status == Some(serde_json::json!(404))
-                || probe.stderr.contains("HTTP 404"),
-            "Cannot inspect existing release: {}",
-            probe.stderr.trim()
-        );
-        false
     };
     let generated = checked(
         github,
@@ -370,11 +382,18 @@ mod tests {
                 if self.calls.len() == 1 {
                     if let Some(existing) = &self.existing {
                         response.stdout = existing.to_string();
-                    } else {
+                    } else if self.denied {
+                        // A real 403 makes gh exit non-zero.
                         response.ok = false;
-                        response.stdout =
-                            json!({"status": if self.denied { "403" } else { "404" }}).to_string();
+                        response.stdout = json!({"status": "403"}).to_string();
                         response.stderr = "API unavailable".into();
+                    } else {
+                        // Real gh exits 0 on a 404 and prints the error body to
+                        // stdout, which is what broke publishing previously.
+                        response.ok = true;
+                        response.stdout =
+                            json!({"message": "Not Found", "status": "404"}).to_string();
+                        response.stderr = "gh: Not Found (HTTP 404)".into();
                     }
                 } else {
                     response.stdout = json!({"draft": true, "target_commitish": "a".repeat(40), "assets": if self.incomplete { vec![] } else { ASSETS.iter().map(|n| json!({"name":n})).collect() }}).to_string();
