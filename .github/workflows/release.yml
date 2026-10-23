@@ -80,7 +80,8 @@ jobs:
           mkdir -p dist/lennette-linux-x86_64
           cp target/${{ matrix.target }}/release/lennette dist/lennette-linux-x86_64/
           cp .github/README.md dist/lennette-linux-x86_64/README.md
-          cp LICENSE packaging/dev.lennette.overlay.desktop dist/lennette-linux-x86_64/
+          cp packaging/dev.lennette.overlay.desktop dist/lennette-linux-x86_64/
+          if [ -f LICENSE ]; then cp LICENSE dist/lennette-linux-x86_64/; fi
           cp src/assets/lennette_app_icon.png dist/lennette-linux-x86_64/
           { rustc --version; ldd --version | sed -n '1p'; printf 'Commit: %s\n' "$GITHUB_SHA"; } > dist/lennette-linux-x86_64/BUILDINFO.txt
           dist/lennette-linux-x86_64/lennette --version
@@ -103,7 +104,7 @@ jobs:
           New-Item -ItemType Directory -Path windows-package | Out-Null
           Copy-Item dist/lennette-windows-x86_64.exe windows-package/lennette.exe
           Copy-Item .github/README.md windows-package/README.md
-          Copy-Item LICENSE windows-package/
+          if (Test-Path LICENSE) { Copy-Item LICENSE windows-package/ }
           Compress-Archive -Path windows-package/* -DestinationPath dist/lennette-windows-x86_64.zip
       - name: Checksums
         shell: bash

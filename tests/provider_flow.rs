@@ -154,6 +154,9 @@ async fn speech_to_streamed_answer_and_finished_meeting_for_both_ai_services() {
             body["messages"][1]["content"][1]["image_url"]["url"],
             "data:image/png;base64,QUJD"
         );
+        // Windows cannot remove SQLite's database/WAL files until the connection
+        // closes. Linux permits unlinking open files and hid this lifecycle bug.
+        drop(database);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
