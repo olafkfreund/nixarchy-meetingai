@@ -1,6 +1,8 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
 
-import { GITHUB_URL, PageShell } from "@/components/page-shell";
+import { PageShell } from "@/components/page-shell";
+import { WaitlistDialog } from "@/components/waitlist-dialog";
 
 const MANAGED_MONTHLY_PRICE = "$17.10";
 
@@ -11,7 +13,12 @@ interface Plan {
   summary: string;
   note: string;
   features: string[];
-  cta: { label: string; to?: "/downloads" | "/tutorial"; href?: string };
+  cta: {
+    label: string;
+    to?: "/downloads" | "/tutorial";
+    href?: string;
+    waitlist?: boolean;
+  };
   emphasis: boolean;
 }
 
@@ -52,14 +59,20 @@ const plans: Plan[] = [
       "AI and transcription API costs included",
     ],
     cta: {
-      label: "Follow updates on GitHub",
-      href: GITHUB_URL,
+      label: "Join the waitlist",
+      waitlist: true,
     },
     emphasis: true,
   },
 ];
 
-const PlanCard = ({ plan }: { plan: Plan }) => {
+const PlanCard = ({
+  plan,
+  onWaitlist,
+}: {
+  plan: Plan;
+  onWaitlist: () => void;
+}) => {
   const ctaClass = [
     "glass glass-pill btn-liquid mt-8 w-full text-[0.95rem]",
     plan.emphasis
@@ -135,11 +148,17 @@ const PlanCard = ({ plan }: { plan: Plan }) => {
           {plan.note}
         </p>
 
-        {plan.cta.to ? (
+        {plan.cta.waitlist ? (
+          <button type="button" onClick={onWaitlist} className={ctaClass}>
+            {ctaLabel}
+          </button>
+        ) : null}
+        {!plan.cta.waitlist && plan.cta.to ? (
           <Link to={plan.cta.to} className={ctaClass}>
             {ctaLabel}
           </Link>
-        ) : (
+        ) : null}
+        {!plan.cta.waitlist && !plan.cta.to ? (
           <a
             href={plan.cta.href}
             target="_blank"
@@ -148,73 +167,86 @@ const PlanCard = ({ plan }: { plan: Plan }) => {
           >
             {ctaLabel}
           </a>
-        )}
+        ) : null}
       </div>
     </article>
   );
 };
 
-const PricingPage = () => (
-  <PageShell
-    titleIcon={["Start", "for free."]}
-    intro={`Bring your own keys and use Lennette for free. Prefer everything included? Managed is coming soon at ${MANAGED_MONTHLY_PRICE} a month.`}
-  >
-    <div className="grid gap-6 md:grid-cols-2">
-      {plans.map((plan) => (
-        <PlanCard key={plan.name} plan={plan} />
-      ))}
-    </div>
+const PricingPage = () => {
+  const [waitlistOpen, setWaitlistOpen] = useState(false);
 
-    <section className="mt-16">
-      <h2 className="font-display text-2xl text-ink">
-        Questions about pricing
-      </h2>
-      <div className="mt-6 flex flex-col gap-6">
-        <div>
-          <h3 className="font-medium text-ink">
-            What do I pay for on the free plan?
-          </h3>
-          <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-            Nothing to Lennette. Add your own AI provider key for answers and a
-            Deepgram key for live transcription. Those providers bill you
-            directly for API usage. You do not need a Lennette account.
-          </p>
-        </div>
-        <div>
-          <h3 className="font-medium text-ink">What will Managed include?</h3>
-          <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-            The planned {MANAGED_MONTHLY_PRICE} monthly subscription includes
-            2,000 AI responses and 30 hours of live transcription. Each
-            follow-up answer counts toward the same response allowance, shared
-            across your devices. You will not need separate AI or transcription
-            API keys.
-          </p>
-        </div>
-        <div>
-          <h3 className="font-medium text-ink">
-            Does my audio stay on my device?
-          </h3>
-          <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-            Live transcription sends your audio to Deepgram. AI requests send
-            relevant conversation context and any attached content to your
-            selected provider. Your chat and meeting history is stored locally
-            on your device.
-          </p>
-        </div>
-        <div>
-          <h3 className="font-medium text-ink">
-            Can I sign up for Managed now?
-          </h3>
-          <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-            Managed access is coming soon. You can download Lennette and use
-            your own keys today. Follow the project on GitHub for updates on
-            managed availability.
-          </p>
-        </div>
+  return (
+    <PageShell
+      titleIcon={["Start", "for free."]}
+      intro={`Bring your own keys and use Lennette for free. Prefer everything included? Managed is coming soon at ${MANAGED_MONTHLY_PRICE} a month.`}
+    >
+      <div className="grid gap-6 md:grid-cols-2">
+        {plans.map((plan) => (
+          <PlanCard
+            key={plan.name}
+            plan={plan}
+            onWaitlist={() => setWaitlistOpen(true)}
+          />
+        ))}
       </div>
-    </section>
-  </PageShell>
-);
+
+      <section className="mt-16">
+        <h2 className="font-display text-2xl text-ink">
+          Questions about pricing
+        </h2>
+        <div className="mt-6 flex flex-col gap-6">
+          <div>
+            <h3 className="font-medium text-ink">
+              What do I pay for on the free plan?
+            </h3>
+            <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
+              Nothing to Lennette. Add your own AI provider key for answers and
+              a Deepgram key for live transcription. Those providers bill you
+              directly for API usage. You do not need a Lennette account.
+            </p>
+          </div>
+          <div>
+            <h3 className="font-medium text-ink">What will Managed include?</h3>
+            <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
+              The planned {MANAGED_MONTHLY_PRICE} monthly subscription includes
+              2,000 AI responses and 30 hours of live transcription. Each
+              follow-up answer counts toward the same response allowance, shared
+              across your devices. You will not need separate AI or
+              transcription API keys.
+            </p>
+          </div>
+          <div>
+            <h3 className="font-medium text-ink">
+              Does my audio stay on my device?
+            </h3>
+            <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
+              Live transcription sends your audio to Deepgram. AI requests send
+              relevant conversation context and any attached content to your
+              selected provider. Your chat and meeting history is stored locally
+              on your device.
+            </p>
+          </div>
+          <div>
+            <h3 className="font-medium text-ink">
+              Can I sign up for Managed now?
+            </h3>
+            <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
+              Managed access is coming soon. You can download Lennette and use
+              your own keys today. Follow the project on GitHub for updates on
+              managed availability.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <WaitlistDialog
+        open={waitlistOpen}
+        onClose={() => setWaitlistOpen(false)}
+      />
+    </PageShell>
+  );
+};
 
 export const Route = createFileRoute("/pricing")({
   head: () => ({

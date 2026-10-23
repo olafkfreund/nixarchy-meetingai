@@ -13,7 +13,8 @@
     "format:check": "oxfmt --check",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "email": "email dev --dir src/emails"
   },
   "dependencies": {
     "@react-email/components": "^1.0.12",
