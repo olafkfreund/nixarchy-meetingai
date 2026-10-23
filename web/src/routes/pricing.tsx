@@ -35,16 +35,17 @@ const plans: Plan[] = [
   },
   {
     name: "Managed",
-    price: "$12",
+    price: "$35",
     cadence: "per month",
     summary:
-      "Everything in the free plan, with keys, model routing and quotas handled for you. No provider account needed.",
+      "Everything in the free plan, with keys, model routing and quotas handled for you. Nothing to set up beyond signing in.",
     features: [
+      "2,000 AI responses",
+      "Unlimited follow-up questions",
+      "30+ hours of realtime transcription",
+      "Speaker diarization",
+      "Unlimited devices",
       "No API key to create or rotate",
-      "Managed speech and language models",
-      "Usage included up to a fair-use cap",
-      "Same private overlay and local audio",
-      "Email support",
     ],
     cta: {
       label: "Request an invite",
@@ -144,7 +145,7 @@ const PlanCard = ({ plan }: { plan: Plan }) => {
 const PricingPage = () => (
   <PageShell
     titleIcon={["Start", "for free."]}
-    intro="The app costs nothing either way. Bring your own model key, or let us host it for $12 a month."
+    intro="The app costs nothing either way. Bring your own model key, or let us host it for $35 a month."
   >
     <div className="grid gap-6 md:grid-cols-2">
       {plans.map((plan) => (
@@ -172,8 +173,10 @@ const PricingPage = () => (
           </h3>
           <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
             Speech-to-text and suggestions through our relay, so you do not need
-            a separate provider subscription. Your audio still comes from your
-            own device, and the overlay stays local.
+            a separate provider subscription. Follow-up questions are unlimited
+            across unlimited devices, with 2,000 AI responses and 30 hours of
+            realtime transcription a month. Your audio still comes from your own
+            device, and the overlay stays local.
           </p>
         </div>
         <div>
@@ -197,7 +200,7 @@ export const Route = createFileRoute("/pricing")({
       {
         name: "description",
         content:
-          "Lennette is free with your own model API key, or $12 a month managed. The app itself costs nothing.",
+          "Lennette is free with your own model API key, or $35 a month managed. The app itself costs nothing.",
       },
     ],
   }),
