@@ -1,8 +1,15 @@
-import { Hr, Link, Section, Text } from "@react-email/components";
+import { Link, Section, Text } from "@react-email/components";
 import * as React from "react";
 
 import { MANAGED_PLAN } from "../lib/site";
-import { EmailLayout, colors, paragraph, strong } from "./layout";
+import {
+  EmailLayout,
+  colors,
+  footerNote,
+  link,
+  paragraph,
+  strong,
+} from "./layout";
 
 export const NotifyEmail = ({
   email,
@@ -21,17 +28,19 @@ export const NotifyEmail = ({
     <Text
       style={{
         ...paragraph,
-        margin: "0 0 4px 0",
+        margin: "0 0 6px 0",
         color: colors.faint,
-        fontSize: "13px",
+        fontSize: "12px",
+        letterSpacing: "0.04em",
+        textTransform: "uppercase",
       }}
     >
-      NEW WAITLIST SIGNUP
+      New signup
     </Text>
 
     <Text
       style={{
-        margin: "0 0 18px 0",
+        margin: "0 0 20px 0",
         fontSize: "20px",
         lineHeight: "28px",
         color: colors.ink,
@@ -43,8 +52,7 @@ export const NotifyEmail = ({
 
     <Section
       style={{
-        backgroundColor: "#f7fafc",
-        border: `1px solid ${colors.line}`,
+        backgroundColor: "#f4f8fc",
         borderRadius: "12px",
         padding: "16px 18px",
       }}
@@ -69,26 +77,15 @@ export const NotifyEmail = ({
       ) : null}
     </Section>
 
-    <Hr
-      style={{
-        borderColor: colors.line,
-        borderStyle: "solid",
-        borderWidth: "1px 0 0 0",
-        margin: "20px 0 16px 0",
-      }}
-    />
-
-    <Text style={{ ...paragraph, margin: "0 0 8px 0", fontSize: "14px" }}>
-      Reply to this email and it goes straight to them, since they are set as
-      the reply-to address.
-    </Text>
-    <Text style={{ ...paragraph, margin: 0, fontSize: "14px" }}>
-      <Link
-        href={`mailto:${email}`}
-        style={{ color: "#2f6f9f", textDecoration: "underline" }}
-      >
+    <Text style={{ ...paragraph, margin: "20px 0 0 0", fontSize: "14px" }}>
+      Reply and it lands in their inbox:{" "}
+      <Link href={`mailto:${email}`} style={link}>
         {email}
       </Link>
+    </Text>
+
+    <Text style={footerNote}>
+      They were sent a note with what Managed includes and when it opens.
     </Text>
   </EmailLayout>
 );
