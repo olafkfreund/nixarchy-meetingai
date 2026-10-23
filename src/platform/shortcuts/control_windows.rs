@@ -62,13 +62,16 @@ impl ControlListener {
             let _ = ready.send(Ok(()));
             while !halt.load(Ordering::Relaxed) {
                 // SAFETY: pipe remains open and PIPE_NOWAIT makes this nonblocking.
-                let connected =
+                let listening =
                     unsafe { ConnectNamedPipe(pipe.as_raw_handle(), std::ptr::null_mut()) } != 0;
                 let error = std::io::Error::last_os_error().raw_os_error();
+                // In PIPE_NOWAIT mode success only means the instance became
+                // available. It does not mean a client connected. Disconnecting
+                // it now can discard a command arriving just after this call.
                 // A one-shot client can write and close between our polls. Read
                 // its buffered command before resetting the pipe instance.
-                let connected = connected
-                    || matches!(error,
+                let connected = !listening
+                    && matches!(error,
                     Some(code) if code == ERROR_PIPE_CONNECTED as i32 || code == ERROR_NO_DATA as i32);
                 if !connected {
                     std::thread::sleep(Duration::from_millis(10));
@@ -142,23 +145,64 @@ impl Drop for ControlListener {
 mod tests {
     use super::*;
     use std::io::Write;
-    #[test]
-    fn named_pipe_delivers_commands_and_releases_on_drop() {
-        let name = format!(r"\\.\pipe\lennette-test-{}", uuid::Uuid::new_v4());
-        let listener = ControlListener::start_at(name.clone()).unwrap();
-        let mut pipe = std::fs::OpenOptions::new().write(true).open(&name).unwrap();
-        writeln!(pipe, "toggle-window").unwrap();
-        drop(pipe);
+
+    fn connect(name: &str) -> std::fs::File {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::OpenOptions::new().write(true).open(name) {
+                Ok(pipe) => return pipe,
+                Err(error)
+                    if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("connect to test pipe: {error}"),
+            }
+        }
+    }
+
+    fn receive(listener: &ControlListener, expected: Action) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut actions = Vec::new();
-        for _ in 0..100 {
+        while std::time::Instant::now() < deadline {
             actions.extend(listener.drain());
             if !actions.is_empty() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(actions, [Action::ToggleWindow]);
+        assert_eq!(actions, [expected]);
+    }
+
+    #[test]
+    fn named_pipe_delivers_commands_and_releases_on_drop() {
+        let name = format!(r"\\.\pipe\lennette-test-{}", uuid::Uuid::new_v4());
+        let listener = ControlListener::start_at(name.clone()).unwrap();
+        // Exercise both initial listening and reconnects. Clients close without
+        // waiting for the worker, just like one-shot shortcut invocations.
+        for _ in 0..50 {
+            let mut pipe = connect(&name);
+            writeln!(pipe, "toggle-window").unwrap();
+            drop(pipe);
+            receive(&listener, Action::ToggleWindow);
+        }
         drop(listener);
         assert!(ControlListener::start_at(name).is_ok());
+    }
+
+    #[test]
+    fn named_pipe_waits_for_delayed_and_partial_commands() {
+        let name = format!(r"\\.\pipe\lennette-test-{}", uuid::Uuid::new_v4());
+        let listener = ControlListener::start_at(name.clone()).unwrap();
+        // The initial ConnectNamedPipe succeeds without a connected client.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut pipe = connect(&name);
+        std::thread::sleep(Duration::from_millis(50));
+        pipe.write_all(b"toggle-").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(listener.drain().is_empty());
+        pipe.write_all(b"window\n").unwrap();
+        receive(&listener, Action::ToggleWindow);
     }
 }
