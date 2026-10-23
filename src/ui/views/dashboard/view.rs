@@ -339,21 +339,14 @@ impl DashboardView {
         if !self.settings.model_menu_open {
             return;
         }
-        let provider = self.settings.key_provider.clone();
-        let mut credential = self
-            .settings
-            .vault
-            .as_ref()
-            .and_then(|v| {
-                crate::core::credentials::load(v, crate::core::credentials::Kind::Chat, &provider)
-                    .ok()
-                    .flatten()
-            })
-            .unwrap_or_else(|| crate::core::credentials::Credential::chat(&provider, ""));
-        if !self.settings.key_input.trim().is_empty() {
-            credential.api_key = self.settings.key_input.trim().to_owned();
-        }
-        let config = credential.to_config();
+        let config = match self.settings.model_discovery_config() {
+            Ok(config) => config,
+            Err(error) => {
+                self.settings.model_options = vec![self.settings.key_model.clone()];
+                self.settings.model_status = Some(error);
+                return;
+            }
+        };
         self.settings.model_options = vec![self.settings.key_model.clone()];
         if let Some(cache) = crate::ai::models::cached(
             self.database
@@ -366,10 +359,6 @@ impl DashboardView {
         }
         self.settings.model_options.sort();
         self.settings.model_options.dedup();
-        if config.api_key.is_empty() {
-            self.settings.model_status = Some("Enter or save an API key to fetch live models. You can also enter a custom model ID.".into());
-            return;
-        }
         let path = self
             .database
             .as_ref()
@@ -425,8 +414,16 @@ impl DashboardView {
         credential.model = self.settings.key_model.trim().to_owned();
         match credentials::save(vault, &credential) {
             Ok(()) => {
+                let reused_key = self.settings.key_input.trim().is_empty();
                 self.settings.key_input.clear();
-                self.settings.key_status = Some("Key saved in the encrypted vault.".to_owned());
+                self.settings.key_status = Some(
+                    if reused_key {
+                        "Provider settings saved using your saved key."
+                    } else {
+                        "Key saved in the encrypted vault."
+                    }
+                    .to_owned(),
+                );
                 self.reload_credentials();
             }
             Err(error) => self.settings.key_status = Some(error),

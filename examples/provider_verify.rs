@@ -14,6 +14,28 @@ use std::{path::Path, sync::Arc};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    // Read-only catalog verification: reuse existing encrypted credentials and
+    // print counts only. No key replacement, chat generation, or audio upload.
+    if args.get(1).map(String::as_str) == Some("--models") {
+        let vault = Vault::open_default()?;
+        let credentials = credentials::list(&vault, Kind::Chat).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            !credentials.is_empty(),
+            "No saved chat credentials are available"
+        );
+        for credential in credentials {
+            let config = credential.to_config();
+            let models = models::discover(None, config, true)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            println!(
+                "{}: fetched {} chat models using its saved key",
+                credential.provider,
+                models.len()
+            );
+        }
+        return Ok(());
+    }
     let secrets: serde_json::Value = serde_json::from_slice(&std::fs::read(&args[1])?)?;
     let vault = Vault::open_default()?;
     let mut chat = Credential::chat("merge-gateway", secrets["merge"].as_str().unwrap());

@@ -72,11 +72,17 @@ pub struct SettingsState {
 
 impl SettingsState {
     pub fn new(database: Option<crate::db::Database>) -> Self {
+        Self::with_vault(database, crate::core::vault::Vault::open_default().ok())
+    }
+
+    fn with_vault(
+        database: Option<crate::db::Database>,
+        vault: Option<crate::core::vault::Vault>,
+    ) -> Self {
         let settings = database
             .as_ref()
             .and_then(|database| Settings::load(database).ok())
             .unwrap_or_default();
-        let vault = crate::core::vault::Vault::open_default().ok();
         let stored_chat = vault
             .as_ref()
             .and_then(|vault| {
@@ -89,9 +95,14 @@ impl SettingsState {
                 crate::core::credentials::list(vault, crate::core::credentials::Kind::Speech).ok()
             })
             .unwrap_or_default();
-        let key_model = stored_chat
+        let selected = stored_chat
             .iter()
-            .find(|credential| credential.provider == "gemini")
+            .find(|credential| credential.to_config().is_usable())
+            .or_else(|| stored_speech.first());
+        let key_provider = selected
+            .map(|credential| credential.provider.clone())
+            .unwrap_or_else(|| KEY_PROVIDERS[0].1.into());
+        let key_model = selected
             .map(|credential| credential.to_config().model)
             .unwrap_or_else(|| crate::ai::models::default_for("gemini").unwrap().to_owned());
         Self {
@@ -101,7 +112,7 @@ impl SettingsState {
             error: None,
             notice: None,
             key_input: String::new(),
-            key_provider: crate::ai::providers::CHAT_PROVIDERS[0].id.to_owned(),
+            key_provider,
             key_model,
             key_field: None,
             model_menu_open: false,
@@ -114,6 +125,45 @@ impl SettingsState {
             stored_speech,
             vault,
         }
+    }
+
+    pub fn saved_credential(&self) -> Option<&crate::core::credentials::Credential> {
+        self.stored_chat
+            .iter()
+            .chain(self.stored_speech.iter())
+            .find(|credential| credential.provider == self.key_provider)
+    }
+
+    /// Blank input means reuse the saved key, never copy a masked display value
+    /// into the request. Preserve custom endpoints and only replace a typed key.
+    pub fn model_discovery_config(&self) -> Result<crate::ai::providers::ProviderConfig, String> {
+        use crate::core::credentials::{self, Credential, Kind};
+        if crate::ai::providers::ChatProvider::by_id(&self.key_provider).is_none() {
+            return Err("Select a chat provider to browse its models.".into());
+        }
+        let saved = match self.vault.as_ref() {
+            Some(vault) => credentials::load(vault, Kind::Chat, &self.key_provider)?,
+            None => self
+                .stored_chat
+                .iter()
+                .find(|credential| credential.provider == self.key_provider)
+                .cloned(),
+        };
+        let mut credential = saved.unwrap_or_else(|| Credential::chat(&self.key_provider, ""));
+        if !self.key_input.trim().is_empty() {
+            credential.api_key = self.key_input.trim().into();
+        }
+        if !self.key_model.trim().is_empty() {
+            credential.model = self.key_model.trim().into();
+        }
+        let config = credential.to_config();
+        if config.api_key.is_empty() {
+            return Err(
+                "No key is saved for this provider yet. Add its API key once to fetch models."
+                    .into(),
+            );
+        }
+        Ok(config)
     }
 
     /// Persist the current settings, recording any failure.
@@ -745,7 +795,12 @@ fn credentials_section(
             "API key",
             CredentialField::Key,
             if state.key_input.is_empty() {
-                "Click to paste your API key".to_owned()
+                state
+                    .saved_credential()
+                    .map(|credential| {
+                        format!("Saved key {} · click to replace", credential.masked_key())
+                    })
+                    .unwrap_or_else(|| "Click to paste your API key".to_owned())
             } else {
                 "•".repeat(state.key_input.chars().count().min(40))
             },
@@ -875,7 +930,11 @@ fn credentials_section(
     card = card.child(div().flex().items_center().py(px(8.0)).child(action(
         "save-key",
         theme,
-        "Save key",
+        if state.key_input.trim().is_empty() && state.saved_credential().is_some() {
+            "Save changes"
+        } else {
+            "Save key"
+        },
         cx,
         |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
             view.save_credential();
@@ -1088,6 +1147,43 @@ pub fn hint(theme: &Theme, message: &str) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_chat_key_is_selected_and_reused_without_pasting_it_again() {
+        use crate::core::credentials::{self, Credential, Kind};
+        let path =
+            std::env::temp_dir().join(format!("lennette-saved-model-key-{}", uuid::Uuid::new_v4()));
+        let vault = crate::core::vault::Vault::open(&path).unwrap();
+        let mut saved = Credential::chat("merge-gateway", " saved-api-key ");
+        saved.model = "my-custom-model".into();
+        saved.base_url = "http://127.0.0.1:1234/v1/chat/completions".into();
+        credentials::save(&vault, &saved).unwrap();
+        let mut state = SettingsState::with_vault(None, Some(vault));
+        assert_eq!(state.key_provider, "merge-gateway");
+        assert!(state.key_input.is_empty());
+        assert_eq!(state.key_model, "my-custom-model");
+        let config = state.model_discovery_config().unwrap();
+        assert_eq!(config.api_key, "saved-api-key");
+        assert_eq!(config.base_url, saved.base_url);
+        assert!(state.saved_credential().is_some());
+        state.key_input = " replacement-key ".into();
+        assert_eq!(
+            state.model_discovery_config().unwrap().api_key,
+            "replacement-key"
+        );
+        assert_eq!(
+            credentials::load(state.vault.as_ref().unwrap(), Kind::Chat, "merge-gateway")
+                .unwrap()
+                .unwrap()
+                .api_key,
+            saved.api_key
+        );
+        // A key for one service must never be reused for a different service.
+        state.key_input.clear();
+        state.key_provider = "gemini".into();
+        assert!(state.model_discovery_config().is_err());
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn shortcut_catalog_is_complete() {

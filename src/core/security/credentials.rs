@@ -55,7 +55,7 @@ impl Credential {
     pub fn to_config(&self) -> ProviderConfig {
         ProviderConfig {
             id: self.provider.clone(),
-            api_key: self.api_key.clone(),
+            api_key: self.api_key.trim().to_owned(),
             model: if self.model.trim().is_empty() {
                 crate::ai::models::default_for(&self.provider)
                     .or_else(|| SttProvider::by_id(&self.provider).map(|p| p.default_model))

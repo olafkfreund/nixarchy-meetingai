@@ -15,6 +15,7 @@ pub struct ModelList {
 /// Bundled suggestions. Ordered with the fastest and cheapest first, matching
 /// how people pick a model for quick answers.
 pub const MERGE_MODEL: &str = "deepseek/deepseek-v4.1-flash-1017";
+const EMPTY_CATALOG: &str = "This account's catalog has no text-chat models. Your saved key and configured model have been kept.";
 
 pub const MODELS: &[ModelList] = &[
     ModelList {
@@ -132,7 +133,7 @@ pub fn cache_key(config: &super::providers::ProviderConfig) -> String {
     let scope =
         serde_json::to_vec(&(&config.id, config.endpoint(), &config.api_key)).expect("cache scope");
     format!(
-        "model_catalog:{}",
+        "model_catalog:v2:{}",
         Sha256::digest(scope)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -160,7 +161,50 @@ pub fn models_endpoint(config: &super::providers::ProviderConfig) -> Result<Stri
     Ok(format!("{prefix}/models"))
 }
 
-pub fn parse_models(value: &serde_json::Value) -> Result<Vec<String>, String> {
+fn supports_chat(row: &serde_json::Value) -> bool {
+    let outputs = row
+        .pointer("/modalities/output")
+        .or_else(|| row.pointer("/capabilities/output"))
+        .or_else(|| row.get("output_modalities"))
+        .and_then(serde_json::Value::as_array);
+    if let Some(outputs) = outputs.filter(|items| !items.is_empty()) {
+        return outputs.iter().any(|item| item.as_str() == Some("text"));
+    }
+    if let Some(methods) = row
+        .get("supportedGenerationMethods")
+        .and_then(serde_json::Value::as_array)
+        .filter(|items| !items.is_empty())
+    {
+        return methods
+            .iter()
+            .any(|method| matches!(method.as_str(), Some("generateContent" | "generateMessage")));
+    }
+    // Merge exposes capabilities per vendor, rather than on the model itself.
+    if let Some(vendors) = row.get("vendors").and_then(serde_json::Value::as_object) {
+        let mut described = false;
+        for vendor in vendors.values() {
+            match vendor
+                .pointer("/capabilities/output")
+                .and_then(serde_json::Value::as_array)
+                .filter(|v| !v.is_empty())
+            {
+                Some(output) => {
+                    described = true;
+                    if output.iter().any(|item| item.as_str() == Some("text")) {
+                        return true;
+                    }
+                }
+                None => return true, // Missing metadata is not evidence of incompatibility.
+            }
+        }
+        if described {
+            return false;
+        }
+    }
+    true
+}
+
+fn page_models(value: &serde_json::Value) -> Result<Vec<String>, String> {
     let rows = value
         .get("data")
         .or_else(|| value.get("models"))
@@ -168,18 +212,15 @@ pub fn parse_models(value: &serde_json::Value) -> Result<Vec<String>, String> {
         .ok_or("The provider did not return a model list.")?;
     let mut models: Vec<_> = rows
         .iter()
-        .filter(|row| {
-            // Exclude embedding/audio-only/image-only models when modalities exist.
-            let output = row
-                .pointer("/modalities/output")
-                .and_then(serde_json::Value::as_array);
-            output.is_none_or(|items| items.iter().any(|item| item.as_str() == Some("text")))
-        })
+        .filter(|row| supports_chat(row))
         .filter_map(|row| {
-            row.get("id")
-                .or_else(|| row.get("name"))
-                .and_then(serde_json::Value::as_str)
+            ["model", "id", "name"].iter().find_map(|field| {
+                row.get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+            })
         })
+        .map(str::trim)
         .map(|id| id.strip_prefix("models/").unwrap_or(id))
         .filter(|id| !id.is_empty() && id.len() <= 240 && !id.chars().any(char::is_control))
         .take(2000)
@@ -187,11 +228,13 @@ pub fn parse_models(value: &serde_json::Value) -> Result<Vec<String>, String> {
         .collect();
     models.sort();
     models.dedup();
+    Ok(models)
+}
+
+pub fn parse_models(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    let models = page_models(value)?;
     if models.is_empty() {
-        Err(
-            "The provider returned no chat models. Your configured model is still available."
-                .into(),
-        )
+        Err(EMPTY_CATALOG.into())
     } else {
         Ok(models)
     }
@@ -208,32 +251,9 @@ pub async fn discover(
     {
         return Ok(cache.models);
     }
-    let response = crate::ai::engine::http_client()
-        .get(models_endpoint(&config)?)
-        .bearer_auth(&config.api_key)
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
+    let models = tokio::time::timeout(std::time::Duration::from_secs(30), fetch_catalog(&config))
         .await
-        .map_err(|_| {
-            "Could not reach the model catalog. Check your connection or retry.".to_owned()
-        })?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!(
-            "Model discovery returned HTTP {}. Check the provider key or retry; saved models remain available.",
-            status.as_u16()
-        ));
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| "Could not read the model catalog.")?;
-    if bytes.len() > 4 * 1024 * 1024 {
-        return Err("The model catalog is too large.".into());
-    }
-    let value =
-        serde_json::from_slice(&bytes).map_err(|_| "The model catalog was not valid JSON.")?;
-    let models = parse_models(&value)?;
+        .map_err(|_| "Model refresh timed out. Your saved key and models have been kept.")??;
     if let Some(path) = path
         && let Ok(db) = crate::db::Database::open(path)
     {
@@ -250,11 +270,253 @@ pub async fn discover(
     Ok(models)
 }
 
+async fn fetch_catalog(config: &super::providers::ProviderConfig) -> Result<Vec<String>, String> {
+    let client = crate::ai::engine::http_client();
+    let endpoint = models_endpoint(config)?;
+    let mut continuation: Option<(&str, String)> = None;
+    let mut cursors = std::collections::HashSet::new();
+    let mut models = Vec::new();
+    let mut total_bytes = 0;
+    loop {
+        let mut url = reqwest::Url::parse(&endpoint)
+            .map_err(|_| "The model catalog endpoint is not a valid URL.")?;
+        if let Some((parameter, cursor)) = &continuation {
+            url.query_pairs_mut().append_pair(parameter, cursor);
+        }
+        let response = client
+            .get(url)
+            .bearer_auth(&config.api_key)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|_| {
+                "Could not reach the model catalog. Check your connection or retry.".to_owned()
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(match status.as_u16() {
+            401 | 403 => format!("The provider denied model-list access (HTTP {}). Check this key's catalog permissions. Your saved key has been kept.", status.as_u16()),
+            404 | 405 => "This endpoint does not offer a model catalog. You can keep using your configured model or enter a custom model ID.".into(),
+            _ => format!("Model refresh returned HTTP {}. Retry later; your saved key and models have been kept.", status.as_u16()),
+        });
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| "Could not read the model catalog.")?;
+        total_bytes += bytes.len();
+        if bytes.len() > 4 * 1024 * 1024 || total_bytes > 32 * 1024 * 1024 {
+            return Err("The model catalog is too large.".into());
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| "The model catalog was not valid JSON.")?;
+        models.extend(page_models(&value)?);
+        continuation = if let Some(token) = value
+            .get("nextPageToken")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            Some(("pageToken", token.to_owned()))
+        } else if value.get("has_more").and_then(serde_json::Value::as_bool) != Some(false) {
+            value
+                .get("next_cursor")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|token| ("cursor", token.to_owned()))
+        } else {
+            None
+        };
+        if continuation.is_none() {
+            if value.get("has_more").and_then(serde_json::Value::as_bool) == Some(true) {
+                return Err(
+                    "The model catalog is missing its next-page cursor. Retry refresh.".into(),
+                );
+            }
+            break;
+        }
+        if models.len() > 10_000 || cursors.len() >= 50 || !cursors.insert(continuation.clone()) {
+            return Err(
+                "The model catalog pagination did not complete. Saved models are still available."
+                    .into(),
+            );
+        }
+    }
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        return Err(EMPTY_CATALOG.into());
+    }
+    Ok(models)
+}
+
 #[cfg(test)]
 mod discovery_tests {
     use super::super::providers::ProviderConfig;
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn merge_catalog_uses_canonical_model_ids_and_vendor_capabilities() {
+        let catalog = serde_json::json!({"data":[
+            {"model":"anthropic/chat-model", "vendors":{"a":{"capabilities":{"output":["text","tool_use"]}}}},
+            {"model":"audio-only", "vendors":{"a":{"capabilities":{"output":["audio"]}}}},
+            {"model":"mixed", "vendors":{"a":{"capabilities":{"output":["image"]}},"b":{"capabilities":{"output":["text"]}}}},
+            {"model":"unknown-output", "modalities":{"output":[]}},
+            {"model":"canonical-name", "id":"internal-database-id"}
+        ]});
+        assert_eq!(
+            parse_models(&catalog).unwrap(),
+            [
+                "anthropic/chat-model",
+                "canonical-name",
+                "mixed",
+                "unknown-output"
+            ]
+        );
+        assert_eq!(
+            parse_models(&serde_json::json!({"models":[
+                {"name":"models/gemini-chat", "supportedGenerationMethods":["generateContent"]},
+                {"name":"models/embedding", "supportedGenerationMethods":["embedContent"]}
+            ]}))
+            .unwrap(),
+            ["gemini-chat"]
+        );
+    }
+
+    fn catalog_server(
+        pages: Vec<(u16, serde_json::Value)>,
+    ) -> (ProviderConfig, std::thread::JoinHandle<Vec<String>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut config = ProviderConfig::new("merge-gateway", "saved-list-key", "my-custom-model");
+        config.base_url = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        let server = std::thread::spawn(move || {
+            let mut requests = vec![];
+            for (status, page) in pages {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "Catalog page was never requested"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = vec![];
+                let mut buffer = [0; 4096];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = stream.read(&mut buffer).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                requests.push(String::from_utf8(request).unwrap().to_lowercase());
+                let body = page.to_string();
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        (config, server)
+    }
+
+    #[tokio::test]
+    async fn merge_and_gemini_pagination_keep_auth_on_the_configured_endpoint() {
+        for google in [false, true] {
+            let pages = if google {
+                vec![
+                    (
+                        200,
+                        serde_json::json!({"models":[{"name":"models/a"}], "nextPageToken":"second"}),
+                    ),
+                    (200, serde_json::json!({"models":[{"name":"models/b"}]})),
+                ]
+            } else {
+                vec![
+                    (
+                        200,
+                        serde_json::json!({"data":[{"model":"a"}], "has_more":true,"next_cursor":"second"}),
+                    ),
+                    (
+                        200,
+                        serde_json::json!({"data":[{"model":"b"}], "has_more":false,"next_cursor":null}),
+                    ),
+                ]
+            };
+            let (mut config, server) = catalog_server(pages);
+            if google {
+                config.id = "gemini".into();
+            }
+            assert_eq!(discover(None, config, false).await.unwrap(), ["a", "b"]);
+            let requests = server.join().unwrap();
+            assert!(
+                requests
+                    .iter()
+                    .all(|r| r.contains("authorization: bearer saved-list-key"))
+            );
+            assert!(requests[1].starts_with(if google {
+                "get /v1/models?pagetoken=second "
+            } else {
+                "get /v1/models?cursor=second "
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_cursors_and_denied_access_do_not_overwrite_saved_models() {
+        for denied in [false, true] {
+            let pages = if denied {
+                vec![(403, serde_json::json!({"error":"forbidden"}))]
+            } else {
+                vec![
+                    (
+                        200,
+                        serde_json::json!({"data":[{"model":"a"}], "has_more":true,"next_cursor":"same"}),
+                    ),
+                    (
+                        200,
+                        serde_json::json!({"data":[{"model":"b"}], "has_more":true,"next_cursor":"same"}),
+                    ),
+                ]
+            };
+            let (config, server) = catalog_server(pages);
+            let directory = std::env::temp_dir()
+                .join(format!("lennette-catalog-failure-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.join("cache.db");
+            let db = crate::db::Database::open(&path).unwrap();
+            crate::db::settings::set(
+                db.connection(),
+                &cache_key(&config),
+                &serde_json::to_string(&CachedModels {
+                    fetched_at: now(),
+                    models: vec!["previous-model".into()],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let error = discover(Some(path.clone()), config.clone(), true)
+                .await
+                .unwrap_err();
+            assert!(error.contains(if denied { "denied" } else { "pagination" }));
+            server.join().unwrap();
+            assert_eq!(
+                cached(Some(&path), &config).unwrap().models,
+                ["previous-model"]
+            );
+            drop(db);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
 
     #[test]
     fn endpoint_and_cache_scope_follow_the_actual_account_and_gateway() {
