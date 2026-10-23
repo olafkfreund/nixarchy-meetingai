@@ -1,7 +1,6 @@
 //! Per-user local named pipe. No network port or Unix socket is required.
 use super::Action;
 pub use super::parse_command;
-use std::io::Read;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::sync::{
     Arc, Mutex,
@@ -58,7 +57,7 @@ impl ControlListener {
                 return;
             }
             // SAFETY: this thread takes unique ownership of the new pipe handle.
-            let mut pipe = unsafe { std::fs::File::from_raw_handle(handle) };
+            let pipe = unsafe { std::fs::File::from_raw_handle(handle) };
             let _ = ready.send(Ok(()));
             while !halt.load(Ordering::Relaxed) {
                 // SAFETY: pipe remains open and PIPE_NOWAIT makes this nonblocking.
@@ -84,19 +83,31 @@ impl ControlListener {
                     && payload.len() < 128
                 {
                     let mut bytes = [0; 128];
-                    match pipe.read(&mut bytes) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            payload.extend_from_slice(&bytes[..n]);
-                            if payload.contains(&b'\n') {
-                                break;
-                            }
+                    let mut read = 0;
+                    // SAFETY: the pipe and writable buffer live through this
+                    // synchronous, nonblocking read. Use ReadFile directly:
+                    // std::fs::File maps ERROR_NO_DATA to EOF, although here it
+                    // means a connected client has not written its bytes yet.
+                    let ok = unsafe {
+                        ReadFile(
+                            pipe.as_raw_handle(),
+                            bytes.as_mut_ptr(),
+                            bytes.len() as u32,
+                            &mut read,
+                            std::ptr::null_mut(),
+                        )
+                    } != 0;
+                    if ok {
+                        payload.extend_from_slice(&bytes[..read as usize]);
+                        if payload.contains(&b'\n') {
+                            break;
                         }
-                        Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA as i32) => {
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(_) => break,
+                    } else if std::io::Error::last_os_error().raw_os_error()
+                        != Some(ERROR_NO_DATA as i32)
+                    {
+                        break;
                     }
+                    std::thread::sleep(Duration::from_millis(10));
                 }
                 if payload.len() <= 128
                     && let Ok(text) = std::str::from_utf8(&payload)
