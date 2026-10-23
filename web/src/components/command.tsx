@@ -29,20 +29,20 @@ export const Command = ({
   }, [children]);
 
   return (
-    <div className="group relative overflow-hidden rounded-2xl bg-ink text-[0.92rem] shadow-[0_1px_2px_oklch(0.3_0.05_250/0.18)]">
-      <div className="flex items-center justify-between gap-4 border-b border-white/10 px-4 py-2">
-        <span className="text-xs font-medium tracking-wide text-white/50">
+    <div className="glass relative overflow-hidden rounded-2xl">
+      <div className="relative z-10 flex items-center justify-between gap-4 border-b border-ink/10 bg-white/25 px-4 py-2">
+        <span className="text-xs font-medium text-ink-soft">
           {label ?? "shell"}
         </span>
         <button
           type="button"
           onClick={onCopy}
-          className="rounded-lg px-2 py-1 text-xs font-medium text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+          className="rounded-lg px-2 py-1 text-xs font-medium text-sky-deep transition-colors hover:bg-sky-deep/10 hover:text-ink"
         >
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre className="overflow-x-auto px-4 py-3.5 leading-relaxed text-white/95">
+      <pre className="relative z-10 overflow-x-auto bg-white/35 px-4 py-3.5 text-[0.92rem] leading-relaxed text-ink">
         <code>{children}</code>
       </pre>
     </div>

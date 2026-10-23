@@ -75,7 +75,9 @@ const TutorialPage = () => (
       <Step index={2} title="Enable the modules">
         <p>
           Import both modules and enable the integration. Replace{" "}
-          <code className="rounded bg-ink/8 px-1.5 py-0.5 text-ink">alice</code>{" "}
+          <code className="rounded bg-white/45 px-1.5 py-0.5 text-ink">
+            alice
+          </code>{" "}
           with your own Home Manager user.
         </p>
         <Command label="configuration.nix">
@@ -98,7 +100,7 @@ const TutorialPage = () => (
       <Step index={3} title="Build and switch">
         <p>
           Rebuild before activation. Replace{" "}
-          <code className="rounded bg-ink/8 px-1.5 py-0.5 text-ink">
+          <code className="rounded bg-white/45 px-1.5 py-0.5 text-ink">
             my-host
           </code>{" "}
           with the host name from your own flake.
@@ -131,7 +133,7 @@ const TutorialPage = () => (
         <p>
           The compositor is separate from the application. From a Lennette
           checkout, install the binary and make sure{" "}
-          <code className="rounded bg-ink/8 px-1.5 py-0.5 text-ink">
+          <code className="rounded bg-white/45 px-1.5 py-0.5 text-ink">
             ~/.local/bin
           </code>{" "}
           is on your <code>PATH</code>.
@@ -163,7 +165,7 @@ const TutorialPage = () => (
               {bindings.map((binding) => (
                 <tr key={binding.keys}>
                   <td className="px-4 py-3 whitespace-nowrap">
-                    <code className="rounded bg-ink/8 px-1.5 py-0.5 text-ink">
+                    <code className="rounded bg-white/45 px-1.5 py-0.5 text-ink">
                       {binding.keys}
                     </code>
                   </td>
@@ -187,7 +189,7 @@ const TutorialPage = () => (
         <p>
           Plugins only work if they are rebuilt against this compositor&apos;s
           patched headers and listed by exact library path in{" "}
-          <code className="rounded bg-ink/8 px-1.5 py-0.5 text-ink">
+          <code className="rounded bg-white/45 px-1.5 py-0.5 text-ink">
             programs.lennettePrivateOverlay.allowedPluginPaths
           </code>
           . The launcher rejects anything outside that list.

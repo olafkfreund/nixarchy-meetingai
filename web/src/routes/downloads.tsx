@@ -7,76 +7,76 @@ interface Platform {
   name: string;
   requirement: string;
   body: string;
-  note: string;
+  status?: string;
   action?: { label: string; href: string; external: boolean };
+  available: boolean;
 }
 
 const platforms: Platform[] = [
   {
     name: "Linux",
-    requirement: "x86_64 · Hyprland or any Wayland/X11 desktop",
+    requirement: "x86_64",
     body: "For private screen-share protection on Hyprland, install the patched compositor first.",
-    note: "Build from source today; binaries will land on the releases page.",
-    action: {
-      label: "Hyprland setup guide",
-      href: "/tutorial",
-      external: false,
-    },
+    status: "Wayland and X11",
+    action: { label: "Hyprland setup", href: "/tutorial", external: false },
+    available: true,
   },
   {
     name: "Windows",
-    requirement: "x86_64 · Windows 10 or later",
-    body: "Launches privately by default using WDA_EXCLUDEFROMCAPTURE. No compositor patch and no environment variable needed.",
-    note: "Build from source today; binaries will land on the releases page.",
-    action: {
-      label: "Build instructions",
-      href: GITHUB_URL,
-      external: true,
-    },
+    requirement: "x86_64",
+    body: "Launches privately by default using WDA_EXCLUDEFROMCAPTURE. No compositor patch needed.",
+    status: "Windows 10 or later",
+    action: { label: "Build instructions", href: GITHUB_URL, external: true },
+    available: true,
   },
   {
     name: "macOS",
-    requirement: "Not supported",
-    body: "There is no macOS build. Capture exclusion depends on an OS interface Lennette does not implement for macOS, so nothing is published for it.",
-    note: "Will be reconsidered if that changes.",
+    requirement: "Coming soon",
+    body: "Capture exclusion needs a macOS screen-capture path Lennette does not implement yet.",
+    available: false,
   },
 ];
 
 const DownloadsPage = () => (
   <PageShell
     title="Download Lennette"
-    intro="Lennette ships for Linux and Windows. It listens to your device audio locally, so the meeting never receives a bot or an upload."
+    intro="Lennette runs on your own machine and reads your device audio locally, so the meeting never receives a bot or an upload."
   >
-    <div className="flex flex-col gap-5">
+    <div className="grid gap-5 md:grid-cols-3">
       {platforms.map((platform) => (
-        <article key={platform.name} className="glass rounded-3xl p-6 sm:p-8">
-          <div className="relative z-10 flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
-            <div className="max-w-2xl">
-              <div className="flex flex-wrap items-baseline gap-3">
-                <h2 className="font-display text-2xl text-ink">
-                  {platform.name}
-                </h2>
-                <span className="text-sm text-ink-soft">
-                  {platform.requirement}
-                </span>
-              </div>
-              <p className="mt-3 leading-relaxed text-ink-soft">
-                {platform.body}
-              </p>
-              <p className="mt-2 text-sm text-ink-soft/80">{platform.note}</p>
+        <article
+          key={platform.name}
+          className="glass flex flex-col rounded-3xl p-6"
+        >
+          <div className="relative z-10 flex flex-1 flex-col">
+            <div className="flex items-baseline justify-between gap-2">
+              <h2 className="font-display text-2xl text-ink">
+                {platform.name}
+              </h2>
+              <span className="text-xs text-ink-soft">
+                {platform.requirement}
+              </span>
             </div>
-            {platform.action ? (
-              <div className="shrink-0">
-                <a
-                  href={platform.action.href}
-                  target={platform.action.external ? "_blank" : undefined}
-                  rel={platform.action.external ? "noreferrer" : undefined}
-                  className="glass btn-liquid glass-pill glass-blue text-on-sky"
-                >
-                  <span>{platform.action.label}</span>
-                </a>
-              </div>
+            {platform.status ? (
+              <p className="mt-1 text-xs text-ink-soft/80">{platform.status}</p>
             ) : null}
+            <p className="mt-4 flex-1 leading-relaxed text-ink-soft">
+              {platform.body}
+            </p>
+            {platform.action ? (
+              <a
+                href={platform.action.href}
+                target={platform.action.external ? "_blank" : undefined}
+                rel={platform.action.external ? "noreferrer" : undefined}
+                className="glass btn-liquid mt-6 h-11 glass-pill text-sm glass-blue text-on-sky"
+              >
+                <span>{platform.action.label}</span>
+              </a>
+            ) : (
+              <span className="mt-6 flex h-11 items-center justify-center rounded-full border border-ink/15 text-sm font-medium text-ink-soft">
+                Coming soon
+              </span>
+            )}
           </div>
         </article>
       ))}
@@ -94,12 +94,12 @@ const DownloadsPage = () => (
           {`git clone ${GITHUB_URL}.git\ncd lennette\ndevenv shell -- just install`}
         </Command>
         <p className="max-w-2xl text-sm leading-relaxed text-ink-soft">
-          <code className="rounded bg-ink/8 px-1.5 py-0.5 text-ink">
+          <code className="rounded bg-white/45 px-1.5 py-0.5 text-ink">
             just install
           </code>{" "}
           validates formatting, lints and type-checks, then builds an optimised
           binary into{" "}
-          <code className="rounded bg-ink/8 px-1.5 py-0.5 text-ink">
+          <code className="rounded bg-white/45 px-1.5 py-0.5 text-ink">
             ~/.local/bin
           </code>
           .
@@ -127,7 +127,7 @@ export const Route = createFileRoute("/downloads")({
       {
         name: "description",
         content:
-          "Download Lennette for Linux and Windows, or build it from source. macOS is not supported yet.",
+          "Download Lennette for Linux and Windows. macOS support is coming soon.",
       },
     ],
   }),
