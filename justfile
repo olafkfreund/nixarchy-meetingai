@@ -52,9 +52,7 @@ bump type="patch":
 
 # Install repository git hooks into .git/hooks/
 install-hooks:
-    cp .githooks/pre-push .git/hooks/pre-push
-    cp .githooks/prepare-commit-msg .git/hooks/prepare-commit-msg
-    chmod +x .git/hooks/pre-push .git/hooks/prepare-commit-msg
+    lefthook install --force
 
 # Run the landing site dev server.
 web-dev:

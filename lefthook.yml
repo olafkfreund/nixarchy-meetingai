@@ -1,0 +1,45 @@
+# Lefthook drives the hooks so the version bump can be staged into the commit
+# being created; prek stashed unstaged changes around pre-commit, which threw
+# the staged bump away whenever the tree was dirty.
+#
+# git runs pre-commit before the commit message exists, so the bump here cannot
+# choose minor vs patch from the message. It always bumps the patch version.
+# Use `just bump minor` (or major) when you want something else.
+
+pre-commit:
+  commands:
+    bump-version:
+      run: |
+        if [ "${SKIP_BUMP:-0}" = "1" ]; then
+          exit 0
+        fi
+        # Never bump for merges, amends or rebases.
+        if [ -e .git/MERGE_HEAD ] || [ -e .git/rebase-merge ] \
+          || [ -e .git/rebase-apply ] || [ -e .git/CHERRY_PICK_HEAD ]; then
+          exit 0
+        fi
+        ./scripts/bump-version.sh patch
+
+    rustfmt:
+      glob: "*.rs"
+      run: cargo fmt --all -- --check
+
+    clippy:
+      glob: "*.{rs,toml}"
+      run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+    nixfmt:
+      glob: "*.nix"
+      run: nixfmt --check {staged_files}
+
+    web:
+      root: "web/"
+      glob: "*.{ts,tsx,json,css}"
+      run: |
+        bun run lint
+        bun run typecheck
+
+pre-push:
+  commands:
+    checks:
+      run: ./scripts/pre-push-checks.sh

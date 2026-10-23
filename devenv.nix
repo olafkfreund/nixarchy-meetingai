@@ -30,6 +30,7 @@ in
     jq
     just
     rustfmt
+    lefthook
     clippy
     cargo-nextest
     cargo-deny
@@ -99,38 +100,6 @@ in
   env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   env.NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   env.XDG_DATA_DIRS = "${pkgs.fontconfig}/share:$XDG_DATA_DIRS";
-
-  git-hooks.hooks = {
-    nixfmt = {
-      enable = true;
-      package = pkgs.nixfmt;
-    };
-    rustfmt.enable = true;
-    clippy = {
-      enable = true;
-      entry = "${pkgs.writeShellScript "lennette-clippy" ''
-        # Use the complete toolchain (rustc + std + clippy together). Splitting
-        # them across separate outputs makes clippy-driver unable to find std.
-        export PATH="${
-          lib.makeBinPath [
-            pkgs.rust-bin.stable."1.99.1".default
-            pkgs.pkg-config
-            pkgs.coreutils
-            pkgs.gcc
-            pkgs.glibc.bin
-            pkgs.llvmPackages.clang
-          ]
-        }"
-        export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
-        export BINDGEN_EXTRA_CLANG_ARGS="-isystem ${pkgs.glibc.dev}/include"
-        export CPATH="${pkgs.glibc.dev}/include"
-        export PKG_CONFIG_PATH="${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig:${pkgs.libGL.dev}/lib/pkgconfig:${pkgs.mesa}/lib/pkgconfig"
-        cd "''${DEVENV_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-        exec cargo clippy --workspace --all-targets --all-features -- -D warnings
-      ''}";
-      pass_filenames = false;
-    };
-  };
 
   tasks = {
     "lennette:build" = {
