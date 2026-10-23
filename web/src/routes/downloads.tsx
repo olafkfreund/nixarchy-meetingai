@@ -33,10 +33,10 @@ const cards: Card[] = [
     platform: "linux",
     name: "Linux",
     requirement: "x86_64",
-    status: "Wayland and X11",
-    body: "Runs on any modern Linux desktop. Private screen-share protection is only available on the patched Hyprland compositor described in the setup guide.",
+    status: "Any desktop",
+    body: "Works on any modern Linux desktop. Hiding Lennette from a screen share needs a special setup, and right now that only works on Hyprland.",
     caution:
-      "Screen-share protection currently supports Hyprland only, from a pinned compositor revision. On GNOME, KDE, Sway or an unpatched Hyprland, the overlay is visible in shares.",
+      "Screen sharing is only hidden on Hyprland, and only with the custom build from our setup guide. On GNOME, KDE, Sway or a normal Hyprland install, other people will see Lennette when you share your screen. Want it on your desktop? Open an issue and tell us.",
     releases: [
       {
         asset: "lennette-linux-x86_64.tar.gz",
@@ -50,8 +50,8 @@ const cards: Card[] = [
     platform: "windows",
     name: "Windows",
     requirement: "x86_64",
-    status: "Windows 10 or later",
-    body: "Portable build, no installer. Launches privately by default using WDA_EXCLUDEFROMCAPTURE, so no compositor patch is needed.",
+    status: "Windows 10 or newer",
+    body: "One file, no installer. Just download and run it. It hides itself from screen shares automatically, so there is nothing extra to set up.",
     releases: [
       {
         asset: "lennette-windows-x86_64.exe",
@@ -64,8 +64,8 @@ const cards: Card[] = [
     platform: "macos",
     name: "macOS",
     requirement: "Coming soon",
-    status: "Not yet supported",
-    body: "Capture exclusion needs a macOS screen-capture path Lennette does not implement yet, so no build is published.",
+    status: "Not yet available",
+    body: "Not available yet. Hiding the window from a screen share needs work we have not done on macOS, so there is nothing to download.",
     pending: true,
   },
 ];
@@ -78,6 +78,23 @@ const PlatformIcon = ({ platform }: { platform: Platform }) => {
     </span>
   );
 };
+
+const InfoMark = ({ className = "" }: { className?: string }) => (
+  <svg
+    viewBox="0 0 24 24"
+    aria-hidden="true"
+    className={className}
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 11v5" />
+    <path d="M12 8h.01" />
+  </svg>
+);
 
 const DownloadsPage = () => (
   <PageShell
@@ -109,18 +126,30 @@ const DownloadsPage = () => (
             </p>
 
             {card.caution ? (
-              <div className="mt-4 rounded-xl border border-ink/10 bg-white/45 p-3">
-                <p className="text-xs leading-relaxed text-ink-soft">
-                  {card.caution}
-                </p>
-                <a
-                  href={`${GITHUB_URL}/issues/new?title=${encodeURIComponent("Screen-share protection on ")}&body=${encodeURIComponent("Desktop environment / compositor:\nVersion:\n\nWhat happens when you share your screen with Lennette running:\n")}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-2 inline-block text-xs font-medium text-sky-deep transition-colors hover:text-ink"
+              <div className="group/info relative mt-4">
+                <button
+                  type="button"
+                  aria-describedby={`caution-${card.platform}`}
+                  className="flex items-center gap-1.5 rounded-full border border-ink/15 px-3 py-1 text-xs font-medium text-ink-soft transition-colors hover:border-ink/25 hover:text-ink focus-visible:border-ink/40 focus-visible:text-ink focus-visible:outline-none"
                 >
-                  Request support for your desktop →
-                </a>
+                  <InfoMark className="size-3.5" />
+                  Screen-share support
+                </button>
+                <div
+                  id={`caution-${card.platform}`}
+                  role="tooltip"
+                  className="pointer-events-none absolute inset-x-0 bottom-full z-30 mb-2 rounded-xl border border-ink/10 bg-cloud p-3 text-xs leading-relaxed text-ink-soft opacity-0 shadow-[0_8px_20px_-10px_oklch(0.45_0.08_250/0.5)] transition-opacity duration-150 group-focus-within/info:pointer-events-auto group-focus-within/info:opacity-100 group-hover/info:pointer-events-auto group-hover/info:opacity-100"
+                >
+                  {card.caution}
+                  <a
+                    href={`${GITHUB_URL}/issues/new?title=${encodeURIComponent("Screen-share protection on ")}&body=${encodeURIComponent("Desktop environment / compositor:\nVersion:\n\nWhat happens when you share your screen with Lennette running:\n")}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-2 inline-block font-medium text-sky-deep transition-colors hover:text-ink"
+                  >
+                    Request support for your desktop →
+                  </a>
+                </div>
               </div>
             ) : null}
 
