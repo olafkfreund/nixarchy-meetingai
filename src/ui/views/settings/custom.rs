@@ -61,6 +61,7 @@ pub fn providers(
                                     }),
                             ),
                     )
+                    .child(preset_trigger(state, theme, speech, cx))
                     .child(div().flex().flex_shrink_0().child(action(
                         if speech {
                             "new-custom-stt"
@@ -123,7 +124,131 @@ pub fn providers(
     if let Some(status) = &state.key_status {
         body = body.child(help_text(theme, status));
     }
-    body.into_any_element()
+    body.children(preset_menu(state, theme, cx))
+        .into_any_element()
+}
+
+fn preset_trigger(
+    state: &SettingsState,
+    theme: &Theme,
+    speech: bool,
+    cx: &mut Context<Dashboard>,
+) -> gpui::AnyElement {
+    let bounds = state.provider_menu_bounds[speech as usize].clone();
+    let open = state.provider_menu == Some(speech);
+    div()
+        .id(if speech {
+            "speech-provider-more"
+        } else {
+            "ai-provider-more"
+        })
+        .relative()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(5.0))
+        .h(px(28.0))
+        .px(px(9.0))
+        .rounded(px(8.0))
+        .bg(theme.input)
+        .border_1()
+        .border_color(theme.control_border(open))
+        .cursor_pointer()
+        .text_size(scaled(11.0))
+        .child("More")
+        .child(icons::icon(theme, Icon::ChevronDown, 12.0))
+        .on_click(cx.listener(move |view, _, _, cx| {
+            view.settings_mut().provider_menu = if open { None } else { Some(speech) };
+            cx.notify();
+        }))
+        .child(
+            gpui::canvas(|_, _, _| (), move |value, _, _, _| bounds.set(value))
+                .absolute()
+                .inset_0(),
+        )
+        .into_any_element()
+}
+
+fn preset_menu(
+    state: &SettingsState,
+    theme: &Theme,
+    cx: &mut Context<Dashboard>,
+) -> Option<gpui::AnyElement> {
+    let speech = state.provider_menu?;
+    let bounds = state.provider_menu_bounds[speech as usize].clone();
+    let mut menu = div()
+        .id("popular-provider-menu")
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .p(px(6.0))
+        .w(px(220.0))
+        .max_h(px(300.0))
+        .overflow_y_scroll()
+        .rounded(px(11.0))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.popover())
+        .shadow_md()
+        .occlude()
+        .on_mouse_down_out(
+            cx.listener(move |view, event: &gpui::MouseDownEvent, _, cx| {
+                if !bounds.get().contains(&event.position) {
+                    view.settings_mut().provider_menu = None;
+                    cx.notify();
+                }
+            }),
+        )
+        .child(
+            div()
+                .p(px(7.0))
+                .text_size(scaled(10.0))
+                .text_color(theme.muted_foreground)
+                .child("Connect a popular service"),
+        );
+    for (index, preset) in crate::ai::catalog::presets::PRESETS
+        .iter()
+        .enumerate()
+        .filter(|(_, preset)| preset.speech == speech)
+    {
+        menu = menu.child(
+            div()
+                .id(("provider-preset", index))
+                .flex()
+                .items_center()
+                .flex_shrink_0()
+                .h(px(30.0))
+                .px(px(8.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .text_size(scaled(12.0))
+                .text_color(theme.foreground)
+                .hover(|style| style.bg(theme.menu_hover()))
+                .child(preset.name)
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    let preset = &crate::ai::catalog::presets::PRESETS[index];
+                    view.edit_custom_provider(Some(preset.draft()), speech);
+                    view.settings_mut().provider_docs = Some(preset.docs);
+                    cx.notify();
+                })),
+        );
+    }
+    let bounds = state.provider_menu_bounds[speech as usize].get();
+    Some(
+        gpui::deferred(
+            gpui::anchored()
+                .position(gpui::point(bounds.left(), bounds.bottom() + px(5.0)))
+                .snap_to_window_with_margin(px(8.0))
+                .child(crate::ui::widgets::motion::reveal(
+                    menu,
+                    "popular-provider-menu-open",
+                    state.settings.reduce_motion,
+                    true,
+                )),
+        )
+        .with_priority(20)
+        .into_any_element(),
+    )
 }
 
 fn provider_row(
@@ -295,6 +420,15 @@ pub fn dialog(
             },
             "Use the full request endpoint. Leave the key blank while editing to keep its saved value. Keys and custom settings stay encrypted.",
         );
+        if let Some(url) = state.provider_docs {
+            form = form.child(div().flex().child(action(
+                "preset-docs",
+                theme,
+                "Provider documentation",
+                cx,
+                move |_: &mut Dashboard, cx, _| cx.open_url(url),
+            )));
+        }
         form = form.child(
             div()
                 .flex()
@@ -347,39 +481,15 @@ pub fn dialog(
             }
             return Some(form.into_any_element());
         }
-        for (field, label, value) in [
-            (CredentialField::CustomName, "Name", custom.name.clone()),
-            (
-                CredentialField::CustomEndpoint,
-                "HTTP endpoint",
-                draft.base_url.clone(),
-            ),
-            (
-                CredentialField::CustomKey,
-                "API key / auth value",
-                if draft.api_key.is_empty() {
-                    "Leave blank to keep a saved key".into()
-                } else {
-                    "•".repeat(draft.api_key.chars().count().min(40))
-                },
-            ),
-            (
-                CredentialField::CustomModel,
-                "Model ID",
-                draft.model.clone(),
-            ),
-            (
-                CredentialField::CustomHeader,
-                "Authentication header",
-                custom.auth_header.clone(),
-            ),
-            (
-                CredentialField::CustomPath,
-                "Response JSON pointer",
-                custom.response_path.clone(),
-            ),
+        for (field, label) in [
+            (CredentialField::CustomName, "Name"),
+            (CredentialField::CustomEndpoint, "HTTP endpoint"),
+            (CredentialField::CustomKey, "API key / auth value"),
+            (CredentialField::CustomModel, "Model ID"),
+            (CredentialField::CustomHeader, "Authentication header"),
+            (CredentialField::CustomPath, "Response JSON pointer"),
         ] {
-            form = form.child(field_input(state, theme, field, label, value, cx));
+            form = form.child(native_field(state, theme, field, label));
         }
         form = form.child(choice(
             theme,
@@ -399,6 +509,25 @@ pub fn dialog(
             cx,
             |c, value| c.auth = value,
         ));
+        if !speech {
+            form = form.child(choice(
+                theme,
+                "Chat request format",
+                &custom.request_format,
+                &["openai", "anthropic"],
+                "custom-wire",
+                cx,
+                |custom, value| {
+                    custom.request_format = value;
+                    custom.response_path = if custom.request_format == "anthropic" {
+                        "/content/0/text"
+                    } else {
+                        "/choices/0/message/content"
+                    }
+                    .into();
+                },
+            ));
+        }
         if speech {
             form = form.child(choice(
                 theme,
@@ -426,7 +555,11 @@ pub fn dialog(
             if speech {
                 "Requires the Deepgram two-channel PCM WebSocket protocol"
             } else {
-                "Requires the OpenAI chat SSE protocol"
+                if custom.request_format == "anthropic" {
+                    "Uses Anthropic Messages SSE"
+                } else {
+                    "Uses OpenAI chat SSE"
+                }
             },
             switch(
                 "custom-streaming",
@@ -446,13 +579,11 @@ pub fn dialog(
             ),
         ));
         if speech && custom.streaming {
-            form = form.child(field_input(
+            form = form.child(native_field(
                 state,
                 theme,
                 CredentialField::CustomStream,
                 "WebSocket endpoint (ws:// or wss://)",
-                custom.stream_url.clone(),
-                cx,
             ));
             form = form.child(help_text(theme, "Keep the HTTP endpoint too: push to talk uses it for finished WAV recordings. Live mode sends 16 kHz, 16-bit stereo PCM (microphone left, system audio right)."));
         }
@@ -510,55 +641,31 @@ pub fn dialog(
     None
 }
 
-fn field_input(
+pub(super) fn native_field(
     state: &SettingsState,
     theme: &Theme,
     field: CredentialField,
     label: &'static str,
-    value: String,
-    cx: &mut Context<Dashboard>,
 ) -> gpui::AnyElement {
-    let focused = state.key_field == Some(field);
     div()
         .flex()
         .flex_col()
-        .gap(px(5.0))
-        .py(px(7.0))
-        .child(div().text_size(scaled(12.0)).child(label))
+        .w_full()
+        .min_w(px(0.0))
+        .gap(px(6.0))
+        .py(px(4.0))
         .child(
             div()
-                .id(gpui::ElementId::Name(
-                    format!("custom-field-{}", field as usize).into(),
-                ))
-                .min_h(scaled(36.0))
-                .w_full()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .px(px(10.0))
-                .py(px(8.0))
-                .rounded(px(radius::LG))
-                .border_1()
-                .border_color(if focused {
-                    theme.focus_border()
-                } else {
-                    theme.control_border(false)
-                })
-                .bg(theme.input)
                 .text_size(scaled(12.0))
                 .text_color(theme.foreground)
-                .cursor_text()
-                .child(div().min_w(px(0.0)).truncate().child(if value.is_empty() {
-                    "Click to enter a value".to_owned()
-                } else {
-                    value
-                }))
-                .child(if focused { "│" } else { "" })
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |view, _, window, cx| {
-                        view.focus_credential_field(field, window, cx)
-                    }),
-                ),
+                .child(label),
+        )
+        .children(
+            state
+                .credential_editors
+                .iter()
+                .find(|(key, _)| *key == field)
+                .map(|(_, editor)| editor.clone()),
         )
         .into_any_element()
 }
@@ -593,6 +700,10 @@ fn choice(
                     .and_then(|d| d.custom.as_mut())
                 {
                     set(custom, values[index].into());
+                }
+                if id == "custom-wire" {
+                    view.settings_mut().credential_observers.clear();
+                    view.settings_mut().credential_editors.clear();
                 }
             },
         ),

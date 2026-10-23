@@ -24,6 +24,61 @@ use std::{
 };
 
 #[tokio::test]
+async fn anthropic_preset_sends_native_messages_and_streams_only_visible_text() {
+    use lennette::ai::catalog::presets::PRESETS;
+    for streaming in [false, true] {
+        let response = if streaming {
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"private reasoning\"}}\n\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Claude answer\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n"
+        } else {
+            r#"{"content":[{"type":"thinking","thinking":"private reasoning"},{"type":"text","text":"Claude answer"}]}"#
+        };
+        let (url, request) = server(
+            200,
+            if streaming {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
+            response.into(),
+        );
+        let mut config = PRESETS
+            .iter()
+            .find(|preset| preset.wire == "anthropic")
+            .unwrap()
+            .draft()
+            .to_config();
+        config.api_key = "local-test-key".into();
+        config.base_url = url;
+        config.custom.as_mut().unwrap().streaming = streaming;
+        let answer = engine::stream_chat(
+            &engine::http_client(),
+            &config,
+            &[Message::user("Look")],
+            &TurnContext {
+                system: Some("Be concise".into()),
+                images: vec!["QUJD".into()],
+            },
+            Arc::new(tokio::sync::watch::channel(false).1),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer, "Claude answer");
+        let bytes = request.join().unwrap();
+        let raw = String::from_utf8_lossy(&bytes);
+        let headers = raw.split_once("\r\n\r\n").unwrap().0.to_lowercase();
+        assert!(headers.contains("authorization: bearer local-test-key"));
+        assert!(headers.contains("anthropic-version: 2026-10-21"));
+        let body: serde_json::Value =
+            serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["system"], "Be concise");
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"][1]["source"]["data"], "QUJD");
+        assert_eq!(body["max_tokens"], 4096);
+    }
+}
+
+#[tokio::test]
 async fn custom_chat_uses_its_method_auth_model_and_response_pointer() {
     use lennette::ai::catalog::custom::CustomProvider;
     let (url, request) = server(

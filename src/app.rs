@@ -133,6 +133,9 @@ pub fn run() {
     // GPUI runs its own executor; reqwest/WebSockets and tokio::spawn still need
     // a live Tokio reactor on the UI thread for all provider requests.
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        // Provider streams are asynchronous; a small pool avoids one worker
+        // per CPU core on machines with many cores. CPU work uses GPUI's pool.
+        .worker_threads(2)
         .enable_all()
         .build()
         .expect("could not start the provider runtime");

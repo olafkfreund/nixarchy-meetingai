@@ -1957,6 +1957,9 @@ impl Overlay {
                         self.begin_capture(cx);
                     }
                 }
+                TrayAction::PrivacyMode => {
+                    self.handle_shortcut(crate::features::shortcuts::Action::PrivacyMode, cx);
+                }
                 TrayAction::Quit => {
                     self.show_window(cx);
                     self.show_dialog(session_menu::Dialog::Quit);

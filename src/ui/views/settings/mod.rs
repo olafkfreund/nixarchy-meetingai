@@ -60,6 +60,14 @@ pub const KEY_PROVIDERS: &[(&str, &str)] = &[
 pub struct SettingsState {
     pub custom_draft: Option<crate::core::credentials::Credential>,
     pub custom_open: bool,
+    pub credential_editors: Vec<(
+        CredentialField,
+        gpui::Entity<crate::ui::widgets::editor::Editor>,
+    )>,
+    pub credential_observers: Vec<gpui::Subscription>,
+    pub provider_menu: Option<bool>,
+    pub provider_menu_bounds: [std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>; 2],
+    pub provider_docs: Option<&'static str>,
     pub custom_json_mode: bool,
     pub custom_guide: bool,
     pub custom_json: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
@@ -140,6 +148,11 @@ impl SettingsState {
         Self {
             custom_draft: None,
             custom_open: false,
+            credential_editors: Vec::new(),
+            credential_observers: Vec::new(),
+            provider_menu: None,
+            provider_menu_bounds: Default::default(),
+            provider_docs: None,
             custom_json_mode: false,
             custom_guide: false,
             custom_json: None,
@@ -712,6 +725,7 @@ fn device_picker(
         .flex_col()
         .w_full()
         .items_start()
+        .pt(px(10.0))
         .gap(px(8.0))
         .on_mouse_down_out(cx.listener(move |view, _, _, cx| {
             if view.settings_mut().device_menu == Some(input) {
@@ -1286,83 +1300,24 @@ pub(crate) fn credentials_section(
         "Connect with an API key and choose a model. Leave the key unchanged to reuse its encrypted saved value.",
     );
 
-    for (id, label, field, shown) in [
-        (
-            "credential-key",
-            "API key",
-            CredentialField::Key,
-            if state.key_input.is_empty() {
-                state
-                    .saved_credential()
-                    .map(|credential| {
-                        format!("Saved key {} · click to replace", credential.masked_key())
-                    })
-                    .unwrap_or_else(|| "Click to paste your API key".to_owned())
-            } else {
-                "•".repeat(state.key_input.chars().count().min(40))
-            },
-        ),
-        (
-            "credential-model",
-            "Model",
-            CredentialField::Model,
-            state.key_model.clone(),
-        ),
+    for (field, label) in [
+        (CredentialField::Key, "API key"),
+        (CredentialField::Model, "Model"),
     ] {
-        let focused = state.key_field == Some(field);
         let chat_model = field == CredentialField::Model
             && crate::ai::providers::ChatProvider::by_id(&state.key_provider).is_some();
-        card = card.child(
-            div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .max_w(px(480.0))
-                .gap(px(5.0))
-                .py(px(space::SM))
-                .child(
-                    div()
-                        .text_size(scaled(12.0))
-                        .text_color(theme.foreground)
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .id(id)
-                        .h(px(36.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(5.0))
-                        .rounded(px(radius::LG))
-                        .border_1()
-                        .border_color(if focused {
-                            if theme.is_glass() {
-                                theme.focus_border()
-                            } else {
-                                theme.foreground
-                            }
-                        } else {
-                            theme.border
-                        })
-                        .bg(theme.input)
-                        .px(px(space::SM))
-                        .text_size(scaled(12.0))
-                        .text_color(theme.foreground)
-                        .cursor_text()
-                        .child(div().flex_1().min_w(px(0.0)).truncate().child(shown))
-                        .child(if focused { "│" } else { "" })
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(move |view, _, window, cx| {
-                                if chat_model {
-                                    view.toggle_credential_models(false, cx);
-                                } else {
-                                    view.focus_credential_field(field, window, cx);
-                                }
-                            }),
-                        ),
-                ),
-        );
+        card = card.child(custom::native_field(state, theme, field, label));
+        if chat_model {
+            card = card.child(div().flex().child(action(
+                "browse-provider-models",
+                theme,
+                "Browse models",
+                cx,
+                |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
+                    view.toggle_credential_models(false, cx)
+                },
+            )));
+        }
         if chat_model && state.model_menu_open {
             let mut dropdown = div()
                 .id("credential-model-options")
@@ -1406,6 +1361,8 @@ pub(crate) fn credentials_section(
                         .child(model.clone())
                         .on_click(cx.listener(move |view, _, _, cx| {
                             view.settings_mut().key_model = chosen.clone();
+                            view.settings_mut().credential_observers.clear();
+                            view.settings_mut().credential_editors.clear();
                             view.settings_mut().model_menu_open = false;
                             cx.notify();
                         })),
@@ -1418,7 +1375,14 @@ pub(crate) fn credentials_section(
                 cx,
                 |view: &mut crate::ui::dashboard::view::DashboardView, cx, window| {
                     view.settings_mut().model_menu_open = false;
-                    view.focus_credential_field(CredentialField::Model, window, cx);
+                    if let Some((_, editor)) = view
+                        .settings_mut()
+                        .credential_editors
+                        .iter()
+                        .find(|(field, _)| *field == CredentialField::Model)
+                    {
+                        editor.read(cx).focus(window);
+                    }
                 },
             ));
             card = card.child(crate::ui::widgets::motion::reveal(
@@ -1614,11 +1578,11 @@ pub fn render(
                         .items_center()
                         .gap(px(8.0))
                         .w_full()
-                        .max_w(px(480.0))
                         .child(
                             div()
-                                .flex_1()
-                                .min_w(px(0.0))
+                                .w(px(420.0))
+                                .max_w_full()
+                                .flex_shrink_0()
                                 .children(view.settings_search_field()),
                         )
                         .children((!query.is_empty()).then(|| {

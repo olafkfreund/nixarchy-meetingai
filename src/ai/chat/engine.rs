@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::ai::providers::{ChatProvider, ProviderConfig};
+use crate::ai::providers::{ChatProvider, ChatWire, ProviderConfig};
 use crate::core::domain::Message;
 
 /// Errors from a chat request.
@@ -61,6 +61,9 @@ pub fn build_body(
     history: &[Message],
     context: &TurnContext,
 ) -> Value {
+    if provider.wire == ChatWire::Anthropic {
+        return anthropic_body(config, history, context, provider.supports_images);
+    }
     let mut messages: Vec<Value> = Vec::with_capacity(history.len() + 1);
     if let Some(system) = &context.system {
         messages.push(json!({ "role": "system", "content": system }));
@@ -81,6 +84,35 @@ pub fn build_body(
         // Meeting answers need the final response promptly, rather than a long
         // reasoning stream. This control is supported by the pinned DeepSeek model.
         body["reasoning_effort"] = json!("none");
+    }
+    body
+}
+
+fn anthropic_body(
+    config: &ProviderConfig,
+    history: &[Message],
+    context: &TurnContext,
+    images: bool,
+) -> Value {
+    let mut system = context.system.iter().cloned().collect::<Vec<_>>();
+    let mut messages = Vec::new();
+    for (index, message) in history.iter().enumerate() {
+        if message.role == crate::core::domain::Role::System {
+            system.push(message.content.clone());
+            continue;
+        }
+        let mut content = vec![json!({"type":"text", "text":message.content})];
+        if images && index + 1 == history.len() && message.role == crate::core::domain::Role::User {
+            content.extend(context.images.iter().map(|image| json!({
+                "type":"image", "source":{"type":"base64", "media_type":"image/png", "data":image}
+            })));
+        }
+        messages.push(json!({"role":role_name(message), "content":content}));
+    }
+    let mut body =
+        json!({"model":config.model, "max_tokens":4096, "messages":messages, "stream":true});
+    if !system.is_empty() {
+        body["system"] = json!(system.join("\n\n"));
     }
     body
 }
@@ -108,7 +140,7 @@ fn role_name(message: &Message) -> &'static str {
 /// Accepts comments and unknown JSON as `None`, returns `Done` for the final
 /// sentinel, and errors only on malformed JSON or an explicit provider error.
 pub fn parse_sse_line(
-    _provider: &ChatProvider,
+    provider: &ChatProvider,
     line: &[u8],
 ) -> Result<Option<ChatEvent>, ChatError> {
     let text = std::str::from_utf8(line)
@@ -127,6 +159,20 @@ pub fn parse_sse_line(
         .map_err(|_| ChatError::Protocol("stream contained malformed JSON".into()))?;
     if let Some(error) = value.get("error").and_then(message_from_error) {
         return Err(ChatError::Protocol(error));
+    }
+    if provider.wire == ChatWire::Anthropic {
+        return Ok(match value.get("type").and_then(Value::as_str) {
+            Some("message_stop") => Some(ChatEvent::Done),
+            Some("content_block_delta")
+                if value.pointer("/delta/type").and_then(Value::as_str) == Some("text_delta") =>
+            {
+                value
+                    .pointer("/delta/text")
+                    .and_then(Value::as_str)
+                    .map(|text| ChatEvent::Delta(text.into()))
+            }
+            _ => None,
+        });
     }
     let delta = value
         .pointer("/choices/0/delta/content")
@@ -188,6 +234,9 @@ pub async fn stream_chat(
     } else {
         client.post(endpoint).bearer_auth(&config.api_key)
     };
+    if provider.wire == ChatWire::Anthropic {
+        request = request.header("anthropic-version", "2026-10-21");
+    }
     request = request.json(&body);
     let response = tokio::select! {
         result = request.send() => result?,

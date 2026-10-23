@@ -421,6 +421,7 @@ impl Overlay {
             .gap(px(14.0))
             .w_full()
             .max_w(px(600.0))
+            .flex_shrink_0()
             .p(px(20.0))
             .rounded(px(18.0))
             .border_1()
@@ -489,6 +490,7 @@ impl Overlay {
             Dialog::Quit => {
                 panel = panel
                     .max_w(px(360.0))
+                    .pb(px(28.0))
                     .child(
                         div()
                             .text_size(scaled(17.0))
@@ -509,6 +511,8 @@ impl Overlay {
                     .child(
                         div()
                             .flex()
+                            .flex_shrink_0()
+                            .pt(px(4.0))
                             .justify_end()
                             .gap(px(8.0))
                             .child(

@@ -10,7 +10,7 @@ pub struct CustomProvider {
     /// none, bearer, token, or header (send the key verbatim).
     pub auth: String,
     pub auth_header: String,
-    /// openai, raw-wav, multipart-wav, or json-wav.
+    /// openai, anthropic, raw-wav, multipart-wav, or json-wav.
     pub request_format: String,
     /// json or text.
     pub response_format: String,
@@ -59,7 +59,7 @@ impl CustomProvider {
                 "raw-wav" | "multipart-wav" | "json-wav"
             )
         } else {
-            self.request_format == "openai"
+            matches!(self.request_format.as_str(), "openai" | "anthropic")
         }) {
             return Err("Choose a supported request format.".into());
         }
@@ -82,9 +82,14 @@ impl CustomProvider {
         if self.streaming
             && !speech
             && (self.response_format != "json"
-                || self.response_path != "/choices/0/message/content")
+                || self.response_path
+                    != if self.request_format == "anthropic" {
+                        "/content/0/text"
+                    } else {
+                        "/choices/0/message/content"
+                    })
         {
-            return Err("Chat streaming requires OpenAI SSE responses. Disable streaming for a custom JSON path or plain text.".into());
+            return Err("Chat streaming requires the matching OpenAI or Anthropic SSE response format. Disable streaming for a custom JSON path or plain text.".into());
         }
         Ok(())
     }
@@ -95,6 +100,21 @@ impl CustomProvider {
         } else {
             let value: Value =
                 serde_json::from_str(response).map_err(|_| "Response was not JSON.")?;
+            if self.request_format == "anthropic" && self.response_path == "/content/0/text" {
+                let text = value
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if text.trim().is_empty() {
+                    return Err("The provider returned empty text.".into());
+                }
+                return Ok(text.trim().into());
+            }
             value
                 .pointer(&self.response_path)
                 .and_then(Value::as_str)

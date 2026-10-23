@@ -3,49 +3,7 @@ use super::*;
 use gpui::{EntityInputHandler, UTF16Selection};
 use std::ops::Range;
 
-#[derive(Default)]
-pub(super) struct Layout {
-    pub bounds: gpui::Bounds<gpui::Pixels>,
-    pub lines: Vec<gpui::WrappedLine>,
-    pub line_height: gpui::Pixels,
-}
-impl Layout {
-    pub fn position(&self, index: usize) -> gpui::Point<gpui::Pixels> {
-        let mut start = 0;
-        let mut y = px(0.0);
-        for line in &self.lines {
-            if index <= start + line.len() {
-                let mut p = line
-                    .position_for_index(index.saturating_sub(start), self.line_height)
-                    .unwrap_or_default();
-                p.y += y;
-                return p;
-            }
-            start += line.len() + 1;
-            y += line.size(self.line_height).height;
-        }
-        gpui::point(px(0.0), y)
-    }
-    pub fn index(&self, position: gpui::Point<gpui::Pixels>) -> usize {
-        let mut start = 0;
-        let mut y = px(0.0);
-        for line in &self.lines {
-            let height = line.size(self.line_height).height;
-            if position.y < y + height {
-                return start
-                    + line
-                        .closest_index_for_position(
-                            gpui::point(position.x, (position.y - y).max(px(0.0))),
-                            self.line_height,
-                        )
-                        .unwrap_or_else(|i| i);
-            }
-            start += line.len() + 1;
-            y += height;
-        }
-        start.saturating_sub(1)
-    }
-}
+pub(super) type Layout = crate::ui::widgets::text_input::TextLayout;
 
 pub(super) fn byte(text: &str, units: usize) -> usize {
     let mut count = 0;

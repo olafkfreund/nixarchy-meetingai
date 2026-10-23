@@ -13,6 +13,7 @@ pub enum TrayAction {
     ShowOverlay,
     OpenDashboard,
     ToggleListening,
+    PrivacyMode,
     Quit,
 }
 
@@ -200,6 +201,12 @@ mod ksni_tray {
                 StandardItem {
                     label: "Start or stop listening".into(),
                     activate: Box::new(push(TrayAction::ToggleListening)),
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
+                    label: "Go stealth (Privacy mode)".into(),
+                    activate: Box::new(push(TrayAction::PrivacyMode)),
                     ..Default::default()
                 }
                 .into(),

@@ -167,6 +167,12 @@ pub fn start() -> Result<Backend, String> {
                                     AppendMenuW(menu, MF_STRING, 1, w!("Show overlay"));
                                     AppendMenuW(menu, MF_STRING, 2, w!("Open dashboard"));
                                     AppendMenuW(menu, MF_STRING, 3, w!("Start or stop listening"));
+                                    AppendMenuW(
+                                        menu,
+                                        MF_STRING,
+                                        5,
+                                        w!("Go stealth (Privacy mode)"),
+                                    );
                                     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
                                     AppendMenuW(menu, MF_STRING, 4, w!("Quit lennette"));
                                     let mut point = POINT::default();
@@ -188,6 +194,7 @@ pub fn start() -> Result<Backend, String> {
                                         2 => Some(TrayAction::OpenDashboard),
                                         3 => Some(TrayAction::ToggleListening),
                                         4 => Some(TrayAction::Quit),
+                                        5 => Some(TrayAction::PrivacyMode),
                                         _ => None,
                                     }
                                 } else {

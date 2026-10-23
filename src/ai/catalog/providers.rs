@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub enum ChatWire {
     /// OpenAI-compatible `/chat/completions`.
     OpenAi,
+    /// Native Anthropic Messages API.
+    Anthropic,
 }
 
 /// A chat provider definition.
@@ -167,7 +169,11 @@ impl ProviderConfig {
                 id: "custom",
                 name: "Custom",
                 endpoint: "",
-                wire: ChatWire::OpenAi,
+                wire: if custom.request_format == "anthropic" {
+                    ChatWire::Anthropic
+                } else {
+                    ChatWire::OpenAi
+                },
                 supports_images: custom.supports_images,
             })
         } else {

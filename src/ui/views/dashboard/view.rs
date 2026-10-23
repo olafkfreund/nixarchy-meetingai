@@ -38,6 +38,9 @@ pub struct DashboardView {
     renaming: bool,
     edit_target: Option<EditTarget>,
     profile_edit: Option<profiles::ProfileDraft>,
+    profile_search: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
+    profile_observer: Option<gpui::Subscription>,
+    profile_delete: Option<String>,
     editor: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
     rename_buffer: String,
     credential_focus: Option<FocusHandle>,
@@ -102,6 +105,9 @@ impl DashboardView {
             renaming: false,
             edit_target: None,
             profile_edit: None,
+            profile_search: None,
+            profile_observer: None,
+            profile_delete: None,
             editor: None,
             rename_buffer: String::new(),
             credential_focus: None,
@@ -145,12 +151,14 @@ impl DashboardView {
         self.renaming = false;
         self.edit_target = None;
         self.profile_edit = None;
+        self.profile_delete = None;
         self.editor = None;
         self.rename_buffer.clear();
         self.settings.key_field = None;
         self.prompt_edit = None;
         self.prompt_menu = None;
         self.settings.device_menu = None;
+        self.settings.provider_menu = None;
         self.settings.speech_language_menu = false;
         self.settings.language_menu = false;
         self.reset_credential_models();
@@ -410,9 +418,17 @@ impl DashboardView {
             credential
         });
         credential.api_key.clear();
+        self.settings.credential_observers.clear();
+        self.settings.credential_editors.clear();
+        self.settings.provider_menu = None;
+        self.settings.provider_docs = None;
         self.settings.custom_json = None;
         self.settings.custom_json_mode = false;
         self.settings.custom_guide = false;
+        self.settings.provider_docs = crate::ai::catalog::presets::PRESETS
+            .iter()
+            .find(|preset| preset.speech == speech && preset.endpoint == credential.base_url)
+            .map(|preset| preset.docs);
         self.settings.custom_draft = Some(credential);
         self.settings.custom_open = true;
         self.custom_focus_pending = true;
@@ -423,6 +439,10 @@ impl DashboardView {
     pub fn edit_builtin_provider(&mut self, id: &str) {
         self.reset_credential_models();
         self.settings.custom_draft = None;
+        self.settings.credential_observers.clear();
+        self.settings.credential_editors.clear();
+        self.settings.provider_menu = None;
+        self.settings.provider_docs = None;
         self.settings.custom_json = None;
         self.settings.custom_json_mode = false;
         self.settings.custom_guide = false;
@@ -449,6 +469,65 @@ impl DashboardView {
         self.custom_focus_pending = true;
     }
 
+    fn init_credential_editors(&mut self, cx: &mut Context<Self>) {
+        use settings_pages::CredentialField as F;
+        let fields = if let Some(draft) = &self.settings.custom_draft {
+            let custom = draft.custom.as_ref().expect("custom draft");
+            vec![
+                (F::CustomName, custom.name.clone()),
+                (F::CustomEndpoint, draft.base_url.clone()),
+                (F::CustomKey, draft.api_key.clone()),
+                (F::CustomModel, draft.model.clone()),
+                (F::CustomHeader, custom.auth_header.clone()),
+                (F::CustomPath, custom.response_path.clone()),
+                (F::CustomStream, custom.stream_url.clone()),
+            ]
+        } else {
+            vec![
+                (F::Key, self.settings.key_input.clone()),
+                (F::Model, self.settings.key_model.clone()),
+            ]
+        };
+        for (field, value) in fields {
+            let editor = cx.new(|cx| {
+                let mut editor = crate::ui::widgets::editor::Editor::new(&value, self.theme, cx);
+                editor.compact = true;
+                editor.secret = matches!(field, F::Key | F::CustomKey);
+                editor.max_chars = Some(if field == F::CustomName { 80 } else { 4096 });
+                editor.placeholder = if editor.secret {
+                    "Paste a key; leave blank to keep a saved key"
+                } else {
+                    "Enter a value..."
+                };
+                editor
+            });
+            self.settings.credential_observers.push(cx.observe(
+                &editor,
+                move |this, editor, cx| {
+                    let value = editor.read(cx).input.text().to_owned();
+                    let previous = this.settings.key_field;
+                    this.settings.key_field = Some(field);
+                    let changed = if let Some(destination) = this.credential_field_mut() {
+                        if *destination != value {
+                            *destination = value;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    this.settings.key_field = previous;
+                    if changed && field == F::Key {
+                        this.reset_credential_models();
+                    }
+                    cx.notify();
+                },
+            ));
+            self.settings.credential_editors.push((field, editor));
+        }
+    }
+
     pub fn apply_provider_json(&mut self, cx: &mut Context<Self>) {
         let Some(draft) = self.settings.custom_draft.as_ref() else {
             return;
@@ -459,6 +538,8 @@ impl DashboardView {
         match crate::core::security::provider_import::parse(editor.read(cx).input.text(), draft) {
             Ok(draft) => {
                 self.settings.custom_draft = Some(draft);
+                self.settings.credential_observers.clear();
+                self.settings.credential_editors.clear();
                 self.settings.custom_json_mode = false;
                 self.settings.key_field = None;
                 self.settings.key_status =
@@ -1720,6 +1801,22 @@ impl DashboardView {
                     )),
             )
             .child(
+                div().flex().flex_col().w_full().gap(px(12.0)).p(px(18.0))
+                    .rounded(px(14.0)).border_1().border_color(theme.control_border(false)).bg(surfaces.card())
+                    .child(div().text_center().text_size(scaled(13.0)).font_weight(FontWeight::MEDIUM).child("Creator & contact"))
+                    .child(div().text_center().text_size(scaled(11.0)).text_color(theme.muted_foreground)
+                        .child("Questions, feedback, or anything else - get in touch."))
+                    .child(div().flex().flex_wrap().justify_center().gap(px(8.0))
+                        .child(action_button("about-author-portfolio", &theme, "Author's portfolio", cx,
+                            |_, cx, _| cx.open_url("https://przknv.cc")))
+                        .child(action_button("about-author-github", &theme, "Author's GitHub", cx,
+                            |_, cx, _| cx.open_url("https://github.com/parazeeknova")))
+                        .child(action_button("about-singularity-works", &theme, "Singularity Works", cx,
+                            |_, cx, _| cx.open_url("https://itssingularity.com")))
+                        .child(action_button("about-contact-email", &theme, "harsh@itssingularity.com", cx,
+                            |_, cx, _| cx.open_url("mailto:harsh@itssingularity.com"))))
+            )
+            .child(
                 div()
                     .w_full()
                     .text_center()
@@ -2143,14 +2240,7 @@ impl DashboardView {
             super::nav::Route::Meetings => self.meetings_body(cx),
             super::nav::Route::MeetingDetail => self.meeting_detail(cx),
             super::nav::Route::Prompts => self.prompts_body(cx).into_any_element(),
-            super::nav::Route::Profiles => div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .gap(px(16.0))
-                .child(self.page_heading("Profiles", super::nav::Route::Profiles.description()))
-                .child(self.profiles_body(cx))
-                .into_any_element(),
+            super::nav::Route::Profiles => self.profiles_body(window, cx),
             super::nav::Route::About => self.about_body(window, cx),
             _ => self.settings_body(cx),
         }
@@ -2223,6 +2313,9 @@ impl Render for DashboardView {
             self.settings_search_observer = Some(cx.observe(&search, |_, _, cx| cx.notify()));
             self.settings_search = Some(search);
         }
+        if self.settings.custom_open && self.settings.credential_editors.is_empty() {
+            self.init_credential_editors(cx);
+        }
         let (modal_progress, animating) = self.custom_motion.step(
             f32::from(self.settings.custom_open),
             self.settings.settings.reduce_motion,
@@ -2234,6 +2327,8 @@ impl Render for DashboardView {
         if modal_progress == 0.0 && !self.settings.custom_open {
             self.settings.custom_draft = None;
             self.settings.custom_json = None;
+            self.settings.credential_observers.clear();
+            self.settings.credential_editors.clear();
             self.settings.key_input.clear();
         }
         if self.settings.custom_open
@@ -2245,6 +2340,12 @@ impl Render for DashboardView {
                 editor.placeholder = "Paste provider JSON here…";
                 editor
             }));
+        }
+        if self.dashboard.route() == super::nav::Route::Profiles && self.profile_search.is_none() {
+            self.init_profile_search(cx);
+        }
+        if let Some(draft) = &self.profile_edit {
+            draft.sync_theme(Theme::from_settings(&self.settings.settings), cx);
         }
         if self.dashboard.route() == super::nav::Route::Prompts && self.prompt_search.is_none() {
             self.init_prompt_search(cx);
@@ -2280,11 +2381,15 @@ impl Render for DashboardView {
         for editor in [
             self.settings_search.as_ref(),
             self.prompt_search.as_ref(),
+            self.profile_search.as_ref(),
             self.settings.custom_json.as_ref(),
         ]
         .into_iter()
         .flatten()
         {
+            crate::ui::widgets::editor::Editor::sync_theme(editor, theme, cx);
+        }
+        for (_, editor) in &self.settings.credential_editors {
             crate::ui::widgets::editor::Editor::sync_theme(editor, theme, cx);
         }
         let surfaces = self.surfaces();
@@ -2366,6 +2471,11 @@ impl Render for DashboardView {
             .overflow_hidden()
             // Dev Space owns the keyboard so the key field can be typed into.
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if this.settings.provider_menu.is_some() && event.keystroke.key == "escape" {
+                    this.settings.provider_menu = None;
+                    cx.notify();
+                    return;
+                }
                 if this.settings.custom_open && event.keystroke.key == "escape" {
                     this.settings.custom_open = false;
                     this.settings.key_field = None;
