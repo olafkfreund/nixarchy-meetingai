@@ -12,8 +12,6 @@ import {
 import { useEffect } from "react";
 import type { ReactNode } from "react";
 
-import { reportLovableError } from "../lib/lovable-error-reporting";
-
 import appCss from "../styles.css?url";
 
 const NotFoundComponent = () => (
@@ -42,7 +40,6 @@ const ErrorComponent = ({ error, reset }: ErrorComponentProps) => {
   const router = useRouter();
   useEffect(() => {
     console.error(error);
-    reportLovableError(error, { boundary: "tanstack_root_error_component" });
   }, [error]);
 
   return (
