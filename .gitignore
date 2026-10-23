@@ -33,3 +33,4 @@ ref/
 *.key
 test-key*
 node_modules/
+.wrangler
