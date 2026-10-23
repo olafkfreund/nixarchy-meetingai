@@ -61,19 +61,24 @@ const marks: Record<
   unknown: null,
 };
 
-export const PlatformDownload = () => {
-  const platform = useSyncExternalStore(
-    subscribe,
-    getSnapshot,
-    getServerSnapshot
-  );
+export const usePlatform = () =>
+  useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+
+export const PlatformDownload = ({
+  className = "mt-8",
+  id = "download",
+}: {
+  className?: string;
+  id?: string;
+}) => {
+  const platform = usePlatform();
   const Mark = marks[platform];
 
   return (
     <Link
       to="/downloads"
-      id="download"
-      className="glass btn-liquid mt-8 glass-pill"
+      id={id}
+      className={`glass btn-liquid glass-pill ${className}`}
     >
       {Mark ? <Mark className="size-5 shrink-0" /> : null}
       <span>{labels[platform]}</span>

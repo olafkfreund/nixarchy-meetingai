@@ -17,7 +17,10 @@ export const NotifyEmail = ({
   receivedAt: string;
   userAgent?: string;
 }) => (
-  <EmailLayout preview={`New waitlist signup: ${email}`}>
+  <EmailLayout
+    preview={`New waitlist signup: ${email}`}
+    footer="A signup from the Lennette waitlist. Reply to this email to contact them directly."
+  >
     <Text
       style={{
         ...paragraph,

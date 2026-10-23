@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# Native Linux setup: curl -fsSL https://lennette.itssingularity.com/install | bash
+# After setup: lenny [update|doctor|uninstall]. No Node.js or Rust required.
+set -euo pipefail
+
+RELEASES=${LENNETTE_RELEASES_URL:-https://github.com/${LENNETTE_REPO:-parazeeknova/lennette}/releases}
+SELF_URL=${LENNETTE_INSTALL_URL:-${LENNETTE_SITE_URL:-https://lennette.itssingularity.com}/install}
+DATA_DIR=${LENNETTE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/lennette}
+BIN_DIR=${XDG_BIN_HOME:-$HOME/.local/bin}
+VERSION=latest
+MODIFY_PATH=1
+LAUNCH=1
+TEMP=""
+trap '[[ -z $TEMP ]] || rm -rf -- "$TEMP"' EXIT
+
+info() { printf '%s\n' "$*"; }
+fail() { printf 'lenny: %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+while (($#)); do
+    case "$1" in
+        --version) [[ $# -ge 2 ]] || fail '--version needs a release tag'; VERSION=$2; shift 2 ;;
+        --version=*) VERSION=${1#*=}; shift ;;
+        --no-modify-path) MODIFY_PATH=0; shift ;;
+        --no-launch) LAUNCH=0; shift ;;
+        --uninstall)
+            if [[ -x $BIN_DIR/lenny ]]; then exec "$BIN_DIR/lenny" uninstall; fi
+            info 'Lennette is not installed.'; exit 0 ;;
+        -h|--help)
+            info 'Install and launch Lennette (Linux x86_64).'
+            info '  --version <tag>    install a specific release'
+            info '  --no-launch        install without opening the app'
+            info '  --no-modify-path   leave shell startup files alone'
+            info 'After setup: lenny, lenny update, lenny doctor, lenny uninstall'
+            exit 0 ;;
+        *) fail "unknown option: $1" ;;
+    esac
+done
+
+[[ $(uname -s) == Linux ]] || fail 'Use the PowerShell setup command on Windows. macOS is not supported yet.'
+[[ $(uname -m) == x86_64 ]] || fail 'Only Linux x86_64 releases are available.'
+ASSET=lennette-linux-x86_64.tar.gz
+MANIFEST=SHA256SUMS-linux-x86_64.txt
+
+# Download to disk before executing anything. Local mirrors also support tests.
+download() {
+    if [[ $1 == /* ]]; then cp -- "$1" "$2"
+    elif have curl; then curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 300 -o "$2" "$1"
+    elif have wget; then wget --https-only --timeout=30 --tries=3 -qO "$2" "$1"
+    else fail 'Install curl or wget and try again.'; fi
+}
+
+if [[ $VERSION == latest ]]; then
+    if [[ $RELEASES == /* ]]; then
+        VERSION=$(find "$RELEASES/download" -mindepth 1 -maxdepth 1 -type d -name 'v*' -printf '%f\n' | sort -V | tail -n 1)
+    elif have curl; then
+        resolved=$(curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 30 -o /dev/null -w '%{url_effective}' "$RELEASES/latest") || fail 'Could not find the latest release. Check your connection.'
+        [[ $resolved == "$RELEASES/tag/"* ]] || fail 'No published release was found.'
+        VERSION=${resolved##*/}
+    else
+        TEMP=$(mktemp -d)
+        download "$RELEASES/latest" "$TEMP/latest.html"
+        VERSION=$(grep -oE '/releases/tag/v[0-9A-Za-z._-]+' "$TEMP/latest.html" | sed -n '1s|.*/tag/||p')
+    fi
+fi
+[[ $VERSION =~ ^v[0-9A-Za-z][0-9A-Za-z._-]*$ ]] || fail 'Expected a published release tag beginning with v.'
+payload="$DATA_DIR/versions/$VERSION/linux-x86_64"
+binary="$payload/lennette"
+
+if [[ -x $binary ]] && "$binary" --version >/dev/null 2>&1; then
+    info "Already installed: $VERSION"
+else
+    [[ -n $TEMP ]] || TEMP=$(mktemp -d)
+    info "Downloading Lennette $VERSION for Linux x86_64…"
+    download "$RELEASES/download/$VERSION/$MANIFEST" "$TEMP/$MANIFEST"
+    download "$RELEASES/download/$VERSION/$ASSET" "$TEMP/$ASSET"
+    want=$(tr -d '\r' <"$TEMP/$MANIFEST" | awk -v name="$ASSET" '$2 == name || $2 == "*" name { print tolower($1); exit }')
+    [[ $want =~ ^[0-9a-f]{64}$ ]] || fail "$ASSET is missing from the checksum manifest."
+    if have sha256sum; then got=$(sha256sum "$TEMP/$ASSET"); got=${got%% *}
+    elif have shasum; then got=$(shasum -a 256 "$TEMP/$ASSET"); got=${got%% *}
+    else fail 'Install sha256sum or shasum to verify the download.'; fi
+    [[ $want == "$got" ]] || fail "checksum mismatch for $ASSET; the existing installation was left alone."
+    # Extract only the known executable, never paths supplied by the archive.
+    tar -xOzf "$TEMP/$ASSET" lennette-linux-x86_64/lennette >"$TEMP/lennette"
+    chmod 755 "$TEMP/lennette"
+    if ! "$TEMP/lennette" --version; then
+        fail 'This build could not start. Check the loader error above for missing libraries or a newer glibc requirement. On NixOS use the documented Nix installation.'
+    fi
+    mkdir -p "$payload"
+    staged=$(mktemp "$payload/.lennette.XXXXXXXX")
+    install -m 755 "$TEMP/lennette" "$staged"
+    mv -f -- "$staged" "$binary"
+fi
+
+mkdir -p "$BIN_DIR"
+launcher=$(mktemp "$BIN_DIR/.lenny.XXXXXXXX")
+{
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+    # Bash quoting handles spaces and apostrophes in home directories and URLs.
+    printf 'data=%q\nbin=%q\nnative=%q\ninstaller=%q\nreleases=%q\n' "$DATA_DIR" "$BIN_DIR" "$binary" "$SELF_URL" "$RELEASES"
+    cat <<'LAUNCHER'
+fetch_setup() {
+    local setup status=0
+    setup=$(mktemp)
+    if [[ $installer == /* ]]; then cp -- "$installer" "$setup" || status=$?
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 60 -o "$setup" "$installer" || status=$?
+    elif command -v wget >/dev/null 2>&1; then
+        wget --https-only --timeout=30 --tries=3 -qO "$setup" "$installer" || status=$?
+    else printf '%s\n' 'lenny: install curl or wget to update or repair.' >&2; status=1; fi
+    if (( status == 0 )); then
+        LENNETTE_HOME="$data" XDG_BIN_HOME="$bin" LENNETTE_RELEASES_URL="$releases" LENNETTE_INSTALL_URL="$installer" bash "$setup" --no-launch "$@" || status=$?
+    fi
+    rm -f -- "$setup"
+    return "$status"
+}
+case ${1:-} in
+    update)
+        shift
+        fetch_setup "$@"
+        exit $? ;;
+    uninstall)
+        [[ $# == 1 ]] || { printf 'Usage: lenny uninstall\n' >&2; exit 1; }
+        rm -f -- "$bin/lenny"
+        if [[ -L $bin/lennette && $(readlink "$bin/lennette") == lenny ]]; then rm -- "$bin/lennette"; fi
+        rm -rf -- "${data:?}/versions"
+        rm -f -- "$data/launch.log"
+        rmdir -- "$data" 2>/dev/null || true
+        printf '%s\n' 'Lennette removed. Your settings, history, and API keys were kept.'
+        exit 0 ;;
+    doctor)
+        status=0
+        printf 'Platform: %s %s\nExecutable: %s\n' "$(uname -s)" "$(uname -m)" "$native"
+        if ! "$native" --version; then
+            printf '%s\n' 'Run lenny update to repair the installation.' >&2
+            status=1
+        fi
+        if [[ -z ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]]; then
+            printf '%s\n' 'No desktop session detected (DISPLAY / WAYLAND_DISPLAY).' >&2
+            status=1
+        fi
+        if command -v ldd >/dev/null 2>&1; then
+            missing=$(ldd "$native" 2>/dev/null | grep 'not found' || true)
+            if [[ -n $missing ]]; then printf '%s\n' "$missing" >&2; status=1; fi
+        fi
+        case :$PATH: in *":$bin:"*) ;; *) printf 'Open a new terminal, or run: export PATH=%q:"$PATH"\n' "$bin" ;; esac
+        exit "$status" ;;
+    help|-h|--help)
+        printf '%s\n' 'lenny — launch Lennette' '  lenny update [--version <tag>]  install the latest or a pinned release' '  lenny doctor                    check the local installation' '  lenny uninstall                 remove the app, keeping your data' 'App options such as --version and --toggle-dashboard are forwarded.'
+        exit 0 ;;
+esac
+if [[ ! -x $native ]]; then
+    printf '%s\n' 'lenny: repairing the missing app…' >&2
+    fetch_setup
+    # An update can change the versioned executable path. Re-read the launcher.
+    exec "$bin/lenny" "$@"
+fi
+if (($#)); then exec "$native" "$@"; fi
+if [[ -z ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]]; then
+    printf '%s\n' 'lenny: launch from a Linux desktop session, or run lenny doctor.' >&2
+    exit 1
+fi
+nohup "$native" </dev/null >>"$data/launch.log" 2>&1 &
+pid=$!
+sleep 0.2
+if ! kill -0 "$pid" 2>/dev/null; then
+    if wait "$pid"; then exit 0; else status=$?; fi
+    printf 'lenny: the app exited during startup. See %s/launch.log or run lenny doctor.\n' "$data" >&2
+    exit "$status"
+fi
+LAUNCHER
+} >"$launcher"
+chmod 755 "$launcher"
+mv -f -- "$launcher" "$BIN_DIR/lenny"
+if [[ ! -e $BIN_DIR/lennette || -L $BIN_DIR/lennette ]]; then ln -sfn lenny "$BIN_DIR/lennette"; fi
+
+# A child process cannot change the parent shell's PATH. Persist it for the next
+# terminal and use the absolute launcher path to open the app immediately.
+case :${PATH-}: in
+    *":$BIN_DIR:"*) ;;
+    *)
+        if (( MODIFY_PATH )); then
+            rc=""
+            case ${SHELL:-} in
+                */bash) rc="$HOME/.bashrc" ;;
+                */zsh) rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
+                */fish) rc="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish" ;;
+                *) rc="$HOME/.profile" ;;
+            esac
+            if [[ ! -e $rc || ( -f $rc && -w $rc ) ]]; then
+                if ! grep -qF '# lennette: user binaries on PATH' "$rc" 2>/dev/null; then
+                    mkdir -p "$(dirname "$rc")"
+                    {
+                        printf '\n# lennette: user binaries on PATH\n'
+                        if [[ ${SHELL:-} == */fish ]]; then
+                            fish_path=${BIN_DIR//\\/\\\\}
+                            fish_path=${fish_path//\'/\\\'}
+                            printf "fish_add_path -- '%s'\n" "$fish_path"
+                        else
+                            # Keep PATH literal for the user's next shell.
+                            # shellcheck disable=SC2016
+                            printf 'export PATH=%q:"$PATH"\n' "$BIN_DIR"
+                        fi
+                    } >>"$rc"
+                fi
+            else info "Could not update $rc (it may be managed by Nix). Add $BIN_DIR to PATH yourself."
+            fi
+        fi
+        info "Open a new terminal to use lenny, or run: export PATH=$(printf %q "$BIN_DIR"):\"\$PATH\""
+        ;;
+esac
+info 'Ready. From now on, run: lenny'
+if (( LAUNCH )); then
+    if [[ -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]]; then "$BIN_DIR/lenny"
+    else info 'No desktop session detected; run lenny from your desktop terminal.'; fi
+fi

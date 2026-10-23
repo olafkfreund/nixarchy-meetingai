@@ -18,7 +18,55 @@ Bring your own keys: **Google Gemini** or **Merge Gateway** for chat; **Deepgram
   <img src="https://swr2.itssingularity.com/lennette/lennette_header.png" alt="Lennette — know exactly what to say, live" width="100%" />
 </p>
 
-Download a build from [Releases](https://github.com/parazeeknova/lennette/releases). SHA-256 checksums are included.
+### Set up once, then run `lenny`
+
+**Linux (x86_64 desktop):**
+
+```sh
+curl -fsSL https://lennette.itssingularity.com/install | bash
+```
+
+**Windows (x86_64, PowerShell 5.1 or newer):**
+
+```powershell
+irm https://lennette.itssingularity.com/install.ps1 | iex
+```
+
+Setup downloads and verifies the release, adds a user-local command, and opens
+Lennette immediately. No Node.js, Rust, repository clone, or administrator rights.
+On Linux, open a new terminal afterward to pick up the PATH change. Windows
+PowerShell updates the current PATH too.
+
+From then on, the commands are the same on both platforms:
+
+```sh
+lenny                              # launch the installed app
+lenny update                       # install the latest release
+lenny update --version <tag>        # select a published release
+lenny doctor                       # check the executable and desktop environment
+lenny uninstall                    # remove releases, keeping settings and keys
+```
+
+Launches use the local binary and work offline. Missing payloads are repaired on
+the next launch; updates require a connection. Updates verify and check the new
+executable before switching the launcher, keeping old versions until uninstall.
+For setup without opening the app, use `bash -s -- --no-launch` on Linux or
+`& ([scriptblock]::Create((irm https://lennette.itssingularity.com/install.ps1))) -NoLaunch`
+on Windows.
+
+The two native setup scripts live directly in `web/public/install` and
+`web/public/install.ps1`, served as `/install` and `/install.ps1`. There are no
+root copies or generated copies. Bash and PowerShell need different setup
+syntax; after setup, users only need `lenny`. Windows exposes one `lenny.cmd`
+command, avoiding a conflicting `lenny.ps1` that execution policy could block.
+
+Linux needs the release build's glibc version and your distribution's desktop,
+Vulkan, and audio libraries; these are not bundled in the archive. Setup reports
+loader errors, and `lenny doctor` checks missing libraries and a desktop session.
+On NixOS, use the Nix installation below to supply the interpreter and runtime
+libraries. ARM and macOS builds are not available yet.
+
+Prefer a plain download? Grab a build from [Releases](https://github.com/parazeeknova/lennette/releases). SHA-256 checksums are included.
 
 ### Screen sharing
 

@@ -1,7 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
 
 import { Command } from "@/components/command";
-import { GITHUB_URL, PageShell, RELEASES_URL } from "@/components/page-shell";
+import {
+  GITHUB_URL,
+  PageShell,
+  RELEASES_URL,
+  SITE_URL,
+} from "@/components/page-shell";
+import { usePlatform } from "@/components/platform-download";
 import { platformMarks } from "@/components/platform-marks";
 import type { Platform } from "@/components/platform-marks";
 import { pageHead } from "@/lib/seo";
@@ -28,6 +35,65 @@ interface Card {
 // GitHub serves the newest release's assets from this stable path, so the links
 // keep working without hardcoding a tag.
 const assetUrl = (asset: string) => `${RELEASES_URL}/latest/download/${asset}`;
+
+const unixInstall = `curl -fsSL ${SITE_URL}/install | bash`;
+const windowsInstall = `irm ${SITE_URL}/install.ps1 | iex`;
+
+export const NativeSetup = () => {
+  const detected = usePlatform();
+  const [selected, setSelected] = useState<"linux" | "windows" | null>(null);
+  const platform = selected ?? (detected === "windows" ? "windows" : "linux");
+
+  return (
+    <div className="mt-6 flex flex-col gap-3">
+      <fieldset className="glass relative flex w-fit gap-1 glass-pill p-1">
+        <legend className="sr-only">Setup platform</legend>
+        {(["linux", "windows"] as const).map((os) => {
+          const Mark = platformMarks[os];
+          return (
+            <button
+              key={os}
+              type="button"
+              aria-pressed={platform === os}
+              onClick={() => setSelected(os)}
+              className={`relative z-10 inline-flex h-10 items-center justify-center gap-2 rounded-full px-5 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-deep ${
+                platform === os
+                  ? "bg-white/80 text-ink shadow-[0_1px_2px_oklch(0.4_0.08_250/0.12)]"
+                  : "text-ink-soft hover:bg-white/25 hover:text-ink"
+              }`}
+            >
+              <Mark className="size-4 shrink-0" />
+              <span>{os === "windows" ? "Windows" : "Linux"}</span>
+            </button>
+          );
+        })}
+      </fieldset>
+      <Command
+        label={
+          platform === "windows"
+            ? "One-time setup · PowerShell"
+            : "One-time setup · terminal"
+        }
+      >
+        {platform === "windows" ? windowsInstall : unixInstall}
+      </Command>
+      <p className="text-sm leading-relaxed text-ink-soft">
+        Setup opens Lennette right away. On Linux, open a new terminal afterward
+        so it picks up your PATH.
+      </p>
+      <Command label="Every launch after setup · Windows and Linux">
+        lenny
+      </Command>
+      <p className="max-w-2xl text-sm leading-relaxed text-ink-soft">
+        Use <code>lenny update</code> to get the newest release,{" "}
+        <code>lenny doctor</code> to check your installation, or{" "}
+        <code>lenny uninstall</code> to remove the app while keeping your
+        settings and keys. Launches use your local copy, without downloading it
+        again.
+      </p>
+    </div>
+  );
+};
 
 const cards: Card[] = [
   {
@@ -177,9 +243,13 @@ const DownloadsPage = () => (
                 </a>
               ) : null}
               {card.pending ? (
-                <span className="flex h-11 items-center justify-center rounded-full border border-ink/15 text-sm font-medium text-ink-soft">
-                  Coming soon
-                </span>
+                <button
+                  type="button"
+                  disabled
+                  className="glass btn-liquid h-11 cursor-not-allowed glass-pill text-sm text-ink-soft opacity-60 disabled:hover:bg-transparent"
+                >
+                  <span>Coming soon</span>
+                </button>
               ) : null}
             </div>
           </div>
@@ -195,6 +265,25 @@ const DownloadsPage = () => (
       manifest. If a button returns 404, no release has been published yet —
       build from source below.
     </p>
+
+    <section className="mt-14">
+      <h2 className="font-display text-2xl text-ink">
+        Set up once. Then just lenny.
+      </h2>
+      <p className="mt-3 max-w-2xl leading-relaxed text-ink-soft">
+        Setup downloads the release for your computer, checks it against the
+        published{" "}
+        <code className="rounded bg-white/45 px-1.5 py-0.5 text-ink">
+          SHA256SUMS
+        </code>{" "}
+        manifest and puts{" "}
+        <code className="rounded bg-white/45 px-1.5 py-0.5 text-ink">
+          lenny
+        </code>{" "}
+        on your PATH. No Node.js, clone, toolchain, or admin rights required.
+      </p>
+      <NativeSetup />
+    </section>
 
     <section className="mt-14">
       <h2 className="font-display text-2xl text-ink">Build from source</h2>

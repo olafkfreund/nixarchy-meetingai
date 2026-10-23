@@ -36,6 +36,15 @@ build:
 run:
     {{devenv}}cargo run
 
+# Install/upgrade the released build with the one-line installer. No clone,
+# no toolchain: downloads the matching release and puts `lenny` on PATH.
+install-script:
+    bash web/public/install
+
+# Check native Linux setup and the lenny command against local release fixtures.
+test-install-script:
+    ./tests/install-sh.test.sh
+
 # Run the unit test suite.
 test:
     {{devenv}}cargo nextest run --workspace

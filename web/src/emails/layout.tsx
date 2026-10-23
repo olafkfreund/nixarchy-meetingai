@@ -24,7 +24,7 @@ const colors = {
 const ASSETS = "https://swr2.itssingularity.com/lennette";
 
 const Header = () => (
-  <Section style={{ padding: 0, margin: 0 }}>
+  <Section style={{ padding: "12px 12px 0", margin: 0 }}>
     <Img
       src={`${ASSETS}/lennette_header.png`}
       alt="Lennette"
@@ -63,12 +63,25 @@ const Footer = () => (
 export const EmailLayout = ({
   preview,
   children,
+  footer = "You received this because you joined the Lennette waitlist. One launch email, no drip sequence. Reply if you'd like to leave the list.",
 }: {
   preview: string;
   children: ReactNode;
+  footer?: string;
 }) => (
   <Html lang="en">
-    <Head />
+    <Head>
+      <meta name="color-scheme" content="light" />
+      <meta name="supported-color-schemes" content="light" />
+      <style>{`
+        @media only screen and (max-width: 480px) {
+          .email-content { padding: 24px 22px 0 !important; }
+          .email-footer { padding: 0 22px 24px !important; }
+          .email-heading { font-size: 33px !important; line-height: 38px !important; }
+          .email-benefits { padding: 20px 16px !important; }
+        }
+      `}</style>
+    </Head>
     <Preview>{preview}</Preview>
     <Body
       style={{
@@ -91,8 +104,10 @@ export const EmailLayout = ({
         }}
       >
         <Header />
-        <Section style={{ padding: "32px 36px 8px 36px" }}>{children}</Section>
-        <Section style={{ padding: "0 36px 28px 36px" }}>
+        <Section className="email-content" style={{ padding: "24px 40px 0" }}>
+          {children}
+        </Section>
+        <Section className="email-footer" style={{ padding: "0 40px 28px" }}>
           <Hr
             style={{
               borderColor: colors.line,
@@ -109,8 +124,7 @@ export const EmailLayout = ({
               color: colors.faint,
             }}
           >
-            You are getting this because you joined the Lennette waitlist. Reply
-            to this email and it comes straight to me.
+            {footer}
           </Text>
         </Section>
         <Footer />

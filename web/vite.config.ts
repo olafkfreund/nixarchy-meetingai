@@ -29,6 +29,22 @@ export default defineConfig({
   optimizeDeps: {
     include: ["react", "react-dom", "react-dom/client"],
   },
+  environments: {
+    ssr: {
+      // Workerd cannot execute React's CommonJS entry points directly.
+      // Prebundle them as ESM for Nitro's Cloudflare dev runner.
+      optimizeDeps: {
+        noDiscovery: false,
+        include: [
+          "react",
+          "react/jsx-runtime",
+          "react/jsx-dev-runtime",
+          "react-dom",
+          "react-dom/server",
+        ],
+      },
+    },
+  },
   css: { transformer: "lightningcss" },
   plugins: [
     tailwindcss(),

@@ -1,11 +1,16 @@
 import { render } from "@react-email/render";
 import { createServerFn } from "@tanstack/react-start";
 
+import { emailIcons } from "../emails/icons";
 import { NotifyEmail } from "../emails/notify";
-import { WaitlistEmail } from "../emails/waitlist";
+import {
+  WaitlistEmail,
+  WAITLIST_SUBJECT,
+  waitlistText,
+} from "../emails/waitlist";
 import { MANAGED_PLAN as PLAN } from "./site";
 
-const FROM = "Lennette <harsh@itssingularity.com>";
+const FROM = "Harsh at Lennette <harsh@itssingularity.com>";
 
 // Deliberately permissive: over-strict patterns reject valid addresses. The
 // real check is whether the address can receive mail.
@@ -65,6 +70,7 @@ export const joinWaitlist = createServerFn({ method: "POST" })
     const [toSignup, toOwner] = await Promise.all([
       render(
         <WaitlistEmail
+          attachedIcons
           email={data.email}
           plan={PLAN.name}
           price={PLAN.price}
@@ -88,9 +94,15 @@ export const joinWaitlist = createServerFn({ method: "POST" })
     const signup = await resend.emails.send({
       from: config.from,
       to: data.email,
-      subject: "You are on the Lennette list",
+      subject: WAITLIST_SUBJECT,
       html: toSignup,
-      text: "Thanks for joining the Lennette waitlist. You are first in line for the Managed plan when it opens. Reply to this email and it reaches me directly.",
+      text: waitlistText(data.email, PLAN.name, PLAN.price),
+      attachments: Object.entries(emailIcons).map(([name, content]) => ({
+        filename: `${name}.png`,
+        content,
+        contentType: "image/png",
+        contentId: `lennette-${name}`,
+      })),
     });
 
     if (signup.error) {

@@ -1,7 +1,10 @@
 import { Link } from "@tanstack/react-router";
+import { ChevronDown, X } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import skyFooter from "@/assets/sky-footer.jpg";
+import { PlatformDownload } from "@/components/platform-download";
 import { GITHUB_URL } from "@/lib/site";
 
 const appIcon =
@@ -28,42 +31,121 @@ const navLinks = [
   { label: "Pricing", to: "/pricing" },
 ] as const;
 
-export const SiteNav = () => (
-  <header className="absolute inset-x-0 top-0 z-30 px-4 pt-5 sm:px-8">
-    <nav className="glass mx-auto flex h-16 max-w-5xl items-center justify-between glass-pill pr-2 pl-4">
-      <Link to="/" className="relative z-10 flex items-center gap-2.5">
-        <img
-          src="/lennette.png"
-          alt=""
-          width={44}
-          height={30}
-          className="h-8 w-auto"
-        />
-        <span className="font-display text-2xl leading-none text-ink">
-          lennette
-        </span>
-      </Link>
-      <div className="relative z-10 hidden items-center gap-7 text-sm font-medium text-ink-soft lg:flex">
-        {navLinks.map((link) => (
-          <Link
-            key={link.label}
-            to={link.to}
-            {...("hash" in link ? { hash: link.hash } : {})}
-            className="transition-colors hover:text-ink"
-          >
-            {link.label}
-          </Link>
-        ))}
-      </div>
-      <Link
-        to="/downloads"
-        className="glass btn-liquid h-12 glass-pill px-5 text-sm"
+export const SiteNav = () => {
+  const [open, setOpen] = useState(false);
+  const menu = useRef<HTMLDivElement>(null);
+  const toggle = useRef<HTMLButtonElement>(null);
+  const menuId = useId();
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const dismissOutside = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        !menu.current?.contains(event.target)
+      ) {
+        setOpen(false);
+      }
+    };
+    const dismissEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        toggle.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", dismissOutside);
+    document.addEventListener("keydown", dismissEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutside);
+      document.removeEventListener("keydown", dismissEscape);
+    };
+  }, [open]);
+
+  return (
+    <header className="absolute inset-x-0 top-0 z-30 px-4 pt-5 sm:px-8">
+      <nav
+        aria-label="Main navigation"
+        className="glass mx-auto flex h-16 max-w-5xl items-center justify-between gap-3 glass-pill pr-2 pl-4"
       >
-        <span>Get lennette</span>
-      </Link>
-    </nav>
-  </header>
-);
+        <Link to="/" className="relative z-10 flex items-center gap-2.5">
+          <img
+            src="/lennette.png"
+            alt=""
+            width={44}
+            height={30}
+            className="h-8 w-auto"
+          />
+          <span className="font-display text-2xl leading-none text-ink">
+            lennette
+          </span>
+        </Link>
+        <div className="relative z-10 hidden items-center gap-7 text-sm font-medium text-ink-soft lg:flex">
+          {navLinks.map((link) => (
+            <Link
+              key={link.label}
+              to={link.to}
+              {...("hash" in link ? { hash: link.hash } : {})}
+              className="transition-colors hover:text-ink"
+            >
+              {link.label}
+            </Link>
+          ))}
+        </div>
+        <div className="relative z-20 flex items-center gap-2">
+          <div ref={menu} className="relative lg:hidden">
+            <button
+              ref={toggle}
+              type="button"
+              aria-expanded={open}
+              aria-controls={menuId}
+              aria-label={
+                open ? "Close page navigation" : "Open page navigation"
+              }
+              onClick={() => setOpen(!open)}
+              className="glass flex h-11 items-center justify-center gap-2 glass-pill px-4 text-sm font-semibold text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-deep"
+            >
+              <span className="relative z-10">Pages</span>
+              {open ? (
+                <X className="relative z-10 size-4" />
+              ) : (
+                <ChevronDown className="relative z-10 size-4" />
+              )}
+            </button>
+            {open ? (
+              <div
+                id={menuId}
+                className="glass absolute top-full right-0 mt-3 w-64 max-w-[calc(100vw-3rem)] rounded-3xl bg-cloud/95 p-2"
+              >
+                {navLinks.map((link) => (
+                  <Link
+                    key={link.label}
+                    to={link.to}
+                    {...("hash" in link ? { hash: link.hash } : {})}
+                    onClick={() => setOpen(false)}
+                    className="relative z-10 flex min-h-12 items-center rounded-2xl px-4 text-base font-medium text-ink transition-colors hover:bg-white/65 focus-visible:bg-white/65 focus-visible:outline-2 focus-visible:outline-sky-deep"
+                  >
+                    {link.label}
+                  </Link>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <Link
+            to="/downloads"
+            className="glass btn-liquid hidden h-12 glass-pill px-5 text-sm sm:inline-flex"
+          >
+            <span>Get lennette</span>
+          </Link>
+        </div>
+      </nav>
+    </header>
+  );
+};
+
+export const pillLinkClassName =
+  "glass btn-liquid h-12 glass-pill px-5 text-base text-ink focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-sky-deep sm:h-14 sm:px-6 sm:text-lg";
 
 export const SiteFooter = () => (
   <footer className="relative">
@@ -76,7 +158,7 @@ export const SiteFooter = () => (
       className="absolute inset-0 h-full w-full feather-top object-cover"
     />
     <div className="relative z-10 mx-auto max-w-5xl px-6 pt-28 sm:px-10">
-      <div className="flex flex-col items-center gap-10 text-center lg:flex-row lg:items-center lg:justify-between lg:gap-14 lg:text-left">
+      <div className="flex flex-col items-center gap-10 text-center lg:flex-row lg:items-end lg:justify-between lg:gap-14 lg:text-left">
         <h2 className="max-w-xl font-display text-[clamp(2.4rem,5.5vw,4.5rem)] leading-[1.05] text-ink">
           Walk into every meeting ready.
         </h2>
@@ -86,15 +168,13 @@ export const SiteFooter = () => (
             alt="lennette app icon"
             width={96}
             height={96}
-            className="h-20 w-20 rounded-3xl"
+            className="h-20 w-20 rounded-3xl lg:-translate-y-4"
           />
           <div className="flex flex-col gap-3">
-            <Link
-              to="/downloads"
-              className="glass btn-liquid glass-pill glass-blue text-on-sky hover:bg-[oklch(0.5_0.15_252/0.25)]"
-            >
-              <span>Download lennette</span>
-            </Link>
+            <PlatformDownload
+              id="footer-download"
+              className="glass-blue text-on-sky hover:bg-[oklch(0.5_0.15_252/0.25)]"
+            />
             <a
               href={GITHUB_URL}
               target="_blank"
@@ -108,7 +188,7 @@ export const SiteFooter = () => (
         </div>
       </div>
 
-      {/* The mascot sits in flow so it can never overlap the links pill. */}
+      {/* Keep the illustration in flow above the footer links. */}
       <img
         src={footerArt}
         alt=""
@@ -120,34 +200,35 @@ export const SiteFooter = () => (
       />
     </div>
 
-    {/* Sits over the illustration's lower edge on a solid surface, so the links
-        stay legible instead of dissolving into the artwork. */}
-    <div className="relative z-20 flex justify-center px-6 pb-6 sm:px-10">
-      <nav className="flex flex-wrap items-center justify-center gap-x-6 gap-y-1 rounded-full border border-white/70 bg-cloud px-6 py-2 text-[0.8rem] font-medium text-ink-soft shadow-[inset_0_1px_0_oklch(1_0_0),0_2px_10px_-4px_oklch(0.45_0.08_250/0.35)]">
-        <Link to="/tutorial" className="transition-colors hover:text-ink">
-          Hyprland setup
+    <div className="relative z-20 mx-auto max-w-5xl px-6 pt-4 pb-10 sm:px-10 sm:pb-14">
+      <nav
+        aria-label="Footer"
+        className="flex flex-wrap items-center justify-center gap-3 sm:gap-4"
+      >
+        <Link to="/tutorial" className={pillLinkClassName}>
+          <span>Hyprland setup</span>
         </Link>
-        <Link to="/downloads" className="transition-colors hover:text-ink">
-          Downloads
+        <Link to="/downloads" className={pillLinkClassName}>
+          <span>Downloads</span>
         </Link>
-        <Link to="/pricing" className="transition-colors hover:text-ink">
-          Pricing
+        <Link to="/pricing" className={pillLinkClassName}>
+          <span>Pricing</span>
         </Link>
         <a
           href="https://itssingularity.com"
           target="_blank"
           rel="noreferrer"
-          className="transition-colors hover:text-ink"
+          className={pillLinkClassName}
         >
-          Singularity Works
+          <span>Singularity Works</span>
         </a>
         <a
           href="https://github.com/parazeeknova"
           target="_blank"
           rel="noreferrer"
-          className="transition-colors hover:text-ink"
+          className={pillLinkClassName}
         >
-          Creator
+          <span>Creator</span>
         </a>
       </nav>
     </div>
@@ -222,4 +303,4 @@ export const PageShell = ({
   </main>
 );
 
-export { GITHUB_URL, RELEASES_URL } from "@/lib/site";
+export { GITHUB_URL, RELEASES_URL, SITE_URL } from "@/lib/site";

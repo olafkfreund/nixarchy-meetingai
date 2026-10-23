@@ -19,8 +19,28 @@ env:
   RUSTUP_TOOLCHAIN: 1.99.1
 
 jobs:
+  installers:
+    name: Native setup (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check Linux setup and the lenny command
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash tests/install-sh.test.sh
+      - name: Check Windows setup and the lenny command
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/install-ps1.test.ps1
+
   build:
     name: ${{ matrix.platform }}
+    needs: installers
     strategy:
       fail-fast: false
       matrix:
