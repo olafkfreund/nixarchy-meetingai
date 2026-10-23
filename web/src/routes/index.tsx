@@ -294,10 +294,14 @@ const Privacy = () => {
     {
       title: "Doesn't join meetings",
       body: "It never joins your meetings, so there are no bots and no extra people on the guest list.",
+      src: "https://swr2.itssingularity.com/lennette/lennette_guest.png",
+      alt: "A meeting guest list with no lennette bot in it",
     },
     {
       title: "Invisible to screen share",
       body: "It never shows up in shared screens, recordings, or external meeting tools.",
+      src: "https://swr2.itssingularity.com/lennette/notvisible_lennette.png",
+      alt: "A shared screen with lennette absent from the recording",
     },
   ];
   return (
@@ -305,8 +309,16 @@ const Privacy = () => {
       <SectionHeading title="Present for you. Absent for everyone else." />
       <div className="mx-auto mt-16 grid max-w-5xl gap-6 md:grid-cols-2">
         {items.map((it) => (
-          <article key={it.title} className="glass p-9">
-            <div className="relative z-10">
+          <article key={it.title} className="glass flex flex-col p-3 sm:p-4">
+            <img
+              src={it.src}
+              alt={it.alt}
+              width={1672}
+              height={941}
+              loading="lazy"
+              className="relative z-10 w-full rounded-[22px]"
+            />
+            <div className="relative z-10 flex flex-1 flex-col p-5 pt-6 sm:p-6">
               <h3 className="font-display text-3xl text-ink">{it.title}</h3>
               <p className="mt-3 text-lg text-ink-soft">{it.body}</p>
             </div>
