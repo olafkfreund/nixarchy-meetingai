@@ -161,11 +161,11 @@ try {
     $manager = $manager.Replace('@DATA@', $dataDir.Replace("'", "''")).Replace('@EXE@', $exe.Replace("'", "''")).Replace('@INSTALLER@', $selfUrl.Replace("'", "''")).Replace('@RELEASES@', $releases.Replace("'", "''"))
     # UTF-8 BOM lets Windows PowerShell 5.1 read non-ASCII user paths correctly.
     [IO.File]::WriteAllText((Join-Path $binDir 'lenny-launch.ps1'), $manager, (New-Object Text.UTF8Encoding($true)))
-    # cmd.exe reads batch files incrementally. Keep dispatch and exit in one
-    # parsed block because uninstall deletes this .cmd while PowerShell runs.
-    # CALL expands ERRORLEVEL after PowerShell finishes. Delayed expansion stays
-    # off so exclamation marks in forwarded arguments are not changed.
-    $cmd = "@echo off`r`nsetlocal DisableDelayedExpansion`r`n(`r`npowershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"%~dp0lenny-launch.ps1`" %*`r`ncall exit /b %%errorlevel%%`r`n)`r`n"
+    # cmd.exe reads batch files incrementally, so uninstall must not delete an
+    # active batch context. GOTO without a label ends that context before the
+    # already-parsed PowerShell command runs. Its native exit code is returned
+    # directly, with no attempt to read this .cmd again after uninstall.
+    $cmd = "@echo off`r`n(goto) 2>nul & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"%~dp0lenny-launch.ps1`" %*`r`n"
     [IO.File]::WriteAllText((Join-Path $binDir 'lenny.cmd'), $cmd, [Text.Encoding]::ASCII)
     # Remove obsolete wrappers from the previous installer, including the .ps1
     # that PowerShell would otherwise choose ahead of our single .cmd command.
