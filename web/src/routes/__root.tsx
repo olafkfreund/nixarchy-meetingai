@@ -112,8 +112,15 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         { rel: "stylesheet", href: appCss },
         { rel: "preconnect", href: "https://api.fontshare.com" },
         {
+          rel: "preconnect",
+          href: "https://cdn.fontshare.com",
+          crossOrigin: "",
+        },
+        // Satoshi is self-hosted from src/fonts, so only the display face is
+        // fetched from Fontshare here.
+        {
           rel: "stylesheet",
-          href: "https://api.fontshare.com/v2/css?f[]=gambarino@400&f[]=switzer@400,500,600&display=swap",
+          href: "https://api.fontshare.com/v2/css?f[]=gambarino@400&display=swap",
         },
         { rel: "icon", type: "image/png", href: "/favicon.png" },
         { rel: "apple-touch-icon", href: "/favicon.png" },

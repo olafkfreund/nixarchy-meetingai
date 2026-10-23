@@ -2,11 +2,21 @@
 @source "../src";
 @import "tw-animate-css";
 
+/* Satoshi variable, self-hosted. Coverage 300-900, so every weight the page
+   asks for renders natively instead of being synthesised. */
+@font-face {
+  font-family: "Satoshi";
+  src: url("./fonts/satoshi-variable.woff2") format("woff2-variations");
+  font-weight: 300 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --font-display: "Gambarino", "Iowan Old Style", Georgia, serif;
-  --font-sans: "Switzer", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Satoshi", ui-sans-serif, system-ui, sans-serif;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);

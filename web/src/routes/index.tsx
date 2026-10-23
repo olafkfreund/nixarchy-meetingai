@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import {
   AudioLines,
   Component,
@@ -360,7 +360,8 @@ const Transcription = () => {
         height={1088}
         className="pointer-events-none absolute inset-x-0 top-1/2 -z-10 h-[92%] w-full -translate-y-1/2 feather-y object-cover object-bottom opacity-70"
       />
-      <div className="mx-auto grid max-w-5xl gap-6 md:grid-cols-[1.3fr_1fr]">
+      <SectionHeading title="And the rest of the call, handled." />
+      <div className="mx-auto mt-16 grid max-w-5xl gap-6 md:grid-cols-[1.3fr_1fr]">
         <article className="glass p-9">
           <div className="relative z-10">
             <h3 className="font-display text-3xl text-ink">
@@ -527,12 +528,15 @@ const Footer = () => (
       </div>
 
       <div className="mt-14 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-sm text-ink-soft">
-        <a href="/pricing" className="transition-colors hover:text-ink">
+        <Link to="/pricing" className="transition-colors hover:text-ink">
           Pricing
-        </a>
-        <a href="/downloads" className="transition-colors hover:text-ink">
+        </Link>
+        <Link to="/downloads" className="transition-colors hover:text-ink">
           Downloads
-        </a>
+        </Link>
+        <Link to="/tutorial" className="transition-colors hover:text-ink">
+          Hyprland setup
+        </Link>
         <a
           href="https://itssingularity.com"
           target="_blank"
