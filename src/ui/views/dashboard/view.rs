@@ -1821,7 +1821,7 @@ impl Render for DashboardView {
             .size_full()
             .rounded(px(radius::XL))
             .border_1()
-            .border_color(surfaces.border())
+            .border_color(theme.frame_border)
             .bg(
                 if self.settings.settings.theme == crate::core::models::settings::ThemeChoice::Glass
                 {

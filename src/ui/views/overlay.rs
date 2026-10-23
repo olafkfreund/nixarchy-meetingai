@@ -5143,7 +5143,7 @@ impl Render for Overlay {
             )
             .rounded(px(radius::XL))
             .border_1()
-            .border_color(self.surfaces().border())
+            .border_color(self.theme.frame_border)
             .bg(self.surfaces().background());
         root =
             root.child(

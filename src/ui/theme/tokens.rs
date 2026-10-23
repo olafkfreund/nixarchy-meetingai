@@ -56,6 +56,8 @@ pub struct Theme {
     pub muted: Rgba,
     pub muted_foreground: Rgba,
     pub border: Rgba,
+    /// Outer window frame, independent of decorative control outlines/opacity.
+    pub frame_border: Rgba,
     pub input: Rgba,
     pub accent: Rgba,
     pub primary: Rgba,
@@ -69,6 +71,7 @@ impl Theme {
         let mut theme = Self::from_choice(settings.theme);
         if !settings.show_borders {
             theme.border.a = 0.0;
+            theme.frame_border.a = 0.0;
         }
         theme
     }
@@ -81,6 +84,7 @@ impl Theme {
         muted: rgba(0xff, 0xff, 0xff, 0.045),
         muted_foreground: rgb_hex(0xd0d4dc),
         border: rgba(0xff, 0xff, 0xff, 0.0),
+        frame_border: rgba(0xff, 0xff, 0xff, 0.18),
         input: rgba(0x0c, 0x11, 0x1b, 0.12),
         accent: rgba(0xff, 0xff, 0xff, 0.09),
         primary: rgb_hex(0xf7f7f7),
@@ -97,6 +101,7 @@ impl Theme {
         muted: rgba(0xff, 0xff, 0xff, 0.08),
         muted_foreground: rgb_hex(0xa6a6a6),
         border: rgba(0xff, 0xff, 0xff, 0.14),
+        frame_border: rgba(0xff, 0xff, 0xff, 0.22),
         input: rgba(0x12, 0x12, 0x12, 0.42),
         accent: rgba(0xff, 0xff, 0xff, 0.12),
         primary: rgb_hex(0xf5f5f5),
@@ -113,6 +118,7 @@ impl Theme {
         muted: rgba(0x00, 0x00, 0x00, 0.06),
         muted_foreground: rgb_hex(0x6b7280),
         border: rgba(0x00, 0x00, 0x00, 0.14),
+        frame_border: rgba(0x00, 0x00, 0x00, 0.20),
         input: rgba(0xff, 0xff, 0xff, 0.90),
         accent: rgba(0x00, 0x00, 0x00, 0.08),
         primary: rgb_hex(0x111827),
@@ -412,6 +418,23 @@ mod tests {
         assert_eq!(theme.surfaces(1.0).border().a, 0.0);
         assert!(theme.primary.a > 0.0);
         assert!(theme.destructive.a > 0.0);
+    }
+
+    #[test]
+    fn window_frame_respects_border_preference_in_every_theme() {
+        use crate::core::models::settings::ThemeChoice;
+        for choice in [ThemeChoice::Glass, ThemeChoice::Dark, ThemeChoice::Light] {
+            let mut settings = crate::core::settings::Settings {
+                theme: choice,
+                show_borders: true,
+                transparency: 0,
+                ..Default::default()
+            };
+            assert!(Theme::from_settings(&settings).frame_border.a > 0.0);
+            settings.show_borders = false;
+            assert_eq!(Theme::from_settings(&settings).frame_border.a, 0.0);
+        }
+        assert_eq!(Theme::GLASS.control_border(true).a, 0.0);
     }
 
     #[test]
