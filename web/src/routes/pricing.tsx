@@ -2,29 +2,32 @@ import { Link, createFileRoute } from "@tanstack/react-router";
 
 import { GITHUB_URL, PageShell } from "@/components/page-shell";
 
+const MANAGED_MONTHLY_PRICE = "$17.10";
+
 interface Plan {
   name: string;
   price: string;
   cadence: string;
   summary: string;
+  note: string;
   features: string[];
-  /** `to` navigates inside the app; `href` opens externally. */
   cta: { label: string; to?: "/downloads" | "/tutorial"; href?: string };
   emphasis: boolean;
 }
 
 const plans: Plan[] = [
   {
-    name: "Bring your own key",
+    name: "Free · Bring your own keys",
     price: "$0",
     cadence: "forever",
     summary:
-      "Run the app on your own machine with your own model credentials. Transcription and answers go straight to the provider you pick.",
+      "Use Lennette with your own AI and transcription API keys. Choose your providers and pay them directly for what you use.",
+    note: "Lennette is free. Your providers may charge for API usage.",
     features: [
-      "Full app, no feature limits",
-      "Any supported provider and model",
-      "Local transcription and history",
-      "Private overlay on Hyprland",
+      "Full desktop app",
+      "Your choice of supported AI models",
+      "Live transcription with your Deepgram key",
+      "Chat and meeting history stored locally",
       "Windows and Linux builds",
     ],
     cta: {
@@ -35,20 +38,21 @@ const plans: Plan[] = [
   },
   {
     name: "Managed",
-    price: "$35",
+    price: MANAGED_MONTHLY_PRICE,
     cadence: "per month",
     summary:
-      "Everything in the free plan, with keys, model routing and quotas handled for you. Nothing to set up beyond signing in.",
+      "The full Lennette experience, with AI answers and live transcription included in one monthly plan. No provider keys to manage.",
+    note: "Planned pricing in USD. Managed access is coming soon.",
     features: [
-      "2,000 AI responses",
-      "Unlimited follow-up questions",
-      "30+ hours of realtime transcription",
-      "Speaker diarization",
-      "Unlimited devices",
-      "No API key to create or rotate",
+      "2,000 AI responses per month",
+      "30 hours of live transcription per month",
+      "Follow-up answers use your response allowance",
+      "Speaker labels in your transcripts",
+      "Use your allowance across your devices",
+      "AI and transcription API costs included",
     ],
     cta: {
-      label: "Request an invite",
+      label: "Follow updates on GitHub",
       href: GITHUB_URL,
     },
     emphasis: true,
@@ -82,7 +86,7 @@ const PlanCard = ({ plan }: { plan: Plan }) => {
           {plan.name}
         </h2>
 
-        <p className="mt-6 flex items-baseline gap-2">
+        <p className="mt-6 flex flex-wrap items-baseline gap-x-2 gap-y-2">
           <span
             className={`font-display text-5xl leading-none ${
               plan.emphasis ? "text-on-sky" : "text-ink"
@@ -123,6 +127,14 @@ const PlanCard = ({ plan }: { plan: Plan }) => {
           ))}
         </ul>
 
+        <p
+          className={`mt-6 text-sm leading-relaxed ${
+            plan.emphasis ? "text-on-sky-soft" : "text-ink-soft"
+          }`}
+        >
+          {plan.note}
+        </p>
+
         {plan.cta.to ? (
           <Link to={plan.cta.to} className={ctaClass}>
             {ctaLabel}
@@ -145,7 +157,7 @@ const PlanCard = ({ plan }: { plan: Plan }) => {
 const PricingPage = () => (
   <PageShell
     titleIcon={["Start", "for free."]}
-    intro="The app costs nothing either way. Bring your own model key, or let us host it for $35 a month."
+    intro={`Bring your own keys and use Lennette for free. Prefer everything included? Managed is coming soon at ${MANAGED_MONTHLY_PRICE} a month.`}
   >
     <div className="grid gap-6 md:grid-cols-2">
       {plans.map((plan) => (
@@ -160,32 +172,43 @@ const PricingPage = () => (
       <div className="mt-6 flex flex-col gap-6">
         <div>
           <h3 className="font-medium text-ink">
-            Do I need an account for the free plan?
+            What do I pay for on the free plan?
           </h3>
           <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-            No. You build or download the app, add your own provider key, and
-            everything runs locally. Nothing is metered by us.
+            Nothing to Lennette. Add your own AI provider key for answers and a
+            Deepgram key for live transcription. Those providers bill you
+            directly for API usage. You do not need a Lennette account.
+          </p>
+        </div>
+        <div>
+          <h3 className="font-medium text-ink">What will Managed include?</h3>
+          <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
+            The planned {MANAGED_MONTHLY_PRICE} monthly subscription includes
+            2,000 AI responses and 30 hours of live transcription. Each
+            follow-up answer counts toward the same response allowance, shared
+            across your devices. You will not need separate AI or transcription
+            API keys.
           </p>
         </div>
         <div>
           <h3 className="font-medium text-ink">
-            What does managed actually cover?
+            Does my audio stay on my device?
           </h3>
           <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-            Speech-to-text and suggestions through our relay, so you do not need
-            a separate provider subscription. Follow-up questions are unlimited
-            across unlimited devices, with 2,000 AI responses and 30 hours of
-            realtime transcription a month. Your audio still comes from your own
-            device, and the overlay stays local.
+            Live transcription sends your audio to Deepgram. AI requests send
+            relevant conversation context and any attached content to your
+            selected provider. Your chat and meeting history is stored locally
+            on your device.
           </p>
         </div>
         <div>
           <h3 className="font-medium text-ink">
-            Can I switch between the two?
+            Can I sign up for Managed now?
           </h3>
           <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-            Yes. The model selector lets you point the app at your own key or
-            the managed route at any time.
+            Managed access is coming soon. You can download Lennette and use
+            your own keys today. Follow the project on GitHub for updates on
+            managed availability.
           </p>
         </div>
       </div>
@@ -199,8 +222,7 @@ export const Route = createFileRoute("/pricing")({
       { title: "Pricing - Lennette" },
       {
         name: "description",
-        content:
-          "Lennette is free with your own model API key, or $35 a month managed. The app itself costs nothing.",
+        content: `Use Lennette for free with your own AI and transcription API keys. Managed AI and transcription are coming soon at ${MANAGED_MONTHLY_PRICE}/month.`,
       },
     ],
   }),

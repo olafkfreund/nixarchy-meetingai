@@ -200,7 +200,7 @@ fn checked(github: &mut impl Github, args: &[&str], input: Option<&str>) -> Resu
     ensure!(
         response.ok,
         "gh {} failed: {}",
-        args[0],
+        args.join(" "),
         response.stderr.trim()
     );
     Ok(response.stdout)
@@ -211,7 +211,9 @@ struct Asset {
 }
 #[derive(Deserialize)]
 struct Release {
+    #[serde(rename = "isDraft")]
     draft: bool,
+    #[serde(rename = "targetCommitish")]
     target_commitish: String,
     assets: Vec<Asset>,
 }
@@ -224,18 +226,20 @@ fn publish(root: &Path, config: &Config, github: &mut impl Github) -> Result<Str
     let directory = root.join("dist");
     validate_assets(&directory)?;
     let repo = &config.repo;
-    let endpoint = format!("repos/{repo}/releases/tags/{tag}");
-    let probe = github.call(&["api", &endpoint], None)?;
-    // `gh api` exits 0 even for a 404; the status only appears in the body and
-    // on stderr. Only a genuine 404 means "create it" — anything else (auth,
-    // rate limit, network) must fail rather than silently publish.
-    let status = serde_json::from_str::<serde_json::Value>(&probe.stdout)
-        .ok()
-        .and_then(|v| v.get("status").cloned());
-    let not_found = status
-        .as_ref()
-        .is_some_and(|s| s == "404" || s == &serde_json::json!(404))
-        || probe.stderr.contains("HTTP 404");
+    // The REST lookup by tag omits drafts, even after their assets are uploaded.
+    // `gh release view` also searches drafts, so failed publishes can resume and
+    // newly uploaded assets can be verified before making the release public.
+    let lookup = [
+        "release",
+        "view",
+        &tag,
+        "--repo",
+        repo,
+        "--json",
+        "isDraft,targetCommitish,assets",
+    ];
+    let probe = github.call(&lookup, None)?;
+    let not_found = !probe.ok && probe.stderr.trim() == "release not found";
     ensure!(
         not_found || probe.ok,
         "Cannot inspect existing release: {}",
@@ -320,7 +324,7 @@ fn publish(root: &Path, config: &Config, github: &mut impl Github) -> Result<Str
     let mut args = vec!["release", "upload", &tag, "--repo", repo, "--clobber"];
     args.extend(paths.iter().map(String::as_str));
     checked(github, &args, None)?;
-    let uploaded = checked(github, &["api", &endpoint], None)?;
+    let uploaded = checked(github, &lookup, None)?;
     let uploaded: Release = serde_json::from_str(&uploaded)?;
     ensure!(
         uploaded.draft
@@ -378,7 +382,7 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
             };
-            if args[0] == "api" && args[1].contains("/tags/") {
+            if args[0] == "release" && args[1] == "view" {
                 if self.calls.len() == 1 {
                     if let Some(existing) = &self.existing {
                         response.stdout = existing.to_string();
@@ -388,15 +392,11 @@ mod tests {
                         response.stdout = json!({"status": "403"}).to_string();
                         response.stderr = "API unavailable".into();
                     } else {
-                        // Real gh exits 0 on a 404 and prints the error body to
-                        // stdout, which is what broke publishing previously.
-                        response.ok = true;
-                        response.stdout =
-                            json!({"message": "Not Found", "status": "404"}).to_string();
-                        response.stderr = "gh: Not Found (HTTP 404)".into();
+                        response.ok = false;
+                        response.stderr = "release not found".into();
                     }
                 } else {
-                    response.stdout = json!({"draft": true, "target_commitish": "a".repeat(40), "assets": if self.incomplete { vec![] } else { ASSETS.iter().map(|n| json!({"name":n})).collect() }}).to_string();
+                    response.stdout = json!({"isDraft": true, "targetCommitish": "a".repeat(40), "assets": if self.incomplete { vec![] } else { ASSETS.iter().map(|n| json!({"name":n})).collect() }}).to_string();
                 }
             } else if args[0] == "api" {
                 response.stdout = json!({"body":"Generated changes"}).to_string();
@@ -452,6 +452,20 @@ mod tests {
             &github.calls.last().unwrap()[5..],
             ["--draft=false", "--latest"]
         );
+        for index in [0, 4] {
+            assert_eq!(
+                github.calls[index],
+                [
+                    "release",
+                    "view",
+                    "v0.10.0-build.42.aaaaaaa",
+                    "--repo",
+                    "example/lennette",
+                    "--json",
+                    "isDraft,targetCommitish,assets",
+                ]
+            );
+        }
         let body = &github.inputs[0];
         assert!(body.starts_with(&format!("![Lennette]({BANNER})")));
         assert!(body.contains(&format!("/blob/{}/.github/README.md", config.sha)));
@@ -507,7 +521,7 @@ mod tests {
     fn published_reruns_preserve_assets_and_mismatched_commits_fail() {
         let (temp, config, mut github) = fixture();
         github.existing = Some(
-            json!({"draft":false,"target_commitish":config.sha,"assets":ASSETS.iter().map(|n|json!({"name":n})).collect::<Vec<_>>()}),
+            json!({"isDraft":false,"targetCommitish":config.sha,"assets":ASSETS.iter().map(|n|json!({"name":n})).collect::<Vec<_>>()}),
         );
         assert!(
             publish(temp.path(), &config, &mut github)
@@ -516,7 +530,7 @@ mod tests {
         );
         assert_eq!(github.calls.len(), 1);
         github.calls.clear();
-        github.existing.as_mut().unwrap()["target_commitish"] = json!("b".repeat(40));
+        github.existing.as_mut().unwrap()["targetCommitish"] = json!("b".repeat(40));
         assert!(publish(temp.path(), &config, &mut github).is_err());
         assert_eq!(github.calls.len(), 1);
     }
@@ -536,7 +550,7 @@ mod tests {
             );
         }
         let (temp, config, mut github) = fixture();
-        github.existing = Some(json!({"draft":true,"target_commitish":config.sha,"assets":[]}));
+        github.existing = Some(json!({"isDraft":true,"targetCommitish":config.sha,"assets":[]}));
         publish(temp.path(), &config, &mut github).unwrap();
         assert_eq!(github.calls[2][1], "edit");
     }

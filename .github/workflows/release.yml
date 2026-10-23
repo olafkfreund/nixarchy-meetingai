@@ -59,6 +59,14 @@ jobs:
             Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $fxc) { throw 'Windows SDK fxc.exe was not found' }
           "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      # Cache dependencies for both debug checks and optimized release builds.
+      # Run after Windows RUSTFLAGS are set so incompatible artifacts stay apart.
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+        with:
+          key: ${{ matrix.platform }}
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
@@ -115,6 +123,8 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 7
+          # Packages are already compressed; recompressing them wastes runner time.
+          compression-level: 0
 
   release:
     name: Publish both platforms
@@ -129,6 +139,11 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install Rust
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Restore publishing tool cache
+        uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+        with:
+          key: release-tools
+          cache-on-failure: true
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*

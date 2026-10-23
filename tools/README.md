@@ -18,8 +18,16 @@ stages those files. Existing Git hooks and `just bump` use the same Rust command
 `release` is for the main-branch GitHub Actions publish job. It checks both
 platforms' files/checksums before any GitHub call, creates/resumes a draft, then
 publishes only after all expected assets are uploaded. It uses the authenticated
-`gh` CLI; its tests use a fake client without network access. Every release keeps
-the supplied banner. CI tests this tool on Linux and Windows.
+`gh release view` command to inspect published releases and drafts: the REST
+lookup by tag does not return drafts. Its tests use a fake client without network
+access. Every release keeps the supplied banner. CI tests this tool on Linux and
+Windows.
+
+CI caches Cargo downloads and compiled dependencies for both debug checks and
+release builds, separately for each platform and the publishing tool. Compiler
+versions, Cargo manifests/lockfiles and Rust flags are included in the cache
+keys. A first run still has to populate the caches; cache restoration does not
+skip formatting, lint, tests, or the Windows smoke check.
 
 The Hyprland commands are Linux-only. They launch their own nested compositor,
 store captures/logs/results in the artifact directory, and stop only their own

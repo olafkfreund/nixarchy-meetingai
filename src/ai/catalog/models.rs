@@ -410,6 +410,9 @@ mod discovery_tests {
                         Err(error) => panic!("{error}"),
                     }
                 };
+                // Winsock can inherit the listener's nonblocking mode. Switch
+                // accepted sockets back before the blocking HTTP read/write.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
