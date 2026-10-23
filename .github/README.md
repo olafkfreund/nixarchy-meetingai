@@ -68,6 +68,11 @@ libraries. ARM and macOS builds are not available yet.
 
 Prefer a plain download? Grab a build from [Releases](https://github.com/parazeeknova/lennette/releases). SHA-256 checksums are included.
 
+Windows also has a **setup wizard** (`lennette-windows-x86_64-setup.exe`) with a
+Start menu shortcut, optional desktop shortcut, and an uninstaller. It installs
+for the current user without administrator rights and keeps settings and keys
+when upgraded or removed. This is an alternative to the `lenny` command setup.
+
 ### Screen sharing
 
 **Windows:** the overlay and dashboard use OS capture exclusion, including for full-monitor sharing on capture paths that honor it. They stay visible locally. Private launch is the default, with no tray icon, taskbar entry, or Alt+Tab entry. The new Windows backend still needs real meeting/audio validation; check the receiver's view in your meeting software. [Windows support and limits](https://github.com/parazeeknova/lennette/blob/main/docs/windows.md).

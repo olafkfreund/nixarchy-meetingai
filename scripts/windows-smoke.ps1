@@ -13,6 +13,11 @@ public static class LennetteWindows {
     [DllImport("user32.dll")] public static extern bool GetWindowDisplayAffinity(IntPtr hwnd, out uint affinity);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, uint attribute, out uint value, uint size);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hwnd, uint message, IntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll")] static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
     [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] struct Point { public int X, Y; }
@@ -106,6 +111,31 @@ public static class LennetteWindows {
         }, IntPtr.Zero);
         return result;
     }
+    public static int HitTest(IntPtr window, int x, int y) {
+        // Feed the app's mouse position before querying GPUI's rendered native
+        // control hitboxes. This sends no real mouse input to the user's desktop.
+        SendMessage(window, 0x200, IntPtr.Zero, new IntPtr((y << 16) | (x & 0xffff)));
+        var point = new Point { X=x, Y=y };
+        if (!ClientToScreen(window, ref point)) throw new InvalidOperationException("Cannot map pill coordinates");
+        return SendMessage(window, 0x84, IntPtr.Zero, new IntPtr((point.Y << 16) | (point.X & 0xffff))).ToInt32();
+    }
+    public static void AssertPillDrag(IntPtr window) {
+        Rect client;
+        if (!GetClientRect(window, out client)) throw new InvalidOperationException("Cannot read client bounds");
+        double scale = GetDpiForWindow(window)/96.0;
+        int y=(int)(27*scale), first=-1;
+        for (int x=(int)(20*scale); x<client.Right-(int)(20*scale); x++) {
+            if (HitTest(window, x, y) == 2) { first=x; break; } // HTCAPTION
+        }
+        if (first < 0) throw new InvalidOperationException("Top pill has no native window drag region");
+        // Pill padding + 18px grip + gap, then the 34px new-chat button.
+        if (HitTest(window, first+(int)(49*scale), y) != 1)
+            throw new InvalidOperationException("New-chat button was swallowed by the pill drag region");
+        if (HitTest(window, first+(int)(90*scale), y) != 1)
+            throw new InvalidOperationException("Model selector was swallowed by the pill drag region");
+        if (HitTest(window, client.Right/2, (int)(120*scale)) != 1)
+            throw new InvalidOperationException("Chat content became a window drag region");
+    }
     public static void ToggleHotkey() {
         keybd_event(0x11, 0, 0, UIntPtr.Zero); // Ctrl
         keybd_event(0x10, 0, 0, UIntPtr.Zero); // Shift
@@ -137,6 +167,11 @@ function Assert-Protection([IntPtr]$Window) {
     }
     $style = [LennetteWindows]::GetWindowLongPtr($Window, -20).ToInt64()
     if (($style -band 0x80) -eq 0 -or ($style -band 0x40000) -ne 0) { throw 'Taskbar/Alt+Tab styling is missing' }
+    [uint32]$border = 0
+    # Windows 10 does not implement these Windows 11 attributes.
+    if ([LennetteWindows]::DwmGetWindowAttribute($Window, 34, [ref]$border, 4) -eq 0 -and $border -ne 0xfffffffeL) { throw 'Native square window border is still enabled' }
+    [uint32]$corners = 0
+    if ([LennetteWindows]::DwmGetWindowAttribute($Window, 33, [ref]$corners, 4) -eq 0 -and $corners -ne 2) { throw 'Rounded Windows corners are not configured' }
 }
 $previousPrivate = $env:LENNETTE_PRIVATE_OVERLAY
 try {
@@ -145,6 +180,8 @@ try {
     $app = Start-Process -FilePath $Binary -PassThru
     Wait-For { $script:overlay = [LennetteWindows]::Find($app.Id, 'lennette'); $overlay -ne [IntPtr]::Zero -and [LennetteWindows]::IsWindowVisible($overlay) } 'protected overlay startup'
     Assert-Protection $overlay
+    Start-Sleep -Milliseconds 500
+    [LennetteWindows]::AssertPillDrag($overlay)
     if ([LennetteWindows]::Find($app.Id, 'lennette tray') -ne [IntPtr]::Zero) { throw 'Default Windows launch created an Explorer tray icon' }
     # Exercise RegisterHotKey, not just the one-shot control flags.
     [LennetteWindows]::ToggleHotkey()
@@ -155,6 +192,7 @@ try {
     if ([LennetteWindows]::Find($app.Id, 'lennette dashboard') -ne [IntPtr]::Zero) { throw 'Hidden dashboard shortcut ran' }
     [LennetteWindows]::ToggleHotkey()
     Wait-For { [LennetteWindows]::IsWindowVisible($overlay) } 'hotkey restore'
+    Assert-Protection $overlay
     Send-Command '--toggle-dashboard'
     Wait-For { $script:dashboard = [LennetteWindows]::Find($app.Id, 'lennette dashboard'); $dashboard -ne [IntPtr]::Zero -and [LennetteWindows]::IsWindowVisible($dashboard) } 'dashboard after restore'
     Assert-Protection $dashboard
@@ -174,11 +212,12 @@ try {
     if ([LennetteWindows]::NonWhitePixels($controlBounds) -ne 0) { throw 'Capture backdrop is not stable' }
     foreach ($window in @($overlay, $dashboard)) {
         $area = [LennetteWindows]::PlaceAbove($window, $app.Id)
+        Assert-Protection $window
         Start-Sleep -Milliseconds 700
         if ([LennetteWindows]::NonWhitePixels($area) -ne 0) { throw 'Protected app pixels or a black fallback leaked into the full-desktop capture' }
         [LennetteWindows]::ShowWindow($window, 0) | Out-Null
     }
-    Write-Output 'PASS: full-desktop capture sees the positive control and omits real GPUI overlay/dashboard pixels; native hotkeys and hidden-state filtering work.'
+    Write-Output 'PASS: rounded borderless frames, pill caption hit-tests and independent controls; full-desktop capture omits overlay/dashboard pixels; hotkeys, restore protection and hidden-state filtering work.'
 } finally {
     foreach ($fixture in @($control, $backdrop)) {
         if ($fixture -and $fixture -ne [IntPtr]::Zero) { [LennetteWindows]::DestroyWindow($fixture) | Out-Null }

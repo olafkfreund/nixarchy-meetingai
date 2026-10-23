@@ -185,6 +185,7 @@ pub fn protect_from_capture(window: &Window) -> Result<(), String> {
     #[cfg(windows)]
     {
         let handle = win32_window(window).ok_or("no Windows window handle")?;
+        configure_win32_frame(handle);
         if let Err(error) = protect_win32(handle) {
             let message: Vec<u16> =
                 format!("{error}\n\nLennette will close without showing an unprotected window.")
@@ -218,6 +219,44 @@ pub fn protect_from_capture(window: &Window) -> Result<(), String> {
     #[cfg(not(windows))]
     let _ = window;
     Ok(())
+}
+
+#[cfg(windows)]
+fn configure_win32_frame(handle: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Graphics::Dwm::*;
+    use windows_sys::Win32::UI::Controls::MARGINS;
+
+    // GPUI keeps WS_THICKFRAME for native resizing. Extend the transparent
+    // surface across that frame instead of painting an opaque square around
+    // our rounded client UI. This also works on Windows 10.
+    let margins = MARGINS {
+        cxLeftWidth: -1,
+        cxRightWidth: -1,
+        cyTopHeight: -1,
+        cyBottomHeight: -1,
+    };
+    // Windows 11 adds its own 1px outline and corner treatment. These attributes
+    // are optional on Windows 10, which returns E_INVALIDARG for them.
+    let border: u32 = 0xfffffffe; // DWMWA_COLOR_NONE
+    let corners = DWMWCP_ROUND;
+    // SAFETY: the HWND is live; DWM copies each value during the call.
+    unsafe {
+        if DwmExtendFrameIntoClientArea(handle, &margins) < 0 {
+            tracing::warn!("Windows could not extend the transparent window frame");
+        }
+        let _ = DwmSetWindowAttribute(
+            handle,
+            DWMWA_BORDER_COLOR as u32,
+            (&border as *const u32).cast(),
+            std::mem::size_of_val(&border) as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            handle,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            (&corners as *const i32).cast(),
+            std::mem::size_of_val(&corners) as u32,
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -261,6 +300,12 @@ pub fn set_visible(window: &Window, visible: bool) -> Applied {
     let Some(handle) = win32_window(window) else {
         return Applied::Unsupported;
     };
+    // Recheck before every restore as well as initial startup. Never expose a
+    // window if its policy was lost while hidden.
+    if visible && let Err(error) = protect_win32(handle) {
+        tracing::error!(%error, "refusing to restore an unprotected window");
+        return Applied::Failed;
+    }
     // SAFETY: handle belongs to this live GPUI window. ShowWindow returns its
     // previous visibility, not success, so check the resulting state explicitly.
     unsafe {

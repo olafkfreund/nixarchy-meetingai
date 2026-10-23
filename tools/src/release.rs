@@ -11,10 +11,11 @@ use std::{
 };
 
 const BANNER: &str = "https://swr2.itssingularity.com/lennette/github_release_banner_lennette.png";
-const ASSETS: [&str; 5] = [
+const ASSETS: [&str; 6] = [
     "lennette-linux-x86_64.tar.gz",
     "lennette-windows-x86_64.exe",
     "lennette-windows-x86_64.zip",
+    "lennette-windows-x86_64-setup.exe",
     "SHA256SUMS-linux-x86_64.txt",
     "SHA256SUMS-windows-x86_64.txt",
 ];
@@ -57,7 +58,7 @@ fn validate_assets(directory: &Path) -> Result<()> {
         actual.difference(&expected)
     );
     let mut verified = BTreeSet::new();
-    for sums in &ASSETS[3..] {
+    for sums in &ASSETS[4..] {
         for line in fs::read_to_string(directory.join(sums))?.lines() {
             let (digest, name) = line
                 .split_once(char::is_whitespace)
@@ -67,7 +68,7 @@ fn validate_assets(directory: &Path) -> Result<()> {
                 .strip_prefix('*')
                 .unwrap_or(name.trim_start());
             ensure!(
-                ASSETS[..3].contains(&name),
+                ASSETS[..4].contains(&name),
                 "Unexpected checksum entry: {name}"
             );
             ensure!(
@@ -80,7 +81,7 @@ fn validate_assets(directory: &Path) -> Result<()> {
             );
         }
     }
-    ensure!(verified.len() == 3, "Checksum coverage is incomplete");
+    ensure!(verified.len() == 4, "Checksum coverage is incomplete");
     Ok(())
 }
 
@@ -139,9 +140,9 @@ Native meeting and interview copilot for Linux and Windows.
 | Platform | Download |
 | --- | --- |
 | Linux x86_64 | [Archive]({base}/lennette-linux-x86_64.tar.gz) |
-| Windows x86_64 | [Portable EXE]({base}/lennette-windows-x86_64.exe) · [ZIP]({base}/lennette-windows-x86_64.zip) |
+| Windows x86_64 | [Setup installer]({base}/lennette-windows-x86_64-setup.exe) · [Portable EXE]({base}/lennette-windows-x86_64.exe) · [ZIP]({base}/lennette-windows-x86_64.zip) |
 
-Extract the Linux archive and run `./lennette`, or run the Windows EXE directly.
+Extract the Linux archive and run `./lennette`, or use the Windows setup wizard (no admin rights required). The portable EXE also runs directly.
 Add chat and speech provider keys in **Settings → AI & Keys**.
 See the [README](https://github.com/{repo}/blob/{sha}/.github/README.md) for dependencies,
 features, shortcuts, and the optional patched Hyprland setup.
@@ -411,10 +412,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dist = temp.path().join("dist");
         fs::create_dir(&dist).unwrap();
-        for name in &ASSETS[..3] {
+        for name in &ASSETS[..4] {
             fs::write(dist.join(name), name).unwrap();
         }
-        for (manifest, names) in [(ASSETS[3], &ASSETS[..1]), (ASSETS[4], &ASSETS[1..3])] {
+        for (manifest, names) in [(ASSETS[4], &ASSETS[..1]), (ASSETS[5], &ASSETS[1..4])] {
             fs::write(
                 dist.join(manifest),
                 names
@@ -469,7 +470,7 @@ mod tests {
         let body = &github.inputs[0];
         assert!(body.starts_with(&format!("![Lennette]({BANNER})")));
         assert!(body.contains(&format!("/blob/{}/.github/README.md", config.sha)));
-        for name in &ASSETS[..3] {
+        for name in &ASSETS[..4] {
             assert!(body.contains(&format!(
                 "/releases/download/v0.10.0-build.42.aaaaaaa/{name}"
             )));
@@ -491,11 +492,11 @@ mod tests {
                 "damaged" => fs::write(dist.join(ASSETS[1]), b"damaged").unwrap(),
                 "missing" => fs::remove_file(dist.join(ASSETS[0])).unwrap(),
                 "extra" => fs::write(dist.join("extra"), b"").unwrap(),
-                "coverage" => fs::write(dist.join(ASSETS[4]), b"").unwrap(),
-                "traversal" => fs::write(dist.join(ASSETS[4]), "abc  ../outside\n").unwrap(),
+                "coverage" => fs::write(dist.join(ASSETS[5]), b"").unwrap(),
+                "traversal" => fs::write(dist.join(ASSETS[5]), "abc  ../outside\n").unwrap(),
                 _ => fs::write(
-                    dist.join(ASSETS[4]),
-                    fs::read(dist.join(ASSETS[3])).unwrap(),
+                    dist.join(ASSETS[5]),
+                    fs::read(dist.join(ASSETS[4])).unwrap(),
                 )
                 .unwrap(),
             }

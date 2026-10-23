@@ -747,6 +747,7 @@ impl DashboardView {
         }
 
         div()
+            .window_control_area(gpui::WindowControlArea::Drag)
             .flex()
             .items_center()
             .gap(px(14.0))
@@ -777,6 +778,7 @@ impl DashboardView {
             .child(
                 div()
                     .id("close-dashboard")
+                    .occlude()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -801,6 +803,7 @@ impl DashboardView {
         let theme = self.theme;
         let surfaces = self.surfaces();
         let mut pill = div()
+            .occlude()
             .flex()
             .items_center()
             .gap(px(6.0))

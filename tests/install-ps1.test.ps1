@@ -132,12 +132,19 @@ printf '%s\n' "$@" >"$LENNETTE_TEST_LAUNCH_LOG"
     $output = Run-Setup @('-Version', '../../escape', '-NoLaunch', '-NoModifyPath')
     Check 'unsafe release tags are rejected' ($code -ne 0)
     [IO.File]::WriteAllText((Join-Path $testHome 'settings-marker'), 'keep me')
+    $output = Run-Lenny @('uninstall', 'unexpected')
+    if ($code -eq 0 -or -not (Test-Path $manager)) { throw "Invalid uninstall: exit=$code output=$output" }
+    Check 'failed uninstall keeps the command and payloads' ($code -ne 0 -and (Test-Path $manager) -and (Test-Path (Join-Path $bin 'lenny.cmd')) -and (Test-Path (Join-Path $testHome 'versions')))
     $output = Run-Lenny @('uninstall')
     $commandLeft = Test-Path (Join-Path $bin 'lenny.cmd')
     $managerLeft = Test-Path $manager
     $versionsLeft = Test-Path (Join-Path $testHome 'versions')
     Check 'uninstall removes the command and payloads' ($code -eq 0 -and -not $commandLeft -and -not $managerLeft -and -not $versionsLeft) "exit=$code; commandLeft=$commandLeft; managerLeft=$managerLeft; versionsLeft=$versionsLeft; output=$output"
     Check 'uninstall keeps user data' (Test-Path (Join-Path $testHome 'settings-marker'))
+    $output = Run-Setup @('-NoLaunch', '-NoModifyPath')
+    Check 'setup reinstalls after uninstall' ($code -eq 0 -and (Test-Path $manager))
+    $output = Run-Setup @('-Uninstall')
+    Check 'setup -Uninstall removes the launcher too' ($code -eq 0 -and -not (Test-Path $manager) -and -not (Test-Path (Join-Path $bin 'lenny.cmd')))
     Write-Host 'Windows installer: all checks passed'
 } finally {
     foreach ($name in $original.Keys) { [Environment]::SetEnvironmentVariable($name, $original[$name]) }

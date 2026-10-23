@@ -1988,6 +1988,8 @@ impl Overlay {
         let recording = self.is_listening();
         let mut pill = div()
             .id("session-pill")
+            .window_control_area(gpui::WindowControlArea::Drag)
+            .cursor(gpui::CursorStyle::OpenHand)
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -1997,10 +1999,35 @@ impl Overlay {
             .border_1()
             .border_color(self.surfaces().border())
             .bg(self.surfaces().muted())
+            .child(
+                div()
+                    .id("window-drag-grip")
+                    .window_control_area(gpui::WindowControlArea::Drag)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(18.0))
+                    .h(px(28.0))
+                    .cursor(gpui::CursorStyle::OpenHand)
+                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                        // Windows uses the native caption hit-test above. GPUI's
+                        // explicit move request is implemented on X11/Wayland.
+                        #[cfg(not(windows))]
+                        window.start_window_move();
+                        #[cfg(windows)]
+                        let _ = window;
+                    })
+                    .child(icons::icon_colored(
+                        theme.muted_foreground,
+                        Icon::GripVertical,
+                        12.0,
+                    )),
+            )
             .children(recording.then(|| self.pill_audio(cx)))
             .child(
                 div()
                     .id("new-chat-logo")
+                    .occlude()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2041,6 +2068,7 @@ impl Overlay {
             pill = pill.child(
                 div()
                     .id("stop-answer-header")
+                    .occlude()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2176,6 +2204,7 @@ impl Overlay {
         };
         div()
             .id("header-play-pause")
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
@@ -3310,6 +3339,7 @@ impl Overlay {
     fn profile_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("profile-select")
+            .occlude()
             .relative()
             .flex()
             .items_center()
@@ -3604,6 +3634,7 @@ impl Overlay {
         let label = crate::ai::models::label(self.model.as_deref(), self.model_provider.as_deref());
         div()
             .id("model-select")
+            .occlude()
             .relative()
             .flex()
             .items_center()
@@ -3641,6 +3672,7 @@ impl Overlay {
     fn prompt_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("prompt-mode")
+            .occlude()
             .relative()
             .flex()
             .items_center()
@@ -5142,6 +5174,7 @@ impl Render for Overlay {
                 }),
             )
             .rounded(px(radius::XL))
+            .overflow_hidden()
             .border_1()
             .border_color(self.theme.frame_border)
             .bg(self.surfaces().background());

@@ -1,7 +1,7 @@
 [package]
 name = "lennette"
 description = "An ambient real-time meeting and discussion copilot"
-version = "0.18.10"
+version = "0.18.11"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -49,7 +49,7 @@ zbus = "5.19"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
-windows-sys = { version = "0.61.2", features = ["Wdk_System_SystemServices", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_System_Time", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi"] }
+windows-sys = { version = "0.61.2", features = ["Wdk_System_SystemServices", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_System_Time", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_Controls"] }
 
 [profile.release]
 codegen-units = 1

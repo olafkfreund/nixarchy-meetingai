@@ -122,7 +122,7 @@ jobs:
           $version = Start-Process -FilePath (Resolve-Path dist/lennette-windows-x86_64.exe).Path -ArgumentList '--version' -Wait -PassThru
           if ($version.ExitCode -ne 0) { throw 'Portable executable failed to start' }
           # Only OS DLLs should be imported: no separately installed VC runtime.
-          $dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+          $dumpbin = Get-ChildItem @("${env:ProgramFiles}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe", "${env:ProgramFiles(x86)}\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe") -ErrorAction SilentlyContinue |
             Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $dumpbin) { throw 'dumpbin.exe was not found' }
           $imports = & $dumpbin.FullName /dependents dist/lennette-windows-x86_64.exe
@@ -132,7 +132,22 @@ jobs:
           Copy-Item .github/README.md windows-package/README.md
           if (Test-Path LICENSE) { Copy-Item LICENSE windows-package/ }
           Compress-Archive -Path windows-package/* -DestinationPath dist/lennette-windows-x86_64.zip
+      - name: Build Windows setup installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $compiler)) {
+            choco install innosetup --version=6.7.3 --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Could not install Inno Setup' }
+          }
+          ./scripts/build-windows-installer.ps1 -Binary target/${{ matrix.target }}/release/lennette.exe -Compiler $compiler
+      - name: Verify Windows install, upgrade and uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/windows-installer-smoke.ps1 -Installer dist/lennette-windows-x86_64-setup.exe -Binary target/${{ matrix.target }}/release/lennette.exe
       - name: Checksums
+        # The installer is included in the Windows checksum manifest below.
         shell: bash
         run: |
           cd dist
