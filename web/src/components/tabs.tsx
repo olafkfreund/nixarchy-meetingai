@@ -42,13 +42,17 @@ export const Tabs = ({
           );
         })}
       </div>
-      <div
-        role="tabpanel"
-        id={`panel-${active}`}
-        aria-labelledby={`tab-${active}`}
-      >
-        {children(active)}
-      </div>
+      {tabs.map((tab) => (
+        <div
+          key={tab.id}
+          role="tabpanel"
+          id={`panel-${tab.id}`}
+          aria-labelledby={`tab-${tab.id}`}
+          hidden={tab.id !== active}
+        >
+          {children(tab.id)}
+        </div>
+      ))}
     </div>
   );
 };

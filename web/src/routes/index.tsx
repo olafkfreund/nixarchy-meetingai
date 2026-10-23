@@ -12,8 +12,9 @@ import {
 import skyHero from "@/assets/sky-hero.jpg";
 import { SiteFooter, SiteNav } from "@/components/page-shell";
 import { PlatformDownload } from "@/components/platform-download";
-
-const GITHUB_URL = "https://github.com/parazeeknova/lennette";
+import { HOME_FAQS } from "@/lib/faqs";
+import { pageHead } from "@/lib/seo";
+import { GITHUB_URL } from "@/lib/site";
 
 // Rust crab mark, from Simple Icons (CC0).
 const RustMark = ({ className = "" }: { className?: string }) => (
@@ -34,6 +35,7 @@ const Hero = () => (
       alt=""
       width={1920}
       height={1088}
+      fetchPriority="high"
       className="absolute inset-0 h-full w-full animate-drift object-cover"
     />
     {/* blend clouds into the page below */}
@@ -47,8 +49,8 @@ const Hero = () => (
       </h1>
 
       <p className="mt-8 max-w-xl text-lg leading-relaxed text-on-sky text-sky-shadow">
-        Lennette listens to your meeting, follows the conversation as it
-        happens, and quietly hands you the next thing worth saying.
+        Lennette is an AI meeting copilot for Windows and Linux. It follows the
+        live transcript and uses your context to suggest what to say next.
       </p>
       <PlatformDownload />
 
@@ -58,6 +60,7 @@ const Hero = () => (
           alt="Lennette answering live inside a Google Meet call"
           width={1672}
           height={941}
+          decoding="async"
           className="w-full rounded-[22px]"
         />
       </div>
@@ -93,6 +96,8 @@ const HowItHelps = () => (
         <img
           src="https://swr2.itssingularity.com/lennette/lenette_transcribe.png"
           alt="Lennette listening with a live transcript and response"
+          loading="lazy"
+          decoding="async"
           width={1672}
           height={941}
           className="relative z-10 w-full rounded-[22px]"
@@ -113,6 +118,8 @@ const HowItHelps = () => (
       <article className="glass flex flex-col p-3 sm:p-4">
         <img
           src="https://swr2.itssingularity.com/lennette/lennette_shortcut.png"
+          loading="lazy"
+          decoding="async"
           alt="Lennette's overlay beside a call, opened with a keyboard shortcut"
           width={1448}
           height={1086}
@@ -350,29 +357,6 @@ const Transcription = () => {
   );
 };
 
-const faqs = [
-  {
-    q: "Does lennette join my call as a bot?",
-    a: "No. It runs on your computer and listens through your device audio, so nobody else sees it.",
-  },
-  {
-    q: "Can others see lennette when I share my screen?",
-    a: "No. The window is excluded from screen sharing and recordings.",
-  },
-  {
-    q: "Which meeting apps does it work with?",
-    a: "Any app that plays audio on your computer: Zoom, Google Meet, Microsoft Teams, Slack huddles and more.",
-  },
-  {
-    q: "How do I ask for help mid-meeting?",
-    a: "Press Ctrl + Shift + \\ and a suggestion appears instantly.",
-  },
-  {
-    q: "Can I share my notes?",
-    a: "Yes. Notes, minutes and transcripts can be copied or shared with a link right after the call.",
-  },
-];
-
 const Faq = () => (
   <section id="faq" className="relative px-6 py-28 sm:px-10">
     <div className="mx-auto max-w-5xl">
@@ -385,14 +369,14 @@ const Faq = () => (
       </p>
 
       <div className="mt-14 border-t border-ink/10">
-        {faqs.map((f, index) => (
+        {HOME_FAQS.map((faq, index) => (
           <details
-            key={f.q}
+            key={faq.question}
             className="group border-b border-ink/10"
             open={index === 0}
           >
             <summary className="flex cursor-pointer list-none items-center justify-between gap-8 py-5 text-left text-lg font-medium text-ink transition-colors hover:text-sky-deep">
-              <span>{f.q}</span>
+              <span>{faq.question}</span>
               <svg
                 aria-hidden="true"
                 viewBox="0 0 24 24"
@@ -406,7 +390,7 @@ const Faq = () => (
                 <path d="m6 9 6 6 6-6" />
               </svg>
             </summary>
-            <p className="max-w-2xl pb-6 text-ink-soft">{f.a}</p>
+            <p className="max-w-2xl pb-6 text-ink-soft">{faq.answer}</p>
           </details>
         ))}
       </div>
@@ -438,26 +422,6 @@ const Index = () => (
 );
 
 export const Route = createFileRoute("/")({
-  head: () => ({
-    meta: [
-      { title: "Lennette - Know exactly what to say, live." },
-      {
-        name: "description",
-        content:
-          "Lennette listens to your meetings in real time and suggests exactly what to say next. No bots, invisible to screen share.",
-      },
-      {
-        property: "og:title",
-        content: "Lennette - Know exactly what to say, live.",
-      },
-      {
-        property: "og:description",
-        content:
-          "A live meeting assistant that tells you what to say next, quietly and invisibly.",
-      },
-      { property: "og:type", content: "website" },
-      { name: "twitter:card", content: "summary_large_image" },
-    ],
-  }),
+  head: () => pageHead("/", HOME_FAQS),
   component: Index,
 });

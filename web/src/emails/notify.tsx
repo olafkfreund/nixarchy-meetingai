@@ -1,12 +1,13 @@
 import { Hr, Link, Section, Text } from "@react-email/components";
 import * as React from "react";
 
+import { MANAGED_PLAN } from "../lib/site";
 import { EmailLayout, colors, paragraph, strong } from "./layout";
 
 export const NotifyEmail = ({
   email,
-  plan = "Managed",
-  price = "$35",
+  plan = MANAGED_PLAN.name,
+  price = MANAGED_PLAN.price,
   receivedAt,
   userAgent,
 }: {

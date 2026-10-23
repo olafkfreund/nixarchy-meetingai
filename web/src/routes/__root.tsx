@@ -79,6 +79,15 @@ const RootShell = ({ children }: { children: ReactNode }) => (
   <html lang="en">
     <head>
       <HeadContent />
+      {/* Analytics only in production builds. import.meta.env.PROD is replaced
+          at build time, so the tag is absent entirely during local dev. */}
+      {import.meta.env.PROD ? (
+        <script
+          defer
+          src="https://tracking.przknv.cc/script.js"
+          data-website-id="8ef5aa50-97b4-4deb-8a6b-e5c825338bd9"
+        />
+      ) : null}
     </head>
     <body>
       {children}
@@ -105,8 +114,10 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         { name: "viewport", content: "width=device-width, initial-scale=1" },
         { title: "Lennette" },
         { name: "description", content: "Know exactly what to say, live." },
-        { property: "og:type", content: "website" },
-        { name: "twitter:card", content: "summary_large_image" },
+        // Public pages override this. Missing/error routes should not be indexed.
+        { name: "robots", content: "noindex, follow" },
+        { name: "application-name", content: "Lennette" },
+        { name: "theme-color", content: "#d0edff" },
       ],
       links: [
         { rel: "stylesheet", href: appCss },
@@ -122,8 +133,18 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
           rel: "stylesheet",
           href: "https://api.fontshare.com/v2/css?f[]=gambarino@400&display=swap",
         },
-        { rel: "icon", type: "image/png", href: "/favicon.png" },
-        { rel: "apple-touch-icon", href: "/favicon.png" },
+        {
+          rel: "icon",
+          type: "image/png",
+          sizes: "48x48",
+          href: "/favicon.png",
+        },
+        {
+          rel: "apple-touch-icon",
+          sizes: "180x180",
+          href: "/apple-touch-icon.png",
+        },
+        { rel: "manifest", href: "/site.webmanifest" },
       ],
     }),
     shellComponent: RootShell,

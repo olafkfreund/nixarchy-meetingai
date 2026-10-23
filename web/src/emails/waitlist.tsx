@@ -1,6 +1,7 @@
 import { Link, Section, Text } from "@react-email/components";
 import * as React from "react";
 
+import { MANAGED_PLAN } from "../lib/site";
 import { EmailLayout, colors, paragraph, strong } from "./layout";
 
 const benefits: { title: string; detail: string }[] = [
@@ -38,8 +39,8 @@ const benefits: { title: string; detail: string }[] = [
 
 export const WaitlistEmail = ({
   email,
-  plan = "Managed",
-  price = "$35",
+  plan = MANAGED_PLAN.name,
+  price = MANAGED_PLAN.price,
 }: {
   email: string;
   plan?: string;
@@ -138,9 +139,7 @@ export const WaitlistEmail = ({
       Just hit reply if you have a question. It reaches me, not a support desk.
     </Text>
 
-    <Text style={{ ...paragraph, margin: 0, color: colors.ink }}>
-      — Parazeek
-    </Text>
+    <Text style={{ ...paragraph, margin: 0, color: colors.ink }}>— Harsh</Text>
   </EmailLayout>
 );
 

@@ -44,6 +44,8 @@ export default defineConfig({
       },
     }),
     viteReact(),
-    nitro(),
+    // Target Cloudflare Workers for deploy; `node-server` locally so `vite
+    // preview` still works without wrangler.
+    nitro({ preset: process.env["NITRO_PRESET"] ?? "cloudflare-module" }),
   ],
 });

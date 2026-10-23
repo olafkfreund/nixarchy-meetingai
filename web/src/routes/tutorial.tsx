@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Command, CommandList } from "@/components/command";
 import { GITHUB_URL, PageShell, RELEASES_URL } from "@/components/page-shell";
 import { Tabs } from "@/components/tabs";
+import { pageHead } from "@/lib/seo";
 
 const Step = ({
   index,
@@ -239,6 +240,7 @@ git -C ~/Hyprland submodule update --init --recursive`}
 
 const TutorialPage = () => (
   <PageShell
+    breadcrumb="Hyprland Setup"
     titleIcon={["Private on", "Hyprland."]}
     intro="Hyprland has no built-in way to hide one window from screen capture, so Lennette ships a patched compositor that does. Pick your setup below; the bindings and the protection boundary are the same either way."
   >
@@ -364,15 +366,6 @@ const TutorialPage = () => (
 );
 
 export const Route = createFileRoute("/tutorial")({
-  head: () => ({
-    meta: [
-      { title: "Hyprland setup - Lennette" },
-      {
-        name: "description",
-        content:
-          "Step by step guide to running Lennette as a private overlay on Hyprland, on NixOS or any other Linux distribution.",
-      },
-    ],
-  }),
+  head: () => pageHead("/tutorial"),
   component: TutorialPage,
 });

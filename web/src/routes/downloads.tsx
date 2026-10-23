@@ -4,6 +4,7 @@ import { Command } from "@/components/command";
 import { GITHUB_URL, PageShell, RELEASES_URL } from "@/components/page-shell";
 import { platformMarks } from "@/components/platform-marks";
 import type { Platform } from "@/components/platform-marks";
+import { pageHead } from "@/lib/seo";
 
 interface Release {
   /** Asset filename published by the release workflow. */
@@ -98,8 +99,9 @@ const InfoMark = ({ className = "" }: { className?: string }) => (
 
 const DownloadsPage = () => (
   <PageShell
+    breadcrumb="Downloads"
     titleIcon={["Download", "lennette."]}
-    intro="Lennette runs on your own machine and reads your device audio locally, so the meeting never receives a bot or an upload."
+    intro="Get the free Lennette desktop app for Windows or Linux. Bring your AI and transcription keys and get help during calls without adding a meeting bot."
   >
     <div className="grid gap-5 md:grid-cols-3">
       {cards.map((card) => (
@@ -232,15 +234,6 @@ const DownloadsPage = () => (
 );
 
 export const Route = createFileRoute("/downloads")({
-  head: () => ({
-    meta: [
-      { title: "Downloads - Lennette" },
-      {
-        name: "description",
-        content:
-          "Download Lennette for Linux and Windows. Linux screen-share protection requires patched Hyprland. macOS is coming soon.",
-      },
-    ],
-  }),
+  head: () => pageHead("/downloads"),
   component: DownloadsPage,
 });

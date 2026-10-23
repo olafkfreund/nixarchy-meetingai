@@ -3,8 +3,11 @@ import { useState } from "react";
 
 import { PageShell } from "@/components/page-shell";
 import { WaitlistDialog } from "@/components/waitlist-dialog";
+import { PRICING_FAQS } from "@/lib/faqs";
+import { pageHead } from "@/lib/seo";
+import { MANAGED_PLAN } from "@/lib/site";
 
-const MANAGED_MONTHLY_PRICE = "$17.10";
+const MANAGED_MONTHLY_PRICE = MANAGED_PLAN.price;
 
 interface Plan {
   name: string;
@@ -178,7 +181,8 @@ const PricingPage = () => {
 
   return (
     <PageShell
-      titleIcon={["Start", "for free."]}
+      breadcrumb="Pricing"
+      titleIcon={["Simple", "pricing."]}
       intro={`Bring your own keys and use Lennette for free. Prefer everything included? Managed is coming soon at ${MANAGED_MONTHLY_PRICE} a month.`}
     >
       <div className="grid gap-6 md:grid-cols-2">
@@ -196,47 +200,14 @@ const PricingPage = () => {
           Questions about pricing
         </h2>
         <div className="mt-6 flex flex-col gap-6">
-          <div>
-            <h3 className="font-medium text-ink">
-              What do I pay for on the free plan?
-            </h3>
-            <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-              Nothing to Lennette. Add your own AI provider key for answers and
-              a Deepgram key for live transcription. Those providers bill you
-              directly for API usage. You do not need a Lennette account.
-            </p>
-          </div>
-          <div>
-            <h3 className="font-medium text-ink">What will Managed include?</h3>
-            <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-              The planned {MANAGED_MONTHLY_PRICE} monthly subscription includes
-              2,000 AI responses and 30 hours of live transcription. Each
-              follow-up answer counts toward the same response allowance, shared
-              across your devices. You will not need separate AI or
-              transcription API keys.
-            </p>
-          </div>
-          <div>
-            <h3 className="font-medium text-ink">
-              Does my audio stay on my device?
-            </h3>
-            <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-              Live transcription sends your audio to Deepgram. AI requests send
-              relevant conversation context and any attached content to your
-              selected provider. Your chat and meeting history is stored locally
-              on your device.
-            </p>
-          </div>
-          <div>
-            <h3 className="font-medium text-ink">
-              Can I sign up for Managed now?
-            </h3>
-            <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
-              Managed access is coming soon. You can download Lennette and use
-              your own keys today. Follow the project on GitHub for updates on
-              managed availability.
-            </p>
-          </div>
+          {PRICING_FAQS.map((faq) => (
+            <div key={faq.question}>
+              <h3 className="font-medium text-ink">{faq.question}</h3>
+              <p className="mt-1.5 max-w-2xl leading-relaxed text-ink-soft">
+                {faq.answer}
+              </p>
+            </div>
+          ))}
         </div>
       </section>
 
@@ -249,14 +220,6 @@ const PricingPage = () => {
 };
 
 export const Route = createFileRoute("/pricing")({
-  head: () => ({
-    meta: [
-      { title: "Pricing - Lennette" },
-      {
-        name: "description",
-        content: `Use Lennette for free with your own AI and transcription API keys. Managed AI and transcription are coming soon at ${MANAGED_MONTHLY_PRICE}/month.`,
-      },
-    ],
-  }),
+  head: () => pageHead("/pricing", PRICING_FAQS),
   component: PricingPage,
 });

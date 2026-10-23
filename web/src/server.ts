@@ -2,6 +2,7 @@
 // anything else in the server bundle can log.
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
+import { canonicalPathRedirect, searchResponse } from "./lib/search-response";
 
 interface ServerEntry {
   fetch: (
@@ -63,16 +64,29 @@ const normalizeCatastrophicSsrResponse = async (
 
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
+    const redirect = canonicalPathRedirect(request);
+    if (redirect) {
+      return redirect;
+    }
+    const noindex = process.env["SEO_NOINDEX"] === "true";
     try {
       const handler = await serverEntry();
       const response = await handler.fetch(request, env, ctx);
-      return await normalizeCatastrophicSsrResponse(response);
+      return searchResponse(
+        await normalizeCatastrophicSsrResponse(response),
+        request,
+        noindex
+      );
     } catch (error) {
       console.error(error);
-      return new Response(renderErrorPage(), {
-        status: 500,
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
+      return searchResponse(
+        new Response(renderErrorPage(), {
+          status: 500,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        }),
+        request,
+        noindex
+      );
     }
   },
 };
