@@ -16,8 +16,8 @@ $original = @{}
 foreach ($name in 'LENNETTE_HOME', 'LENNETTE_RELEASES_URL', 'LENNETTE_INSTALL_URL_PS1', 'LENNETTE_TEST_LAUNCH_LOG', 'OS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_ARCHITEW6432') {
     $original[$name] = [Environment]::GetEnvironmentVariable($name)
 }
-function Check([string]$What, [bool]$Passed) {
-    if (-not $Passed) { throw "FAIL: $What" }
+function Check([string]$What, [bool]$Passed, [string]$Detail = '') {
+    if (-not $Passed) { throw "FAIL: $What`n$Detail" }
     Write-Host "ok: $What"
 }
 function Make-Release([string]$Tag) {
@@ -56,6 +56,7 @@ using System.IO;
 public class Fixture {
     public static int Main(string[] args) {
         if (args.Length > 0 && args[0] == "--version") { Console.WriteLine("lennette test"); return 0; }
+        if (args.Length > 0 && args[0] == "--fail") { return 37; }
         File.WriteAllLines(Environment.GetEnvironmentVariable("LENNETTE_TEST_LAUNCH_LOG"), args);
         return 0;
     }
@@ -65,6 +66,7 @@ public class Fixture {
         [IO.File]::WriteAllText((Join-Path $work 'fixture.exe'), @'
 #!/bin/sh
 if [ "${1:-}" = --version ]; then echo 'lennette test'; exit 0; fi
+if [ "${1:-}" = --fail ]; then exit 37; fi
 printf '%s\n' "$@" >"$LENNETTE_TEST_LAUNCH_LOG"
 '@ + "`n", $utf8)
         & chmod +x (Join-Path $work 'fixture.exe')
@@ -82,6 +84,8 @@ printf '%s\n' "$@" >"$LENNETTE_TEST_LAUNCH_LOG"
     Check '-NoLaunch does not open the app' (-not (Test-Path $env:LENNETTE_TEST_LAUNCH_LOG))
     $output = Run-Lenny @('--version')
     Check 'app flags are forwarded through the command' ($code -eq 0 -and $output.Contains('lennette test'))
+    $output = Run-Lenny @('--fail')
+    Check 'the launcher preserves a failing app exit code' ($code -eq 37) "exit=$code; output=$output"
     $output = Run-Lenny @('argument with spaces', "apostrophe's argument")
     Check 'arguments keep their spaces and apostrophes' ($code -eq 0 -and ([IO.File]::ReadAllLines($env:LENNETTE_TEST_LAUNCH_LOG) -join '|') -eq "argument with spaces|apostrophe's argument")
     Remove-Item $env:LENNETTE_TEST_LAUNCH_LOG
@@ -127,7 +131,10 @@ printf '%s\n' "$@" >"$LENNETTE_TEST_LAUNCH_LOG"
     Check 'unsafe release tags are rejected' ($code -ne 0)
     [IO.File]::WriteAllText((Join-Path $testHome 'settings-marker'), 'keep me')
     $output = Run-Lenny @('uninstall')
-    Check 'uninstall removes the command and payloads' ($code -eq 0 -and -not (Test-Path $manager) -and -not (Test-Path (Join-Path $testHome 'versions')))
+    $commandLeft = Test-Path (Join-Path $bin 'lenny.cmd')
+    $managerLeft = Test-Path $manager
+    $versionsLeft = Test-Path (Join-Path $testHome 'versions')
+    Check 'uninstall removes the command and payloads' ($code -eq 0 -and -not $commandLeft -and -not $managerLeft -and -not $versionsLeft) "exit=$code; commandLeft=$commandLeft; managerLeft=$managerLeft; versionsLeft=$versionsLeft; output=$output"
     Check 'uninstall keeps user data' (Test-Path (Join-Path $testHome 'settings-marker'))
     Write-Host 'Windows installer: all checks passed'
 } finally {
