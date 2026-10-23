@@ -51,7 +51,8 @@ trap cleanup EXIT INT TERM
 git log -1 --pretty=%B >"$message_file"
 "$REPO_ROOT/scripts/bump-version.sh" auto "$message_file"
 
-if git diff --quiet -- Cargo.toml Cargo.lock; then
+# The bump stages its change, so compare against HEAD rather than the worktree.
+if git diff --quiet HEAD -- Cargo.toml Cargo.lock; then
     exit 0
 fi
 
