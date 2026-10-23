@@ -74,7 +74,7 @@ pub fn pill(
     element = if active {
         element
             .bg(surfaces.primary())
-            .border_color(theme.primary)
+            .border_color(theme.control_border(true))
             .text_color(theme.primary_foreground())
     } else {
         element

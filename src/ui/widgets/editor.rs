@@ -90,7 +90,7 @@ impl Render for Editor {
             .rounded(px(10.0))
             .border_1()
             .border_color(if focused {
-                self.theme.primary
+                self.theme.focus_border()
             } else {
                 self.theme.border
             })

@@ -1488,7 +1488,7 @@ impl DashboardView {
                     .gap(px(6.0))
                     .rounded(px(8.0))
                     .border_1()
-                    .border_color(theme.primary)
+                    .border_color(theme.focus_border())
                     .bg(theme.card)
                     .px(px(10.0))
                     .py(px(6.0))
@@ -1655,7 +1655,7 @@ impl DashboardView {
                 div()
                     .rounded(px(9.0))
                     .border_1()
-                    .border_color(theme.primary)
+                    .border_color(theme.focus_border())
                     .bg(surfaces.input())
                     .p(px(10.0))
                     .text_size(scaled(13.0))
@@ -1769,7 +1769,11 @@ pub fn action_button<V: 'static>(
         .text_size(scaled(11.0))
         .text_color(theme.foreground)
         .cursor_pointer()
-        .hover(|style| style.bg(surfaces.muted()).border_color(theme.primary))
+        .hover(|style| {
+            style
+                .bg(surfaces.muted())
+                .border_color(theme.control_border(true))
+        })
         .id(id)
         .child(label)
         .on_click(cx.listener(move |view, _, window, cx| {

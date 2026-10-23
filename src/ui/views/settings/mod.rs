@@ -784,7 +784,11 @@ fn credentials_section(
                         .rounded(px(radius::LG))
                         .border_1()
                         .border_color(if focused {
-                            theme.foreground
+                            if theme.is_glass() {
+                                theme.focus_border()
+                            } else {
+                                theme.foreground
+                            }
                         } else {
                             theme.border
                         })

@@ -4,6 +4,7 @@
 //! one owns its hover and pressed handling and reports activation through a real
 //! GPUI listener rather than being a painted placeholder.
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
@@ -29,7 +30,7 @@ pub fn switch<V: 'static>(
         .p(px(2.0))
         .rounded_full()
         .border_1()
-        .border_color(if on { theme.primary } else { theme.border })
+        .border_color(theme.control_border(on))
         .bg(if on {
             theme.primary_fill()
         } else {
@@ -48,16 +49,22 @@ pub fn switch<V: 'static>(
                 .size(px(16.0))
                 .rounded_full()
                 .border_1()
-                .border_color(if on {
+                .border_color(if theme.is_glass() {
+                    theme.border
+                } else if on {
                     theme.primary_foreground()
                 } else {
                     theme.muted_foreground
                 })
-                .bg(theme.fill(if on {
-                    theme.primary_foreground()
+                .bg(if theme.is_glass() {
+                    Theme::with_alpha(theme.foreground, if on { 0.85 } else { 0.4 })
                 } else {
-                    theme.muted_foreground
-                })),
+                    theme.fill(if on {
+                        theme.primary_foreground()
+                    } else {
+                        theme.muted_foreground
+                    })
+                }),
         )
         .on_click(cx.listener(move |view, _, window, cx| {
             handler(view, cx, window);
@@ -107,7 +114,11 @@ pub fn segmented<V: 'static>(
             .child(*label);
         if *active {
             chip = chip
-                .bg(theme.background)
+                .bg(if theme.is_glass() {
+                    theme.primary_fill()
+                } else {
+                    theme.background
+                })
                 .border_1()
                 .border_color(theme.border);
         }
@@ -219,7 +230,11 @@ pub fn slider<V: 'static>(
                 .right(px(center))
                 .h(px(4.0))
                 .rounded_full()
-                .bg(theme.border),
+                .bg(if theme.is_glass() {
+                    Theme::with_alpha(theme.foreground, 0.08)
+                } else {
+                    theme.border
+                }),
         )
         .child(
             div()
@@ -242,7 +257,11 @@ pub fn slider<V: 'static>(
                 .items_center()
                 .justify_center()
                 .rounded(px(5.0))
-                .bg(theme.fill(theme.foreground))
+                .bg(if theme.is_glass() {
+                    Theme::with_alpha(theme.foreground, 0.65)
+                } else {
+                    theme.fill(theme.foreground)
+                })
                 .border_1()
                 .border_color(theme.border)
                 .child(
@@ -449,7 +468,14 @@ pub fn warning(theme: &Theme, message: &str) -> impl IntoElement {
         .gap(px(8.0))
         .rounded(px(radius::MD))
         .border_1()
-        .border_color(theme.warning)
+        .border_color(if theme.is_glass() {
+            theme.border
+        } else {
+            theme.warning
+        })
+        .when(theme.is_glass(), |style| {
+            style.bg(theme.fill(theme.warning))
+        })
         .px(px(space::MD))
         .py(px(space::SM))
         .child(icons::icon_colored(
@@ -496,7 +522,7 @@ pub fn action<V: 'static>(
         .px(px(space::MD))
         .rounded(px(radius::MD))
         .border_1()
-        .border_color(theme.primary)
+        .border_color(theme.control_border(true))
         .bg(theme.primary_fill())
         .text_size(scaled(11.5))
         .font_weight(FontWeight::MEDIUM)

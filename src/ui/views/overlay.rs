@@ -1870,8 +1870,7 @@ impl Overlay {
         crate::features::hyprland::focus_overlay();
     }
 
-    /// A clear menu has no backing fill to cover text underneath it. Preserve
-    /// content layout while temporarily concealing the app's overlapping text.
+    /// Preserve layout while keeping app text from showing through a glass menu.
     fn transparent_menu_open(&self) -> bool {
         self.theme.is_glass()
             && (self.context_menu_open
@@ -2703,7 +2702,14 @@ impl Overlay {
                     .gap(px(8.0))
                     .rounded(px(radius::MD))
                     .border_1()
-                    .border_color(theme.destructive)
+                    .border_color(if theme.is_glass() {
+                        theme.border
+                    } else {
+                        theme.destructive
+                    })
+                    .when(theme.is_glass(), |style| {
+                        style.bg(theme.fill(theme.destructive))
+                    })
                     .px(px(space::MD))
                     .py(px(space::SM))
                     .child(icons::icon_colored(
@@ -3316,7 +3322,11 @@ impl Overlay {
             .bg(if self.profile_menu_open {
                 self.surfaces().accent()
             } else {
-                gpui::transparent_black().into()
+                if self.theme.is_glass() {
+                    self.surfaces().muted()
+                } else {
+                    gpui::transparent_black().into()
+                }
             })
             .hover(|style| style.bg(self.surfaces().accent()))
             .cursor_pointer()
@@ -3603,9 +3613,12 @@ impl Overlay {
             .rounded_full()
             .border_1()
             .border_color(self.theme.border)
+            .when(self.theme.is_glass(), |style| {
+                style.bg(self.surfaces().muted())
+            })
             .hover(|s| {
                 s.bg(self.surfaces().accent())
-                    .border_color(self.theme.foreground)
+                    .border_color(self.theme.control_border(true))
             })
             .cursor_pointer()
             .text_size(scaled(11.0))
@@ -3637,9 +3650,12 @@ impl Overlay {
             .rounded_full()
             .border_1()
             .border_color(self.theme.border)
+            .when(self.theme.is_glass(), |style| {
+                style.bg(self.surfaces().muted())
+            })
             .hover(|s| {
                 s.bg(self.surfaces().accent())
-                    .border_color(self.theme.foreground)
+                    .border_color(self.theme.control_border(true))
             })
             .cursor_pointer()
             .text_size(scaled(11.0))
@@ -4347,7 +4363,11 @@ impl Overlay {
                     .rounded_full()
                     .border_1()
                     .border_color(if self.composer_focused {
-                        theme.border
+                        if theme.is_glass() {
+                            theme.focus_border()
+                        } else {
+                            theme.border
+                        }
                     } else {
                         self.surfaces().border()
                     })
@@ -4626,7 +4646,16 @@ fn text_tool(
         .rounded(px(radius::MD))
         .border_1()
         .border_color(surfaces.border())
-        .hover(|style| style.bg(surfaces.muted()).border_color(theme.foreground))
+        .when(theme.is_glass(), |style| style.bg(surfaces.muted()))
+        .hover(|style| {
+            style
+                .bg(if theme.is_glass() {
+                    surfaces.accent()
+                } else {
+                    surfaces.muted()
+                })
+                .border_color(theme.control_border(true))
+        })
         .cursor_pointer()
         .id(gpui::ElementId::Name(tooltip.into()))
         .child(icons::icon(theme, icon, 14.0))

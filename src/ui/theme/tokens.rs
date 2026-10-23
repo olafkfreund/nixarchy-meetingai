@@ -44,7 +44,7 @@ const fn rgba(r: u32, g: u32, b: u32, a: f32) -> Rgba {
     }
 }
 
-/// Default opacity for shaded themes; glass surfaces remain completely clear.
+/// Default window tint opacity.
 pub const DEFAULT_OPACITY: f32 = 0.5;
 
 /// Semantic surface and text colours.
@@ -73,16 +73,16 @@ impl Theme {
         theme
     }
 
-    /// Pure Glass mode: no background shade behind the app window, pure transparent background.
+    /// Glass uses faint neutral fills rather than outlining every nested control.
     pub const GLASS: Theme = Theme {
-        background: rgba(0x08, 0x08, 0x08, 0.0),
-        card: rgba(0x18, 0x18, 0x18, 0.0),
+        background: rgba(0x11, 0x13, 0x18, 0.18),
+        card: rgba(0x16, 0x1b, 0x24, 0.12),
         foreground: rgb_hex(0xf5f5f5),
-        muted: rgba(0x24, 0x27, 0x2d, 0.0),
+        muted: rgba(0xff, 0xff, 0xff, 0.045),
         muted_foreground: rgb_hex(0xd0d4dc),
-        border: rgba(0xff, 0xff, 0xff, 0.45),
-        input: rgba(0x16, 0x19, 0x1f, 0.0),
-        accent: rgba(0x38, 0x3d, 0x47, 0.0),
+        border: rgba(0xff, 0xff, 0xff, 0.0),
+        input: rgba(0x0c, 0x11, 0x1b, 0.12),
+        accent: rgba(0xff, 0xff, 0xff, 0.09),
         primary: rgb_hex(0xf7f7f7),
         destructive: rgb_hex(0xe5837f),
         success: rgb_hex(0x8fd9b0),
@@ -134,10 +134,10 @@ impl Theme {
         self.background.a < 0.2
     }
 
-    /// Glass mode uses borders and text without a background fill.
+    /// Cap semantic fills in glass so active/error states remain translucent.
     pub fn fill(self, colour: Rgba) -> Rgba {
         if self.is_glass() {
-            Self::with_alpha(colour, 0.0)
+            Self::with_alpha(colour, colour.a.min(0.13))
         } else {
             colour
         }
@@ -147,10 +147,28 @@ impl Theme {
         self.fill(self.primary)
     }
 
+    /// Glass controls use their fill for separation; other themes keep outlines.
+    pub fn control_border(self, active: bool) -> Rgba {
+        if self.is_glass() || !active {
+            self.border
+        } else {
+            self.primary
+        }
+    }
+
+    /// A quiet focus cue remains available even when decorative borders are off.
+    pub fn focus_border(self) -> Rgba {
+        if self.is_glass() {
+            Self::with_alpha(self.foreground, 0.22)
+        } else {
+            self.primary
+        }
+    }
+
     /// Popups follow the same transparency policy as the rest of the app.
     pub fn popover(self) -> Rgba {
         if self.is_glass() {
-            self.card
+            Self::with_alpha(self.background, 0.78)
         } else {
             Self::with_alpha(self.card, 0.98)
         }
@@ -251,7 +269,7 @@ impl Surfaces {
         self.fade(self.theme.background)
     }
 
-    /// Glass panels stay clear; other themes retain a legibility floor.
+    /// Glass panels keep a faint tint; other themes retain a legibility floor.
     pub fn card(self) -> Rgba {
         if self.theme.is_glass() {
             self.theme.card
@@ -284,7 +302,7 @@ impl Surfaces {
         }
     }
 
-    /// Primary actions use outlines in glass and shaded fills in other themes.
+    /// Primary actions use a soft translucent fill in glass.
     pub fn primary(self) -> Rgba {
         if self.theme.is_glass() {
             return self.theme.primary_fill();
@@ -356,24 +374,26 @@ mod tests {
     }
 
     #[test]
-    fn glass_has_no_fills_at_any_opacity() {
+    fn glass_keeps_soft_fills_and_opaque_text_without_decorative_outlines() {
         let theme = Theme::GLASS;
         for opacity in [0.0, 0.5, 1.0] {
             let surfaces = theme.surfaces(opacity);
             for colour in [
-                surfaces.background(),
                 surfaces.card(),
                 surfaces.muted(),
                 surfaces.input(),
                 surfaces.accent(),
                 surfaces.primary(),
-                theme.popover(),
                 theme.menu_hover(),
                 theme.fill(theme.destructive),
             ] {
-                assert_eq!(colour.a, 0.0);
+                assert!(colour.a > 0.0 && colour.a <= 0.13);
             }
-            assert_eq!(surfaces.border().a, theme.border.a);
+            assert_eq!(surfaces.border().a, 0.0);
+            assert_eq!(theme.control_border(true).a, 0.0);
+            assert!(theme.focus_border().a > 0.0);
+            assert!(surfaces.background().a <= 0.18);
+            assert!(theme.popover().a > surfaces.card().a);
             assert_eq!(theme.primary_foreground(), theme.foreground);
             assert_eq!(theme.foreground.a, 1.0);
         }
