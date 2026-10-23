@@ -135,6 +135,9 @@ impl DashboardView {
         self.settings.key_field = None;
         self.prompt_edit = None;
         self.prompt_menu = None;
+        self.settings.device_menu = None;
+        self.settings.speech_language_menu = false;
+        self.settings.language_menu = false;
         self.reset_credential_models();
         self.settings.notice = None;
         self.dashboard.navigate(route, self.database.as_ref());
@@ -1590,7 +1593,7 @@ impl DashboardView {
                 .child(action_button("about-website", &theme, "Visit Lennette ↗", cx, |_, cx, _| cx.open_url("https://lennette.itssingularity.com")))
                 .child(action_button("about-check-updates", &theme, if self.update_task.is_some() { "Checking…" } else { "Check for updates" }, cx, |this, cx, _| this.check_updates(cx)))
                 .children(self.update_available.then(|| action_button("about-open-update", &theme, "View update ↗", cx, |_, cx, _| cx.open_url("https://github.com/parazeeknova/lennette/releases/latest")))))
-            .children(self.update_status.as_ref().map(|status| div().text_size(scaled(12.0)).text_color(theme.muted_foreground).whitespace_normal().child(status.clone())))
+            .children(self.update_status.as_ref().map(|status| div().w_full().text_center().text_size(scaled(12.0)).text_color(theme.muted_foreground).whitespace_normal().child(status.clone())))
             .child(
                 div()
                     .flex()

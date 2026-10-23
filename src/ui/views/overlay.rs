@@ -99,12 +99,7 @@ pub struct TranscriptEntry {
 const READING_MEASURE: f32 = 620.0;
 
 /// Follow-up suggestions shown above the composer, in the reference's order.
-pub const FOLLOW_UPS: [&str; 4] = [
-    "What should I say?",
-    "Follow-up questions",
-    "Fact-check",
-    "Recap",
-];
+pub const FOLLOW_UPS: [&str; 3] = ["What should I say?", "Follow-up questions", "Fact check"];
 
 /// How much of the lower panel is visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2635,16 +2630,27 @@ impl Overlay {
         body
     }
 
-    /// The follow-ups to show: generated ones, else the defaults.
+    /// Fixed actions stay first; generated suggestions follow without duplicates.
     fn visible_follow_ups(&self) -> Vec<String> {
         if !self.runtime_settings.smart_follow_ups {
             return Vec::new();
         }
-        if self.follow_ups.is_empty() {
-            FOLLOW_UPS.iter().map(|text| (*text).to_owned()).collect()
-        } else {
-            self.follow_ups.clone()
+        let normalized = |text: &str| {
+            text.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        };
+        let mut labels: Vec<String> = FOLLOW_UPS.iter().map(|text| (*text).to_owned()).collect();
+        for question in &self.follow_ups {
+            if !labels
+                .iter()
+                .any(|label| normalized(label) == normalized(question))
+            {
+                labels.push(question.clone());
+            }
         }
+        labels
     }
 
     /// Sync settings (theme and transparency) in real-time.
@@ -3318,16 +3324,18 @@ impl Overlay {
         let theme = self.theme;
         // Wrap rather than scroll: a long question moves onto the next row
         // instead of being clipped at the edge.
-        let mut chips = div()
+        let chips = div()
             .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(12.0))
+            .flex_col()
+            .gap(px(6.0))
             .flex_1()
             .min_w(px(0.0))
             .id("follow-up-chips");
 
+        let mut fixed = div().flex().flex_wrap().items_center().gap(px(12.0));
+        let mut generated = div().flex().flex_wrap().items_center().gap(px(12.0));
         let labels = self.visible_follow_ups();
+        let has_generated = labels.len() > FOLLOW_UPS.len();
         for (index, label) in labels.into_iter().enumerate() {
             let chip = div()
                 .flex()
@@ -3351,7 +3359,7 @@ impl Overlay {
                         .child(label.clone()),
                 );
             let send = label;
-            chips = chips.child(chip.on_click(cx.listener(move |this, _, _, cx| {
+            let chip = chip.on_click(cx.listener(move |this, _, _, cx| {
                 // Fill the composer and send, so a chip is one click.
                 this.composer.set_text(send.clone());
                 this.conversation.set_draft(send.clone());
@@ -3361,8 +3369,16 @@ impl Overlay {
                     this.send_message(cx);
                 }
                 cx.notify();
-            })));
+            }));
+            if index < FOLLOW_UPS.len() {
+                fixed = fixed.child(chip);
+            } else {
+                generated = generated.child(chip);
+            }
         }
+        let chips = chips
+            .child(fixed)
+            .children(has_generated.then_some(generated));
 
         div()
             .flex()
@@ -3431,6 +3447,16 @@ impl Overlay {
         }
     }
 
+    fn pill_selector_fill(&self, open: bool) -> gpui::Rgba {
+        if open {
+            self.surfaces().accent()
+        } else if self.theme.is_glass() {
+            self.surfaces().muted()
+        } else {
+            gpui::transparent_black().into()
+        }
+    }
+
     fn profile_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("profile-select")
@@ -3442,20 +3468,11 @@ impl Overlay {
             .h(px(26.0))
             .px(px(6.0))
             .rounded_full()
-            .bg(if self.profile_menu_open {
-                self.surfaces().accent()
-            } else {
-                if self.theme.is_glass() {
-                    self.surfaces().muted()
-                } else {
-                    gpui::transparent_black().into()
-                }
-            })
+            .bg(self.pill_selector_fill(self.profile_menu_open))
             .hover(|style| style.bg(self.surfaces().accent()))
             .cursor_pointer()
             .text_size(scaled(11.0))
             .text_color(self.theme.foreground)
-            .child(icons::icon(&self.theme, Icon::NotebookPen, 11.0))
             .child(
                 div().max_w(px(95.0)).truncate().child(
                     self.active_profile
@@ -3735,9 +3752,7 @@ impl Overlay {
             .h(px(26.0))
             .px(px(6.0))
             .rounded_full()
-            .when(self.theme.is_glass(), |style| {
-                style.bg(self.surfaces().muted())
-            })
+            .bg(self.pill_selector_fill(self.model_menu_open))
             .hover(|s| s.bg(self.surfaces().accent()))
             .cursor_pointer()
             .text_size(scaled(11.0))
@@ -3768,13 +3783,11 @@ impl Overlay {
             .h(px(26.0))
             .px(px(6.0))
             .rounded_full()
-            .when(self.theme.is_glass(), |style| {
-                style.bg(self.surfaces().muted())
-            })
+            .bg(self.pill_selector_fill(self.prompt_menu_open))
             .hover(|s| s.bg(self.surfaces().accent()))
             .cursor_pointer()
             .text_size(scaled(11.0))
-            .text_color(self.theme.muted_foreground)
+            .text_color(self.theme.foreground)
             .child(
                 div()
                     .max_w(px(70.0))
@@ -3923,21 +3936,6 @@ impl Overlay {
                     cx,
                 ));
             }
-            menu = menu.child(
-                div()
-                    .id("manage-profiles")
-                    .px(px(10.0))
-                    .py(px(9.0))
-                    .border_t_1()
-                    .border_color(self.theme.border)
-                    .cursor_pointer()
-                    .text_size(scaled(11.0))
-                    .child("Manage profiles…")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.profile_menu_open = false;
-                        this.open_dashboard_at(cx, crate::ui::dashboard::nav::Route::Profiles);
-                    })),
-            );
         } else {
             if self.prompt_choices.is_empty() {
                 menu = menu.child(self.prompt_option(None, "General".into(), 0, cx));
@@ -3994,7 +3992,6 @@ impl Overlay {
             .text_size(scaled(11.0))
             .cursor_pointer()
             .child(div().flex_1().min_w(px(0.0)).truncate().child(name))
-            .children(active.then(|| icons::icon(&self.theme, Icon::Check, 12.0)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_profile(id.as_deref());
                 cx.notify();
@@ -6135,6 +6132,30 @@ mod tests {
         );
         std::fs::remove_dir_all(path).unwrap();
     }
+    #[test]
+    fn generated_questions_keep_fixed_actions_first_without_duplicates() {
+        let (_path, mut overlay) = fixture();
+        overlay.runtime_settings.smart_follow_ups = true;
+        overlay.follow_ups = vec![
+            "What changes next?".into(),
+            "Fact-check".into(),
+            "What should I say?".into(),
+            "Who owns this?".into(),
+        ];
+        assert_eq!(
+            overlay.visible_follow_ups(),
+            [
+                "What should I say?",
+                "Follow-up questions",
+                "Fact check",
+                "What changes next?",
+                "Who owns this?"
+            ]
+        );
+        overlay.runtime_settings.smart_follow_ups = false;
+        assert!(overlay.visible_follow_ups().is_empty());
+    }
+
     #[test]
     fn answer_preferences_are_kept_until_a_new_conversation_starts() {
         let (_path, mut overlay) = fixture();

@@ -69,6 +69,11 @@ impl DashboardView {
 
     pub(super) fn prompts_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
+        let action_tint: gpui::Rgba = if theme.background.r > 0.5 {
+            gpui::rgb(0x1d4ed8)
+        } else {
+            gpui::rgb(0xa7c9ff)
+        };
         let mut body = div().flex().flex_col().gap(px(16.0)).w_full().child(self.page_heading("System prompts", "Reusable instructions for interviews, meetings and other conversations. Select a prompt in the overlay."));
         if let Some(error) = &self.settings.error {
             body = body.child(crate::ui::controls::warning(&theme, error));
@@ -130,13 +135,30 @@ impl DashboardView {
                         )
                         .children(self.prompt_search.clone()),
                 )
-                .child(action_button(
-                    "new-prompt",
-                    &theme,
-                    "New prompt",
-                    cx,
-                    |this, cx, _| this.edit_prompt(None, cx),
-                )),
+                .child(
+                    div()
+                        .id("new-prompt")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .h(px(34.0))
+                        .px(px(12.0))
+                        .rounded(px(11.0))
+                        .border_1()
+                        .border_color(Theme::with_alpha(action_tint, 0.16))
+                        .bg(Theme::with_alpha(action_tint, 0.12))
+                        .text_color(action_tint)
+                        .text_size(scaled(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(Theme::with_alpha(action_tint, 0.20)))
+                        .child(icons::icon_colored(action_tint, Icon::Plus, 14.0))
+                        .child("New prompt")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.edit_prompt(None, cx);
+                            cx.notify();
+                        })),
+                ),
         );
         let query = self
             .prompt_search
@@ -158,6 +180,7 @@ impl DashboardView {
             count += 1;
             let id = prompt.id;
             let mut card = div()
+                .id(gpui::ElementId::Name(format!("prompt-card-{id}").into()))
                 .relative()
                 .w(px(220.0))
                 .h(px(220.0))
@@ -169,6 +192,12 @@ impl DashboardView {
                 .border_1()
                 .border_color(theme.control_border(false))
                 .bg(self.surfaces().card())
+                .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                    if this.prompt_menu == Some(id) {
+                        this.prompt_menu = None;
+                        cx.notify();
+                    }
+                }))
                 .child(
                     div()
                         .flex()
@@ -182,19 +211,26 @@ impl DashboardView {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(prompt.name.clone()),
                         )
-                        .child(action_button(
-                            gpui::ElementId::Name(format!("more-prompt-{id}").into()),
-                            &theme,
-                            "More ⋯",
-                            cx,
-                            move |this, _, _| {
-                                this.prompt_menu = if this.prompt_menu == Some(id) {
-                                    None
-                                } else {
-                                    Some(id)
-                                };
-                            },
-                        )),
+                        .child(
+                            div()
+                                .id(gpui::ElementId::Name(format!("more-prompt-{id}").into()))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(28.0))
+                                .rounded(px(8.0))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.menu_hover()))
+                                .child(icons::icon(&theme, Icon::Ellipsis, 16.0))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.prompt_menu = if this.prompt_menu == Some(id) {
+                                        None
+                                    } else {
+                                        Some(id)
+                                    };
+                                    cx.notify();
+                                })),
+                        ),
                 )
                 .child(
                     div()
@@ -214,42 +250,70 @@ impl DashboardView {
                         .absolute()
                         .top(px(48.0))
                         .right(px(10.0))
-                        .p(px(6.0))
+                        .w(px(170.0))
+                        .p(px(5.0))
                         .flex()
                         .flex_col()
-                        .gap(px(5.0))
-                        .rounded(px(10.0))
+                        .gap(px(2.0))
+                        .rounded(px(12.0))
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.popover())
+                        .shadow_md()
                         .occlude()
-                        .child(action_button(
-                            gpui::ElementId::Name(format!("edit-prompt-{id}").into()),
-                            &theme,
-                            "Edit",
-                            cx,
-                            move |this, cx, _| this.edit_prompt(Some(editing.clone()), cx),
-                        ))
-                        .child(action_button(
-                            gpui::ElementId::Name(format!("delete-prompt-{id}").into()),
-                            &theme,
-                            "Delete",
-                            cx,
-                            move |this, _, _| {
-                                if let Some(db) = &this.database {
-                                    match store::delete_prompt(db.connection(), id) {
-                                        Ok(()) => {
-                                            this.prompt_menu = None;
-                                            this.dashboard.navigate(
-                                                super::super::nav::Route::Prompts,
-                                                Some(db),
-                                            );
+                        .child(
+                            div()
+                                .id(gpui::ElementId::Name(format!("edit-prompt-{id}").into()))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .h(px(34.0))
+                                .px(px(10.0))
+                                .rounded(px(8.0))
+                                .text_size(scaled(12.0))
+                                .text_color(theme.foreground)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.menu_hover()))
+                                .child(icons::icon(&theme, Icon::Pencil, 14.0))
+                                .child("Edit prompt")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.edit_prompt(Some(editing.clone()), cx);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(gpui::ElementId::Name(format!("delete-prompt-{id}").into()))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .h(px(34.0))
+                                .px(px(10.0))
+                                .rounded(px(8.0))
+                                .text_size(scaled(12.0))
+                                .text_color(theme.destructive)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.menu_hover()))
+                                .child(icons::icon_colored(theme.destructive, Icon::Trash2, 14.0))
+                                .child("Delete prompt")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(db) = &this.database {
+                                        match store::delete_prompt(db.connection(), id) {
+                                            Ok(()) => {
+                                                this.prompt_menu = None;
+                                                this.dashboard.navigate(
+                                                    super::super::nav::Route::Prompts,
+                                                    Some(db),
+                                                );
+                                            }
+                                            Err(error) => {
+                                                this.settings.error = Some(error.to_string())
+                                            }
                                         }
-                                        Err(error) => this.settings.error = Some(error.to_string()),
                                     }
-                                }
-                            },
-                        )),
+                                    cx.notify();
+                                })),
+                        ),
                 );
             }
             grid = grid.child(card);

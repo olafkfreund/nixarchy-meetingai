@@ -63,6 +63,8 @@ pub struct SettingsState {
     pub devices_loading: bool,
     pub capture_status: Option<String>,
     pub language_menu: bool,
+    pub speech_language_menu: bool,
+    pub custom_speech_language: bool,
     pub settings: Settings,
     pub baseline: Settings,
     pub database: Option<crate::db::Database>,
@@ -137,6 +139,8 @@ impl SettingsState {
             devices_loading: false,
             capture_status: None,
             language_menu: false,
+            speech_language_menu: false,
+            custom_speech_language: false,
             baseline: settings.clone(),
             settings,
             database,
@@ -593,12 +597,7 @@ pub fn audio_settings(
             ),
         ));
     }
-    providers = providers.child(view.editable_setting(
-        "speech_language",
-        "Speech language (blank uses provider default; for example en or de)",
-        &s.speech_language,
-        cx,
-    ));
+    providers = providers.child(speech_language_picker(view, state, theme, cx));
     if state.stored_speech.is_empty() {
         providers = providers.child(help_text(
             theme,
@@ -681,64 +680,86 @@ fn device_picker(
             .map(|d| d.name.clone())
             .unwrap_or_else(|| format!("Unavailable: {selected}"))
     };
-    let mut block = div().flex().flex_col().gap(px(8.0)).child(
-        div()
-            .flex()
-            .gap(px(8.0))
-            .child(action(
-                if input {
-                    "microphone-picker"
-                } else {
-                    "output-picker"
-                },
-                theme,
-                &label,
-                cx,
-                move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    let state = view.settings_mut();
-                    state.device_menu = if state.device_menu == Some(input) {
-                        None
+    let open = state.device_menu == Some(input);
+    let mut block = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .items_start()
+        .gap(px(8.0))
+        .on_mouse_down_out(cx.listener(move |view, _, _, cx| {
+            if view.settings_mut().device_menu == Some(input) {
+                view.settings_mut().device_menu = None;
+                cx.notify();
+            }
+        }))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .w_full()
+                .max_w(px(480.0))
+                .gap(px(8.0))
+                .child(div().flex_1().min_w(px(0.0)).child(select_trigger(
+                    if input {
+                        "microphone-picker"
                     } else {
-                        Some(input)
-                    };
-                },
-            ))
-            .child(action(
-                if input {
-                    "refresh-microphones"
-                } else {
-                    "refresh-outputs"
-                },
-                theme,
-                if state.devices_loading {
-                    "Refreshing…"
-                } else {
-                    "Refresh"
-                },
-                cx,
-                |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
-                    view.refresh_audio_devices(cx)
-                },
-            )),
-    );
-    if state.device_menu == Some(input) {
+                        "output-picker"
+                    },
+                    theme,
+                    &label,
+                    open,
+                    cx,
+                    move |view, _, _| {
+                        let state = view.settings_mut();
+                        state.device_menu = if state.device_menu == Some(input) {
+                            None
+                        } else {
+                            Some(input)
+                        };
+                        state.speech_language_menu = false;
+                    },
+                )))
+                .child(action(
+                    if input {
+                        "refresh-microphones"
+                    } else {
+                        "refresh-outputs"
+                    },
+                    theme,
+                    if state.devices_loading {
+                        "Refreshing..."
+                    } else {
+                        "Refresh"
+                    },
+                    cx,
+                    |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
+                        view.refresh_audio_devices(cx)
+                    },
+                )),
+        );
+    if open {
         let mut menu = div()
             .id(if input {
                 "microphone-options"
             } else {
                 "output-options"
             })
+            .w_full()
+            .max_w(px(380.0))
             .max_h(px(240.0))
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(6.0))
-            .p(px(8.0))
+            .gap(px(2.0))
+            .p(px(5.0))
             .rounded(px(12.0))
             .bg(theme.popover())
             .border_1()
             .border_color(theme.border)
-            .child(action(
+            .shadow_md()
+            .occlude()
+            .child(select_option(
                 if input {
                     "default-microphone"
                 } else {
@@ -746,15 +767,16 @@ fn device_picker(
                 },
                 theme,
                 "System default",
+                selected.is_empty(),
                 cx,
-                move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    let s = view.settings_mut();
+                move |view, _, _| {
+                    let state = view.settings_mut();
                     if input {
-                        s.settings.input_device.clear();
+                        state.settings.input_device.clear();
                     } else {
-                        s.settings.output_device.clear();
+                        state.settings.output_device.clear();
                     }
-                    s.device_menu = None;
+                    state.device_menu = None;
                     view.save_settings();
                 },
             ));
@@ -763,21 +785,22 @@ fn device_picker(
             let label = format!(
                 "{}{}",
                 device.name,
-                if device.is_default { " · Default" } else { "" }
+                if device.is_default { " (Default)" } else { "" }
             );
-            menu = menu.child(action(
+            menu = menu.child(select_option(
                 gpui::ElementId::Name(format!("device-{input}-{index}").into()),
                 theme,
                 &label,
+                selected == &device.id,
                 cx,
-                move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    let s = view.settings_mut();
+                move |view, _, _| {
+                    let state = view.settings_mut();
                     if input {
-                        s.settings.input_device = id.clone();
+                        state.settings.input_device = id.clone();
                     } else {
-                        s.settings.output_device = id.clone();
+                        state.settings.output_device = id.clone();
                     }
-                    s.device_menu = None;
+                    state.device_menu = None;
                     view.save_settings();
                 },
             ));
@@ -794,6 +817,242 @@ fn device_picker(
         ));
     }
     block.into_any_element()
+}
+
+fn select_trigger(
+    id: &'static str,
+    theme: &Theme,
+    label: &str,
+    open: bool,
+    cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
+    handler: impl Fn(
+        &mut crate::ui::dashboard::view::DashboardView,
+        &mut Context<crate::ui::dashboard::view::DashboardView>,
+        &mut gpui::Window,
+    ) + 'static,
+) -> gpui::AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .w_full()
+        .h(px(38.0))
+        .px(px(12.0))
+        .rounded(px(11.0))
+        .bg(theme.input)
+        .border_1()
+        .border_color(if open {
+            theme.focus_border()
+        } else {
+            theme.control_border(false)
+        })
+        .text_color(theme.foreground)
+        .text_size(scaled(12.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.menu_hover()))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .truncate()
+                .child(label.to_owned()),
+        )
+        .child(icons::icon(
+            theme,
+            if open {
+                Icon::ChevronUp
+            } else {
+                Icon::ChevronDown
+            },
+            14.0,
+        ))
+        .on_click(cx.listener(move |view, _, window, cx| {
+            handler(view, cx, window);
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
+fn select_option(
+    id: impl Into<gpui::ElementId>,
+    theme: &Theme,
+    label: &str,
+    selected: bool,
+    cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
+    handler: impl Fn(
+        &mut crate::ui::dashboard::view::DashboardView,
+        &mut Context<crate::ui::dashboard::view::DashboardView>,
+        &mut gpui::Window,
+    ) + 'static,
+) -> gpui::AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .w_full()
+        .min_h(px(34.0))
+        .px(px(10.0))
+        .py(px(7.0))
+        .rounded(px(8.0))
+        .bg(if selected {
+            theme.menu_hover()
+        } else {
+            gpui::transparent_black().into()
+        })
+        .text_color(theme.foreground)
+        .text_size(scaled(12.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.menu_hover()))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .whitespace_normal()
+                .child(label.to_owned()),
+        )
+        .child(
+            div()
+                .w(px(14.0))
+                .children(selected.then(|| icons::icon(theme, Icon::Check, 14.0))),
+        )
+        .on_click(cx.listener(move |view, _, window, cx| {
+            handler(view, cx, window);
+            cx.notify();
+        }))
+        .into_any_element()
+}
+
+const SPEECH_LANGUAGES: &[(&str, &str)] = &[
+    ("Provider default", ""),
+    ("English", "en"),
+    ("Hindi", "hi"),
+    ("Spanish", "es"),
+    ("French", "fr"),
+    ("German", "de"),
+    ("Portuguese", "pt"),
+    ("Italian", "it"),
+    ("Dutch", "nl"),
+    ("Japanese", "ja"),
+    ("Korean", "ko"),
+    ("Chinese", "zh"),
+    ("Arabic", "ar"),
+    ("Russian", "ru"),
+    ("Turkish", "tr"),
+    ("Indonesian", "id"),
+];
+
+fn speech_language_label(code: &str) -> String {
+    SPEECH_LANGUAGES
+        .iter()
+        .find(|(_, value)| *value == code)
+        .map(|(label, _)| (*label).to_owned())
+        .unwrap_or_else(|| format!("Custom ({code})"))
+}
+
+fn speech_language_picker(
+    view: &crate::ui::dashboard::view::DashboardView,
+    state: &SettingsState,
+    theme: &Theme,
+    cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
+) -> gpui::AnyElement {
+    let code = &state.settings.speech_language;
+    let custom =
+        state.custom_speech_language || !SPEECH_LANGUAGES.iter().any(|(_, value)| value == code);
+    let label = if state.custom_speech_language
+        && SPEECH_LANGUAGES.iter().any(|(_, value)| value == code)
+    {
+        "Custom language...".into()
+    } else {
+        speech_language_label(code)
+    };
+    let mut block = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .items_start()
+        .gap(px(8.0))
+        .py(px(8.0))
+        .child(
+            div()
+                .text_size(scaled(12.0))
+                .text_color(theme.foreground)
+                .child("Speech language"),
+        )
+        .child(div().w_full().max_w(px(380.0)).child(select_trigger(
+            "speech-language-picker",
+            theme,
+            &label,
+            state.speech_language_menu,
+            cx,
+            |view, _, _| {
+                let state = view.settings_mut();
+                state.speech_language_menu = !state.speech_language_menu;
+                state.device_menu = None;
+            },
+        )))
+        .on_mouse_down_out(cx.listener(|view, _, _, cx| {
+            if view.settings_mut().speech_language_menu {
+                view.settings_mut().speech_language_menu = false;
+                cx.notify();
+            }
+        }));
+    if state.speech_language_menu {
+        let mut menu = div()
+            .id("speech-language-options")
+            .w_full()
+            .max_w(px(380.0))
+            .max_h(px(240.0))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .p(px(5.0))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover())
+            .shadow_md()
+            .occlude();
+        for (index, (name, code)) in SPEECH_LANGUAGES.iter().enumerate() {
+            menu = menu.child(select_option(
+                ("speech-language-option", index),
+                theme,
+                name,
+                !custom && state.settings.speech_language == *code,
+                cx,
+                move |view, _, _| {
+                    let state = view.settings_mut();
+                    state.settings.speech_language = (*code).into();
+                    state.speech_language_menu = false;
+                    state.custom_speech_language = false;
+                    view.save_settings();
+                },
+            ));
+        }
+        menu = menu.child(select_option(
+            "speech-language-custom",
+            theme,
+            "Add a custom language...",
+            custom,
+            cx,
+            |view, _, _| {
+                view.settings_mut().speech_language_menu = false;
+                view.settings_mut().custom_speech_language = true;
+            },
+        ));
+        block = block.child(menu);
+    }
+    if custom {
+        block = block.child(view.editable_setting(
+            "speech_language",
+            "Custom language code (for example en-US or ta)",
+            code,
+            cx,
+        ));
+    }
+    block.child(help_text(theme, "Choose a supported language for your speech provider. Availability and language-code support depend on the service and model.")).into_any_element()
 }
 
 fn help_text(theme: &Theme, text: &str) -> impl IntoElement {
@@ -1283,11 +1542,7 @@ pub fn render(
                 FontWeight::NORMAL
             })
             .cursor_pointer()
-            .text_color(if is_active {
-                theme.foreground
-            } else {
-                surfaces.muted_foreground()
-            })
+            .text_color(theme.foreground)
             .id(("settings-subtab", sub_route as usize));
 
         if is_active {
