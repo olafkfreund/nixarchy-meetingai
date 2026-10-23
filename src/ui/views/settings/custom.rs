@@ -95,6 +95,14 @@ pub fn providers(
         }
         sections.push(card.into_any_element());
     }
+    stack(sections)
+}
+
+pub fn dialog(
+    state: &SettingsState,
+    theme: &Theme,
+    cx: &mut Context<Dashboard>,
+) -> Option<gpui::AnyElement> {
     if let Some(draft) = &state.custom_draft {
         let custom = draft.custom.as_ref().expect("custom provider draft");
         let speech = draft.kind == Kind::Speech;
@@ -256,7 +264,7 @@ pub fn providers(
                     "Cancel",
                     cx,
                     |view: &mut Dashboard, _, _| {
-                        view.settings_mut().custom_draft = None;
+                        view.settings_mut().custom_open = false;
                         view.settings_mut().key_field = None;
                     },
                 )),
@@ -264,9 +272,9 @@ pub fn providers(
         if let Some(status) = &state.key_status {
             form = form.child(help_text(theme, status));
         }
-        sections.push(form.into_any_element());
+        return Some(form.into_any_element());
     }
-    stack(sections)
+    None
 }
 
 fn field_input(

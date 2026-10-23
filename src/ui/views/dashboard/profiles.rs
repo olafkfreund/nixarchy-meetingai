@@ -76,7 +76,14 @@ impl DashboardView {
                 .child(div().flex().gap(px(8.0))
                     .child(action_button("save-profile", &theme, "Save profile", cx, |this, cx, _| this.save_profile(cx)))
                     .child(action_button("cancel-profile", &theme, "Cancel", cx, |this, _, _| { this.profile_edit = None; this.settings.error = None; })));
-            return body.child(form).into_any_element();
+            return body
+                .child(crate::ui::widgets::motion::reveal(
+                    form,
+                    "profile-editor-open",
+                    self.settings.settings.reduce_motion,
+                    false,
+                ))
+                .into_any_element();
         }
         body = body.child(action_button(
             "create-profile",

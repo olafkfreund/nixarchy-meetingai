@@ -8,7 +8,7 @@ pub const MAX_TEXT_CHARS: usize = 16_000;
 pub const MAX_TOTAL_CHARS: usize = 64_000;
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub id: String,
     pub name: String,

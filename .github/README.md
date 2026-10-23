@@ -11,6 +11,9 @@
 - **Choose when it responds.** On questions or after substantive pauses, with Fast / Balanced / Relaxed pacing.
 - **Hold to dictate.** Use the input microphone or **Ctrl+Shift+Space**; release inserts a draft for review.
 - **Stay out of the way.** Compact overlay, transparent glass theme, global shortcuts, local history, and exports.
+- **Keep the input tidy.** The composer grows to five lines, then scrolls. Code and large pastes become square attachments with scrollable previews; sent references can be reopened from the question bubble. Shift+Enter adds a line; Enter sends.
+- **Continue where you left off.** Click the pill logo for New, Restore, or Quit. Restore opens saved chats and meeting transcripts; resumed recordings append to the same meeting. Newly recorded meetings also retain their associated AI thread and selected text context. Quit asks for confirmation inside the overlay.
+- **Find a setting or model.** Search across all Settings tabs, or filter providers and models from the pill dropdown. Motion follows the Reduce motion preference.
 
 Bring your own keys: **Google Gemini** or **Merge Gateway** for chat; **Deepgram** for speech.
 

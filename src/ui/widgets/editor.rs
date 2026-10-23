@@ -1,6 +1,7 @@
 //! Multiline native text editor used for meeting context and editable prompts.
 use super::text_input::Input;
 use crate::ui::theme::Theme;
+use gpui::prelude::FluentBuilder;
 use gpui::{
     Context, EntityInputHandler, FocusHandle, InteractiveElement, IntoElement, ParentElement,
     Render, StatefulInteractiveElement, Styled, UTF16Selection, Window, div, px,
@@ -11,11 +12,23 @@ pub struct Editor {
     pub compact: bool,
     pub input: Input,
     pub theme: Theme,
+    pub placeholder: &'static str,
     focus: FocusHandle,
     marked: Option<Range<usize>>,
 }
 
 impl Editor {
+    pub fn sync_theme(editor: &gpui::Entity<Self>, theme: Theme, cx: &mut gpui::App) {
+        if editor.read(cx).theme != theme {
+            editor.update(cx, |editor, cx| {
+                editor.theme = theme;
+                cx.notify();
+            });
+        }
+    }
+    pub fn focus(&self, window: &mut Window) {
+        window.focus(&self.focus);
+    }
     pub fn new(text: &str, theme: Theme, cx: &mut Context<Self>) -> Self {
         let mut input = Input::new();
         input.set_text(text);
@@ -23,6 +36,7 @@ impl Editor {
             compact: false,
             input,
             theme,
+            placeholder: "Click to write or paste…",
             focus: cx.focus_handle(),
             marked: None,
         }
@@ -44,8 +58,18 @@ impl Editor {
         let remaining = (if self.compact { 80usize } else { 16_000usize }).saturating_sub(
             self.input.text().chars().count() - self.input.text()[range.clone()].chars().count(),
         );
-        self.input
-            .replace_range(range, &text.chars().take(remaining).collect::<String>());
+        let text = text
+            .chars()
+            .take(remaining)
+            .map(|ch| {
+                if self.compact && matches!(ch, '\n' | '\r' | '\t') {
+                    ' '
+                } else {
+                    ch
+                }
+            })
+            .collect::<String>();
+        self.input.replace_range(range, &text);
         cx.notify();
     }
 }
@@ -74,7 +98,7 @@ impl Render for Editor {
             display.insert(self.input.cursor(), '│');
         }
         if display.is_empty() {
-            display = "Click to write or paste…".into();
+            display = self.placeholder.into();
         }
         div()
             .id("multiline-editor")
@@ -85,7 +109,8 @@ impl Render for Editor {
             .min_h(px(if self.compact { 38.0 } else { 100.0 }))
             .max_h(px(if self.compact { 38.0 } else { 240.0 }))
             .flex_shrink_0()
-            .overflow_y_scroll()
+            .when(self.compact, |style| style.overflow_hidden().h(px(38.0)))
+            .when(!self.compact, |style| style.overflow_y_scroll())
             .p(px(if self.compact { 8.0 } else { 12.0 }))
             .rounded(px(10.0))
             .border_1()
@@ -97,7 +122,8 @@ impl Render for Editor {
             .bg(self.theme.muted)
             .text_color(self.theme.foreground)
             .text_size(crate::ui::theme::scaled(12.0))
-            .whitespace_normal()
+            .when(self.compact, |style| style.whitespace_nowrap())
+            .when(!self.compact, |style| style.whitespace_normal())
             .track_focus(&focus)
             .cursor_text()
             .on_mouse_down(
@@ -147,7 +173,8 @@ impl Render for Editor {
                     .w_full()
                     .flex_shrink_0()
                     .line_height(px(19.0))
-                    .whitespace_normal()
+                    .when(self.compact, |style| style.whitespace_nowrap())
+                    .when(!self.compact, |style| style.whitespace_normal())
                     .child(display),
             )
             .child(

@@ -18,7 +18,8 @@ use crate::ui::dashboard::nav::Route;
 use crate::ui::icons;
 use crate::ui::theme::scaled;
 use crate::ui::theme::{Theme, radius, space};
-mod custom;
+pub(crate) mod custom;
+mod search;
 
 /// Shortcut catalog shown on the shortcuts page, derived from the real bindings
 /// that the shortcut layer registers.
@@ -58,6 +59,7 @@ pub const KEY_PROVIDERS: &[(&str, &str)] = &[
 /// Settings state shared by every settings page.
 pub struct SettingsState {
     pub custom_draft: Option<crate::core::credentials::Credential>,
+    pub custom_open: bool,
     pub devices: crate::audio::devices::Devices,
     pub device_menu: Option<bool>,
     pub devices_loading: bool,
@@ -134,6 +136,7 @@ impl SettingsState {
             .unwrap_or_else(|| crate::ai::models::default_for("gemini").unwrap().to_owned());
         Self {
             custom_draft: None,
+            custom_open: false,
             devices: crate::audio::devices::Devices::default(),
             device_menu: None,
             devices_loading: false,
@@ -553,6 +556,23 @@ pub fn audio_settings(
         "Used by Listen and push to talk. Hold the composer microphone button, release to transcribe, then review before sending.",
     );
     microphone = microphone.child(device_picker(state, theme, true, cx));
+    microphone = microphone.child(row(
+        theme,
+        "Always on top",
+        "Keep Lennette above the meeting window while using audio",
+        switch(
+            "audio-always-on-top",
+            theme,
+            s.always_on_top,
+            cx,
+            |view: &mut crate::ui::dashboard::view::DashboardView, _, window| {
+                let enabled = !view.settings_mut().settings.always_on_top;
+                view.settings_mut().settings.always_on_top = enabled;
+                view.save_settings();
+                view.apply_always_on_top(enabled, window);
+            },
+        ),
+    ));
     let mut speakers = section(
         theme,
         "System Audio",
@@ -700,27 +720,34 @@ fn device_picker(
                 .w_full()
                 .max_w(px(480.0))
                 .gap(px(8.0))
-                .child(div().flex_1().min_w(px(0.0)).child(select_trigger(
-                    if input {
-                        "microphone-picker"
-                    } else {
-                        "output-picker"
-                    },
-                    theme,
-                    &label,
-                    open,
-                    cx,
-                    move |view, _, _| {
-                        let state = view.settings_mut();
-                        state.device_menu = if state.device_menu == Some(input) {
-                            None
-                        } else {
-                            Some(input)
-                        };
-                        state.speech_language_menu = false;
-                    },
-                )))
-                .child(action(
+                .child(
+                    div()
+                        .flex_1()
+                        .flex_basis(px(0.0))
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .child(select_trigger(
+                            if input {
+                                "microphone-picker"
+                            } else {
+                                "output-picker"
+                            },
+                            theme,
+                            &label,
+                            open,
+                            cx,
+                            move |view, _, _| {
+                                let state = view.settings_mut();
+                                state.device_menu = if state.device_menu == Some(input) {
+                                    None
+                                } else {
+                                    Some(input)
+                                };
+                                state.speech_language_menu = false;
+                            },
+                        )),
+                )
+                .child(div().flex_shrink_0().child(action(
                     if input {
                         "refresh-microphones"
                     } else {
@@ -736,7 +763,7 @@ fn device_picker(
                     |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
                         view.refresh_audio_devices(cx)
                     },
-                )),
+                ))),
         );
     if open {
         let mut menu = div()
@@ -805,7 +832,12 @@ fn device_picker(
                 },
             ));
         }
-        block = block.child(menu);
+        block = block.child(crate::ui::widgets::motion::reveal(
+            menu,
+            "settings-picker-open",
+            state.settings.reduce_motion,
+            true,
+        ));
     }
     if let Some(error) = &state.devices.error {
         block = block.child(warning(theme, error));
@@ -837,6 +869,8 @@ fn select_trigger(
         .items_center()
         .gap(px(10.0))
         .w_full()
+        .min_w(px(0.0))
+        .overflow_hidden()
         .h(px(38.0))
         .px(px(12.0))
         .rounded(px(11.0))
@@ -858,7 +892,7 @@ fn select_trigger(
                 .truncate()
                 .child(label.to_owned()),
         )
-        .child(icons::icon(
+        .child(div().flex_shrink_0().child(icons::icon(
             theme,
             if open {
                 Icon::ChevronUp
@@ -866,7 +900,7 @@ fn select_trigger(
                 Icon::ChevronDown
             },
             14.0,
-        ))
+        )))
         .on_click(cx.listener(move |view, _, window, cx| {
             handler(view, cx, window);
             cx.notify();
@@ -1042,7 +1076,12 @@ fn speech_language_picker(
                 view.settings_mut().custom_speech_language = true;
             },
         ));
-        block = block.child(menu);
+        block = block.child(crate::ui::widgets::motion::reveal(
+            menu,
+            "settings-picker-open",
+            state.settings.reduce_motion,
+            true,
+        ));
     }
     if custom {
         block = block.child(view.editable_setting(
@@ -1155,7 +1194,12 @@ pub fn response_settings(
                 },
             ));
         }
-        responses = responses.child(languages);
+        responses = responses.child(crate::ui::widgets::motion::reveal(
+            languages,
+            "response-language-open",
+            state.settings.reduce_motion,
+            true,
+        ));
     }
     responses = responses.child(row(theme, "Auto-scroll", "Follow new answers and transcript lines as they arrive", switch("auto-scroll", theme, s.auto_scroll, cx,
         |view: &mut crate::ui::dashboard::view::DashboardView, _, _| { view.settings_mut().settings.auto_scroll = !view.settings_mut().settings.auto_scroll; view.save_settings(); })))
@@ -1387,7 +1431,12 @@ fn credentials_section(
                     view.focus_credential_field(CredentialField::Model, window, cx);
                 },
             ));
-            card = card.child(dropdown);
+            card = card.child(crate::ui::widgets::motion::reveal(
+                dropdown,
+                "model-picker-open",
+                state.settings.reduce_motion,
+                true,
+            ));
         }
     }
     card = card.child(div().flex().items_center().py(px(8.0)).child(action(
@@ -1561,18 +1610,23 @@ pub fn render(
         tab_bar = tab_bar.child(chip.child(label));
     }
 
-    let body: gpui::AnyElement = match active_route {
-        Route::Settings => {
-            let app = app_settings(state, theme, cx);
-            let screenshots = screenshot_settings(state, theme, cx);
-            stack(vec![app, screenshots])
+    let query = view.settings_search_query(cx);
+    let body: gpui::AnyElement = if !query.trim().is_empty() {
+        search::results(&query, theme, state.settings.reduce_motion, cx)
+    } else {
+        match active_route {
+            Route::Settings => {
+                let app = app_settings(state, theme, cx);
+                let screenshots = screenshot_settings(state, theme, cx);
+                stack(vec![app, screenshots])
+            }
+            Route::Responses => response_settings(view, state, theme, cx),
+            Route::Profiles => view.profiles_body(cx),
+            Route::Audio => audio_settings(view, state, theme, cx),
+            Route::DevSpace => dev_space(state, theme, cx),
+            Route::Shortcuts => shortcut_settings(theme, cx),
+            _ => app_settings(state, theme, cx),
         }
-        Route::Responses => response_settings(view, state, theme, cx),
-        Route::Profiles => view.profiles_body(cx),
-        Route::Audio => audio_settings(view, state, theme, cx),
-        Route::DevSpace => dev_space(state, theme, cx),
-        Route::Shortcuts => shortcut_settings(theme, cx),
-        _ => app_settings(state, theme, cx),
     };
 
     div()
@@ -1585,6 +1639,7 @@ pub fn render(
             div()
                 .flex()
                 .flex_col()
+                .w_full()
                 .items_start()
                 .gap(px(18.0))
                 .child(page_header(
@@ -1592,6 +1647,31 @@ pub fn render(
                     active_route.title(),
                     active_route.description(),
                 ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .w_full()
+                        .max_w(px(480.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .children(view.settings_search_field()),
+                        )
+                        .children((!query.is_empty()).then(|| {
+                            action(
+                                "clear-settings-search",
+                                theme,
+                                "Clear",
+                                cx,
+                                |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
+                                    view.clear_settings_search(cx)
+                                },
+                            )
+                        })),
+                )
                 .child(tab_bar),
         )
         .child(body)

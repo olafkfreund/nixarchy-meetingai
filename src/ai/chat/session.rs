@@ -50,10 +50,35 @@ fn recent_history(mut history: Vec<Message>) -> Vec<Message> {
     };
     let mut remaining = 32_000usize.saturating_sub(latest.content.chars().count());
     let mut recent = vec![latest];
-    for message in history.into_iter().rev().take(23) {
-        let size = message.content.chars().count();
-        if size > remaining {
+    for mut message in history.into_iter().rev().take(23) {
+        if remaining < 256 {
             break;
+        }
+        let mut size = message.content.chars().count();
+        if size > remaining {
+            // A large pasted reference must not disappear entirely on the next
+            // follow-up. Keep its beginning and newest material; originals stay on disk.
+            let budget = if message.role == crate::core::domain::Role::User {
+                remaining
+            } else {
+                remaining / 2
+            };
+            let marker = "\n[Earlier content shortened; the complete original is saved in this conversation.]\n";
+            let available = budget.saturating_sub(marker.chars().count());
+            let head = available / 3;
+            let tail = available - head;
+            let prefix: String = message.content.chars().take(head).collect();
+            let suffix: String = message
+                .content
+                .chars()
+                .rev()
+                .take(tail)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            message.content = format!("{prefix}{marker}{suffix}");
+            size = message.content.chars().count();
         }
         remaining -= size;
         recent.push(message);
@@ -102,6 +127,27 @@ impl ChatSession {
         self.streaming_message_id = None;
         self.answer.clear();
         self.streaming = false;
+    }
+
+    /// Reuse the original thread; the next turn still uses the bounded history window.
+    pub fn restore(&mut self, database: &Database, id: &str) -> Result<Vec<Message>, String> {
+        conversations::require_conversation(database.connection(), id)
+            .map_err(|e| e.to_string())?;
+        let records =
+            conversations::messages(database.connection(), id).map_err(|e| e.to_string())?;
+        self.reset();
+        self.conversation_id = Some(id.to_owned());
+        Ok(records
+            .into_iter()
+            .filter(|r| !r.content.trim().is_empty())
+            .map(|r| {
+                if r.role == "assistant" {
+                    Message::assistant(r.content)
+                } else {
+                    Message::user(r.content)
+                }
+            })
+            .collect())
     }
 
     /// Begin a turn.
@@ -286,6 +332,24 @@ mod tests {
         ]);
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].content, huge_question);
+        let recent = recent_history(vec![
+            Message::user(format!(
+                "Reference start {} Reference end",
+                "é".repeat(64_000)
+            )),
+            Message::assistant("Earlier analysis"),
+            Message::user("What about that reference?"),
+        ]);
+        assert!(recent[0].content.starts_with("Reference start"));
+        assert!(recent[0].content.ends_with("Reference end"));
+        assert!(recent[0].content.contains("complete original is saved"));
+        assert!(
+            recent
+                .iter()
+                .map(|m| m.content.chars().count())
+                .sum::<usize>()
+                <= 32_000
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub use repos::conversations;
 pub use repos::library;
 pub use repos::meetings;
 pub use repos::profiles;
+pub use repos::sessions;
 pub use repos::settings;
 pub use schema::seed;
 

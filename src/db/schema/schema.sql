@@ -171,3 +171,13 @@ CREATE TABLE IF NOT EXISTS context_profiles (
     meeting_context TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS conversation_state (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    context_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meeting_conversations (
+    meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    PRIMARY KEY (meeting_id, conversation_id)
+);

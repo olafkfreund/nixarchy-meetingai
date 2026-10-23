@@ -48,7 +48,7 @@ const fn rgba(r: u32, g: u32, b: u32, a: f32) -> Rgba {
 pub const DEFAULT_OPACITY: f32 = 0.5;
 
 /// Semantic surface and text colours.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     pub background: Rgba,
     pub card: Rgba,

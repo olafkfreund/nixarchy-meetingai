@@ -54,6 +54,11 @@ pub struct DashboardView {
     prompt_search: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
     prompt_observer: Option<gpui::Subscription>,
     prompt_menu: Option<i64>,
+    settings_search: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
+    settings_search_observer: Option<gpui::Subscription>,
+    page_generation: usize,
+    custom_focus_pending: bool,
+    custom_motion: crate::ui::widgets::motion::Transition,
     /// Background task naming meetings that still carry a timestamp title.
     title_task: Option<gpui::Task<()>>,
     /// Chat provider used to name old sessions, when one is configured.
@@ -112,12 +117,20 @@ impl DashboardView {
             prompt_search: None,
             prompt_observer: None,
             prompt_menu: None,
+            settings_search: None,
+            settings_search_observer: None,
+            page_generation: 0,
+            custom_focus_pending: false,
+            custom_motion: crate::ui::widgets::motion::Transition::new(0.0),
             title_task: None,
             title_config,
         }
     }
 
     fn navigate(&mut self, route: super::nav::Route) {
+        if self.dashboard.route() != route {
+            self.page_generation += 1;
+        }
         if self.settings_save.take().is_some() {
             self.save_settings();
         }
@@ -146,6 +159,26 @@ impl DashboardView {
     /// Navigate to a page, loading its data.
     pub fn navigate_to(&mut self, route: super::nav::Route) {
         self.navigate(route);
+    }
+
+    pub fn settings_search_field(
+        &self,
+    ) -> Option<gpui::Entity<crate::ui::widgets::editor::Editor>> {
+        self.settings_search.clone()
+    }
+    pub fn settings_search_query(&self, cx: &gpui::App) -> String {
+        self.settings_search
+            .as_ref()
+            .map(|e| e.read(cx).input.text().to_owned())
+            .unwrap_or_default()
+    }
+    pub fn clear_settings_search(&mut self, cx: &mut Context<Self>) {
+        if let Some(search) = &self.settings_search {
+            search.update(cx, |editor, cx| {
+                editor.input.clear();
+                cx.notify();
+            });
+        }
     }
 
     /// Navigate, then start any follow-up work the page needs.
@@ -376,6 +409,8 @@ impl DashboardView {
         });
         credential.api_key.clear();
         self.settings.custom_draft = Some(credential);
+        self.settings.custom_open = true;
+        self.custom_focus_pending = true;
         self.settings.key_field = None;
         self.settings.key_status = None;
     }
@@ -402,7 +437,7 @@ impl DashboardView {
                     self.settings.settings.speech_model = credential.model.clone();
                     self.save_settings();
                 }
-                self.settings.custom_draft = None;
+                self.settings.custom_open = false;
                 self.settings.key_field = None;
                 self.settings.key_status =
                     Some("Custom provider saved in the encrypted vault.".into());
@@ -925,7 +960,8 @@ impl DashboardView {
     }
 
     pub fn wants_key_input(&self) -> bool {
-        (self.dashboard.route() == super::nav::Route::DevSpace && self.settings.key_field.is_some())
+        ((self.settings.custom_open || self.dashboard.route() == super::nav::Route::DevSpace)
+            && self.settings.key_field.is_some())
             || self.renaming
     }
 
@@ -2094,6 +2130,27 @@ fn truncate(text: &str, limit: usize) -> String {
 
 impl Render for DashboardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.settings_search.is_none() {
+            let search = cx.new(|cx| {
+                let mut editor = crate::ui::widgets::editor::Editor::new("", self.theme, cx);
+                editor.compact = true;
+                editor.placeholder = "Search all settings…";
+                editor
+            });
+            self.settings_search_observer = Some(cx.observe(&search, |_, _, cx| cx.notify()));
+            self.settings_search = Some(search);
+        }
+        let (modal_progress, animating) = self.custom_motion.step(
+            f32::from(self.settings.custom_open),
+            self.settings.settings.reduce_motion,
+            std::time::Instant::now(),
+        );
+        if animating {
+            window.request_animation_frame();
+        }
+        if modal_progress == 0.0 && !self.settings.custom_open {
+            self.settings.custom_draft = None;
+        }
         if self.dashboard.route() == super::nav::Route::Prompts && self.prompt_search.is_none() {
             self.init_prompt_search(cx);
         }
@@ -2118,11 +2175,71 @@ impl Render for DashboardView {
         ));
         self.theme = Theme::from_settings(&self.settings.settings);
         let theme = self.theme;
+        for editor in [self.settings_search.as_ref(), self.prompt_search.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            crate::ui::widgets::editor::Editor::sync_theme(editor, theme, cx);
+        }
         let surfaces = self.surfaces();
         let focus = self
             .credential_focus
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
+        if self.custom_focus_pending {
+            window.focus(&focus);
+            self.custom_focus_pending = false;
+        }
+        let dialog_height = f32::from(window.viewport_size().height) - 96.0;
+        let custom_dialog = (modal_progress > 0.0 || self.settings.custom_open).then(|| {
+            let form = settings_pages::custom::dialog(&self.settings, &theme, cx);
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(24.0))
+                .occlude()
+                .child(
+                    div()
+                        .id("custom-provider-scrim")
+                        .absolute()
+                        .inset_0()
+                        .bg(Theme::with_alpha(
+                            gpui::black().into(),
+                            0.42 * modal_progress,
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings.custom_open = false;
+                            this.settings.key_field = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .occlude()
+                        .top(px(8.0 * (1.0 - modal_progress)))
+                        .opacity(modal_progress)
+                        .w_full()
+                        .max_w(px(680.0))
+                        .rounded(px(20.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover())
+                        .shadow_lg()
+                        .child(
+                            div()
+                                .id("custom-provider-dialog")
+                                .w_full()
+                                .max_h(px(dialog_height.max(200.0)))
+                                .overflow_y_scroll()
+                                .p(px(20.0))
+                                .children(form),
+                        ),
+                )
+        });
         div()
             .track_focus(&focus)
             .relative()
@@ -2136,6 +2253,12 @@ impl Render for DashboardView {
             .overflow_hidden()
             // Dev Space owns the keyboard so the key field can be typed into.
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if this.settings.custom_open && event.keystroke.key == "escape" {
+                    this.settings.custom_open = false;
+                    this.settings.key_field = None;
+                    cx.notify();
+                    return;
+                }
                 if !this.wants_key_input() {
                     return;
                 }
@@ -2218,11 +2341,17 @@ impl Render for DashboardView {
                                 .max_w(px(960.0))
                                 .flex_shrink_0()
                                 .min_w(px(0.0))
-                                .child(self.body(window, cx)),
+                                .child(crate::ui::widgets::motion::reveal(
+                                    self.body(window, cx),
+                                    ("dashboard-page", self.page_generation),
+                                    self.settings.settings.reduce_motion,
+                                    false,
+                                )),
                         )
                     }),
             )
             .child(crate::ui::widgets::window_frame::window_edge(theme))
+            .children(custom_dialog)
     }
 }
 

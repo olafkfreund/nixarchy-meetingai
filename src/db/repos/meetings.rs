@@ -122,6 +122,16 @@ pub fn finish(connection: &Connection, meeting_id: &str, duration_seconds: i64) 
     Ok(())
 }
 
+/// Resume recording into the same session without changing its existing speech.
+pub fn reopen(connection: &Connection, id: &str) -> Result<()> {
+    if connection.execute("UPDATE meetings SET ended_at=NULL WHERE id=?1", [id])? == 0 {
+        return Err(crate::db::DbError::Sqlite(
+            rusqlite::Error::QueryReturnedNoRows,
+        ));
+    }
+    Ok(())
+}
+
 /// Rename a session.
 pub fn rename(connection: &Connection, meeting_id: &str, title: &str) -> Result<()> {
     connection.execute(

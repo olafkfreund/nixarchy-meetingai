@@ -98,6 +98,13 @@ impl Input {
         self.cursor = self.text.len();
     }
 
+    pub fn set_cursor(&mut self, index: usize, extend: bool) {
+        self.cursor = self.clamp_down(index);
+        if !extend {
+            self.anchor = self.cursor;
+        }
+    }
+
     pub fn move_to_edge(&mut self, end: bool, extend: bool) {
         self.cursor = if end { self.text.len() } else { 0 };
         if !extend {

@@ -171,7 +171,7 @@ function Wait-For([scriptblock]$Condition, [string]$Description) {
     throw "Timed out: $Description"
 }
 function Send-Command([string]$Flag) {
-    $command = Start-Process -FilePath $Binary -ArgumentList $Flag -Wait -PassThru
+    $command = Start-Process -FilePath $Binary -ArgumentList $Flag -WindowStyle Hidden -Wait -PassThru
     if ($command.ExitCode -ne 0) { throw "Command failed: $Flag" }
     Start-Sleep -Milliseconds 350
 }

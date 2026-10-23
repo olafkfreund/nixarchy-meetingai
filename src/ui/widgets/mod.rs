@@ -3,6 +3,7 @@
 pub mod controls;
 pub mod editor;
 pub mod markdown;
+pub mod motion;
 pub mod panels;
 pub mod syntax;
 pub mod text_input;

@@ -16,6 +16,10 @@ use crate::ui::icons;
 use crate::ui::theme::Theme;
 use crate::ui::theme::scaled;
 
+mod composer;
+mod menus;
+mod session_menu;
+
 type MenuBounds = std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>;
 
 fn menu_probe(bounds: MenuBounds, cx: &Context<Overlay>) -> impl IntoElement {
@@ -33,6 +37,25 @@ fn menu_probe(bounds: MenuBounds, cx: &Context<Overlay>) -> impl IntoElement {
     .top_0()
     .left_0()
     .size_full()
+}
+
+fn height_probe(
+    height: std::rc::Rc<std::cell::Cell<f32>>,
+    cx: &Context<Overlay>,
+) -> impl IntoElement {
+    let view = cx.entity().downgrade();
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, _, cx| {
+            let measured = f32::from(bounds.size.height);
+            if measured > 0.0 && (height.get() - measured).abs() > 0.5 {
+                height.set(measured);
+                let _ = view.update(cx, |_, cx| cx.notify());
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// Messages from the network task to the UI task.
@@ -299,6 +322,21 @@ pub struct Overlay {
     active_prompt: Option<i64>,
     /// Whether the model list is open.
     model_menu_open: bool,
+    model_search: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
+    model_search_observer: Option<gpui::Subscription>,
+    provider_names: std::collections::BTreeMap<String, String>,
+    app_menu_open: bool,
+    restore_menu_open: bool,
+    app_menu_bounds: MenuBounds,
+    restore_chats: Vec<crate::db::conversations::ConversationRecord>,
+    restore_meetings: Vec<crate::db::meetings::MeetingRecord>,
+    resume_meeting: Option<crate::db::meetings::MeetingRecord>,
+    meeting_offset: f64,
+    meeting_speaker_offset: i64,
+    dialog: Option<session_menu::Dialog>,
+    dialog_open: bool,
+    dialog_motion: crate::ui::widgets::motion::Transition,
+    quit_pending: bool,
     catalog_choices: Vec<(String, String)>,
     catalog_loading: bool,
     catalog_status: Option<String>,
@@ -384,12 +422,17 @@ pub struct Overlay {
     streaming_text: String,
     /// The composer's editable text.
     composer: crate::features::text_input::Input,
+    composer_marked: Option<std::ops::Range<usize>>,
+    composer_scroll: gpui::ScrollHandle,
+    composer_layout: std::rc::Rc<std::cell::RefCell<composer::Layout>>,
+    composer_caret_dirty: std::rc::Rc<std::cell::Cell<bool>>,
+    composer_selecting: bool,
+    draft_attachments: Vec<crate::core::composer::TextAttachment>,
     /// Focus handle for the composer, so the platform routes typing here.
     composer_focus: Option<gpui::FocusHandle>,
     /// Whether the composer currently holds focus.
     composer_focused: bool,
     caret_visible: bool,
-    reduce_motion: bool,
     caret_blink: Option<gpui::Task<()>>,
     message_rows: std::rc::Rc<Vec<ChatRow>>,
     message_documents: Vec<Option<std::sync::Arc<Vec<crate::ui::markdown::Block>>>>,
@@ -401,7 +444,6 @@ pub struct Overlay {
     transcript_tail: (usize, usize),
     /// Whether the overlay is shown; toggled by the Toggle Window shortcut.
     window_visible: bool,
-    #[cfg(windows)]
     native_always_on_top: Option<bool>,
     /// Generated follow-up questions for this conversation.
     follow_ups: Vec<String>,
@@ -436,7 +478,13 @@ pub struct Overlay {
     speech_ready: bool,
     refreshed_at: std::time::Instant,
     dock_expanded: bool,
-    dock_generation: usize,
+    dock_alignment: f32,
+    dock_motion: crate::ui::widgets::motion::Transition,
+    composer_motion: crate::ui::widgets::motion::Transition,
+    composer_size_motion: crate::ui::widgets::motion::Transition,
+    followups_motion: crate::ui::widgets::motion::Transition,
+    composer_height: std::rc::Rc<std::cell::Cell<f32>>,
+    followups_height: std::rc::Rc<std::cell::Cell<f32>>,
     /// Keeps polling for shortcuts on an idle app.
     shortcut_poll: Option<gpui::Task<()>>,
 }
@@ -531,6 +579,21 @@ impl Overlay {
             prompt_choices,
             active_prompt,
             model_menu_open: false,
+            model_search: None,
+            model_search_observer: None,
+            provider_names: Default::default(),
+            app_menu_open: false,
+            restore_menu_open: false,
+            app_menu_bounds: Default::default(),
+            restore_chats: Vec::new(),
+            restore_meetings: Vec::new(),
+            resume_meeting: None,
+            meeting_offset: 0.0,
+            meeting_speaker_offset: 0,
+            dialog: None,
+            dialog_open: false,
+            dialog_motion: crate::ui::widgets::motion::Transition::new(0.0),
+            quit_pending: false,
             catalog_choices: Vec::new(),
             catalog_loading: false,
             catalog_status: None,
@@ -597,10 +660,15 @@ impl Overlay {
             user_scrolled: false,
             streaming_text: String::new(),
             composer: crate::features::text_input::Input::new(),
+            composer_marked: None,
+            composer_scroll: gpui::ScrollHandle::new(),
+            composer_layout: Default::default(),
+            composer_caret_dirty: std::rc::Rc::new(std::cell::Cell::new(true)),
+            composer_selecting: false,
+            draft_attachments: Vec::new(),
             composer_focus: None,
             composer_focused: false,
             caret_visible: true,
-            reduce_motion: false,
             caret_blink: None,
             message_rows: std::rc::Rc::new(Vec::new()),
             message_documents: Vec::new(),
@@ -609,7 +677,6 @@ impl Overlay {
             transcript_scroll: gpui::ScrollHandle::new(),
             transcript_tail: (0, 0),
             window_visible: true,
-            #[cfg(windows)]
             native_always_on_top: None,
             native_icon_hidden: None,
             conversation_response: None,
@@ -633,7 +700,13 @@ impl Overlay {
             speech_ready: false,
             refreshed_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
             dock_expanded: true,
-            dock_generation: 0,
+            dock_alignment: 0.0,
+            dock_motion: crate::ui::widgets::motion::Transition::new(0.0),
+            composer_motion: crate::ui::widgets::motion::Transition::new(1.0),
+            composer_size_motion: crate::ui::widgets::motion::Transition::new(58.0),
+            followups_motion: crate::ui::widgets::motion::Transition::new(1.0),
+            composer_height: std::rc::Rc::new(std::cell::Cell::new(58.0)),
+            followups_height: std::rc::Rc::new(std::cell::Cell::new(36.0)),
         }
     }
 
@@ -662,7 +735,7 @@ impl Overlay {
     fn elapsed_seconds(&self) -> f64 {
         self.session
             .as_ref()
-            .map(|session| session.elapsed().as_secs_f64())
+            .map(|session| self.meeting_offset + session.elapsed().as_secs_f64())
             .unwrap_or(self.last_elapsed)
     }
 
@@ -695,15 +768,29 @@ impl Overlay {
             return;
         }
         self.interrupt_response();
-        self.chat.reset();
-        self.conversation = Conversation::new();
-        self.conversation_response = None;
+        let resuming = self.resume_meeting.clone();
+        if resuming.is_none() {
+            self.meeting_offset = 0.0;
+            self.meeting_speaker_offset = 0;
+            self.chat.reset();
+            self.conversation = Conversation::new();
+            self.conversation_response = None;
+            self.transcript.clear();
+        } else {
+            self.meeting_offset = self.last_elapsed.max(self.meeting_offset);
+            self.meeting_speaker_offset = self
+                .transcript
+                .iter()
+                .filter_map(|l| l.speaker)
+                .max()
+                .map_or(0, |s| s + 1);
+        }
         self.runtime_settings =
             crate::core::settings::Settings::load_from_path(self.services.database_path.as_deref())
                 .unwrap_or_default();
 
         self.live_active = [false; 2];
-        self.last_elapsed = 0.0;
+        self.last_elapsed = self.meeting_offset;
         self.live_connected = false;
         self.live_interim = Default::default();
         self.live_turns = Default::default();
@@ -727,13 +814,29 @@ impl Overlay {
         };
         let (session, events) = crate::features::listen::ListenSession::start(&config);
         self.session = Some(session);
-        self.transcript.clear();
         self.meeting_id = None;
         for event in events {
             self.handle_session_event(event);
         }
         if self.is_listening() {
-            self.meeting_id = self.create_meeting();
+            self.meeting_id = if let Some(record) = resuming {
+                let result = self
+                    .services
+                    .connect()
+                    .ok_or_else(|| "The local database is unavailable.".to_owned())
+                    .and_then(|db| {
+                        crate::db::meetings::reopen(db.connection(), &record.id)
+                            .map_err(|e| e.to_string())
+                    });
+                if let Err(error) = result {
+                    self.stop_listening();
+                    self.listen_error = Some(format!("Could not resume the meeting: {error}"));
+                    return;
+                }
+                Some(record.id)
+            } else {
+                self.create_meeting()
+            };
             self.mode = Mode::Listen;
             self.set_dock_expanded(false);
             self.spawn_transcription(cx);
@@ -937,6 +1040,8 @@ impl Overlay {
         channel: u8,
         speaker: Option<i64>,
     ) {
+        let start = start + self.meeting_offset;
+        let speaker = speaker.map(|s| s + self.meeting_speaker_offset);
         let who = if channel == 0 { "me" } else { "them" };
         if let Some(meeting_id) = self
             .meeting_id
@@ -1000,7 +1105,7 @@ impl Overlay {
             self.cancel_dictation();
         }
         if let Some(mut session) = self.session.take() {
-            self.last_elapsed = session.elapsed().as_secs_f64();
+            self.last_elapsed = self.meeting_offset + session.elapsed().as_secs_f64();
             for event in session.stop() {
                 self.handle_session_event(event);
             }
@@ -1065,7 +1170,14 @@ impl Overlay {
     /// Apply capture policy before starting a turn, without blocking input or streaming.
     pub fn send_message(&mut self, cx: &mut Context<Self>) {
         use crate::features::settings::AutoScreenshot;
-        let question = self.composer.text().trim().to_owned();
+        let question = crate::core::composer::question(
+            self.composer.text(),
+            if self.automatic_turn {
+                &[]
+            } else {
+                &self.draft_attachments
+            },
+        );
         if question.is_empty() {
             return;
         }
@@ -1089,6 +1201,10 @@ impl Overlay {
         )
         .unwrap_or_default();
         self.composer.clear();
+        if !self.automatic_turn {
+            self.draft_attachments.clear();
+        }
+        self.composer_changed();
         self.conversation.set_draft(String::new());
         if let Some(image) = self.attached_capture.take() {
             if settings.auto_screenshot == AutoScreenshot::Once {
@@ -1173,6 +1289,7 @@ impl Overlay {
                 return;
             }
         };
+        self.save_resume_context(database.as_ref());
 
         // Show exactly the question sent, including ambient and shortcut turns.
         self.conversation
@@ -1765,6 +1882,11 @@ impl Overlay {
 
     /// Start a fresh conversation without losing the old one.
     pub fn new_chat(&mut self) {
+        self.composer.clear();
+        self.composer_marked = None;
+        self.draft_attachments.clear();
+        self.resume_meeting = None;
+        self.close_pill_menus();
         self.conversation_response = None;
         self.cancel_dictation();
         self.profile_menu_open = false;
@@ -1773,6 +1895,8 @@ impl Overlay {
         if self.is_listening() {
             self.stop_listening();
         }
+        self.meeting_offset = 0.0;
+        self.meeting_speaker_offset = 0;
         self.chat.reset();
         self.context_generation = self.context_generation.wrapping_add(1);
         self.context_import = None;
@@ -1833,13 +1957,17 @@ impl Overlay {
                         self.begin_capture(cx);
                     }
                 }
-                TrayAction::Quit => cx.quit(),
+                TrayAction::Quit => {
+                    self.show_window(cx);
+                    self.show_dialog(session_menu::Dialog::Quit);
+                }
             }
         }
     }
 
     fn shortcut_enabled(&self, action: crate::features::shortcuts::Action) -> bool {
-        self.window_visible || action == crate::features::shortcuts::Action::ToggleWindow
+        (self.window_visible && !self.dialog_open)
+            || action == crate::features::shortcuts::Action::ToggleWindow
     }
 
     fn handle_shortcut(
@@ -1921,7 +2049,8 @@ impl Overlay {
     /// Preserve layout while keeping app text from showing through a glass menu.
     fn transparent_menu_open(&self) -> bool {
         self.theme.is_glass()
-            && (self.context_menu_open
+            && (self.app_menu_open
+                || self.context_menu_open
                 || self.model_menu_open
                 || self.prompt_menu_open
                 || self.profile_menu_open)
@@ -2001,12 +2130,13 @@ impl Overlay {
     fn set_dock_expanded(&mut self, expanded: bool) {
         if self.dock_expanded != expanded {
             self.dock_expanded = expanded;
-            self.dock_generation += 1;
         }
     }
 
     fn dock_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
-        if self.model_menu_open
+        if self.app_menu_open
+            || self.dialog_open
+            || self.model_menu_open
             || self.prompt_menu_open
             || self.profile_menu_open
             || self.context_menu_open
@@ -2045,7 +2175,7 @@ impl Overlay {
             .h(px(40.0))
             .px(px(8.0))
             .rounded_full()
-            .bg(self.surfaces().muted())
+            .bg(self.surfaces().input())
             .child(
                 div()
                     .id("window-drag-grip")
@@ -2070,6 +2200,7 @@ impl Overlay {
             .child(
                 div()
                     .id("new-chat-logo")
+                    .relative()
                     .occlude()
                     .flex()
                     .items_center()
@@ -2081,16 +2212,17 @@ impl Overlay {
                     .hover(|s| s.bg(self.surfaces().muted()))
                     .tooltip(move |_, cx| {
                         cx.new(|_| HoverLabel {
-                            text: "New conversation".into(),
+                            text: "Lennette menu".into(),
                             theme,
                         })
                         .into()
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.new_chat();
+                        this.toggle_app_menu();
                         cx.notify();
                     }))
-                    .child(img(icons::brand_logo()).w(px(27.0)).h(px(18.0))),
+                    .child(img(icons::brand_logo()).w(px(27.0)).h(px(18.0)))
+                    .child(menu_probe(self.app_menu_bounds.clone(), cx)),
             )
             .child(self.model_selector(cx))
             .child(self.prompt_selector(cx))
@@ -2136,12 +2268,10 @@ impl Overlay {
         pill = pill
             .child(self.play_pause_button(cx))
             .child(crate::ui::widgets::window_frame::surface_edge(theme, 20.0));
-        let right = recording && !self.dock_expanded;
-        let duration = if self.reduce_motion { 1 } else { 240 };
-        let animation = || {
-            gpui::Animation::new(std::time::Duration::from_millis(duration))
-                .with_easing(|t| 1.0 - (1.0 - t).powi(3))
-        };
+        let mut leading_space = div().min_w(px(0.0));
+        leading_space.style().flex_grow = Some(1.0 + self.dock_alignment);
+        let mut trailing_space = div().min_w(px(0.0));
+        trailing_space.style().flex_grow = Some(1.0 - self.dock_alignment);
         div()
             .id("session-header")
             .on_hover(cx.listener(|this, hovered, _, cx| this.dock_hover(*hovered, cx)))
@@ -2150,25 +2280,9 @@ impl Overlay {
             .h(px(54.0))
             .flex_shrink_0()
             .px(px(10.0))
-            .child(div().min_w(px(0.0)).with_animation(
-                ("pill-left", self.dock_generation),
-                animation(),
-                move |mut spacer, t| {
-                    let alignment = if right { t } else { 1.0 - t };
-                    spacer.style().flex_grow = Some(1.0 + alignment);
-                    spacer
-                },
-            ))
+            .child(leading_space)
             .child(pill)
-            .child(div().min_w(px(0.0)).with_animation(
-                ("pill-right", self.dock_generation),
-                animation(),
-                move |mut spacer, t| {
-                    let alignment = if right { t } else { 1.0 - t };
-                    spacer.style().flex_grow = Some(1.0 - alignment);
-                    spacer
-                },
-            ))
+            .child(trailing_space)
     }
 
     fn pill_audio(&self, _: &mut Context<Self>) -> impl IntoElement {
@@ -2369,6 +2483,20 @@ impl Overlay {
             "delete" => self.composer.delete(),
             "left" => self.composer.move_cursor(true, keystroke.modifiers.shift),
             "right" => self.composer.move_cursor(false, keystroke.modifiers.shift),
+            "home" | "end" if !keystroke.modifiers.control && !keystroke.modifiers.platform => {
+                let l = self.composer_layout.borrow();
+                let p = l.position(self.composer.cursor());
+                let index = l.index(gpui::point(
+                    if keystroke.key == "home" {
+                        px(0.0)
+                    } else {
+                        px(100_000.0)
+                    },
+                    p.y,
+                ));
+                drop(l);
+                self.composer.set_cursor(index, keystroke.modifiers.shift);
+            }
             "home" => self.composer.move_to_edge(false, keystroke.modifiers.shift),
             "end" => self.composer.move_to_edge(true, keystroke.modifiers.shift),
             "a" if keystroke.modifiers.control || keystroke.modifiers.platform => {
@@ -2376,7 +2504,7 @@ impl Overlay {
             }
             "v" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.composer.insert(&text);
+                    self.paste_composer(&text);
                 }
             }
             "c" | "x" if keystroke.modifiers.control || keystroke.modifiers.platform => {
@@ -2390,19 +2518,21 @@ impl Overlay {
                     }
                 }
             }
-            "enter" => return,
-            key if !keystroke.modifiers.platform && !keystroke.modifiers.control => {
-                // IME and printable input arrive through key_char; fall back to the
-                // key name for plain letters when it is absent.
-                if let Some(text) = keystroke.key_char.as_deref() {
-                    self.composer.insert(text);
-                } else if key.len() == 1 {
-                    self.composer.insert(key);
-                }
+            "enter" if keystroke.modifiers.shift => self.composer.insert("\n"),
+            "up" | "down" => {
+                let layout = self.composer_layout.borrow();
+                let p = layout.position(self.composer.cursor());
+                let index = layout.index(gpui::point(
+                    p.x,
+                    p.y + layout.line_height * if keystroke.key == "up" { -1.0 } else { 1.0 },
+                ));
+                drop(layout);
+                self.composer.set_cursor(index, keystroke.modifiers.shift);
             }
-            _ => {}
+            _ => return,
         }
-        self.conversation.set_draft(self.composer.text().to_owned());
+        self.composer_changed();
+        cx.stop_propagation();
     }
 
     /// Surface colours at this window's opacity, so every child fades together.
@@ -2668,6 +2798,7 @@ impl Overlay {
             self.runtime_settings.clone(),
             self.active_profile.clone(),
             self.profile_choices.clone(),
+            self.provider_names.clone(),
         );
         self.refresh_configuration();
         if let Some(settings) = crate::features::settings::Settings::load_from_path(
@@ -2686,7 +2817,6 @@ impl Overlay {
                 self.model_provider = Some(id.clone());
                 self.model = Some(model.clone());
             }
-            self.reduce_motion = settings.reduce_motion;
             self.opacity = (settings.transparency as f32 / 100.0).clamp(0.0, 1.0);
             self.font_scale = settings.font_scale;
             self.settings_theme = settings.theme;
@@ -2703,6 +2833,7 @@ impl Overlay {
                 self.runtime_settings.clone(),
                 self.active_profile.clone(),
                 self.profile_choices.clone(),
+                self.provider_names.clone(),
             )
     }
 
@@ -2717,7 +2848,7 @@ impl Overlay {
         }
         self.refreshed_at = std::time::Instant::now();
         self.speech_ready = self.speech_config().is_some();
-        self.chat_choices = self
+        let credentials = self
             .services
             .vault
             .as_ref()
@@ -2726,7 +2857,24 @@ impl Overlay {
                 crate::features::credentials::list(vault, crate::features::credentials::Kind::Chat)
                     .ok()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.provider_names = credentials
+            .iter()
+            .map(|c| {
+                (
+                    c.provider.clone(),
+                    c.custom
+                        .as_ref()
+                        .map(|p| p.name.clone())
+                        .or_else(|| {
+                            crate::ai::providers::ChatProvider::by_id(&c.provider)
+                                .map(|p| p.name.to_owned())
+                        })
+                        .unwrap_or_else(|| c.provider.clone()),
+                )
+            })
+            .collect();
+        self.chat_choices = credentials
             .into_iter()
             .map(|c| c.to_config())
             .filter(|c| c.is_usable())
@@ -2899,12 +3047,7 @@ impl Overlay {
     /// The Listen tab's body: the words you hear in the top half, answers below.
     fn listen_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.shows_transcript() {
-            return div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .into_any_element();
+            return self.message_list(cx).into_any_element();
         }
 
         self.keep_transcript_at_bottom();
@@ -3217,6 +3360,7 @@ impl Overlay {
         let rows = self.message_rows.clone();
         let theme = self.theme;
         let surfaces = self.surfaces();
+        let view = cx.entity().downgrade();
         let list = gpui::list(self.message_list_state.clone(), move |index, _, _| {
             let content = match &rows[index] {
                 ChatRow::User(text) => div()
@@ -3225,6 +3369,7 @@ impl Overlay {
                     .justify_end()
                     .child(
                         div()
+                            .id(("user-question", index))
                             .max_w(px(520.0))
                             .min_w(px(0.0))
                             .rounded(px(radius::LG))
@@ -3233,7 +3378,33 @@ impl Overlay {
                             .text_size(scaled(12.5))
                             .text_color(theme.foreground)
                             .bg(surfaces.accent())
-                            .child(text.clone()),
+                            .when(text.contains("\n\n<attached_content>\n"), |s| {
+                                s.cursor_pointer().hover(|s| s.bg(surfaces.muted()))
+                            })
+                            .child(crate::core::composer::display_question(text))
+                            .on_click({
+                                let text = text.clone();
+                                let view = view.clone();
+                                move |_, _, cx| {
+                                    let items = crate::core::composer::saved_attachments(&text);
+                                    if !items.is_empty() {
+                                        let item = crate::core::composer::TextAttachment {
+                                            id: "sent-preview".into(),
+                                            name: format!("Sent attachments · {}", items.len()),
+                                            code: items.iter().all(|i| i.code),
+                                            text: items
+                                                .iter()
+                                                .map(|i| format!("{}\n\n{}", i.name, i.text))
+                                                .collect::<Vec<_>>()
+                                                .join("\n\n"),
+                                        };
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.show_dialog(session_menu::Dialog::Text(item));
+                                            cx.notify();
+                                        });
+                                    }
+                                }
+                            }),
                     )
                     .into_any_element(),
                 ChatRow::Markdown { document, block } => {
@@ -3487,6 +3658,8 @@ impl Overlay {
                 let open = !this.profile_menu_open;
                 this.refresh_configuration();
                 this.profile_menu_open = open;
+                this.focus_composer = true;
+                this.app_menu_open = false;
                 this.model_menu_open = false;
                 this.prompt_menu_open = false;
                 this.context_menu_open = false;
@@ -3681,7 +3854,7 @@ impl Overlay {
                             this.composer.insert(" ");
                         }
                         this.composer.insert(text.trim());
-                        this.conversation.set_draft(this.composer.text());
+                        this.composer_changed();
                         this.dictation_status =
                             Some("Dictation added. Review it, then press Send.".into());
                         this.focus_composer = true;
@@ -3760,11 +3933,19 @@ impl Overlay {
             .child(div().max_w(px(150.0)).truncate().child(label))
             .child(icons::icon(&self.theme, Icon::ChevronDown, 10.0))
             .child(menu_probe(self.model_bounds.clone(), cx))
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(|this, _, window, cx| {
                 this.profile_menu_open = false;
                 this.context_menu_open = false;
+                this.app_menu_open = false;
                 this.model_menu_open = !this.model_menu_open;
                 if this.model_menu_open {
+                    if let Some(search) = &this.model_search {
+                        search.update(cx, |editor, cx| {
+                            editor.input.clear();
+                            editor.focus(window);
+                            cx.notify();
+                        });
+                    }
                     this.load_model_catalog(false, cx);
                 }
                 this.prompt_menu_open = false;
@@ -3803,231 +3984,10 @@ impl Overlay {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.profile_menu_open = false;
                 this.context_menu_open = false;
+                this.app_menu_open = false;
                 this.prompt_menu_open = !this.prompt_menu_open;
+                this.focus_composer = true;
                 this.model_menu_open = false;
-                cx.notify();
-            }))
-    }
-
-    /// Only useful choices: connected providers or session contexts.
-    fn selection_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if !self.model_menu_open && !self.prompt_menu_open && !self.profile_menu_open {
-            return None;
-        }
-        let theme = self.theme;
-        let mut menu = div()
-            .id("selection-menu")
-            .occlude()
-            .flex()
-            .flex_col()
-            .w(px(if self.model_menu_open {
-                310.0
-            } else if self.profile_menu_open {
-                220.0
-            } else {
-                156.0
-            }))
-            .max_h(px(320.0))
-            .overflow_y_scroll()
-            .p(px(4.0))
-            .gap(px(2.0))
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(self.surfaces().border())
-            .bg(theme.popover())
-            .text_color(theme.foreground)
-            .when(!self.theme.is_glass(), |style| style.shadow_md())
-            .on_mouse_down_out(cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                let bounds = if this.model_menu_open {
-                    &this.model_bounds
-                } else if this.profile_menu_open {
-                    &this.profile_bounds
-                } else {
-                    &this.prompt_bounds
-                };
-                if !bounds.get().contains(&event.position) {
-                    this.model_menu_open = false;
-                    this.prompt_menu_open = false;
-                    this.profile_menu_open = false;
-                    cx.notify();
-                }
-            }));
-        if self.model_menu_open {
-            if self.chat_choices.is_empty() {
-                menu = menu.child(
-                    div()
-                        .px(px(8.0))
-                        .py(px(8.0))
-                        .text_size(scaled(11.0))
-                        .text_color(theme.muted_foreground)
-                        .child("Connect an AI in Settings"),
-                );
-            }
-            menu = menu.child(
-                div()
-                    .id("refresh-models")
-                    .px(px(8.0))
-                    .py(px(8.0))
-                    .cursor_pointer()
-                    .text_size(scaled(11.0))
-                    .child(if self.catalog_loading {
-                        "Loading models…"
-                    } else {
-                        "Refresh live models"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.load_model_catalog(true, cx);
-                        cx.notify();
-                    })),
-            );
-            if let Some(status) = &self.catalog_status {
-                menu = menu.child(
-                    div()
-                        .p(px(8.0))
-                        .text_size(scaled(10.0))
-                        .child(status.clone()),
-                );
-            }
-            let choices = if self.catalog_choices.is_empty() {
-                &self.chat_choices
-            } else {
-                &self.catalog_choices
-            };
-            for (index, (id, model)) in choices.iter().enumerate() {
-                let active =
-                    self.model_provider.as_ref() == Some(id) && self.model.as_ref() == Some(model);
-                let provider = id.clone();
-                let model = model.clone();
-                menu = menu.child(
-                    div()
-                        .id(("provider-choice", index))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .h(px(30.0))
-                        .px(px(8.0))
-                        .rounded(px(7.0))
-                        .hover(|s| s.bg(self.surfaces().accent()))
-                        .cursor_pointer()
-                        .text_size(scaled(11.0))
-                        .text_color(theme.foreground)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .truncate()
-                                .child(format!("{} · {}", id, model)),
-                        )
-                        .children(active.then(|| icons::icon(&theme, Icon::Check, 11.0)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.model_provider = Some(provider.clone());
-                            this.select_model(&model);
-                            cx.notify();
-                        })),
-                );
-            }
-        } else if self.profile_menu_open {
-            menu = menu.child(self.profile_option(None, "No context".into(), 0, cx));
-            for (index, profile) in self.profile_choices.iter().enumerate() {
-                menu = menu.child(self.profile_option(
-                    Some(profile.id.clone()),
-                    profile.name.clone(),
-                    index + 1,
-                    cx,
-                ));
-            }
-        } else {
-            if self.prompt_choices.is_empty() {
-                menu = menu.child(self.prompt_option(None, "General".into(), 0, cx));
-            }
-            for (index, (id, name, _)) in self.prompt_choices.iter().enumerate() {
-                menu = menu.child(self.prompt_option(Some(*id), name.clone(), index, cx));
-            }
-        }
-        Some(
-            gpui::deferred(
-                gpui::anchored()
-                    .position({
-                        let bounds = if self.model_menu_open {
-                            self.model_bounds.get()
-                        } else if self.profile_menu_open {
-                            self.profile_bounds.get()
-                        } else {
-                            self.prompt_bounds.get()
-                        };
-                        gpui::point(bounds.left(), bounds.bottom() + px(6.0))
-                    })
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(menu),
-            )
-            .with_priority(10)
-            .into_any_element(),
-        )
-    }
-
-    fn profile_option(
-        &self,
-        id: Option<String>,
-        name: String,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let active = self.active_profile.as_ref().map(|p| &p.id) == id.as_ref();
-        div()
-            .id(("profile-option", index))
-            .flex()
-            .items_center()
-            .justify_between()
-            .h(px(32.0))
-            .px(px(10.0))
-            .gap(px(8.0))
-            .rounded(px(7.0))
-            .bg(if active {
-                self.theme.menu_hover()
-            } else {
-                gpui::transparent_black().into()
-            })
-            .hover(|style| style.bg(self.theme.menu_hover()))
-            .text_color(self.theme.foreground)
-            .text_size(scaled(11.0))
-            .cursor_pointer()
-            .child(div().flex_1().min_w(px(0.0)).truncate().child(name))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.select_profile(id.as_deref());
-                cx.notify();
-            }))
-    }
-
-    fn prompt_option(
-        &self,
-        id: Option<i64>,
-        name: String,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let active = self.active_prompt == id;
-        div()
-            .id(("prompt-option", index))
-            .flex()
-            .items_center()
-            .justify_between()
-            .h(px(30.0))
-            .px(px(10.0))
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .bg(if active {
-                self.surfaces().accent()
-            } else {
-                gpui::transparent_black().into()
-            })
-            .hover(|s| s.bg(self.surfaces().muted()))
-            .text_color(self.theme.foreground)
-            .text_size(scaled(11.0))
-            .child(name)
-            .children(active.then(|| icons::icon(&self.theme, Icon::Check, 12.0)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.active_prompt = id;
-                this.prompt_menu_open = false;
                 cx.notify();
             }))
     }
@@ -4130,6 +4090,7 @@ impl Overlay {
     }
 
     fn toggle_context_menu(&mut self) {
+        self.app_menu_open = false;
         self.context_menu_open = !self.context_menu_open;
         self.model_menu_open = false;
         self.prompt_menu_open = false;
@@ -4376,7 +4337,12 @@ impl Overlay {
                         self.context_bounds.get().top() - px(8.0),
                     ))
                     .snap_to_window_with_margin(px(12.0))
-                    .child(menu),
+                    .child(div().w(px(300.0)).child(crate::ui::widgets::motion::reveal(
+                        menu,
+                        "attachment-dropdown",
+                        self.runtime_settings.reduce_motion,
+                        true,
+                    ))),
             )
             .with_priority(20)
             .into_any_element(),
@@ -4440,12 +4406,14 @@ impl Overlay {
     /// Minimal one-line input section with attachment, input text, dashboard button, and send.
     fn input_block(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        let can_submit =
-            !self.composer.is_empty() && !self.chat.is_streaming() && self.model_provider.is_some();
+        let can_submit = (!self.composer.is_empty() || !self.draft_attachments.is_empty())
+            && !self.chat.is_streaming()
+            && self.model_provider.is_some();
         let focus = self.focus_handle(cx);
         let extras = (self.dictation_status.is_some()
             || !self.context_sources.is_empty()
             || self.context_loading
+            || !self.draft_attachments.is_empty()
             || self.attached_capture.is_some())
         .then(|| {
             div()
@@ -4462,6 +4430,7 @@ impl Overlay {
                 }))
                 .children(self.context_tray(cx))
                 .children(self.attachment_tray(cx))
+                .children(self.draft_attachment_tray(cx))
         });
 
         div()
@@ -4474,11 +4443,12 @@ impl Overlay {
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_end()
                     .gap(px(8.0))
-                    .h(px(46.0))
+                    .min_h(px(46.0))
+                    .py(px(7.0))
                     .px(px(8.0))
-                    .rounded_full()
+                    .rounded(px(23.0))
                     .relative()
                     .bg(self.surfaces().input())
                     .id("composer")
@@ -4493,18 +4463,7 @@ impl Overlay {
                         }),
                     )
                     .child(self.dashboard_button(cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .px(px(4.0))
-                            .child(crate::features::text_input::render(
-                                &self.composer,
-                                &theme,
-                                self.composer_focused,
-                                self.caret_visible,
-                                "Session guidance, notes or follow-up question…",
-                            )),
-                    )
+                    .child(self.composer_field(cx))
                     .child(
                         text_tool(
                             &theme,
@@ -5158,16 +5117,61 @@ fn render_markdown_blocks(
 
 impl Render for Overlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.quit_pending && !self.transcription_busy {
+            cx.quit();
+        }
+        if self.model_search.is_none() {
+            let search = cx.new(|cx| {
+                let mut editor = crate::ui::widgets::editor::Editor::new("", self.theme, cx);
+                editor.compact = true;
+                editor.placeholder = "Search models or providers…";
+                editor
+            });
+            self.model_search_observer = Some(cx.observe(&search, |_, _, cx| cx.notify()));
+            self.model_search = Some(search);
+        }
+        if let Some(search) = &self.model_search {
+            crate::ui::widgets::editor::Editor::sync_theme(search, self.theme, cx);
+        }
+        let dialog = self.render_dialog(window, cx);
+        let now = std::time::Instant::now();
+        let reduced = self.runtime_settings.reduce_motion;
+        let (alignment, dock_active) = self.dock_motion.step(
+            f32::from(self.is_listening() && !self.dock_expanded),
+            reduced,
+            now,
+        );
+        self.dock_alignment = alignment;
+        let (composer_progress, composer_active) = self.composer_motion.step(
+            f32::from(self.bottom_mode == BottomMode::Full),
+            reduced,
+            now,
+        );
+        let (composer_height, size_active) =
+            self.composer_size_motion
+                .step(self.composer_height.get(), reduced, now);
+        let (followups_progress, followups_active) = self.followups_motion.step(
+            f32::from(
+                self.bottom_mode != BottomMode::Hidden && self.runtime_settings.smart_follow_ups,
+            ),
+            reduced,
+            now,
+        );
+        if dock_active || composer_active || followups_active || size_active {
+            window.request_animation_frame();
+        }
+
         let hidden = self.runtime_settings.hide_app_icon || crate::cli::private_overlay_enabled();
         if self.native_icon_hidden != Some(hidden) {
             crate::platform::window::set_icon_hidden(window, hidden);
             self.native_icon_hidden = Some(hidden);
         }
-        #[cfg(windows)]
         if self.native_always_on_top != Some(self.runtime_settings.always_on_top) {
             let above = self.runtime_settings.always_on_top;
             if !crate::platform::window::set_always_on_top(window, above).is_yes() {
-                tracing::warn!("Windows refused the overlay stacking preference");
+                tracing::debug!(
+                    "The display server could not apply the overlay stacking preference"
+                );
             }
             self.native_always_on_top = Some(above);
         }
@@ -5201,6 +5205,15 @@ impl Render for Overlay {
             .font_family(crate::ui::theme::ui_font_family())
             .text_color(theme.foreground)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if this.dialog_open {
+                    if event.keystroke.key == "escape" {
+                        this.dialog_open = false;
+                        this.quit_pending = false;
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if event.keystroke.key == "space"
                     && event.keystroke.modifiers.control
                     && event.keystroke.modifiers.shift
@@ -5208,21 +5221,20 @@ impl Render for Overlay {
                     this.start_dictation(true);
                 } else if event.keystroke.key == "escape" {
                     this.cancel_dictation();
-                    if this.model_menu_open
+                    if this.app_menu_open
+                        || this.model_menu_open
                         || this.prompt_menu_open
                         || this.profile_menu_open
                         || this.context_menu_open
                     {
-                        this.model_menu_open = false;
-                        this.prompt_menu_open = false;
-                        this.profile_menu_open = false;
-                        this.context_menu_open = false;
+                        this.close_pill_menus();
                     } else {
                         this.interrupt_response();
                     }
                 } else if this.composer_focused {
                     if event.keystroke.key == "enter" && !event.keystroke.modifiers.shift {
                         this.send_message(cx);
+                        cx.stop_propagation();
                     } else {
                         this.handle_composer_key(event, cx);
                     }
@@ -5241,6 +5253,7 @@ impl Render for Overlay {
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    this.composer_selecting = false;
                     if this.dictation.as_ref().is_some_and(|d| !d.keyboard) {
                         this.finish_dictation(cx);
                     }
@@ -5250,6 +5263,7 @@ impl Render for Overlay {
             .on_mouse_up_out(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
+                    this.composer_selecting = false;
                     if this.dictation.as_ref().is_some_and(|d| !d.keyboard) {
                         this.finish_dictation(cx);
                     }
@@ -5260,54 +5274,72 @@ impl Render for Overlay {
             .overflow_hidden()
             .p(px(1.0))
             .bg(self.surfaces().background());
-        root =
-            root.child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .pr(px(43.0))
-                    .overflow_hidden()
-                    .when(self.transparent_menu_open(), |style| style.invisible())
-                    .child(self.listen_body(cx))
-                    .child(self.bottom_controls(cx))
-                    .with_animation(
-                        "panel-reveal",
-                        gpui::Animation::new(std::time::Duration::from_millis(
-                            if self.reduce_motion { 0 } else { 220 },
-                        ))
-                        .with_easing(|t| 1.0 - (1.0 - t).powi(3)),
-                        |panel, t| panel.opacity(t),
-                    ),
-            );
+        root = root.child(
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .pr(px(43.0))
+                .overflow_hidden()
+                .when(self.transparent_menu_open(), |style| style.invisible())
+                .child(self.listen_body(cx))
+                .child(self.bottom_controls(cx))
+                .with_animation(
+                    ("panel-reveal", self.mode as usize),
+                    gpui::Animation::new(std::time::Duration::from_millis(
+                        if self.runtime_settings.reduce_motion {
+                            1
+                        } else {
+                            crate::ui::widgets::motion::PAGE_MS
+                        },
+                    ))
+                    .with_easing(crate::ui::widgets::motion::ease),
+                    move |panel, t| panel.opacity(if reduced { 1.0 } else { t }),
+                ),
+        );
         root = root.child(
             div()
                 .flex_shrink_0()
                 .when(self.transparent_menu_open(), |style| style.invisible())
                 .children(self.listen_banner(cx)),
         );
-        if self.bottom_mode != BottomMode::Hidden {
+        if followups_progress > 0.0 {
             root = root.child(
                 div()
-                    .when(self.transparent_menu_open(), |style| style.invisible())
-                    .children(
-                        self.runtime_settings
-                            .smart_follow_ups
-                            .then(|| self.follow_ups(cx)),
+                    .flex_shrink_0()
+                    .h(px(self.followups_height.get() * followups_progress))
+                    .overflow_hidden()
+                    .opacity(followups_progress)
+                    .child(
+                        div()
+                            .relative()
+                            .w_full()
+                            .flex_shrink_0()
+                            .when(self.transparent_menu_open(), |style| style.invisible())
+                            .child(self.follow_ups(cx))
+                            .child(height_probe(self.followups_height.clone(), cx)),
                     ),
             );
         }
-        if self.bottom_mode == BottomMode::Full {
-            root = root
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .when(self.transparent_menu_open(), |style| style.invisible())
-                        .children(self.api_key_banner(cx)),
-                )
-                .child(self.input_block(cx));
+        if composer_progress > 0.0 {
+            let content = div()
+                .relative()
+                .w_full()
+                .flex_shrink_0()
+                .when(self.transparent_menu_open(), |style| style.invisible())
+                .children(self.api_key_banner(cx))
+                .child(self.input_block(cx))
+                .child(height_probe(self.composer_height.clone(), cx));
+            root = root.child(
+                div()
+                    .flex_shrink_0()
+                    .h(px(composer_height * composer_progress))
+                    .overflow_hidden()
+                    .opacity(composer_progress)
+                    .child(content),
+            );
         }
         root.child(
             div()
@@ -5319,7 +5351,9 @@ impl Render for Overlay {
         )
         .children(self.selection_menu(cx))
         .children(self.context_menu(cx))
+        .children(self.app_menu(cx))
         .child(crate::ui::widgets::window_frame::window_edge(theme))
+        .children(dialog)
     }
 }
 
@@ -5368,6 +5402,158 @@ mod tests {
             database_ready: false,
         };
         (path, Overlay::new(services, None, None, None, None))
+    }
+
+    #[test]
+    fn restored_thread_keeps_its_history_preferences_and_references_separate() {
+        let (path, mut overlay) = fixture();
+        let db_path = path.join("restore.sqlite");
+        let db = crate::db::Database::open(&db_path).unwrap();
+        overlay.services.database_path = Some(db_path);
+        let first = crate::db::conversations::create(db.connection(), "First", 1).unwrap();
+        let other = crate::db::conversations::create(db.connection(), "Other", 2).unwrap();
+        crate::db::conversations::append_message(
+            db.connection(),
+            &first,
+            "user",
+            "Project Quasar",
+            3,
+        )
+        .unwrap();
+        crate::db::conversations::append_message(
+            db.connection(),
+            &first,
+            "assistant",
+            "Use PostgreSQL",
+            4,
+        )
+        .unwrap();
+        crate::db::conversations::append_message(
+            db.connection(),
+            &other,
+            "user",
+            "Unrelated project",
+            5,
+        )
+        .unwrap();
+        crate::db::sessions::save(
+            db.connection(),
+            &first,
+            None,
+            &crate::db::sessions::SavedContext {
+                response_length: "Short".into(),
+                response_language: "Hindi".into(),
+                sources: vec![crate::core::context::Attachment::text(
+                    "notes".into(),
+                    "Notes".into(),
+                    "Keep the deadlines".into(),
+                )],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        overlay.composer.set_text("Unsaved draft");
+        overlay.restore_chat(&first).unwrap();
+        assert_eq!(overlay.chat.conversation_id(), Some(first.as_str()));
+        assert!(overlay.composer.is_empty());
+        assert_eq!(overlay.conversation.messages().len(), 2);
+        assert!(
+            overlay
+                .selected_system_prompt()
+                .contains("Keep the deadlines")
+        );
+        assert_eq!(
+            overlay.conversation_response,
+            Some((crate::core::settings::ResponseLength::Short, "Hindi".into()))
+        );
+        let history = overlay.chat.begin(Some(&db), "Continue").unwrap();
+        assert!(history.iter().any(|m| m.content == "Project Quasar"));
+        assert!(!history.iter().any(|m| m.content.contains("Unrelated")));
+        assert_eq!(
+            crate::db::conversations::list(db.connection(), 10)
+                .unwrap()
+                .len(),
+            2
+        );
+        drop(db);
+        drop(overlay);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn restored_meeting_retains_its_ai_thread_and_appends_later_speaker_timestamps() {
+        let (path, mut overlay) = fixture();
+        let db_path = path.join("meeting-restore.sqlite");
+        let db = crate::db::Database::open(&db_path).unwrap();
+        overlay.services.database_path = Some(db_path);
+        let meeting =
+            crate::db::meetings::start(db.connection(), "Design review", "Project Quasar", "en")
+                .unwrap();
+        crate::db::meetings::add_line(
+            db.connection(),
+            &meeting,
+            "them",
+            Some(2),
+            "What are the deadlines?",
+            100.0,
+            105.0,
+        )
+        .unwrap();
+        crate::db::meetings::finish(db.connection(), &meeting, 120).unwrap();
+        let chat = crate::db::conversations::create(db.connection(), "Meeting AI", 1).unwrap();
+        crate::db::conversations::append_message(
+            db.connection(),
+            &chat,
+            "user",
+            "Summarize the plan",
+            2,
+        )
+        .unwrap();
+        crate::db::sessions::save(db.connection(), &chat, Some(&meeting), &Default::default())
+            .unwrap();
+        let record = crate::db::meetings::list(db.connection(), 1)
+            .unwrap()
+            .remove(0);
+        overlay.restore_meeting(&record).unwrap();
+        assert_eq!(overlay.chat.conversation_id(), Some(chat.as_str()));
+        assert_eq!(overlay.transcript[0].speaker, Some(2));
+        assert_eq!(overlay.meeting_offset, 120.0);
+        assert!(overlay.selected_system_prompt().contains("deadlines"));
+        crate::db::meetings::reopen(db.connection(), &meeting).unwrap();
+        overlay.meeting_id = Some(meeting.clone());
+        overlay.push_transcript("The deadline is Friday".into(), 1.0, 2.0, 1, Some(2));
+        let lines = crate::db::meetings::lines(db.connection(), &meeting).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].start_time, 121.0);
+        assert!(
+            crate::db::meetings::list(db.connection(), 1).unwrap()[0]
+                .ended_at
+                .is_none()
+        );
+        overlay.transcription_busy = true;
+        assert!(overlay.restore_chat(&chat).is_err());
+        assert_eq!(overlay.chat.conversation_id(), Some(chat.as_str()));
+        drop(db);
+        drop(overlay);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn composer_attaches_code_preserves_draft_and_never_drops_an_oversized_paste() {
+        let (path, mut overlay) = fixture();
+        overlay.composer.set_text("Explain this code");
+        overlay.paste_composer("fn main() {\n    println!(\"hello\");\n}");
+        assert_eq!(overlay.composer.text(), "Explain this code");
+        assert!(overlay.draft_attachments[0].code);
+        let before = overlay.composer.text().to_owned();
+        overlay.paste_composer(&"x".repeat(crate::core::composer::MAX_PASTE_CHARS + 1));
+        assert_eq!(overlay.composer.text(), before);
+        assert_eq!(overlay.draft_attachments.len(), 1);
+        assert!(overlay.chat_error.is_some());
+        overlay.new_chat();
+        assert!(overlay.draft_attachments.is_empty());
+        drop(overlay);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
