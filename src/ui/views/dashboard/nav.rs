@@ -53,6 +53,12 @@ pub const NAV_ITEMS: &[NavItem] = &[
         description: "Tune how answers and instructions are written.",
     },
     NavItem {
+        route: Route::Profiles,
+        label: "Profiles",
+        icon: Icon::UserRound,
+        description: "Reusable background for meetings and interviews.",
+    },
+    NavItem {
         route: Route::Settings,
         label: "Settings",
         icon: Icon::Settings,
@@ -111,12 +117,7 @@ impl Route {
     pub fn is_setting(self) -> bool {
         matches!(
             self,
-            Route::Settings
-                | Route::Audio
-                | Route::Shortcuts
-                | Route::DevSpace
-                | Route::Profiles
-                | Route::Responses
+            Route::Settings | Route::Audio | Route::Shortcuts | Route::DevSpace | Route::Responses
         )
     }
 }
@@ -156,6 +157,7 @@ mod tests {
         assert!(!Route::Conversations.is_setting());
         assert!(!Route::Meetings.is_setting());
         assert!(!Route::Prompts.is_setting());
+        assert!(!Route::Profiles.is_setting());
     }
 
     #[test]

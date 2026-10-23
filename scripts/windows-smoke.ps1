@@ -147,6 +147,25 @@ public static class LennetteWindows {
         if (HitTest(window, client.Right-(int)(35*scale), y) != 1)
             throw new InvalidOperationException("Dashboard close button became a drag region");
     }
+    [StructLayout(LayoutKind.Sequential)] struct MinMaxInfo {
+        public Point Reserved, MaxSize, MaxPosition, MinTrackSize, MaxTrackSize;
+    }
+    public static void AssertMinimumSize(IntPtr window, int width, int height) {
+        var info = new MinMaxInfo();
+        IntPtr buffer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(MinMaxInfo)));
+        try {
+            Marshal.StructureToPtr(info, buffer, false);
+            SendMessage(window, 0x24, IntPtr.Zero, buffer); // WM_GETMINMAXINFO: query native resize limits
+            info = (MinMaxInfo)Marshal.PtrToStructure(buffer, typeof(MinMaxInfo));
+            double scale = GetDpiForWindow(window)/96.0;
+            int expectedWidth = (int)(width*scale), expectedHeight = (int)(height*scale);
+            // GPUI includes the native nonclient frame in the outer tracking size.
+            if (info.MinTrackSize.X < expectedWidth || info.MinTrackSize.Y < expectedHeight ||
+                info.MinTrackSize.X > expectedWidth+64 || info.MinTrackSize.Y > expectedHeight+64)
+                throw new InvalidOperationException("Native minimum size is missing or unexpected: " +
+                    info.MinTrackSize.X + "x" + info.MinTrackSize.Y);
+        } finally { Marshal.FreeHGlobal(buffer); }
+    }
     public static void AssertIcon(IntPtr window) {
         if (GetClassLongPtr(window, -14) == IntPtr.Zero)
             throw new InvalidOperationException("The application class has no branded icon resource");
@@ -202,6 +221,7 @@ try {
     Assert-Protection $overlay
     Start-Sleep -Milliseconds 500
     [LennetteWindows]::AssertPillDrag($overlay)
+    [LennetteWindows]::AssertMinimumSize($overlay, 540, 420)
     if ([LennetteWindows]::Find($app.Id, 'lennette tray') -ne [IntPtr]::Zero) { throw 'Privacy launch created an Explorer tray icon' }
     # Exercise RegisterHotKey, not just the one-shot control flags.
     [LennetteWindows]::ToggleHotkey()
@@ -220,6 +240,7 @@ try {
     Assert-Protection $dashboard
     Start-Sleep -Milliseconds 300
     [LennetteWindows]::AssertDashboardDrag($dashboard)
+    [LennetteWindows]::AssertMinimumSize($dashboard, 760, 540)
     # Capture the whole desktop with a visible, unprotected black positive control.
     # A white backdrop makes even a black-rectangle fallback fail this check.
     [LennetteWindows]::ShowWindow($overlay, 0) | Out-Null
@@ -255,7 +276,7 @@ try {
     Send-Command '--toggle-dashboard'
     Wait-For { [LennetteWindows]::IsWindowVisible($dashboard) } 'protected dashboard restore after mode switch'
     Assert-Protection $dashboard
-    Write-Output 'PASS: shared rounded frames, pill/dashboard drag regions and controls; desktop capture excludes overlay/dashboard; hotkeys and restore protection; Normal/Privacy switches tray and taskbar visibility.'
+    Write-Output 'PASS: native minimum sizes for both windows; shared rounded frames, pill/dashboard drag regions and controls; desktop capture excludes overlay/dashboard; hotkeys and restore protection; Normal/Privacy switches tray and taskbar visibility.'
 } finally {
     if ($diagnostics -and (Test-Path "$diagnostics.err") -and (Get-Item "$diagnostics.err").Length -gt 0) { Get-Content "$diagnostics.err" | Select-Object -Last 30 | Write-Output }
     foreach ($fixture in @($control, $backdrop)) {

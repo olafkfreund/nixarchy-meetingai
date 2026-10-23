@@ -32,8 +32,8 @@ pub fn reveal(
             .with_easing(ease),
             move |panel, t| {
                 panel
-                    .opacity(t)
-                    .top(px((1.0 - t) * if popup { 4.0 } else { 6.0 }))
+                    .opacity(if popup { t } else { 1.0 })
+                    .top(px((1.0 - t) * if popup { 4.0 } else { 3.0 }))
             },
         )
         .into_any_element()

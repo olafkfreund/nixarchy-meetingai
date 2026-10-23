@@ -1,4 +1,4 @@
-//! Profile management lives in Settings; the overlay only selects a profile.
+//! Profile management has its own dashboard tab; the overlay selects a profile.
 use super::*;
 use crate::db::profiles::{self as store, Profile};
 use crate::ui::widgets::editor::Editor;

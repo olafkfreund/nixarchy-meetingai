@@ -20,9 +20,9 @@ const INDEX: &[(Route, &str, &str)] = &[
         "animations accessibility movement",
     ),
     (
-        Route::Audio,
+        Route::Settings,
         "Always on top",
-        "window above stacking meeting",
+        "appearance window above stacking meeting listening idle",
     ),
     (
         Route::Settings,

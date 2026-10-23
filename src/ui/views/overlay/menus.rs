@@ -6,6 +6,7 @@ impl Overlay {
         if !self.model_menu_open && !self.prompt_menu_open && !self.profile_menu_open {
             return None;
         }
+        let theme = self.theme;
         let mut menu = self
             .menu_surface("selection-menu")
             .on_mouse_down_out(cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
@@ -26,23 +27,46 @@ impl Overlay {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .max_h(px(250.0))
+            .max_h(px(224.0))
+            .flex_shrink_0()
             .overflow_y_scroll();
         if self.model_menu_open {
-            menu = menu
-                .child(div().p(px(3.0)).children(self.model_search.clone()))
-                .child(
-                    self.menu_row("refresh-models", false)
-                        .child(if self.catalog_loading {
-                            "Loading models…"
-                        } else {
-                            "Refresh live models"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.load_model_catalog(true, cx);
-                            cx.notify();
-                        })),
-                );
+            menu = menu.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .gap(px(5.0))
+                    .p(px(2.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .children(self.model_search.clone()),
+                    )
+                    .child(
+                        self.menu_row("refresh-models", false)
+                            .w(px(28.0))
+                            .h(scaled(28.0))
+                            .px(px(0.0))
+                            .justify_center()
+                            .opacity(if self.catalog_loading { 0.45 } else { 1.0 })
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| super::HoverLabel {
+                                    text: "Refresh models".into(),
+                                    theme,
+                                })
+                                .into()
+                            })
+                            .child(icons::icon(&self.theme, Icon::RefreshCw, 12.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if !this.catalog_loading {
+                                    this.load_model_catalog(true, cx);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
             let query = self
                 .model_search
                 .as_ref()
@@ -136,21 +160,25 @@ impl Overlay {
                 gpui::anchored()
                     .position(gpui::point(bounds.left(), bounds.bottom() + px(6.0)))
                     .snap_to_window_with_margin(px(8.0))
-                    .child(div().w(px(300.0)).child(crate::ui::widgets::motion::reveal(
-                        menu,
-                        (
-                            "pill-dropdown",
-                            if self.model_menu_open {
-                                0usize
-                            } else if self.profile_menu_open {
-                                1
-                            } else {
-                                2
-                            },
-                        ),
-                        self.runtime_settings.reduce_motion,
-                        true,
-                    ))),
+                    .child(
+                        div()
+                            .w(px(if self.model_menu_open { 240.0 } else { 190.0 }))
+                            .child(crate::ui::widgets::motion::reveal(
+                                menu,
+                                (
+                                    "pill-dropdown",
+                                    if self.model_menu_open {
+                                        0usize
+                                    } else if self.profile_menu_open {
+                                        1
+                                    } else {
+                                        2
+                                    },
+                                ),
+                                self.runtime_settings.reduce_motion,
+                                true,
+                            )),
+                    ),
             )
             .with_priority(10)
             .into_any_element(),

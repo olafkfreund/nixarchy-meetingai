@@ -251,37 +251,54 @@ impl Overlay {
             let card = div()
                 .id(gpui::ElementId::Name(format!("paste-{}", item.id).into()))
                 .relative()
-                .size(px(74.0))
+                .size(scaled(74.0))
                 .flex_shrink_0()
                 .rounded(px(13.0))
                 .border_1()
                 .border_color(self.theme.control_border(false))
                 .bg(self.surfaces().card())
-                .p(px(8.0))
+                .p(px(7.0))
                 .flex()
                 .flex_col()
-                .gap(px(5.0))
+                .justify_between()
+                .gap(px(4.0))
                 .cursor_pointer()
                 .hover(|s| s.bg(self.theme.menu_hover()))
-                .child(icons::icon(
+                .child(div().h(px(16.0)).flex_shrink_0().child(icons::icon(
                     &self.theme,
                     if item.code {
                         Icon::Code
                     } else {
                         Icon::FileText
                     },
-                    18.0,
-                ))
-                .child(div().text_size(scaled(9.0)).truncate().child(if item.code {
-                    "Code"
-                } else {
-                    "Text"
-                }))
+                    16.0,
+                )))
                 .child(
                     div()
-                        .text_size(scaled(9.0))
-                        .text_color(self.theme.muted_foreground)
-                        .child(format!("{} lines", item.text.lines().count().max(1))),
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .flex_shrink_0()
+                        .gap(px(1.0))
+                        .child(
+                            div()
+                                .h(scaled(12.0))
+                                .line_height(scaled(12.0))
+                                .flex_shrink_0()
+                                .text_size(scaled(9.0))
+                                .truncate()
+                                .child(if item.code { "Code" } else { "Text" }),
+                        )
+                        .child(
+                            div()
+                                .h(scaled(11.0))
+                                .line_height(scaled(11.0))
+                                .flex_shrink_0()
+                                .text_size(scaled(8.5))
+                                .text_color(self.theme.muted_foreground)
+                                .whitespace_nowrap()
+                                .child(format!("{} lines", item.text.lines().count().max(1))),
+                        ),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.show_dialog(super::session_menu::Dialog::Text(preview.clone()));
@@ -310,7 +327,7 @@ impl Overlay {
                             cx.notify();
                         })),
                 );
-            tray = tray.child(div().w(px(74.0)).flex_shrink_0().child(
+            tray = tray.child(div().w(scaled(74.0)).flex_shrink_0().child(
                 crate::ui::widgets::motion::reveal(
                     card,
                     gpui::ElementId::Name(format!("paste-enter-{}", item.id).into()),

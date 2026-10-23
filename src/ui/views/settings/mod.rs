@@ -60,6 +60,9 @@ pub const KEY_PROVIDERS: &[(&str, &str)] = &[
 pub struct SettingsState {
     pub custom_draft: Option<crate::core::credentials::Credential>,
     pub custom_open: bool,
+    pub custom_json_mode: bool,
+    pub custom_guide: bool,
+    pub custom_json: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
     pub devices: crate::audio::devices::Devices,
     pub device_menu: Option<bool>,
     pub devices_loading: bool,
@@ -137,6 +140,9 @@ impl SettingsState {
         Self {
             custom_draft: None,
             custom_open: false,
+            custom_json_mode: false,
+            custom_guide: false,
+            custom_json: None,
             devices: crate::audio::devices::Devices::default(),
             device_menu: None,
             devices_loading: false,
@@ -346,6 +352,23 @@ pub fn app_settings(
                 view.save_settings();
             },
         ),
+    ))
+    .child(row(
+        theme,
+        "Always on top",
+        "Keep Lennette above other windows while listening or idle",
+        switch(
+            "always-on-top",
+            theme,
+            s.always_on_top,
+            cx,
+            |view: &mut crate::ui::dashboard::view::DashboardView, _, window| {
+                let enabled = !view.settings_mut().settings.always_on_top;
+                view.settings_mut().settings.always_on_top = enabled;
+                view.save_settings();
+                view.apply_always_on_top(enabled, window);
+            },
+        ),
     ));
 
     let startup = section(
@@ -382,23 +405,6 @@ pub fn app_settings(
             cx,
             |view: &mut crate::ui::dashboard::view::DashboardView, index, _| {
                 view.set_startup_privacy(index == 1);
-            },
-        ),
-    ))
-    .child(row(
-        theme,
-        "Always on top",
-        "Keep the overlay above other windows",
-        switch(
-            "always-on-top",
-            theme,
-            s.always_on_top,
-            cx,
-            |view: &mut crate::ui::dashboard::view::DashboardView, _, window| {
-                let enabled = !view.settings_mut().settings.always_on_top;
-                view.settings_mut().settings.always_on_top = enabled;
-                view.save_settings();
-                view.apply_always_on_top(enabled, window);
             },
         ),
     ))
@@ -719,51 +725,62 @@ fn device_picker(
                 .items_center()
                 .w_full()
                 .max_w(px(480.0))
+                .min_w(px(0.0))
                 .gap(px(8.0))
                 .child(
-                    div()
-                        .flex_1()
-                        .flex_basis(px(0.0))
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .child(select_trigger(
-                            if input {
-                                "microphone-picker"
+                    select_trigger(
+                        if input {
+                            "microphone-picker"
+                        } else {
+                            "output-picker"
+                        },
+                        theme,
+                        &label,
+                        open,
+                        cx,
+                        move |view, _, _| {
+                            let state = view.settings_mut();
+                            state.device_menu = if state.device_menu == Some(input) {
+                                None
                             } else {
-                                "output-picker"
-                            },
-                            theme,
-                            &label,
-                            open,
-                            cx,
-                            move |view, _, _| {
-                                let state = view.settings_mut();
-                                state.device_menu = if state.device_menu == Some(input) {
-                                    None
-                                } else {
-                                    Some(input)
-                                };
-                                state.speech_language_menu = false;
-                            },
-                        )),
+                                Some(input)
+                            };
+                            state.speech_language_menu = false;
+                        },
+                    )
+                    .w_auto()
+                    .flex_1(),
                 )
-                .child(div().flex_shrink_0().child(action(
-                    if input {
-                        "refresh-microphones"
-                    } else {
-                        "refresh-outputs"
-                    },
-                    theme,
-                    if state.devices_loading {
-                        "Refreshing..."
-                    } else {
-                        "Refresh"
-                    },
-                    cx,
-                    |view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
-                        view.refresh_audio_devices(cx)
-                    },
-                ))),
+                .child(
+                    div()
+                        .id(if input {
+                            "refresh-microphones"
+                        } else {
+                            "refresh-outputs"
+                        })
+                        .w(px(68.0))
+                        .h(px(36.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(9.0))
+                        .border_1()
+                        .border_color(theme.control_border(false))
+                        .bg(theme.input)
+                        .text_color(theme.foreground)
+                        .text_size(scaled(11.0))
+                        .cursor_pointer()
+                        .opacity(if state.devices_loading { 0.5 } else { 1.0 })
+                        .hover(|s| s.bg(theme.menu_hover()))
+                        .child("Refresh")
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            if !view.settings_mut().devices_loading {
+                                view.refresh_audio_devices(cx);
+                            }
+                            cx.notify();
+                        })),
+                ),
         );
     if open {
         let mut menu = div()
@@ -862,18 +879,18 @@ fn select_trigger(
         &mut Context<crate::ui::dashboard::view::DashboardView>,
         &mut gpui::Window,
     ) + 'static,
-) -> gpui::AnyElement {
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .flex()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(8.0))
         .w_full()
         .min_w(px(0.0))
         .overflow_hidden()
-        .h(px(38.0))
-        .px(px(12.0))
-        .rounded(px(11.0))
+        .h(px(36.0))
+        .px(px(10.0))
+        .rounded(px(10.0))
         .bg(theme.input)
         .border_1()
         .border_color(if open {
@@ -892,20 +909,27 @@ fn select_trigger(
                 .truncate()
                 .child(label.to_owned()),
         )
-        .child(div().flex_shrink_0().child(icons::icon(
-            theme,
-            if open {
-                Icon::ChevronUp
-            } else {
-                Icon::ChevronDown
-            },
-            14.0,
-        )))
+        .child(
+            div()
+                .w(px(16.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icons::icon(
+                    theme,
+                    if open {
+                        Icon::ChevronUp
+                    } else {
+                        Icon::ChevronDown
+                    },
+                    14.0,
+                )),
+        )
         .on_click(cx.listener(move |view, _, window, cx| {
             handler(view, cx, window);
             cx.notify();
         }))
-        .into_any_element()
 }
 
 fn select_option(
@@ -926,6 +950,8 @@ fn select_option(
         .items_center()
         .gap(px(10.0))
         .w_full()
+        .min_w(px(0.0))
+        .flex_shrink_0()
         .min_h(px(34.0))
         .px(px(10.0))
         .py(px(7.0))
@@ -949,6 +975,7 @@ fn select_option(
         .child(
             div()
                 .w(px(14.0))
+                .flex_shrink_0()
                 .children(selected.then(|| icons::icon(theme, Icon::Check, 14.0))),
         )
         .on_click(cx.listener(move |view, _, window, cx| {
@@ -1243,58 +1270,21 @@ pub fn shortcut_settings(
 }
 
 /// Provider credentials: the only place a key enters the app.
-fn credentials_section(
+pub(crate) fn credentials_section(
     state: &SettingsState,
     theme: &Theme,
     cx: &mut Context<crate::ui::dashboard::view::DashboardView>,
 ) -> impl IntoElement {
-    use crate::core::credentials::Kind;
-
-    let mut card = section(
-        theme,
-        "Provider Keys",
-        "Stored encrypted on this computer. Keys are only sent to the provider you choose.",
-    );
-
-    let choices: Vec<(&str, bool)> = KEY_PROVIDERS
+    let name = KEY_PROVIDERS
         .iter()
-        .map(|(name, id)| (*name, *id == state.key_provider))
-        .collect();
-    card = card.child(row(
+        .find(|(_, id)| *id == state.key_provider)
+        .map(|(name, _)| *name)
+        .unwrap_or("Provider");
+    let mut card = custom::editor_header(
         theme,
-        "Service",
-        "Connect AI answers and speech transcription",
-        segmented(
-            "cred-provider",
-            theme,
-            &choices,
-            cx,
-            |view: &mut crate::ui::dashboard::view::DashboardView, index, _| {
-                let id = KEY_PROVIDERS[index].1;
-                view.reset_credential_models();
-                let state = view.settings_mut();
-                state.key_provider = id.to_owned();
-                state.key_input.clear();
-                state.key_field = None;
-                state.key_status = None;
-                state.key_model = state
-                    .stored_chat
-                    .iter()
-                    .chain(state.stored_speech.iter())
-                    .find(|credential| credential.provider == id)
-                    .map(|credential| credential.to_config().model)
-                    .unwrap_or_else(|| {
-                        crate::ai::models::default_for(id)
-                            .or_else(|| {
-                                crate::ai::providers::SttProvider::by_id(id)
-                                    .map(|p| p.default_model)
-                            })
-                            .unwrap_or_default()
-                            .to_owned()
-                    });
-            },
-        ),
-    ));
+        name,
+        "Connect with an API key and choose a model. Leave the key unchanged to reuse its encrypted saved value.",
+    );
 
     for (id, label, field, shown) in [
         (
@@ -1461,48 +1451,22 @@ fn credentials_section(
         );
     }
 
-    // Stored credentials, with the key masked.
-    for credential in state
-        .stored_chat
-        .iter()
-        .chain(state.stored_speech.iter())
-        .filter(|credential| credential.custom.is_none())
-    {
-        let label = if credential.kind == Kind::Chat {
-            "Chat"
-        } else {
-            "Speech"
-        };
-        let provider = credential.provider.clone();
-        let kind = credential.kind;
-        card = card.child(row(
-            theme,
-            &format!("{} · {}", provider, label),
-            &credential.masked_key(),
-            div().flex().items_center().gap(px(6.0)).child(action(
-                gpui::ElementId::Name(format!("del-{provider}").into()),
-                theme,
-                "Remove",
-                cx,
-                move |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                    view.remove_credential(kind, &provider);
-                },
-            )),
-        ));
-    }
+    card = card.child(div().flex().child(action(
+        "close-provider-editor",
+        theme,
+        "Cancel",
+        cx,
+        |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
+            view.settings_mut().custom_open = false;
+            view.settings_mut().key_field = None;
+        },
+    )));
 
-    if state.stored_chat.is_empty() && state.stored_speech.is_empty() {
-        card = card.child(
-            div()
-                .text_size(scaled(11.0))
-                .text_color(theme.muted_foreground)
-                .child(
-                    "No keys stored yet. Chat and transcription stay disabled until you add one.",
-                ),
-        );
-    }
-
-    card
+    card.child(
+        div()
+            .flex()
+            .children(custom::remove_button(state, theme, cx)),
+    )
 }
 
 /// Provider setup and storage status.
@@ -1537,7 +1501,6 @@ pub fn dev_space(
     ));
 
     stack(vec![
-        credentials_section(state, theme, cx).into_any_element(),
         custom::providers(state, theme, cx),
         storage.into_any_element(),
     ])
@@ -1559,7 +1522,6 @@ pub fn render(
     let subtabs = [
         ("General", Route::Settings),
         ("Responses", Route::Responses),
-        ("Profiles", Route::Profiles),
         ("Audio", Route::Audio),
         ("AI & Keys", Route::DevSpace),
         ("Shortcuts", Route::Shortcuts),
@@ -1621,7 +1583,6 @@ pub fn render(
                 stack(vec![app, screenshots])
             }
             Route::Responses => response_settings(view, state, theme, cx),
-            Route::Profiles => view.profiles_body(cx),
             Route::Audio => audio_settings(view, state, theme, cx),
             Route::DevSpace => dev_space(state, theme, cx),
             Route::Shortcuts => shortcut_settings(theme, cx),
@@ -1674,7 +1635,12 @@ pub fn render(
                 )
                 .child(tab_bar),
         )
-        .child(body)
+        .child(crate::ui::widgets::motion::reveal(
+            body,
+            ("settings-body", active_route as usize),
+            state.settings.reduce_motion,
+            false,
+        ))
         .into_any_element()
 }
 

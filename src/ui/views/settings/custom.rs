@@ -10,92 +10,272 @@ pub fn providers(
 ) -> gpui::AnyElement {
     let mut sections = Vec::new();
     for speech in [false, true] {
-        let mut card = section(
-            theme,
-            if speech {
-                "Speech providers"
-            } else {
-                "AI providers"
-            },
-            if speech {
-                "Create and manage speech endpoints, authentication, upload formats and live transcription."
-            } else {
-                "Create and manage AI endpoints, authentication and response formats. Chat requests use the OpenAI messages format."
-            },
-        );
-        card = card.child(action(
-            if speech {
-                "new-custom-stt"
-            } else {
-                "new-custom-ai"
-            },
-            theme,
-            "Add custom provider",
-            cx,
-            move |view: &mut Dashboard, _, _| view.edit_custom_provider(None, speech),
-        ));
         let credentials = if speech {
             &state.stored_speech
         } else {
             &state.stored_chat
         };
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w(px(0.0))
+            .gap(px(14.0))
+            .p(px(18.0))
+            .rounded(px(14.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme
+                .surfaces(crate::features::theme::DEFAULT_OPACITY)
+                .card())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(5.0))
+                            .child(
+                                div()
+                                    .text_size(scaled(15.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(if speech {
+                                        "Speech providers"
+                                    } else {
+                                        "AI providers"
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(scaled(11.0))
+                                    .text_color(theme.muted_foreground)
+                                    .child(if speech {
+                                        "Transcription, microphone and meeting audio."
+                                    } else {
+                                        "Answers, models and screen context."
+                                    }),
+                            ),
+                    )
+                    .child(div().flex().flex_shrink_0().child(action(
+                        if speech {
+                            "new-custom-stt"
+                        } else {
+                            "new-custom-ai"
+                        },
+                        theme,
+                        "+ Add custom provider",
+                        cx,
+                        move |view: &mut Dashboard, _, _| view.edit_custom_provider(None, speech),
+                    ))),
+            );
+        for &(name, id) in KEY_PROVIDERS {
+            let is_speech = crate::ai::providers::SttProvider::by_id(id).is_some();
+            if is_speech != speech {
+                continue;
+            }
+            let saved = credentials
+                .iter()
+                .find(|credential| credential.provider == id);
+            card = card.child(provider_row(state, theme, name, id, saved, speech, cx));
+        }
         for credential in credentials {
-            let label = credential
+            if KEY_PROVIDERS
+                .iter()
+                .any(|(_, id)| *id == credential.provider)
+            {
+                continue;
+            }
+            let name = credential
                 .custom
                 .as_ref()
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| credential.provider.clone());
-            let id = credential.provider.clone();
-            let model = credential.to_config().model;
-            let selected = if speech {
-                state.settings.speech_provider == id
-            } else {
-                state.settings.chat_provider == id
-            };
-            let mut buttons = div().flex().gap(px(6.0));
-            buttons = buttons.child(action(
-                gpui::ElementId::Name(format!("choose-{id}").into()),
+                .map(|c| c.name.as_str())
+                .unwrap_or(&credential.provider);
+            card = card.child(provider_row(
+                state,
                 theme,
-                if selected { "Selected" } else { "Choose" },
+                name,
+                &credential.provider,
+                Some(credential),
+                speech,
                 cx,
-                move |view: &mut Dashboard, _, _| {
-                    let state = view.settings_mut();
-                    if speech {
-                        state.settings.speech_provider = id.clone();
-                        state.settings.speech_model = model.clone();
-                    } else {
-                        state.settings.chat_provider = id.clone();
-                    }
-                    view.save_settings();
-                },
             ));
-            if credential.custom.is_some() {
-                let draft = credential.clone();
-                buttons = buttons.child(action(
-                    gpui::ElementId::Name(format!("edit-{}", credential.provider).into()),
-                    theme,
-                    "Edit",
-                    cx,
-                    move |view: &mut Dashboard, _, _| {
-                        view.edit_custom_provider(Some(draft.clone()), speech)
-                    },
-                ));
-                let id = credential.provider.clone();
-                buttons = buttons.child(action(
-                    gpui::ElementId::Name(format!("remove-{id}").into()),
-                    theme,
-                    "Remove",
-                    cx,
-                    move |view: &mut Dashboard, _, _| {
-                        view.remove_credential(if speech { Kind::Speech } else { Kind::Chat }, &id)
-                    },
-                ));
-            }
-            card = card.child(row(theme, &label, &credential.to_config().model, buttons));
+        }
+        if !credentials
+            .iter()
+            .any(|credential| credential.custom.is_some())
+        {
+            card = card.child(div().text_size(scaled(11.0)).text_color(theme.muted_foreground)
+                .child("Use Add custom provider to connect your own endpoint. You can fill the form or paste JSON."));
         }
         sections.push(card.into_any_element());
     }
-    stack(sections)
+    let mut body = div().flex().flex_col().gap(px(18.0))
+        .child(div().flex().items_center().gap(px(8.0))
+            .child(icons::icon(theme, Icon::LockKeyhole, 14.0))
+            .child(div().text_size(scaled(11.0)).text_color(theme.muted_foreground)
+                .child("Keys stay encrypted on this computer. Manage a provider to replace its key or model.")))
+        .children(sections);
+    if let Some(status) = &state.key_status {
+        body = body.child(help_text(theme, status));
+    }
+    body.into_any_element()
+}
+
+fn provider_row(
+    state: &SettingsState,
+    theme: &Theme,
+    name: &str,
+    id: &str,
+    credential: Option<&crate::core::credentials::Credential>,
+    speech: bool,
+    cx: &mut Context<Dashboard>,
+) -> gpui::AnyElement {
+    let selected = if speech {
+        state.settings.speech_provider == id
+    } else {
+        state.settings.chat_provider == id
+    };
+    let connected = credential.is_some();
+    let mut buttons = div().flex().flex_shrink_0().items_center().gap(px(6.0));
+    if let Some(credential) = credential {
+        let chosen = credential.clone();
+        buttons = buttons.child(action(
+            gpui::ElementId::Name(format!("choose-{id}").into()),
+            theme,
+            if selected { "Selected" } else { "Use provider" },
+            cx,
+            move |view: &mut Dashboard, _, _| {
+                if speech {
+                    view.settings_mut().settings.speech_provider = chosen.provider.clone();
+                    view.settings_mut().settings.speech_model = chosen.to_config().model;
+                } else {
+                    view.settings_mut().settings.chat_provider = chosen.provider.clone();
+                }
+                view.save_settings();
+            },
+        ));
+    }
+    let draft = credential.cloned();
+    let provider = id.to_owned();
+    buttons = buttons.child(action(
+        gpui::ElementId::Name(format!("manage-{id}").into()),
+        theme,
+        if connected { "Manage" } else { "Connect" },
+        cx,
+        move |view: &mut Dashboard, _, _| {
+            if draft.as_ref().is_some_and(|draft| draft.custom.is_some()) {
+                view.edit_custom_provider(draft.clone(), speech);
+            } else {
+                view.edit_builtin_provider(&provider);
+            }
+        },
+    ));
+    let detail = credential
+        .map(|c| {
+            let model = c.to_config().model;
+            format!(
+                "Connected  ·  {}  ·  {}",
+                if model.is_empty() {
+                    "Default model"
+                } else {
+                    &model
+                },
+                if c.api_key.is_empty() {
+                    "No key required".into()
+                } else {
+                    c.masked_key()
+                }
+            )
+        })
+        .unwrap_or_else(|| "Not connected".into());
+    div()
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .w_full()
+        .min_w(px(0.0))
+        .p(px(12.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(theme.control_border(false))
+        .bg(theme.input)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .child(
+                    div()
+                        .text_size(scaled(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .truncate()
+                        .child(name.to_owned()),
+                )
+                .child(
+                    div()
+                        .text_size(scaled(10.5))
+                        .text_color(theme.muted_foreground)
+                        .truncate()
+                        .child(detail),
+                ),
+        )
+        .child(buttons)
+        .into_any_element()
+}
+
+/// Removal lives inside the editor, keeping the provider list focused on selection.
+pub(super) fn remove_button(
+    state: &SettingsState,
+    theme: &Theme,
+    cx: &mut Context<Dashboard>,
+) -> Option<gpui::AnyElement> {
+    let draft = state.custom_draft.as_ref();
+    let id = draft
+        .map(|d| d.provider.clone())
+        .unwrap_or_else(|| state.key_provider.clone());
+    let saved = state
+        .stored_chat
+        .iter()
+        .chain(state.stored_speech.iter())
+        .find(|c| c.provider == id)?;
+    let kind = saved.kind;
+    Some(
+        action(
+            "disconnect-provider",
+            theme,
+            "Remove provider",
+            cx,
+            move |view: &mut Dashboard, _, _| {
+                view.remove_credential(kind, &id);
+                view.settings_mut().custom_open = false;
+                view.settings_mut().key_field = None;
+            },
+        )
+        .into_any_element(),
+    )
+}
+
+pub(super) fn editor_header(theme: &Theme, title: &str, description: &str) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w(px(0.0))
+        .gap(px(12.0))
+        .child(
+            div()
+                .text_size(scaled(17.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(title.to_owned()),
+        )
+        .child(help_text(theme, description))
 }
 
 pub fn dialog(
@@ -106,7 +286,7 @@ pub fn dialog(
     if let Some(draft) = &state.custom_draft {
         let custom = draft.custom.as_ref().expect("custom provider draft");
         let speech = draft.kind == Kind::Speech;
-        let mut form = section(
+        let mut form = editor_header(
             theme,
             if speech {
                 "Custom speech provider"
@@ -115,6 +295,58 @@ pub fn dialog(
             },
             "Use the full request endpoint. Leave the key blank while editing to keep its saved value. Keys and custom settings stay encrypted.",
         );
+        form = form.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .child(segmented(
+                    "provider-entry-mode",
+                    theme,
+                    &[
+                        ("Form", !state.custom_json_mode),
+                        ("Paste JSON", state.custom_json_mode),
+                    ],
+                    cx,
+                    |view: &mut Dashboard, index, _| {
+                        view.settings_mut().custom_json_mode = index == 1;
+                        view.settings_mut().key_field = None;
+                    },
+                ))
+                .child(action(
+                    "provider-json-info",
+                    theme,
+                    "i  JSON guide",
+                    cx,
+                    |view: &mut Dashboard, _, _| {
+                        view.settings_mut().custom_guide = !view.settings_mut().custom_guide;
+                    },
+                )),
+        );
+        if state.custom_guide {
+            form = form.child(div().flex().flex_col().gap(px(8.0)).p(px(12.0))
+                .rounded(px(10.0)).bg(theme.input)
+                .child(help_text(theme, "Paste one JSON object using kind, name, endpoint, api_key and model. The guide includes every supported field, formats and a ready-to-fill template for your AI agent. Apply JSON fills the form for review; Save stores the provider."))
+                .child(div().flex().child(action("copy-provider-json-guide", theme, "Copy guide + template", cx,
+                    move |view: &mut Dashboard, cx, _| {
+                        view.settings_mut().key_status = Some("Guide and template copied.".into());
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(crate::core::security::provider_import::guide(speech)));
+                    }))));
+        }
+        if state.custom_json_mode {
+            form = form.child(help_text(theme, "Paste your configuration, then apply it to review the fields. Leave api_key blank to keep a saved key."))
+                .children(state.custom_json.clone())
+                .child(div().flex().gap(px(8.0))
+                    .child(action("apply-provider-json", theme, "Apply JSON", cx,
+                        |view: &mut Dashboard, cx, _| view.apply_provider_json(cx)))
+                    .child(action("cancel-provider-json", theme, "Cancel", cx,
+                        |view: &mut Dashboard, _, _| view.settings_mut().custom_open = false)));
+            if let Some(status) = &state.key_status {
+                form = form.child(help_text(theme, status));
+            }
+            return Some(form.into_any_element());
+        }
         for (field, label, value) in [
             (CredentialField::CustomName, "Name", custom.name.clone()),
             (
@@ -269,6 +501,7 @@ pub fn dialog(
                     },
                 )),
         );
+        form = form.child(div().flex().children(remove_button(state, theme, cx)));
         if let Some(status) = &state.key_status {
             form = form.child(help_text(theme, status));
         }
@@ -297,8 +530,10 @@ fn field_input(
                 .id(gpui::ElementId::Name(
                     format!("custom-field-{}", field as usize).into(),
                 ))
-                .min_h(px(36.0))
+                .min_h(scaled(36.0))
                 .w_full()
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .px(px(10.0))
                 .py(px(8.0))
                 .rounded(px(radius::LG))
@@ -312,11 +547,11 @@ fn field_input(
                 .text_size(scaled(12.0))
                 .text_color(theme.foreground)
                 .cursor_text()
-                .child(if value.is_empty() {
+                .child(div().min_w(px(0.0)).truncate().child(if value.is_empty() {
                     "Click to enter a value".to_owned()
                 } else {
                     value
-                })
+                }))
                 .child(if focused { "│" } else { "" })
                 .on_mouse_down(
                     gpui::MouseButton::Left,

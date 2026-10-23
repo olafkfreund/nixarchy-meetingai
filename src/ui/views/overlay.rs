@@ -1181,7 +1181,7 @@ impl Overlay {
         if question.is_empty() {
             return;
         }
-        // A profile may have just been selected or edited in Settings. Resolve
+        // A profile may have just been selected or edited in the dashboard. Resolve
         // it before constructing this request instead of waiting for the UI poll.
         self.refresh_configuration();
         if self.dictation.is_some() || self.dictation_busy {
@@ -5124,7 +5124,8 @@ impl Render for Overlay {
             let search = cx.new(|cx| {
                 let mut editor = crate::ui::widgets::editor::Editor::new("", self.theme, cx);
                 editor.compact = true;
-                editor.placeholder = "Search models or providers…";
+                editor.dense = true;
+                editor.placeholder = "Search models…";
                 editor
             });
             self.model_search_observer = Some(cx.observe(&search, |_, _, cx| cx.notify()));

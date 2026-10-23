@@ -15,9 +15,9 @@ impl Overlay {
             .flex()
             .flex_col()
             .w_full()
-            .p(px(5.0))
+            .p(px(4.0))
             .gap(px(2.0))
-            .rounded(px(12.0))
+            .rounded(px(10.0))
             .border_1()
             .border_color(self.theme.border)
             .bg(self.theme.popover())
@@ -31,13 +31,16 @@ impl Overlay {
     ) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
+            .min_w(px(0.0))
+            .flex_shrink_0()
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .h(px(32.0))
-            .px(px(10.0))
-            .rounded(px(8.0))
-            .text_size(scaled(11.0))
+            .gap(px(6.0))
+            .h(px(28.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .text_size(scaled(10.5))
+            .line_height(scaled(14.0))
             .text_color(self.theme.foreground)
             .cursor_pointer()
             .bg(if active {
@@ -371,7 +374,7 @@ impl Overlay {
                         .child("No saved sessions yet."),
                 );
             }
-            group = group.child(div().w(px(280.0)).child(crate::ui::widgets::motion::reveal(
+            group = group.child(div().w(px(240.0)).child(crate::ui::widgets::motion::reveal(
                 restore,
                 "restore-submenu-open",
                 self.runtime_settings.reduce_motion,

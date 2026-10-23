@@ -10,6 +10,7 @@ use std::ops::Range;
 
 pub struct Editor {
     pub compact: bool,
+    pub dense: bool,
     pub input: Input,
     pub theme: Theme,
     pub placeholder: &'static str,
@@ -34,6 +35,7 @@ impl Editor {
         input.set_text(text);
         Self {
             compact: false,
+            dense: false,
             input,
             theme,
             placeholder: "Click to write or paste…",
@@ -93,26 +95,46 @@ impl Render for Editor {
         let focus = self.focus.clone();
         let entity = cx.entity();
         let focused = focus.is_focused(window);
+        let empty = self.input.text().is_empty();
         let mut display = self.input.text().to_owned();
-        if focused {
+        if focused && !empty {
             display.insert(self.input.cursor(), '│');
         }
-        if display.is_empty() {
+        if empty {
             display = self.placeholder.into();
         }
+        let height = if self.dense { 28.0 } else { 38.0 };
+        let padding = if self.dense {
+            5.0
+        } else if self.compact {
+            8.0
+        } else {
+            12.0
+        };
+        let line_height = if self.dense { 16.0 } else { 19.0 };
         div()
             .id("multiline-editor")
             .relative()
             .flex()
             .flex_col()
             .w_full()
-            .min_h(px(if self.compact { 38.0 } else { 100.0 }))
-            .max_h(px(if self.compact { 38.0 } else { 240.0 }))
+            .min_h(crate::ui::theme::scaled(if self.compact {
+                height
+            } else {
+                100.0
+            }))
+            .max_h(crate::ui::theme::scaled(if self.compact {
+                height
+            } else {
+                240.0
+            }))
             .flex_shrink_0()
-            .when(self.compact, |style| style.overflow_hidden().h(px(38.0)))
+            .when(self.compact, |style| {
+                style.overflow_hidden().h(crate::ui::theme::scaled(height))
+            })
             .when(!self.compact, |style| style.overflow_y_scroll())
-            .p(px(if self.compact { 8.0 } else { 12.0 }))
-            .rounded(px(10.0))
+            .p(crate::ui::theme::scaled(padding))
+            .rounded(px(if self.dense { 7.0 } else { 10.0 }))
             .border_1()
             .border_color(if focused {
                 self.theme.focus_border()
@@ -120,8 +142,16 @@ impl Render for Editor {
                 self.theme.border
             })
             .bg(self.theme.muted)
-            .text_color(self.theme.foreground)
-            .text_size(crate::ui::theme::scaled(12.0))
+            .text_color(if empty {
+                self.theme.muted_foreground
+            } else {
+                self.theme.foreground
+            })
+            .text_size(crate::ui::theme::scaled(if self.dense {
+                11.0
+            } else {
+                12.0
+            }))
             .when(self.compact, |style| style.whitespace_nowrap())
             .when(!self.compact, |style| style.whitespace_normal())
             .track_focus(&focus)
@@ -172,11 +202,20 @@ impl Render for Editor {
                 div()
                     .w_full()
                     .flex_shrink_0()
-                    .line_height(px(19.0))
+                    .line_height(crate::ui::theme::scaled(line_height))
                     .when(self.compact, |style| style.whitespace_nowrap())
                     .when(!self.compact, |style| style.whitespace_normal())
                     .child(display),
             )
+            .children((empty && focused).then(|| {
+                div()
+                    .absolute()
+                    .left(crate::ui::theme::scaled(padding))
+                    .top(crate::ui::theme::scaled(padding))
+                    .w(px(1.0))
+                    .h(crate::ui::theme::scaled(line_height))
+                    .bg(self.theme.foreground)
+            }))
             .child(
                 gpui::canvas(
                     |_, _, _| (),

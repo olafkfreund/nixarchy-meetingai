@@ -46,6 +46,7 @@ pub struct DashboardView {
     devices_task: Option<gpui::Task<()>>,
     capture_task: Option<gpui::Task<()>>,
     native_icon_hidden: Option<bool>,
+    native_always_on_top: Option<bool>,
     update_task: Option<gpui::Task<()>>,
     update_status: Option<String>,
     update_available: bool,
@@ -109,6 +110,7 @@ impl DashboardView {
             devices_task: None,
             capture_task: None,
             native_icon_hidden: None,
+            native_always_on_top: None,
             update_task: None,
             update_status: None,
             update_available: false,
@@ -408,11 +410,63 @@ impl DashboardView {
             credential
         });
         credential.api_key.clear();
+        self.settings.custom_json = None;
+        self.settings.custom_json_mode = false;
+        self.settings.custom_guide = false;
         self.settings.custom_draft = Some(credential);
         self.settings.custom_open = true;
         self.custom_focus_pending = true;
         self.settings.key_field = None;
         self.settings.key_status = None;
+    }
+
+    pub fn edit_builtin_provider(&mut self, id: &str) {
+        self.reset_credential_models();
+        self.settings.custom_draft = None;
+        self.settings.custom_json = None;
+        self.settings.custom_json_mode = false;
+        self.settings.custom_guide = false;
+        self.settings.key_provider = id.to_owned();
+        self.settings.key_input.clear();
+        self.settings.key_field = None;
+        self.settings.key_status = None;
+        self.settings.key_model = self
+            .settings
+            .stored_chat
+            .iter()
+            .chain(self.settings.stored_speech.iter())
+            .find(|credential| credential.provider == id)
+            .map(|credential| credential.to_config().model)
+            .unwrap_or_else(|| {
+                crate::ai::models::default_for(id)
+                    .or_else(|| {
+                        crate::ai::providers::SttProvider::by_id(id).map(|p| p.default_model)
+                    })
+                    .unwrap_or_default()
+                    .to_owned()
+            });
+        self.settings.custom_open = true;
+        self.custom_focus_pending = true;
+    }
+
+    pub fn apply_provider_json(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.settings.custom_draft.as_ref() else {
+            return;
+        };
+        let Some(editor) = self.settings.custom_json.as_ref() else {
+            return;
+        };
+        match crate::core::security::provider_import::parse(editor.read(cx).input.text(), draft) {
+            Ok(draft) => {
+                self.settings.custom_draft = Some(draft);
+                self.settings.custom_json_mode = false;
+                self.settings.key_field = None;
+                self.settings.key_status =
+                    Some("JSON applied. Review the fields and save when ready.".into());
+            }
+            Err(error) => self.settings.key_status = Some(error),
+        }
+        cx.notify();
     }
 
     pub fn save_custom_provider(&mut self) {
@@ -691,6 +745,8 @@ impl DashboardView {
                     }
                     .to_owned(),
                 );
+                self.settings.custom_open = false;
+                self.settings.key_field = None;
                 self.reload_credentials();
             }
             Err(error) => self.settings.key_status = Some(error),
@@ -1046,7 +1102,7 @@ impl DashboardView {
             row = row.child(self.nav_pill(
                 *item,
                 active,
-                window.viewport_size().width < px(860.0),
+                window.viewport_size().width < px(1040.0),
                 cx,
             ));
         }
@@ -1203,6 +1259,36 @@ impl DashboardView {
             )
     }
 
+    fn collection_empty(
+        &self,
+        icon: Icon,
+        title: &'static str,
+        description: &'static str,
+    ) -> impl IntoElement {
+        div()
+            .w_full()
+            .py(px(40.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(12.0))
+            .child(icons::icon(&self.theme, icon, 28.0))
+            .child(
+                div()
+                    .text_size(scaled(14.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(scaled(12.0))
+                    .text_color(self.theme.muted_foreground)
+                    .text_center()
+                    .whitespace_normal()
+                    .child(description),
+            )
+    }
+
     fn conversations_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let surfaces = self.surfaces();
@@ -1249,28 +1335,11 @@ impl DashboardView {
                 )),
         );
         if records.is_empty() {
-            return list.child(
-                div()
-                    .pt(px(40.0))
-                    .pb(px(40.0))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(12.0))
-                    .child(icons::icon(&theme, Icon::MessagesSquare, 28.0))
-                    .child(
-                        div()
-                            .text_size(scaled(14.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Your conversations will appear here"),
-                    )
-                    .child(
-                        div()
-                            .text_size(scaled(12.0))
-                            .text_color(theme.muted_foreground)
-                            .child("Ask a question in the overlay to start one."),
-                    ),
-            );
+            return list.child(self.collection_empty(
+                Icon::MessagesSquare,
+                "Your conversations will appear here",
+                "Ask a question in the overlay to start one.",
+            ));
         }
         let now = crate::ai::session::now_millis();
         for record in records {
@@ -1427,14 +1496,20 @@ impl DashboardView {
             ));
         let PageData::Meetings(meetings) = self.dashboard.data() else {
             return list
-                .child(self.empty_note("No meetings recorded yet."))
+                .child(self.collection_empty(
+                    Icon::Headphones,
+                    "Your meetings will appear here",
+                    "Start listening in the overlay to save your first meeting.",
+                ))
                 .into_any_element();
         };
         if meetings.is_empty() {
             return list
-                .child(
-                    self.empty_note("Start listening in the overlay to save your first meeting."),
-                )
+                .child(self.collection_empty(
+                    Icon::Headphones,
+                    "Your meetings will appear here",
+                    "Start listening in the overlay to save your first meeting.",
+                ))
                 .into_any_element();
         }
         for meeting in meetings {
@@ -2068,6 +2143,14 @@ impl DashboardView {
             super::nav::Route::Meetings => self.meetings_body(cx),
             super::nav::Route::MeetingDetail => self.meeting_detail(cx),
             super::nav::Route::Prompts => self.prompts_body(cx).into_any_element(),
+            super::nav::Route::Profiles => div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .gap(px(16.0))
+                .child(self.page_heading("Profiles", super::nav::Route::Profiles.description()))
+                .child(self.profiles_body(cx))
+                .into_any_element(),
             super::nav::Route::About => self.about_body(window, cx),
             _ => self.settings_body(cx),
         }
@@ -2150,6 +2233,18 @@ impl Render for DashboardView {
         }
         if modal_progress == 0.0 && !self.settings.custom_open {
             self.settings.custom_draft = None;
+            self.settings.custom_json = None;
+            self.settings.key_input.clear();
+        }
+        if self.settings.custom_open
+            && self.settings.custom_draft.is_some()
+            && self.settings.custom_json.is_none()
+        {
+            self.settings.custom_json = Some(cx.new(|cx| {
+                let mut editor = crate::ui::widgets::editor::Editor::new("", self.theme, cx);
+                editor.placeholder = "Paste provider JSON here…";
+                editor
+            }));
         }
         if self.dashboard.route() == super::nav::Route::Prompts && self.prompt_search.is_none() {
             self.init_prompt_search(cx);
@@ -2161,6 +2256,13 @@ impl Render for DashboardView {
             self.refresh_audio_devices(cx);
         }
         let hidden = self.settings.settings.hide_app_icon || crate::cli::private_overlay_enabled();
+        if self.native_always_on_top != Some(self.settings.settings.always_on_top) {
+            crate::platform::window::set_always_on_top(
+                window,
+                self.settings.settings.always_on_top,
+            );
+            self.native_always_on_top = Some(self.settings.settings.always_on_top);
+        }
         if self.native_icon_hidden != Some(hidden) {
             self.settings.notice = match crate::platform::window::set_icon_hidden(window, hidden) {
                 crate::platform::window::Applied::Unsupported if hidden => Some("This compositor controls dock visibility. Use its window rules to hide Lennette's app icon.".into()),
@@ -2175,9 +2277,13 @@ impl Render for DashboardView {
         ));
         self.theme = Theme::from_settings(&self.settings.settings);
         let theme = self.theme;
-        for editor in [self.settings_search.as_ref(), self.prompt_search.as_ref()]
-            .into_iter()
-            .flatten()
+        for editor in [
+            self.settings_search.as_ref(),
+            self.prompt_search.as_ref(),
+            self.settings.custom_json.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             crate::ui::widgets::editor::Editor::sync_theme(editor, theme, cx);
         }
@@ -2192,7 +2298,14 @@ impl Render for DashboardView {
         }
         let dialog_height = f32::from(window.viewport_size().height) - 96.0;
         let custom_dialog = (modal_progress > 0.0 || self.settings.custom_open).then(|| {
-            let form = settings_pages::custom::dialog(&self.settings, &theme, cx);
+            let form = if self.settings.custom_draft.is_some() {
+                settings_pages::custom::dialog(&self.settings, &theme, cx)
+            } else {
+                Some(
+                    settings_pages::credentials_section(&self.settings, &theme, cx)
+                        .into_any_element(),
+                )
+            };
             div()
                 .absolute()
                 .inset_0()
@@ -2341,12 +2454,16 @@ impl Render for DashboardView {
                                 .max_w(px(960.0))
                                 .flex_shrink_0()
                                 .min_w(px(0.0))
-                                .child(crate::ui::widgets::motion::reveal(
-                                    self.body(window, cx),
-                                    ("dashboard-page", self.page_generation),
-                                    self.settings.settings.reduce_motion,
-                                    false,
-                                )),
+                                .child(if self.dashboard.route().is_setting() {
+                                    self.body(window, cx)
+                                } else {
+                                    crate::ui::widgets::motion::reveal(
+                                        self.body(window, cx),
+                                        ("dashboard-page", self.page_generation),
+                                        self.settings.settings.reduce_motion,
+                                        false,
+                                    )
+                                }),
                         )
                     }),
             )

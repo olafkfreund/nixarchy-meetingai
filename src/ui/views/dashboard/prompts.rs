@@ -135,7 +135,7 @@ impl DashboardView {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .h(px(38.0))
+                        .h(scaled(38.0))
                         .flex_shrink_0()
                         .px(px(12.0))
                         .rounded(px(11.0))
