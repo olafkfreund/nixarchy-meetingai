@@ -135,6 +135,7 @@ application's audio, transcription, or meeting-response features.
 
 ```sh
 cd lennette
+devenv shell -- cargo build --locked -p lennette-tools
 nix flake check path:./packaging/hyprland --no-build
 nix build --no-link path:./packaging/hyprland#checks.x86_64-linux.patch \
   path:./packaging/hyprland#checks.x86_64-linux.launcher
@@ -146,13 +147,17 @@ git clone --recursive https://github.com/hyprwm/Hyprland ref/Hyprland
 git -C ref/Hyprland checkout c7216a9807a2683ce243f6ed14ae01e7e884c426
 git -C ref/Hyprland submodule update --init --recursive
 BUILD_TYPE=Debug BUILD_JOBS=2 packaging/hyprland/build.sh
-packaging/hyprland/tests/smoke.py --lennette-binary target/release/lennette
+cargo xtask hyprland-smoke --lennette-binary target/release/lennette
 ```
 
-`smoke.py` launches an isolated, nested compositor with two headless outputs.
+The QA runners are Rust commands in the root Cargo workspace (Rust 1.99.1).
+`cargo xtask hyprland-smoke` launches an isolated, nested compositor with two headless outputs.
 It requires a parent Wayland compositor (`--parent-socket`, default
 `$WAYLAND_DISPLAY`) and an accessible DRM render node (`--drm-node`, default
 `$TEST_DRM_NODE` or the first accessible `/dev/dri/renderD*`). Set `--compositor`
+to a build matching the selected plugins. On hybrid-GPU machines, pass the render
+node that supports linear GBM buffers explicitly if the default cannot allocate
+DMA-BUF fixtures. Set `--compositor`
 to the Nix-built `bin/Hyprland` to test the packaged executable. It briefly
 focuses its own nested window to photograph
 local visibility. Its outer window is explicitly floated and bounded to
@@ -225,7 +230,7 @@ hyprbars' `g_pGlobalState` to a copied C++ structure: changes to `SHyprButton`
 change the vector stride and can corrupt memory while drawing floating windows.
 Both plugins must be rebuilt with their patches.
 
-Run `tests/overview-compat.py` from a Wayland session, supplying `--compositor`,
+Run `cargo xtask hyprland-overview` from a Wayland session, supplying `--compositor`,
 `--plugins` (a JSON array of absolute plugin library paths), `--lennette`,
 `--client-dir` (from `tests/build-fixture.sh`), and `--artifacts`. It starts an
 isolated compositor and exercises both overviews with three decorated floating

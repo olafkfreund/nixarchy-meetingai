@@ -15,14 +15,14 @@ fmt-check:
 
 # Lint with clippy (warnings denied).
 lint:
-    {{devenv}}cargo clippy --all-targets -- -D warnings
+    {{devenv}}cargo clippy --workspace --all-targets -- -D warnings
 
 # Format and lint together in a single command.
 style: fmt lint
 
 # Fast type & borrow checking across all targets.
 typecheck:
-    {{devenv}}cargo check --all-targets
+    {{devenv}}cargo check --workspace --all-targets
 
 # Fast type & borrow checking alias.
 check: typecheck
@@ -37,7 +37,7 @@ run:
 
 # Run the unit test suite.
 test:
-    {{devenv}}cargo nextest run
+    {{devenv}}cargo nextest run --workspace
 
 # Full pre-commit check: style + typecheck.
 pre-commit: fmt-check lint typecheck

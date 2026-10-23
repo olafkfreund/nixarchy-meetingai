@@ -3493,6 +3493,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lennette-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "toml_edit 0.25.17+spec-1.1.0",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6941,6 +6955,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.2+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

@@ -7,6 +7,10 @@ rust-version = "1.99"
 license = "MIT"
 authors = ["lennette contributors"]
 
+[workspace]
+members = ["tools"]
+resolver = "3"
+
 [dependencies]
 anyhow = "1.0.104"
 thiserror = "2.0.21"

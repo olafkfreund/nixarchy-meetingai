@@ -49,7 +49,8 @@
           export HYPRLAND_SOURCE=${hyprland.packages.${system}.hyprland.src}
         '';
         nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
-          pkgs.python3
+          pkgs.cargo
+          pkgs.rustc
           pkgs.grim
           pkgs.jq
           pkgs.wlrctl

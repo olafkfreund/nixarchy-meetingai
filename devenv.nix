@@ -126,7 +126,7 @@ in
         export CPATH="${pkgs.glibc.dev}/include"
         export PKG_CONFIG_PATH="${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig:${pkgs.libGL.dev}/lib/pkgconfig:${pkgs.mesa}/lib/pkgconfig"
         cd "''${DEVENV_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-        exec cargo clippy --all-targets --all-features -- -D warnings
+        exec cargo clippy --workspace --all-targets --all-features -- -D warnings
       ''}";
       pass_filenames = false;
     };
@@ -137,10 +137,10 @@ in
       exec = "cargo build";
     };
     "lennette:test" = {
-      exec = "cargo nextest run";
+      exec = "cargo nextest run --workspace";
     };
     "lennette:check" = {
-      exec = "cargo fmt --check && cargo clippy --all-targets -- -D warnings";
+      exec = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings";
     };
     "lennette:run" = {
       exec = "cargo run";
@@ -156,8 +156,8 @@ in
   '';
 
   enterTest = ''
-    cargo fmt --check
-    cargo clippy --all-targets -- -D warnings
-    cargo nextest run
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo nextest run --workspace
   '';
 }

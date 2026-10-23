@@ -62,11 +62,9 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
       - name: Test
-        run: cargo test --locked --all-targets --target ${{ matrix.target }}
-      - name: Test release publisher
-        run: python -m unittest discover -s tests -p test_release.py
+        run: cargo test --locked --workspace --all-targets --target ${{ matrix.target }}
       - name: Build release
         run: cargo build --locked --release --bin lennette --target ${{ matrix.target }}
       - name: Verify Windows native windows and shortcuts
@@ -129,6 +127,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
@@ -137,4 +137,4 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/publish-release.py
+        run: cargo xtask release
