@@ -32,3 +32,4 @@ ref/
 # Local test credentials, never committed
 *.key
 test-key*
+node_modules/

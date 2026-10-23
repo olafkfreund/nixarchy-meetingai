@@ -1,6 +1,7 @@
 # lennette — development tasks
 
 devenv := if env_var_or_default("DEVENV_PROFILE", "") != "" { "" } else { "devenv shell -- " }
+web := "cd web && bun " 
 
 default:
     @just --list
@@ -54,6 +55,20 @@ install-hooks:
     cp .githooks/pre-push .git/hooks/pre-push
     cp .githooks/prepare-commit-msg .git/hooks/prepare-commit-msg
     chmod +x .git/hooks/pre-push .git/hooks/prepare-commit-msg
+
+# Run the landing site dev server.
+web-dev:
+    cd web && bun run dev
+
+# Format, lint and type check the landing site.
+web-check:
+    cd web && bun run format
+    cd web && bun run lint
+    cd web && bun run typecheck
+
+# Run the landing site test suite.
+web-check-types:
+    cd web && bun run test
 
 # Validate lints, format, types, compile optimized release binary and install locally.
 install: fmt-check lint typecheck
