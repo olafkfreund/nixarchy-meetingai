@@ -19,6 +19,10 @@ enum EditTarget {
     Setting(&'static str),
 }
 
+#[path = "history.rs"]
+mod history;
+#[path = "meeting_tone.rs"]
+mod meeting_tone;
 #[path = "profiles.rs"]
 mod profiles;
 #[path = "prompts.rs"]
@@ -54,6 +58,12 @@ pub struct DashboardView {
     update_status: Option<String>,
     update_available: bool,
     recap_task: Option<gpui::Task<()>>,
+    tone_task: Option<gpui::Task<()>>,
+    tone_report: Option<crate::ai::sentiment::Report>,
+    tone_saved: Option<crate::db::repos::sentiment::Saved>,
+    tone_revision: Option<crate::db::repos::sentiment::Revision>,
+    tone_error: Option<String>,
+    tone_segment: usize,
     prompt_edit: Option<prompts::PromptDraft>,
     prompt_search: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
     prompt_observer: Option<gpui::Subscription>,
@@ -61,6 +71,14 @@ pub struct DashboardView {
     settings_search: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
     settings_search_observer: Option<gpui::Subscription>,
     page_generation: usize,
+    page_scroll: gpui::ScrollHandle,
+    content_width: gpui::Pixels,
+    history_search: [Option<gpui::Entity<crate::ui::widgets::editor::Editor>>; 4],
+    history_queries: [String; 4],
+    history_observers: [Option<gpui::Subscription>; 4],
+    history_tasks: [Option<gpui::Task<()>>; 2],
+    detail_lines: Vec<crate::db::meetings::LineRecord>,
+    detail_messages: Vec<conversations::MessageRecord>,
     custom_focus_pending: bool,
     custom_motion: crate::ui::widgets::motion::Transition,
     /// Background task naming meetings that still carry a timestamp title.
@@ -121,6 +139,12 @@ impl DashboardView {
             update_status: None,
             update_available: false,
             recap_task: None,
+            tone_task: None,
+            tone_report: None,
+            tone_saved: None,
+            tone_revision: None,
+            tone_error: None,
+            tone_segment: 0,
             prompt_edit: None,
             prompt_search: None,
             prompt_observer: None,
@@ -128,6 +152,14 @@ impl DashboardView {
             settings_search: None,
             settings_search_observer: None,
             page_generation: 0,
+            page_scroll: gpui::ScrollHandle::new(),
+            content_width: px(910.0),
+            history_search: Default::default(),
+            history_queries: Default::default(),
+            history_observers: Default::default(),
+            history_tasks: Default::default(),
+            detail_lines: Vec::new(),
+            detail_messages: Vec::new(),
             custom_focus_pending: false,
             custom_motion: crate::ui::widgets::motion::Transition::new(0.0),
             title_task: None,
@@ -139,6 +171,9 @@ impl DashboardView {
         if self.dashboard.route() != route {
             self.page_generation += 1;
         }
+        // Every page starts at its top; a carried-over offset hides the heading
+        // and clamps at the shorter page's end.
+        self.page_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         if self.settings_save.take().is_some() {
             self.save_settings();
         }
@@ -147,6 +182,12 @@ impl DashboardView {
         {
             self.settings.baseline = settings.clone();
             self.settings.settings = settings;
+        }
+        if route != super::nav::Route::MeetingDetail {
+            self.detail_lines.clear();
+        }
+        if route != super::nav::Route::ConversationDetail {
+            self.detail_messages.clear();
         }
         self.renaming = false;
         self.edit_target = None;
@@ -164,6 +205,10 @@ impl DashboardView {
         self.reset_credential_models();
         self.settings.notice = None;
         self.dashboard.navigate(route, self.database.as_ref());
+        if let Some(slot @ 0..=1) = history::search_slot(route) {
+            self.dashboard
+                .search_archive(&self.history_queries[slot], self.database.as_ref());
+        }
     }
 
     /// Navigate to a page, loading its data.
@@ -229,8 +274,10 @@ impl DashboardView {
             if renamed > 0 {
                 this.update(cx, |view, cx| {
                     view.title_task = None;
-                    view.dashboard
-                        .navigate(super::nav::Route::Meetings, view.database.as_ref());
+                    if view.dashboard.route() == super::nav::Route::Meetings {
+                        view.dashboard
+                            .search_archive(&view.history_queries[1], view.database.as_ref());
+                    }
                     cx.notify();
                 })
                 .ok();
@@ -1119,7 +1166,15 @@ impl DashboardView {
 
     /// Open a meeting's transcript.
     pub fn open_meeting(&mut self, id: impl Into<String>) {
+        self.renaming = false;
+        self.settings.notice = None;
+        self.page_generation += 1;
+        self.page_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         self.open_meeting = Some(id.into());
+        self.detail_lines = self.meeting_lines();
+        self.load_meeting_tone();
+        self.history_queries[3].clear();
+        self.history_search[3] = None;
         self.dashboard
             .navigate(super::nav::Route::MeetingDetail, self.database.as_ref());
     }
@@ -1136,7 +1191,12 @@ impl DashboardView {
     pub fn open_conversation(&mut self, id: impl Into<String>) {
         self.renaming = false;
         self.settings.notice = None;
+        self.page_generation += 1;
+        self.page_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         self.open_conversation = Some(id.into());
+        self.detail_messages = self.conversation_messages();
+        self.history_queries[2].clear();
+        self.history_search[2] = None;
         self.dashboard.navigate(
             super::nav::Route::ConversationDetail,
             self.database.as_ref(),
@@ -1373,7 +1433,10 @@ impl DashboardView {
     fn conversations_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let surfaces = self.surfaces();
-        let records = self.dashboard.filtered_conversations();
+        let records = match self.dashboard.data() {
+            PageData::Conversations(records) => records.as_slice(),
+            _ => &[],
+        };
         let count = records.len();
         let mut list = div().flex().flex_col().gap(px(10.0)).pb(px(12.0)).child(
             div()
@@ -1415,6 +1478,10 @@ impl DashboardView {
                     |this: &mut Self, _, _| this.navigate(super::nav::Route::Conversations),
                 )),
         );
+        list = list.child(self.history_search_bar(0, cx));
+        if records.is_empty() && !self.history_queries[0].trim().is_empty() {
+            return list.child(self.empty_note("No conversations match this search."));
+        }
         if records.is_empty() {
             return list.child(self.collection_empty(
                 Icon::MessagesSquare,
@@ -1573,8 +1640,9 @@ impl DashboardView {
             .gap(px(12.0))
             .child(self.page_heading(
                 "Meetings",
-                "Saved sessions, speaker transcripts and context for your next conversation.",
-            ));
+                "Search titles and every saved transcript. Up to 200 matches shown.",
+            ))
+            .child(self.history_search_bar(1, cx));
         let PageData::Meetings(meetings) = self.dashboard.data() else {
             return list
                 .child(self.collection_empty(
@@ -1584,6 +1652,11 @@ impl DashboardView {
                 ))
                 .into_any_element();
         };
+        if meetings.is_empty() && !self.history_queries[1].trim().is_empty() {
+            return list
+                .child(self.empty_note("No meetings match this search."))
+                .into_any_element();
+        }
         if meetings.is_empty() {
             return list
                 .child(self.collection_empty(
@@ -1863,6 +1936,17 @@ impl DashboardView {
                     cx,
                     |this, _, _| this.navigate(super::nav::Route::Meetings),
                 ))
+                .child(action_button(
+                    "refresh-meeting",
+                    &theme,
+                    "Refresh",
+                    cx,
+                    |this, cx, _| {
+                        this.detail_lines = this.meeting_lines();
+                        this.load_meeting_tone();
+                        cx.notify();
+                    },
+                ))
                 .child(super::view::action_button(
                     "rename-meeting",
                     &theme,
@@ -1892,21 +1976,31 @@ impl DashboardView {
                 .into_any_element(),
             None => div().into_any_element(),
         };
-        let lines = self.meeting_lines();
-        let mut list =
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(16.0))
-                .child(actions)
-                .child(self.page_heading(
-                    &self.current_title().unwrap_or_else(|| "Meeting".into()),
-                    &format!(
-                        "{} transcript {}",
-                        lines.len(),
-                        if lines.len() == 1 { "line" } else { "lines" }
-                    ),
-                ));
+        let lines = &self.detail_lines;
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w(px(0.0))
+            .gap(px(16.0))
+            .child(actions)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w(px(0.0))
+                    .gap(px(6.0))
+                    .child(self.page_heading(
+                        &self.current_title().unwrap_or_else(|| "Meeting".into()),
+                        &format!(
+                            "{} transcript {}",
+                            lines.len(),
+                            if lines.len() == 1 { "line" } else { "lines" }
+                        ),
+                    ))
+                    .child(self.history_search_bar(3, cx)),
+            );
         if lines.is_empty() {
             return list
                 .child(self.empty_note("This meeting has no transcript yet."))
@@ -1937,8 +2031,10 @@ impl DashboardView {
             .flex()
             .flex_col()
             .flex_1()
-            .min_w(px(260.0))
+            .w_full()
+            .min_w(px(0.0))
             .gap(px(12.0));
+        let mut matches = 0;
         for line in lines {
             let who = match line.who.as_str() {
                 "me" => "You".to_owned(),
@@ -1948,12 +2044,19 @@ impl DashboardView {
                 },
             };
             let stamp = crate::features::db::meetings::format_duration(line.start_time as i64);
+            if !self.matching_text(3, &[&line.text, &who, &stamp]) {
+                continue;
+            }
+            matches += 1;
             transcript = transcript.child(
                 div()
                     .flex()
-                    .items_start()
-                    .gap(px(10.0))
-                    .rounded(px(8.0))
+                    .flex_col()
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .gap(px(8.0))
+                    .rounded(px(12.0))
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.card)
@@ -1961,20 +2064,40 @@ impl DashboardView {
                     .py(px(14.0))
                     .child(
                         div()
-                            .w(px(105.0))
-                            .flex_shrink_0()
+                            .w_full()
+                            .min_w(px(0.0))
+                            .whitespace_normal()
                             .text_size(scaled(10.5))
                             .text_color(theme.muted_foreground)
                             .child(format!("{stamp} {who}")),
                     )
                     .child(
                         div()
-                            .flex_1()
+                            .w_full()
+                            .min_w(px(0.0))
+                            .whitespace_normal()
                             .text_size(scaled(12.5))
                             .text_color(theme.foreground)
-                            .child(line.text),
+                            .child(line.text.clone()),
                     ),
             );
+        }
+        transcript = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w(px(0.0))
+            .gap(px(10.0))
+            .child(
+                div()
+                    .text_size(scaled(12.0))
+                    .text_color(theme.muted_foreground)
+                    .child(format!("Transcript · {matches} of {} lines", lines.len())),
+            )
+            .child(transcript);
+        if matches == 0 {
+            transcript =
+                transcript.child(self.empty_note("No transcript lines match this search."));
         }
         let recap = self
             .database
@@ -1986,9 +2109,8 @@ impl DashboardView {
                     .flatten()
             });
         let mut panel = div()
-            .w(px(300.0))
-            .min_w(px(250.0))
-            .flex_shrink_0()
+            .w_full()
+            .min_w(px(0.0))
             .flex()
             .flex_col()
             .gap(px(12.0))
@@ -2028,16 +2150,18 @@ impl DashboardView {
             cx,
             |this, cx, _| this.request_recap(cx),
         ));
-        list.child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_start()
-                .gap(px(18.0))
-                .child(transcript)
-                .child(panel),
-        )
-        .into_any_element()
+        list.child(self.meeting_tone_panel(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w(px(0.0))
+                    .gap(px(18.0))
+                    .child(transcript)
+                    .child(panel),
+            )
+            .into_any_element()
     }
 
     fn conversation_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -2048,7 +2172,7 @@ impl DashboardView {
                 .empty_note("Choose a conversation to read it.")
                 .into_any_element();
         };
-        let messages = self.conversation_messages();
+        let messages = &self.detail_messages;
         let title = self
             .current_title()
             .unwrap_or_else(|| "Conversation".into());
@@ -2170,12 +2294,31 @@ impl DashboardView {
                 .child(self.empty_note("This conversation has no messages yet."))
                 .into_any_element();
         }
+        list = list.child(self.history_search_bar(2, cx));
+        let mut matches = 0;
         for message in messages {
+            if !self.matching_text(
+                2,
+                &[
+                    &message.content,
+                    if message.role == "user" {
+                        "You"
+                    } else {
+                        "Lennette"
+                    },
+                ],
+            ) {
+                continue;
+            }
+            matches += 1;
             let is_user = message.role == "user";
             let content = if is_user {
                 div()
+                    .w_full()
+                    .min_w(px(0.0))
+                    .whitespace_normal()
                     .text_size(scaled(13.0))
-                    .child(message.content)
+                    .child(message.content.clone())
                     .into_any_element()
             } else {
                 crate::ui::overlay::render_markdown(&theme, surfaces, &message.content)
@@ -2229,6 +2372,9 @@ impl DashboardView {
                             ),
                     ),
             );
+        }
+        if matches == 0 {
+            list = list.child(self.empty_note("No messages match this search."));
         }
         list.into_any_element()
     }
@@ -2303,6 +2449,8 @@ fn truncate(text: &str, limit: usize) -> String {
 
 impl Render for DashboardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.content_width = (window.viewport_size().width - px(50.0)).clamp(px(200.0), px(960.0));
+        self.init_history_search(cx);
         if self.settings_search.is_none() {
             let search = cx.new(|cx| {
                 let mut editor = crate::ui::widgets::editor::Editor::new("", self.theme, cx);
@@ -2387,6 +2535,9 @@ impl Render for DashboardView {
         .into_iter()
         .flatten()
         {
+            crate::ui::widgets::editor::Editor::sync_theme(editor, theme, cx);
+        }
+        for editor in self.history_search.iter().flatten() {
             crate::ui::widgets::editor::Editor::sync_theme(editor, theme, cx);
         }
         for (_, editor) in &self.settings.credential_editors {
@@ -2553,6 +2704,7 @@ impl Render for DashboardView {
                             .min_h(px(0.0))
                             .id("dashboard-content")
                             .overflow_y_scroll()
+                            .track_scroll(&self.page_scroll)
                             .p(px(24.0))
                             .items_center();
                         if let Some(banner) = self.error_banner() {

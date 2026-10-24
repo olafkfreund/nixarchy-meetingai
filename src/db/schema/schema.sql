@@ -182,3 +182,14 @@ CREATE TABLE IF NOT EXISTS meeting_conversations (
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     PRIMARY KEY (meeting_id, conversation_id)
 );
+
+-- Model assessments stay inside SQLCipher alongside their source transcript.
+CREATE TABLE IF NOT EXISTS meeting_sentiment (
+    meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+    content TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT NOT NULL DEFAULT '',
+    source_lines INTEGER NOT NULL,
+    source_last_row INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

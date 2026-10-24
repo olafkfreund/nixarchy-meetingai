@@ -66,6 +66,37 @@ impl Dashboard {
         self.search = value.into();
     }
 
+    /// Query all saved content; the limit bounds returned cards, not the archive searched.
+    pub fn search_archive(&mut self, query: &str, database: Option<&Database>) {
+        self.search = query.to_owned();
+        let result = database
+            .ok_or_else(not_ready)
+            .and_then(|db| match self.route {
+                Route::Conversations => conversations::search(db.connection(), query, 200)
+                    .map(PageData::Conversations)
+                    .map_err(describe),
+                Route::Meetings => meetings::search(db.connection(), query, 200)
+                    .map(PageData::Meetings)
+                    .map_err(describe),
+                _ => Ok(self.data.clone()),
+            });
+        self.apply_search_result(query, result);
+    }
+
+    pub fn apply_search_result(&mut self, query: &str, result: Result<PageData, String>) {
+        self.search = query.to_owned();
+        match result {
+            Ok(data) => {
+                self.data = data;
+                self.error = None;
+            }
+            Err(error) => {
+                self.data = PageData::Empty;
+                self.error = Some(error);
+            }
+        }
+    }
+
     /// Navigate and load the target page's data.
     pub fn navigate(&mut self, route: Route, database: Option<&Database>) {
         self.route = route;

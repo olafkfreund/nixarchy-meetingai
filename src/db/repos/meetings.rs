@@ -177,16 +177,25 @@ pub fn delete(connection: &Connection, meeting_id: &str) -> Result<()> {
 
 /// Most recent sessions first.
 pub fn list(connection: &Connection, limit: usize) -> Result<Vec<MeetingRecord>> {
+    search(connection, "", limit)
+}
+
+/// Search the complete archive by title, context and saved speech.
+pub fn search(connection: &Connection, query: &str, limit: usize) -> Result<Vec<MeetingRecord>> {
     let mut statement = connection.prepare(
         "SELECT m.id, m.title, m.context, m.language, m.started_at, m.ended_at,
                 m.duration_seconds, COUNT(l.id)
          FROM meetings m
          LEFT JOIN meeting_lines l ON l.meeting_id = m.id
+         WHERE ?2 = '' OR instr(lower(m.title), lower(?2)) > 0
+            OR instr(lower(m.context), lower(?2)) > 0
+            OR EXISTS (SELECT 1 FROM meeting_lines s WHERE s.meeting_id=m.id
+                       AND instr(lower(s.text), lower(?2)) > 0)
          GROUP BY m.id
-         ORDER BY m.started_at DESC
+         ORDER BY m.started_at DESC, m.rowid DESC
          LIMIT ?1",
     )?;
-    let rows = statement.query_map(params![limit as i64], |row| {
+    let rows = statement.query_map(params![limit.min(500) as i64, query.trim()], |row| {
         Ok(MeetingRecord {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -343,6 +352,26 @@ pub fn speaker_names(
 pub fn format_duration(seconds: i64) -> String {
     let seconds = seconds.max(0);
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+#[cfg(test)]
+mod archive_search_tests {
+    use super::*;
+    use crate::db::Database;
+    #[test]
+    fn search_matches_transcript_context_and_literal_query_characters() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let id = start(c, "Design review", "Orion context", "en").unwrap();
+        add_line(c, &id, "them", Some(1), "A 50%_discount. 日本語", 0., 1.).unwrap();
+        start(c, "Other", "auto", "en").unwrap();
+        for query in ["DESIGN", "orion", "50%_", "日本語"] {
+            let found = search(c, query, 200).unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].id, id);
+        }
+        assert!(search(c, "%_not_present", 200).unwrap().is_empty());
+    }
 }
 
 #[cfg(test)]

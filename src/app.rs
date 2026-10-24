@@ -179,7 +179,7 @@ pub fn run() {
                 show: !cfg!(windows),
                 app_id: Some("dev.lennette.overlay".into()),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(540.0), px(420.0))),
+                window_min_size: Some(size(px(680.0), px(420.0))),
                 // A transparent window lets the opacity control show the desktop
                 // through the overlay instead of only fading toward black.
                 window_background: gpui::WindowBackgroundAppearance::Transparent,
@@ -366,7 +366,7 @@ pub fn open_dashboard_at(
         show: !cfg!(windows),
         app_id: Some("dev.lennette.overlay".into()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(760.0), px(540.0))),
+        window_min_size: Some(size(px(960.0), px(540.0))),
         window_background: gpui::WindowBackgroundAppearance::Transparent,
         titlebar: Some(TitlebarOptions {
             title: Some("lennette dashboard".into()),

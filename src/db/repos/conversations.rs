@@ -54,6 +54,16 @@ pub fn delete(connection: &Connection, id: &str) -> Result<()> {
 
 /// Most recently updated conversations first.
 pub fn list(connection: &Connection, limit: usize) -> Result<Vec<ConversationRecord>> {
+    search(connection, "", limit)
+}
+
+/// Search titles and every saved message without loading full bodies into memory.
+/// `instr` treats %, _ and quotes as literal search text.
+pub fn search(
+    connection: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<ConversationRecord>> {
     let mut statement = connection.prepare(
         "SELECT c.id, c.title, c.created_at, c.updated_at, COUNT(m.id),
                 COALESCE((SELECT substr(p.content, 1, 320) FROM messages p
@@ -61,11 +71,14 @@ pub fn list(connection: &Connection, limit: usize) -> Result<Vec<ConversationRec
                           ORDER BY p.timestamp DESC, p.rowid DESC LIMIT 1), '')
          FROM conversations c
          LEFT JOIN messages m ON m.conversation_id = c.id
+         WHERE ?2 = '' OR instr(lower(c.title), lower(?2)) > 0
+            OR EXISTS (SELECT 1 FROM messages s WHERE s.conversation_id=c.id
+                       AND instr(lower(s.content), lower(?2)) > 0)
          GROUP BY c.id
-         ORDER BY c.updated_at DESC
+         ORDER BY c.updated_at DESC, c.rowid DESC
          LIMIT ?1",
     )?;
-    let rows = statement.query_map(params![limit as i64], |row| {
+    let rows = statement.query_map(params![limit.min(500) as i64, query.trim()], |row| {
         Ok(ConversationRecord {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -179,6 +192,30 @@ pub fn require_conversation(connection: &Connection, id: &str) -> Result<()> {
         return Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod archive_search_tests {
+    use super::*;
+    use crate::db::Database;
+    #[test]
+    fn search_finds_old_message_content_beyond_the_initial_card_limit() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let old = create(c, "Unrelated title", 1).unwrap();
+        append_message(c, &old, "user", "Discuss the 50%_migration. Café 東京.", 1).unwrap();
+        for i in 2..205 {
+            create(c, &format!("Recent {i}"), i).unwrap();
+        }
+        assert!(!list(c, 200).unwrap().iter().any(|r| r.id == old));
+        for query in ["MIGRATION", "50%_", "東京"] {
+            let found = search(c, query, 200).unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].id, old);
+        }
+        assert!(search(c, "' OR 1=1 --", 200).unwrap().is_empty());
+        assert_eq!(search(c, "  ", 1).unwrap().len(), 1);
+    }
 }
 
 #[cfg(test)]
