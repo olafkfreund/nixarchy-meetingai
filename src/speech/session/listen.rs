@@ -7,6 +7,7 @@
 //! error — is reported through [`SessionEvent`] so the overlay can show the real
 //! reason instead of appearing to listen when nothing is recording.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +21,69 @@ use crate::speech::transcription::{self, TranscriptLine};
 
 /// How much audio a single pump drains, in samples (about 50 ms at 16 kHz).
 const FRAME_SAMPLES: usize = 800;
+
+/// Device callbacks have independent packet sizes. Retain incomplete frames;
+/// padding a live underflow would insert gaps into otherwise continuous speech.
+#[derive(Default)]
+struct CaptureFrames {
+    microphone: VecDeque<f32>,
+    remote: VecDeque<f32>,
+    remote_enabled: bool,
+}
+
+impl CaptureFrames {
+    fn push(&mut self, microphone: &[f32], remote: &[f32]) -> bool {
+        const LIMIT: usize = crate::audio::SAMPLE_RATE as usize * 2;
+        if self.microphone.len() + microphone.len() > LIMIT
+            || self.remote.len() + remote.len() > LIMIT
+        {
+            return false;
+        }
+        self.microphone.extend(microphone);
+        if self.remote_enabled {
+            self.remote.extend(remote);
+        }
+        true
+    }
+
+    fn next(&mut self, finishing: bool, quiet: [bool; 2]) -> Option<Vec<f32>> {
+        let available = if !self.remote_enabled {
+            self.microphone.len()
+        } else if finishing {
+            self.microphone.len().max(self.remote.len())
+        } else {
+            self.microphone.len().min(self.remote.len())
+        };
+        let frames = if finishing {
+            if available == 0 {
+                return None;
+            }
+            available.min(FRAME_SAMPLES)
+        } else {
+            if self.microphone.len() < FRAME_SAMPLES && !quiet[0]
+                || self.remote_enabled && self.remote.len() < FRAME_SAMPLES && !quiet[1]
+            {
+                return None;
+            }
+            FRAME_SAMPLES
+        };
+        Some(
+            (0..frames)
+                .flat_map(|_| {
+                    [
+                        self.microphone.pop_front().unwrap_or(0.0),
+                        self.remote.pop_front().unwrap_or(0.0),
+                    ]
+                })
+                .collect(),
+        )
+    }
+
+    fn set_remote(&mut self, enabled: bool) {
+        self.remote.clear();
+        self.remote_enabled = enabled;
+    }
+}
 
 /// Something the session wants the UI to know about.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +122,8 @@ pub struct ListenSession {
     system: Option<crate::audio::system_audio::SystemAudio>,
     started: std::time::Instant,
     sent_samples: usize,
+    frames: CaptureFrames,
+    last_audio: [std::time::Instant; 2],
     elapsed: Duration,
     output_device: Option<String>,
 }
@@ -109,11 +175,17 @@ impl ListenSession {
         if let Some(sys) = &mut system {
             sys.take(32_000);
         }
+        let remote_enabled = system.is_some();
         let session = Self {
             microphone,
             system,
             started: std::time::Instant::now(),
             sent_samples: 0,
+            frames: CaptureFrames {
+                remote_enabled,
+                ..Default::default()
+            },
+            last_audio: [std::time::Instant::now(); 2],
             elapsed: Duration::ZERO,
             output_device: config.output_device.clone(),
         };
@@ -123,6 +195,7 @@ impl ListenSession {
     /// Switch call capture without reconnecting or interrupting the microphone.
     pub fn set_system_audio(&mut self, enabled: bool) -> Vec<SessionEvent> {
         if !enabled {
+            self.frames.set_remote(false);
             self.system.take();
             return vec![SessionEvent::Started {
                 device: self
@@ -138,6 +211,8 @@ impl ListenSession {
         match crate::audio::system_audio::SystemAudio::start(self.output_device.as_deref()) {
             Ok(system) => {
                 let device = format!("microphone + {}", system.source());
+                self.frames.set_remote(true);
+                self.last_audio[1] = std::time::Instant::now();
                 self.system = Some(system);
                 vec![SessionEvent::Started { device }]
             }
@@ -183,24 +258,40 @@ impl ListenSession {
             ));
             return events;
         }
-        // Clock both sources together. A silent or unavailable channel is padded,
-        // never mixed into the other speaker's track.
+        let frame = microphone.take(32_000);
+        let remote = self
+            .system
+            .as_mut()
+            .map(|s| s.take(32_000))
+            .unwrap_or_default();
+        let now = std::time::Instant::now();
+        for (channel, samples) in [&frame, &remote].into_iter().enumerate() {
+            if !samples.is_empty() {
+                self.last_audio[channel] = now;
+            }
+        }
+        // Wait through ordinary callback jitter. A loopback device may stop
+        // callbacks during genuine silence; only then pad its absent packets.
+        let quiet = self
+            .last_audio
+            .map(|at| now.duration_since(at) >= Duration::from_millis(250));
+        level = level
+            .max(crate::audio::rms(&frame))
+            .max(crate::audio::rms(&remote));
+        if !self.frames.push(&frame, &remote) {
+            self.microphone.take();
+            self.system.take();
+            events.push(SessionEvent::Failed(
+                "Audio capture was interrupted or fell behind. Start again to reconnect.".into(),
+            ));
+            return events;
+        }
         while self.sent_samples + FRAME_SAMPLES <= due {
-            let frame = microphone.take(FRAME_SAMPLES);
-            let remote = self
-                .system
-                .as_mut()
-                .map(|s| s.take(FRAME_SAMPLES))
-                .unwrap_or_default();
-            level = level
-                .max(crate::audio::rms(&frame))
-                .max(crate::audio::rms(&remote));
-            events.push(SessionEvent::Audio(interleave(
-                &frame,
-                &remote,
-                FRAME_SAMPLES,
-            )));
-            self.sent_samples += FRAME_SAMPLES;
+            let Some(samples) = self.frames.next(false, quiet) else {
+                break;
+            };
+            self.sent_samples += samples.len() / 2;
+            events.push(SessionEvent::Audio(samples));
         }
         self.elapsed = self.started.elapsed();
         events.push(SessionEvent::Level(level));
@@ -223,18 +314,19 @@ impl ListenSession {
     pub fn stop(&mut self) -> Vec<SessionEvent> {
         let mut events = self.pump();
         if let Some(microphone) = self.microphone.take() {
-            let frame = microphone.take(FRAME_SAMPLES);
+            let frame = microphone.take(32_000);
             let remote = self
                 .system
                 .as_mut()
-                .map(|s| s.take(FRAME_SAMPLES))
+                .map(|s| s.take(32_000))
                 .unwrap_or_default();
-            if !frame.is_empty() || !remote.is_empty() {
-                events.push(SessionEvent::Audio(interleave(
-                    &frame,
-                    &remote,
-                    frame.len().max(remote.len()),
-                )));
+            if !self.frames.push(&frame, &remote) {
+                events.push(SessionEvent::Failed(
+                    "The final audio exceeded the capture buffer.".into(),
+                ));
+            }
+            while let Some(samples) = self.frames.next(true, [false; 2]) {
+                events.push(SessionEvent::Audio(samples));
             }
             microphone.stop();
         }
@@ -311,6 +403,101 @@ pub fn shared_session() -> SharedSession {
 mod tests {
     use super::*;
     use crate::audio::encode_wav;
+
+    #[test]
+    fn uneven_device_packets_preserve_both_audio_tracks_without_silence_insertion() {
+        let microphone: Vec<f32> = (1..=16_000).map(|i| i as f32 / 20_000.0).collect();
+        let remote: Vec<f32> = microphone.iter().map(|s| -s).collect();
+        let mut frames = CaptureFrames {
+            remote_enabled: true,
+            ..Default::default()
+        };
+        let mut actual = Vec::new();
+        let mut remote_cursor = 0;
+        // Microphone callbacks and parec pipe reads rarely share packet boundaries.
+        for (tick, chunk) in microphone.chunks(640).enumerate() {
+            let remote_end = (((tick + 1) * 640 / 1024) * 1024).min(remote.len());
+            assert!(frames.push(chunk, &remote[remote_cursor..remote_end]));
+            remote_cursor = remote_end;
+            while let Some(frame) = frames.next(false, [false; 2]) {
+                actual.extend(frame);
+            }
+        }
+        assert!(frames.push(&[], &remote[remote_cursor..]));
+        while let Some(frame) = frames.next(true, [false; 2]) {
+            actual.extend(frame);
+        }
+        assert_eq!(actual, interleave(&microphone, &remote, microphone.len()));
+    }
+
+    #[test]
+    fn live_underflow_waits_and_stop_pads_only_the_final_tail() {
+        let mut frames = CaptureFrames {
+            remote_enabled: true,
+            ..Default::default()
+        };
+        assert!(frames.push(&vec![0.2; 800], &[0.7; 300]));
+        assert!(frames.next(false, [false; 2]).is_none());
+        assert!(frames.push(&[], &[0.8; 500]));
+        assert_eq!(
+            frames.next(false, [false; 2]).unwrap(),
+            interleave(
+                &vec![0.2; 800],
+                &[vec![0.7; 300], vec![0.8; 500]].concat(),
+                800
+            )
+        );
+        assert!(frames.push(&[0.3; 10], &[0.9; 5]));
+        assert!(frames.next(false, [false; 2]).is_none());
+        assert_eq!(
+            frames.next(true, [false; 2]).unwrap(),
+            interleave(&[0.3; 10], &[0.9; 5], 10)
+        );
+        assert!(frames.next(true, [false; 2]).is_none());
+    }
+
+    #[test]
+    fn silent_loopback_can_pause_callbacks_without_stalling_the_microphone() {
+        let mut frames = CaptureFrames {
+            remote_enabled: true,
+            ..Default::default()
+        };
+        assert!(frames.push(&[0.2; 800], &[0.7; 300]));
+        assert!(
+            frames.next(false, [false; 2]).is_none(),
+            "packet jitter must wait"
+        );
+        assert_eq!(
+            frames.next(false, [false, true]).unwrap(),
+            interleave(&[0.2; 800], &[0.7; 300], 800)
+        );
+        assert!(frames.push(&[0.4; 800], &[]));
+        assert_eq!(
+            frames.next(false, [false, true]).unwrap(),
+            interleave(&[0.4; 800], &[], 800)
+        );
+        // Fresh audio resets the quiet grace, so the resumed words stay intact.
+        assert!(frames.push(&[0.6; 800], &[0.9; 800]));
+        assert_eq!(
+            frames.next(false, [false; 2]).unwrap(),
+            interleave(&[0.6; 800], &[0.9; 800], 800)
+        );
+    }
+
+    #[test]
+    fn stalled_capture_is_bounded_and_disabling_remote_releases_microphone() {
+        let mut frames = CaptureFrames {
+            remote_enabled: true,
+            ..Default::default()
+        };
+        assert!(frames.push(&vec![0.4; 32_000], &[]));
+        assert!(!frames.push(&[0.4], &[]));
+        assert!(frames.next(false, [false; 2]).is_none());
+        frames.set_remote(false);
+        let frame = frames.next(false, [false; 2]).unwrap();
+        assert_eq!(frame, interleave(&vec![0.4; 800], &[], 800));
+        assert!(frames.remote.is_empty());
+    }
 
     #[test]
     fn stereo_channels_never_mix_and_missing_audio_is_silent() {

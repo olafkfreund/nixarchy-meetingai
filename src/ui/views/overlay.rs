@@ -136,14 +136,35 @@ enum BottomMode {
 /// Recognize explicit questions and common spoken requests after STT punctuation.
 fn is_question(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
-    if lower.split_whitespace().count() < 3 {
+    if lower.split_whitespace().count() < 2 {
         return false;
     }
-    text.contains('?')
-        || [
+    if lower.contains('?') {
+        return true;
+    }
+    lower.split(['.', '!', '\n']).any(|sentence| {
+        let mut sentence = sentence.trim();
+        for _ in 0..4 {
+            let Some((first, rest)) = sentence.split_once(char::is_whitespace) else {
+                break;
+            };
+            if ![
+                "so", "okay", "ok", "well", "now", "alright", "and", "then", "great",
+            ]
+            .contains(&first.trim_matches([',', ':']))
+            {
+                break;
+            }
+            sentence = rest.trim_start();
+        }
+        [
             "what ",
+            "what's ",
+            "what’s ",
             "why ",
             "how ",
+            "how's ",
+            "how’s ",
             "when ",
             "where ",
             "who ",
@@ -155,11 +176,17 @@ fn is_question(text: &str) -> bool {
             "does ",
             "is it ",
             "are you ",
+            "have you ",
             "tell me ",
             "explain ",
+            "describe ",
+            "walk me through ",
+            "talk me through ",
+            "give me ",
         ]
         .iter()
-        .any(|p| lower.starts_with(p))
+        .any(|prefix| sentence.starts_with(prefix))
+    })
 }
 
 #[derive(Clone)]
@@ -409,6 +436,7 @@ pub struct Overlay {
     pending_since: Option<std::time::Instant>,
     pending_created: Option<std::time::Instant>,
     live_active: [bool; 2],
+    microphone_activity: Option<std::time::Instant>,
     automatic_turn: bool,
     automatic_inflight: bool,
     last_elapsed: f64,
@@ -656,6 +684,7 @@ impl Overlay {
             pending_since: None,
             pending_created: None,
             live_active: [false; 2],
+            microphone_activity: None,
             automatic_turn: false,
             automatic_inflight: false,
             last_elapsed: 0.0,
@@ -805,6 +834,7 @@ impl Overlay {
                 .unwrap_or_default();
 
         self.live_active = [false; 2];
+        self.microphone_activity = None;
         self.last_elapsed = self.meeting_offset;
         self.live_connected = false;
         self.live_interim = Default::default();
@@ -853,6 +883,7 @@ impl Overlay {
                 self.create_meeting()
             };
             self.mode = Mode::Listen;
+            self.close_pill_menus();
             self.set_dock_expanded(false);
             self.spawn_transcription(cx);
         } else {
@@ -971,36 +1002,22 @@ impl Overlay {
     }
 
     fn completed_turn(&mut self, channel: u8, text: Option<String>) {
-        if let Some(text) = text {
-            self.live_interim[usize::from(channel)].clear();
-            if channel == 1 {
-                use crate::core::settings::AutoResponse;
-                let eligible = match self.runtime_settings.auto_response {
-                    AutoResponse::Off => false,
-                    AutoResponse::Questions => is_question(&text),
-                    AutoResponse::Pauses => meaningful_remark(&text),
-                };
-                let echo = self.transcript.last().is_some_and(|latest| {
-                    let normalized = |value: &str| {
-                        value
-                            .chars()
-                            .filter(|c| c.is_alphanumeric())
-                            .flat_map(char::to_lowercase)
-                            .collect::<String>()
-                    };
-                    self.transcript.iter().rev().take(8).any(|line| {
-                        line.who == "me"
-                            && (latest.start - line.start).abs() < 3.0
-                            && normalized(&line.text) == normalized(&text)
-                    })
-                });
-                if eligible && !echo {
-                    self.pending_question = Some(text);
-                    self.pending_created = Some(std::time::Instant::now());
-                }
-                if self.pending_question.is_some() {
-                    self.pending_since = Some(std::time::Instant::now());
-                }
+        self.live_interim[usize::from(channel)].clear();
+        if let Some(text) = text
+            && channel == 1
+        {
+            use crate::core::settings::AutoResponse;
+            let eligible = match self.runtime_settings.auto_response {
+                AutoResponse::Off => false,
+                AutoResponse::Questions => is_question(&text),
+                AutoResponse::Pauses => meaningful_remark(&text),
+            };
+            if eligible {
+                self.pending_question = Some(text);
+                self.pending_created = Some(std::time::Instant::now());
+            }
+            if self.pending_question.is_some() {
+                self.pending_since = Some(std::time::Instant::now());
             }
         }
         self.live_active[usize::from(channel)] = false;
@@ -1041,6 +1058,9 @@ impl Overlay {
         match event {
             LiveEvent::Transcript(line) => {
                 let channel = usize::from(line.channel);
+                if channel == 0 {
+                    self.microphone_activity = Some(std::time::Instant::now());
+                }
                 let completed = self.live_turns.push(&line);
                 if line.is_final {
                     self.live_interim[channel].clear();
@@ -1064,9 +1084,7 @@ impl Overlay {
                 self.live_speaking = Some(channel);
                 self.live_active[usize::from(channel)] = true;
                 if channel == 0 {
-                    self.pending_question = None;
-                    self.pending_created = None;
-                    self.pending_since = None;
+                    self.microphone_activity = Some(std::time::Instant::now());
                 } else if self.pending_question.is_some() {
                     self.pending_since = Some(std::time::Instant::now());
                 }
@@ -1171,6 +1189,7 @@ impl Overlay {
         self.pending_created = None;
         self.pending_since = None;
         self.live_active = [false; 2];
+        self.microphone_activity = None;
         if self.dictation.as_ref().is_some_and(|d| d.meeting) {
             self.cancel_dictation();
         }
@@ -1575,6 +1594,17 @@ impl Overlay {
         .detach();
     }
 
+    fn automatic_speech_active(&self, now: std::time::Instant) -> bool {
+        // A microphone VAD event can be background noise or loudspeaker echo.
+        // Without fresh words it must not hold remote questions indefinitely.
+        self.live_active[1]
+            || !self.live_interim[1].is_empty()
+            || ((self.live_active[0] || !self.live_interim[0].is_empty())
+                && self.microphone_activity.is_none_or(|at| {
+                    now.saturating_duration_since(at) < std::time::Duration::from_secs(2)
+                }))
+    }
+
     fn answer_pending_question(&mut self, cx: &mut Context<Self>) {
         if !self.is_listening()
             || self.runtime_settings.auto_response == crate::core::settings::AutoResponse::Off
@@ -1592,8 +1622,7 @@ impl Overlay {
             self.pending_created = None;
             self.pending_since = None;
         }
-        if self.live_active.iter().any(|active| *active)
-            || self.live_interim.iter().any(|text| !text.is_empty())
+        if self.automatic_speech_active(std::time::Instant::now())
             || self.dictation.is_some()
             || self.dictation_busy
             || self
@@ -2334,10 +2363,13 @@ impl Overlay {
                     }))
                     .child(img(icons::brand_logo()).w(px(27.0)).h(px(18.0)))
                     .child(menu_probe(self.app_menu_bounds.clone(), cx)),
-            )
-            .child(self.model_selector(cx))
-            .child(self.prompt_selector(cx))
-            .child(self.profile_selector(cx));
+            );
+        if !recording || self.dock_expanded {
+            pill = pill
+                .child(self.model_selector(cx))
+                .child(self.prompt_selector(cx))
+                .child(self.profile_selector(cx));
+        }
         if recording {
             pill = pill.child(
                 div().flex().items_center().gap(px(6.0)).px(px(6.0)).child(
@@ -5795,11 +5827,15 @@ mod tests {
         assert!(overlay.pending_question.is_none());
         overlay.completed_turn(1, Some("What is your experience with Rust?".into()));
         assert!(overlay.pending_question.as_ref().unwrap().contains("Rust"));
-        // A local answer cancels a queued suggestion rather than speaking over the user.
+        // Incidental microphone VAD must defer, rather than discard, a remote question.
         overlay.handle_live_event(crate::speech::transcription::LiveEvent::SpeechStarted {
             channel: 0,
         });
-        assert!(overlay.pending_question.is_none());
+        assert!(
+            overlay.pending_question.is_some(),
+            "a microphone VAD event alone must not discard an interviewer question"
+        );
+        overlay.pending_question = None;
         overlay.runtime_settings.auto_response = AutoResponse::Pauses;
         for short in ["Yes.", "Okay, thank you.", "Sounds good to me."] {
             overlay.completed_turn(1, Some(short.into()));
@@ -5832,7 +5868,7 @@ mod tests {
     }
 
     #[test]
-    fn microphone_echo_does_not_request_a_second_answer() {
+    fn interviewer_question_is_not_suppressed_by_microphone_echo() {
         use crate::speech::transcription::{LiveEvent, TranscriptLine};
         let (path, mut overlay) = fixture();
         for (channel, start) in [(0, 1.0), (1, 1.5)] {
@@ -5846,7 +5882,53 @@ mod tests {
                 speaker: None,
             }));
         }
-        assert!(overlay.pending_question.is_none());
+        assert_eq!(
+            overlay.pending_question.as_deref(),
+            Some("What is the next step?")
+        );
+        drop(overlay);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn empty_microphone_utterance_releases_interim_answer_gate() {
+        use crate::speech::transcription::{LiveEvent, TranscriptLine};
+        let (path, mut overlay) = fixture();
+        overlay.handle_live_event(LiveEvent::SpeechStarted { channel: 0 });
+        overlay.handle_live_event(LiveEvent::Transcript(TranscriptLine {
+            channel: 0,
+            text: "uh".into(),
+            speaker: None,
+            is_final: false,
+            speech_final: false,
+            start: 0.0,
+            end: 0.3,
+        }));
+        overlay.handle_live_event(LiveEvent::UtteranceEnd {
+            channel: 0,
+            last_word_end: 0.3,
+        });
+        assert!(
+            overlay.live_interim[0].is_empty(),
+            "an abandoned interim cannot block later remote questions"
+        );
+        assert!(!overlay.live_active[0]);
+        drop(overlay);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn microphone_noise_gate_expires_without_expiring_active_remote_speech() {
+        use crate::speech::transcription::LiveEvent;
+        let (path, mut overlay) = fixture();
+        overlay.completed_turn(1, Some("Why use Rust?".into()));
+        overlay.handle_live_event(LiveEvent::SpeechStarted { channel: 0 });
+        let now = overlay.microphone_activity.unwrap();
+        assert!(overlay.automatic_speech_active(now));
+        assert!(!overlay.automatic_speech_active(now + std::time::Duration::from_secs(2)));
+        assert!(overlay.pending_question.is_some());
+        overlay.handle_live_event(LiveEvent::SpeechStarted { channel: 1 });
+        assert!(overlay.automatic_speech_active(now + std::time::Duration::from_secs(10)));
         drop(overlay);
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -6468,6 +6550,9 @@ mod tests {
     #[test]
     fn detects_spoken_questions_without_answering_plain_statements() {
         assert!(is_question("How does this work?"));
+        assert!(is_question("Why Rust?"));
+        assert!(is_question("So, walk me through your approach."));
+        assert!(is_question("Okay. Describe a project you built."));
         assert!(is_question("could you explain the approach"));
         assert!(!is_question("We have finished the rollout."));
         assert!(!is_question("okay?"));
