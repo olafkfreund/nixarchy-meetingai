@@ -10,6 +10,7 @@ hl.window_rule({
 	rounding = 0,
 	private_overlay = true,
 	no_blur = true,
+	no_shadow = true,
 })
 hl.window_rule({
 	name = "lennette-overlay-size",

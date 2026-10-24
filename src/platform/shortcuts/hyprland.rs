@@ -84,8 +84,8 @@ pub fn accelerator(binding: &Binding) -> String {
 
 /// Window rules so the overlay is drawn by lennette, not by Hyprland.
 ///
-/// A compositor border or rounding would fight the overlay's own glass edge, so
-/// both are disabled and the window floats without decorations.
+/// Compositor borders, shadows and rounding would fight the app's rounded edge.
+/// In particular, a shadow with zero compositor rounding leaves a square frame.
 pub fn window_rules() -> &'static str {
     // Effects are flat in this Hyprland build; a nested `effect = {}` table is
     // rejected with "unknown field 'effect'".
@@ -96,6 +96,7 @@ pub fn window_rules() -> &'static str {
      \x20   border_size = 0,\n\
      \x20   rounding = 0,\n\
      \x20   no_blur = true,\n\
+     \x20   no_shadow = true,\n\
      })\n\
      hl.window_rule({\n\
      \x20   match = { title = \"lennette\" },\n\
@@ -104,6 +105,7 @@ pub fn window_rules() -> &'static str {
      \x20   border_size = 0,\n\
      \x20   rounding = 0,\n\
      \x20   no_blur = true,\n\
+     \x20   no_shadow = true,\n\
      })\n\
      hl.window_rule({\n\
      \x20   match = { class = \"dev.lennette.overlay\" },\n\
@@ -112,6 +114,7 @@ pub fn window_rules() -> &'static str {
      \x20   border_size = 0,\n\
      \x20   rounding = 0,\n\
      \x20   no_blur = true,\n\
+     \x20   no_shadow = true,\n\
      })\n\
      hl.window_rule({ match = { class = \"dev.lennette.overlay\", title = \"^lennette$\" }, size = {720, 620}, center = true })\n\
      hl.window_rule({ match = { class = \"dev.lennette.overlay\", title = \"^lennette dashboard$\" }, size = {1100, 760}, center = true })\n"
@@ -197,7 +200,7 @@ fn apply_expression(expression: &str) -> Result<(), String> {
 /// Keep the protected Nix launcher when repairing the shifted physical key.
 pub fn repair_managed_toggle() -> Result<(), String> {
     apply_expression(
-        r#"hl.window_rule({name="lennette-clear-glass",match={class=[[^(dev\.lennette\.overlay|lennette)$]]},no_blur=true})"#,
+        r#"hl.window_rule({name="lennette-clear-glass",match={class=[[^(dev\.lennette\.overlay|lennette)$]]},no_blur=true,no_shadow=true})"#,
     )?;
     let path = config_directory().ok_or("Hyprland configuration not found")?;
     let text = std::fs::read_to_string(include_path(&path)).map_err(|e| e.to_string())?;
