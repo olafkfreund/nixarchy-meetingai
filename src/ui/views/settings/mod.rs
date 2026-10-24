@@ -1447,7 +1447,7 @@ pub fn dev_space(
     .child(row(
         theme,
         "Database",
-        "Conversations, transcripts and settings",
+        "Conversations, transcripts and settings encrypted with SQLCipher",
         value_chip(
             theme,
             &state

@@ -6,6 +6,7 @@ use std::path::Path;
 pub const MAX_ATTACHMENTS: usize = 8;
 pub const MAX_TEXT_CHARS: usize = 16_000;
 pub const MAX_TOTAL_CHARS: usize = 64_000;
+pub const MAX_TOTAL_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -36,6 +37,17 @@ pub fn add(items: &mut Vec<Attachment>, item: Attachment) -> Result<(), String> 
     }
     if items.len() >= MAX_ATTACHMENTS {
         return Err("Attach up to 8 context sources per conversation.".into());
+    }
+    let image_bytes = items
+        .iter()
+        .filter_map(|s| s.image.as_ref())
+        .map(String::len)
+        .sum::<usize>()
+        .saturating_add(item.image.as_ref().map_or(0, String::len));
+    if image_bytes > MAX_TOTAL_IMAGE_BYTES {
+        return Err(
+            "Image context is full (16 MB). Remove an image before attaching another.".into(),
+        );
     }
     if items
         .iter()

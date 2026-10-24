@@ -10,6 +10,8 @@ use crate::core::domain::Message;
 pub struct Conversation {
     messages: Vec<Message>,
     draft: String,
+    revision: usize,
+    eviction_generation: usize,
 }
 
 impl Conversation {
@@ -25,15 +27,41 @@ impl Conversation {
         &self.draft
     }
 
+    pub fn revision(&self) -> usize {
+        self.revision
+    }
+    pub fn eviction_generation(&self) -> usize {
+        self.eviction_generation
+    }
+
     pub fn push(&mut self, message: Message) {
         if !message.is_empty() {
             self.messages.push(message);
+            self.revision = self.revision.wrapping_add(1);
+            // UI history has its own bound; complete turns remain in the database.
+            let mut bytes = 0usize;
+            let mut keep_from = self.messages.len();
+            for (index, message) in self.messages.iter().enumerate().rev().take(200) {
+                let size =
+                    message.content.len() + message.images.iter().map(String::len).sum::<usize>();
+                if bytes + size > 2 * 1024 * 1024 && keep_from < self.messages.len() {
+                    break;
+                }
+                bytes += size;
+                keep_from = index;
+            }
+            if keep_from > 0 {
+                self.messages.drain(..keep_from);
+                self.eviction_generation = self.eviction_generation.wrapping_add(1);
+            }
         }
     }
 
     pub fn clear(&mut self) {
         self.messages.clear();
         self.draft.clear();
+        self.revision = self.revision.wrapping_add(1);
+        self.eviction_generation = self.eviction_generation.wrapping_add(1);
     }
 
     /// Append every non-empty draft chunk.
@@ -57,7 +85,7 @@ impl Conversation {
             return None;
         }
         let content = std::mem::take(&mut self.draft);
-        self.messages.push(Message::user(content.trim().to_owned()));
+        self.push(Message::user(content.trim().to_owned()));
         self.messages.last()
     }
 
@@ -111,5 +139,32 @@ mod tests {
         let mut c = Conversation::new();
         c.push(Message::assistant("  "));
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn long_meetings_bound_visible_history_and_invalidate_evicted_documents() {
+        let mut conversation = Conversation::new();
+        for i in 0..10_000 {
+            conversation.push(Message::user(format!("Turn {i}: {}", "x".repeat(12_000))));
+        }
+        assert!(conversation.messages().len() <= 200);
+        assert!(
+            conversation
+                .messages()
+                .iter()
+                .map(|m| m.content.len())
+                .sum::<usize>()
+                <= 2 * 1024 * 1024
+        );
+        assert!(
+            conversation
+                .messages()
+                .last()
+                .unwrap()
+                .content
+                .starts_with("Turn 9999:")
+        );
+        assert!(conversation.eviction_generation() > 0);
+        assert_eq!(conversation.revision(), 10_000);
     }
 }

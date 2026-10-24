@@ -306,10 +306,12 @@ async fn fetch_catalog(config: &super::providers::ProviderConfig) -> Result<Vec<
             _ => format!("Model refresh returned HTTP {}. Retry later; your saved key and models have been kept.", status.as_u16()),
         });
         }
-        let bytes = response
-            .bytes()
+        let bytes = crate::core::network::read_body(response, 4 * 1024 * 1024)
             .await
-            .map_err(|_| "Could not read the model catalog.")?;
+            .map_err(|error| match error {
+                crate::core::network::BodyError::TooLarge => "The model catalog is too large.",
+                _ => "Could not read the model catalog.",
+            })?;
         total_bytes += bytes.len();
         if bytes.len() > 4 * 1024 * 1024 || total_bytes > 32 * 1024 * 1024 {
             return Err("The model catalog is too large.".into());

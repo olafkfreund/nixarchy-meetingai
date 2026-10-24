@@ -46,13 +46,11 @@ pub struct TurnContext {
 
 /// Shared HTTP client, so connections are reused across turns.
 pub fn http_client() -> reqwest::Client {
-    crate::core::install_tls_provider();
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(180))
-        .build()
-        .expect("a default HTTP client always builds")
+    crate::core::network::chat_client()
 }
+
+const MAX_SSE_LINE_BYTES: usize = 256 * 1024;
+const MAX_ANSWER_BYTES: usize = 2 * 1024 * 1024;
 
 /// Build the vendor request body.
 pub fn build_body(
@@ -203,6 +201,52 @@ pub async fn stream_chat(
     cancel: Arc<watch::Receiver<bool>>,
     mut on_text: impl FnMut(&str),
 ) -> Result<String, ChatError> {
+    stream_chat_bounded(client, config, history, context, cancel, |text| {
+        on_text(&text);
+        std::future::ready(())
+    })
+    .await
+}
+
+/// Async delivery lets a bounded UI queue apply backpressure instead of accumulating
+/// one allocation per token while the foreground executor is busy.
+pub async fn stream_chat_bounded<F: std::future::Future<Output = ()>>(
+    client: &reqwest::Client,
+    config: &ProviderConfig,
+    history: &[Message],
+    context: &TurnContext,
+    cancel: Arc<watch::Receiver<bool>>,
+    mut on_text: impl FnMut(String) -> F,
+) -> Result<String, ChatError> {
+    let started = std::time::Instant::now();
+    let mut first = true;
+    let result = stream_chat_inner(client, config, history, context, cancel, |text| {
+        if first {
+            first = false;
+            tracing::debug!(provider = %config.id, elapsed_ms = started.elapsed().as_millis(), "provider first text");
+        }
+        on_text(text)
+    }).await.map_err(|error| {
+        let redact = |text: String| if config.api_key.is_empty() { text } else { text.replace(&config.api_key, "[redacted]") };
+        match error {
+            ChatError::Request(error) => ChatError::Request(error.without_url()),
+            ChatError::Status { status, message } => ChatError::Status { status, message: redact(message) },
+            ChatError::Protocol(message) => ChatError::Protocol(redact(message)),
+            error => error,
+        }
+    });
+    tracing::debug!(provider = %config.id, elapsed_ms = started.elapsed().as_millis(), success = result.is_ok(), "provider request finished");
+    result
+}
+
+async fn stream_chat_inner<F: std::future::Future<Output = ()>>(
+    client: &reqwest::Client,
+    config: &ProviderConfig,
+    history: &[Message],
+    context: &TurnContext,
+    cancel: Arc<watch::Receiver<bool>>,
+    mut on_text: impl FnMut(String) -> F,
+) -> Result<String, ChatError> {
     let definition = config.chat_definition().ok_or(ChatError::NotConfigured)?;
     let provider = &definition;
     if config
@@ -245,7 +289,13 @@ pub async fn stream_chat(
 
     let status = response.status();
     if !status.is_success() {
-        let message = response.text().await.unwrap_or_default();
+        let bytes = tokio::select! {
+            result = crate::core::network::read_body(response, 16 * 1024) => result,
+            _ = wait_for_cancellation(&mut cancellation) => return Ok(String::new()),
+        };
+        let message = bytes
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_else(|e| e.to_string());
         return Err(ChatError::Status {
             status: status.as_u16(),
             message,
@@ -253,17 +303,25 @@ pub async fn stream_chat(
     }
 
     if !streaming {
-        let text = tokio::select! {
-            text = response.text() => text?,
+        let bytes = tokio::select! {
+            bytes = crate::core::network::read_body(response, 16 * 1024 * 1024) => bytes.map_err(|e| ChatError::Protocol(e.to_string()))?,
             _ = wait_for_cancellation(&mut cancellation) => return Ok(String::new()),
         };
+        let text = String::from_utf8(bytes)
+            .map_err(|_| ChatError::Protocol("response contained invalid UTF-8".into()))?;
         let answer = config
             .custom
             .as_ref()
             .expect("batch chat has custom settings")
             .text(&text)
             .map_err(ChatError::Protocol)?;
-        on_text(&answer);
+        if answer.len() > MAX_ANSWER_BYTES {
+            return Err(ChatError::Protocol("answer exceeded the size limit".into()));
+        }
+        tokio::select! {
+            _ = on_text(answer.clone()) => {},
+            _ = wait_for_cancellation(&mut cancellation) => return Ok(String::new()),
+        }
         return completed_answer(answer);
     }
     let mut stream = response.bytes_stream();
@@ -278,23 +336,38 @@ pub async fn stream_chat(
         let chunk = chunk?;
         buffer.extend_from_slice(&chunk);
 
-        while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
-            let mut line = buffer.drain(..=newline).collect::<Vec<_>>();
-            if line.last() == Some(&b'\n') {
-                line.pop();
+        let mut consumed = 0;
+        while let Some(offset) = buffer[consumed..].iter().position(|byte| *byte == b'\n') {
+            let newline = consumed + offset;
+            let line = &buffer[consumed..newline];
+            if line.len() > MAX_SSE_LINE_BYTES {
+                return Err(ChatError::Protocol(
+                    "stream event exceeded the size limit".into(),
+                ));
             }
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            match parse_sse_line(provider, &line) {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            consumed = newline + 1;
+            match parse_sse_line(provider, line) {
                 Ok(Some(ChatEvent::Delta(text))) => {
+                    if text.len() > MAX_ANSWER_BYTES.saturating_sub(answer.len()) {
+                        return Err(ChatError::Protocol("answer exceeded the size limit".into()));
+                    }
                     answer.push_str(&text);
-                    on_text(&text);
+                    tokio::select! {
+                        _ = on_text(text) => {},
+                        _ = wait_for_cancellation(&mut cancellation) => return Ok(answer),
+                    }
                 }
                 Ok(Some(ChatEvent::Done)) => return completed_answer(answer),
                 Ok(None) => {}
                 Err(error) => return Err(error),
             }
+        }
+        buffer.drain(..consumed);
+        if buffer.len() > MAX_SSE_LINE_BYTES {
+            return Err(ChatError::Protocol(
+                "stream event exceeded the size limit".into(),
+            ));
         }
     }
 
@@ -302,13 +375,27 @@ pub async fn stream_chat(
     if !buffer.is_empty() {
         match parse_sse_line(provider, &buffer)? {
             Some(ChatEvent::Delta(text)) => {
+                if text.len() > MAX_ANSWER_BYTES.saturating_sub(answer.len()) {
+                    return Err(ChatError::Protocol("answer exceeded the size limit".into()));
+                }
                 answer.push_str(&text);
-                on_text(&text);
+                tokio::select! {
+                    _ = on_text(text) => {},
+                    _ = wait_for_cancellation(&mut cancellation) => return Ok(answer),
+                }
             }
-            Some(ChatEvent::Done) | None => {}
+            Some(ChatEvent::Done) => return completed_answer(answer),
+            None => {}
         }
     }
-    completed_answer(answer)
+    if answer.trim().is_empty() {
+        completed_answer(answer)
+    } else {
+        Err(ChatError::Protocol(
+            "the stream disconnected before confirming completion; the partial answer was kept"
+                .into(),
+        ))
+    }
 }
 
 async fn wait_for_cancellation(cancel: &mut watch::Receiver<bool>) {

@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS meeting_lines (
 );
 
 CREATE INDEX IF NOT EXISTS idx_meeting_lines_meeting ON meeting_lines (meeting_id);
+CREATE INDEX IF NOT EXISTS idx_meeting_lines_time ON meeting_lines (meeting_id, start_time);
 CREATE INDEX IF NOT EXISTS idx_meetings_started ON meetings (started_at DESC);
 
 CREATE TABLE IF NOT EXISTS meeting_recaps (

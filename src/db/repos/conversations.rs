@@ -125,6 +125,37 @@ pub fn messages(connection: &Connection, conversation_id: &str) -> Result<Vec<Me
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// Read only the recent window, bounding old message bodies in SQLite before
+/// allocating Rust strings. The complete original remains available in history.
+pub fn recent_messages(
+    connection: &Connection,
+    conversation_id: &str,
+    limit: usize,
+) -> Result<Vec<MessageRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT id, role,
+                CASE WHEN length(content) > 32000 THEN
+                    substr(content, 1, 10600) || char(10) ||
+                    '[Earlier content shortened; the complete original is saved in this conversation.]' || char(10) ||
+                    substr(content, -21300)
+                ELSE content END, timestamp
+         FROM messages WHERE conversation_id = ?1 AND content != ''
+         ORDER BY timestamp DESC, rowid DESC LIMIT ?2",
+    )?;
+    let mut rows = statement
+        .query_map(params![conversation_id, limit as i64], |row| {
+            Ok(MessageRecord {
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                timestamp: row.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
 /// Derive a conversation title from its first user message.
 pub fn title_from(content: &str) -> String {
     let trimmed = content.trim();
@@ -227,6 +258,31 @@ mod tests {
         let messages = messages(connection, &id).unwrap();
         assert_eq!(messages[0].content, "two");
         assert_eq!(messages[1].content, "one");
+    }
+
+    #[test]
+    fn recent_reads_bound_rows_and_large_unicode_bodies_before_allocation() {
+        let db = Database::in_memory().unwrap();
+        let id = create(db.connection(), "Long history", 1).unwrap();
+        for i in 0..100 {
+            append_message(db.connection(), &id, "user", &format!("message {i}"), 1).unwrap();
+        }
+        let original = format!("Beginning {} End", "é".repeat(1_000_000));
+        append_message(db.connection(), &id, "user", &original, 1).unwrap();
+        let recent = recent_messages(db.connection(), &id, 3).unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].content, "message 98");
+        assert!(recent[2].content.starts_with("Beginning"));
+        assert!(recent[2].content.ends_with("End"));
+        assert!(recent[2].content.chars().count() <= 32_000);
+        assert_eq!(
+            messages(db.connection(), &id)
+                .unwrap()
+                .last()
+                .unwrap()
+                .content,
+            original
+        );
     }
 
     #[test]

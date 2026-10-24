@@ -155,16 +155,15 @@ pub fn untitled(connection: &Connection, limit: usize) -> Result<Vec<(String, St
         .collect::<std::result::Result<_, _>>()?;
     let mut found = Vec::new();
     for id in ids {
-        let lines = lines(connection, &id)?;
-        if lines.len() < 2 {
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM meeting_lines WHERE meeting_id=?1",
+            [&id],
+            |r| r.get(0),
+        )?;
+        if count < 2 {
             continue;
         }
-        let mut body = String::new();
-        for line in lines.iter().take(60) {
-            body.push_str(if line.who == "me" { "You: " } else { "Them: " });
-            body.extend(line.text.chars().take(600));
-            body.push('\n');
-        }
+        let body = transcript_excerpt(connection, &id, 6000)?;
         found.push((id, body));
     }
     Ok(found)
@@ -222,6 +221,96 @@ pub fn lines(connection: &Connection, meeting_id: &str) -> Result<Vec<LineRecord
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// Recent speech for restoring the live view without loading an entire meeting.
+pub fn recent_lines(
+    connection: &Connection,
+    meeting_id: &str,
+    limit: usize,
+) -> Result<Vec<LineRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT id, who, speaker, substr(text, 1, 8000), start_time, end_time FROM meeting_lines
+         WHERE meeting_id = ?1 ORDER BY start_time DESC, rowid DESC LIMIT ?2",
+    )?;
+    let mut rows = statement
+        .query_map(params![meeting_id, limit as i64], |r| {
+            Ok(LineRecord {
+                id: r.get(0)?,
+                who: r.get(1)?,
+                speaker: r.get(2)?,
+                text: r.get(3)?,
+                start_time: r.get(4)?,
+                end_time: r.get(5)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    rows.reverse();
+    Ok(rows)
+}
+
+/// Bounded prompt material read incrementally. Excerpts explicitly disclose any
+/// omitted middle; originals are never shortened in storage.
+pub fn transcript_excerpt(
+    connection: &Connection,
+    meeting_id: &str,
+    max_chars: usize,
+) -> Result<String> {
+    let total: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(length(text) + CASE WHEN who='me' THEN 6 WHEN speaker IS NULL THEN 7 ELSE 11+length(CAST(speaker+1 AS TEXT)) END), 0) FROM meeting_lines WHERE meeting_id=?1",
+        [meeting_id], |r| r.get(0),
+    )?;
+    let truncated = total as usize > max_chars;
+    let budget = if truncated { max_chars / 2 } else { max_chars };
+    let read = |reverse: bool| -> Result<String> {
+        let sql = if reverse {
+            "SELECT who, speaker, substr(text, -?2) FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time DESC, rowid DESC"
+        } else {
+            "SELECT who, speaker, substr(text, 1, ?2) FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time ASC, rowid ASC"
+        };
+        let mut statement = connection.prepare(sql)?;
+        let mut rows = statement.query(params![meeting_id, budget.max(1) as i64])?;
+        let mut remaining = budget;
+        let mut parts = Vec::new();
+        while remaining > 0
+            && let Some(row) = rows.next()?
+        {
+            let who: String = row.get(0)?;
+            let speaker: Option<i64> = row.get(1)?;
+            let text: String = row.get(2)?;
+            let label = if who == "me" {
+                "You".into()
+            } else {
+                speaker
+                    .map(|s| format!("Speaker {}", s + 1))
+                    .unwrap_or("Them".into())
+            };
+            let line = format!("{label}: {text}\n");
+            let part: String = if reverse {
+                line.chars()
+                    .rev()
+                    .take(remaining)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect()
+            } else {
+                line.chars().take(remaining).collect()
+            };
+            remaining = remaining.saturating_sub(part.chars().count());
+            parts.push(part);
+        }
+        if reverse {
+            parts.reverse();
+        }
+        Ok(parts.concat())
+    };
+    let mut text = read(false)?;
+    if truncated {
+        text.push_str("\n[Middle omitted; this context covers only the supplied excerpts.]\n");
+        text.push_str(&read(true)?);
+    }
+    Ok(text)
+}
+
 /// Give a speaker a display name.
 pub fn name_speaker(
     connection: &Connection,
@@ -263,6 +352,34 @@ mod tests {
 
     fn database() -> Database {
         Database::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn recap_excerpts_bound_large_meetings_and_disclose_omitted_facts() {
+        let db = database();
+        let id = start(db.connection(), "Long meeting", "auto", "en").unwrap();
+        for i in 0..1000 {
+            add_line(
+                db.connection(),
+                &id,
+                "them",
+                Some(1),
+                &format!("Fact {i}: {}", "é".repeat(100)),
+                i as f64,
+                i as f64 + 1.0,
+            )
+            .unwrap();
+        }
+        let excerpt = transcript_excerpt(db.connection(), &id, 6000).unwrap();
+        assert!(excerpt.contains("Fact 0:"));
+        assert!(excerpt.contains("Fact 999:"));
+        assert!(excerpt.contains("Middle omitted"));
+        assert!(!excerpt.contains("Fact 500:"));
+        assert!(excerpt.chars().count() < 6100);
+        let recent = recent_lines(db.connection(), &id, 3).unwrap();
+        assert!(recent[0].text.starts_with("Fact 997:"));
+        assert!(recent[2].text.starts_with("Fact 999:"));
+        assert_eq!(lines(db.connection(), &id).unwrap().len(), 1000);
     }
 
     #[test]

@@ -66,49 +66,59 @@ pub fn downmix(channels: &[Vec<f32>]) -> Vec<f32> {
 /// carried between calls.
 #[derive(Debug, Clone)]
 pub struct LinearResampler {
-    input_rate: f32,
-    position: f32,
+    input_rate: f64,
+    position: f64,
     previous: f32,
-    started: bool,
 }
 
 impl LinearResampler {
     pub fn new(input_rate: u32) -> Self {
         Self {
-            input_rate: input_rate as f32,
+            input_rate: input_rate.max(1) as f64,
             position: 0.0,
             previous: 0.0,
-            started: false,
         }
     }
 
     pub fn is_passthrough(&self) -> bool {
-        (self.input_rate - SAMPLE_RATE as f32).abs() < f32::EPSILON
+        (self.input_rate - SAMPLE_RATE as f64).abs() < f64::EPSILON
     }
 
     /// Resample one block. Returns `SAMPLE_RATE`-family samples.
     pub fn process(&mut self, input: &[f32]) -> Vec<f32> {
+        let mut output = Vec::new();
+        self.process_into(input, &mut output);
+        output
+    }
+
+    /// Reuse the callback's allocation and defer interpolation that needs the
+    /// next block's first sample instead of duplicating the previous endpoint.
+    pub fn process_into(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        output.clear();
+        if input.is_empty() {
+            return;
+        }
         if self.is_passthrough() {
-            return input.to_vec();
+            output.extend_from_slice(input);
+            return;
         }
-        if !self.started {
-            self.previous = input.first().copied().unwrap_or(0.0);
-            self.started = true;
-        }
-        let step = self.input_rate / SAMPLE_RATE as f32;
-        let mut output = Vec::with_capacity((input.len() as f32 / step) as usize + 1);
+        let step = self.input_rate / SAMPLE_RATE as f64;
+        output.reserve((input.len() as f64 / step) as usize + 1);
         let mut position = self.position;
-        while position < input.len() as f32 {
-            let index = position.floor() as usize;
-            let fraction = position - index as f32;
-            let current = input.get(index).copied().unwrap_or(self.previous);
-            let next = input.get(index + 1).copied().unwrap_or(current);
+        while position <= (input.len() - 1) as f64 {
+            let index = position.floor() as isize;
+            let fraction = (position - index as f64) as f32;
+            let current = if index < 0 {
+                self.previous
+            } else {
+                input[index as usize]
+            };
+            let next = input.get((index + 1) as usize).copied().unwrap_or(current);
             output.push(current + (next - current) * fraction);
             position += step;
         }
-        self.position = position - input.len() as f32;
+        self.position = position - input.len() as f64;
         self.previous = input.last().copied().unwrap_or(self.previous);
-        output
     }
 }
 
@@ -322,6 +332,33 @@ mod tests {
         let second = resampler.process(&vec![0.25; 4800]);
         for sample in first.iter().chain(second.iter()) {
             assert!((sample - 0.25).abs() < 1e-3, "discontinuity: {sample}");
+        }
+    }
+
+    #[test]
+    fn fractional_resampling_matches_one_pass_across_irregular_and_empty_blocks() {
+        let input: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.071).sin()).collect();
+        for rate in [8_000, 44_100, 48_000] {
+            let expected = LinearResampler::new(rate).process(&input);
+            for block in [1, 2, 63, 997] {
+                let mut resampler = LinearResampler::new(rate);
+                let mut actual = Vec::new();
+                let mut output = Vec::new();
+                for chunk in input.chunks(block) {
+                    resampler.process_into(&[], &mut output);
+                    assert!(output.is_empty());
+                    resampler.process_into(chunk, &mut output);
+                    actual.extend_from_slice(&output);
+                }
+                assert_eq!(actual.len(), expected.len(), "rate={rate}, block={block}");
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&expected)
+                        .all(|(a, b)| (a - b).abs() < 1e-5),
+                    "rate={rate}, block={block}"
+                );
+            }
         }
     }
 

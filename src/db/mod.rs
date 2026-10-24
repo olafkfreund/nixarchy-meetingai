@@ -4,6 +4,7 @@
 //! the document library and shared settings. Repositories keep SQL in one place
 //! so views never build queries inline.
 
+mod encryption;
 pub mod repos;
 pub mod schema;
 
@@ -25,6 +26,8 @@ pub enum DbError {
     Sqlite(#[from] rusqlite::Error),
     #[error("database I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Storage(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -37,7 +40,7 @@ pub struct Database {
 impl Database {
     /// Open or create a database at `path`, applying the schema idempotently.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let connection = Connection::open(path)?;
+        let connection = encryption::open(path.as_ref())?;
         Self::prepare(connection)
     }
 
@@ -56,7 +59,9 @@ impl Database {
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;",
+             PRAGMA synchronous = NORMAL;
+             PRAGMA secure_delete = ON;
+             PRAGMA temp_store = MEMORY;",
         )?;
         connection.execute_batch(schema::SCHEMA)?;
         seed::seed_listen_modes(&connection)?;

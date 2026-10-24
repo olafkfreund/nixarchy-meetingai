@@ -39,12 +39,7 @@ pub enum SttError {
 }
 
 fn client() -> reqwest::Client {
-    crate::core::install_tls_provider();
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .expect("a default HTTP client always builds")
+    crate::core::network::speech_client()
 }
 
 /// Pull the transcript out of a provider response.
@@ -65,6 +60,33 @@ pub fn extract_transcript(provider: &SttProvider, value: &Value) -> Option<Strin
 
 /// Transcribe one WAV buffer.
 pub async fn transcribe(
+    config: &ProviderConfig,
+    wav: Vec<u8>,
+    language: Option<&str>,
+) -> Result<String, SttError> {
+    transcribe_inner(config, wav, language)
+        .await
+        .map_err(|error| {
+            let redact = |text: String| {
+                if config.api_key.is_empty() {
+                    text
+                } else {
+                    text.replace(&config.api_key, "[redacted]")
+                }
+            };
+            match error {
+                SttError::Request(e) => SttError::Request(e.without_url()),
+                SttError::Status { status, message } => SttError::Status {
+                    status,
+                    message: redact(message),
+                },
+                SttError::Protocol(message) => SttError::Protocol(redact(message)),
+                error => error,
+            }
+        })
+}
+
+async fn transcribe_inner(
     config: &ProviderConfig,
     wav: Vec<u8>,
     language: Option<&str>,
@@ -105,7 +127,18 @@ pub async fn transcribe(
         };
         let response = request.send().await?;
         let status = response.status();
-        let text = response.text().await?;
+        let bytes = crate::core::network::read_body(
+            response,
+            if status.is_success() {
+                4 * 1024 * 1024
+            } else {
+                16 * 1024
+            },
+        )
+        .await
+        .map_err(|e| SttError::Protocol(e.to_string()))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| SttError::Protocol("response contained invalid UTF-8".into()))?;
         if !status.is_success() {
             return Err(SttError::Status {
                 status: status.as_u16(),
@@ -151,7 +184,18 @@ pub async fn transcribe(
 
     let response = request.send().await?;
     let status = response.status();
-    let text = response.text().await.unwrap_or_default();
+    let bytes = crate::core::network::read_body(
+        response,
+        if status.is_success() {
+            4 * 1024 * 1024
+        } else {
+            16 * 1024
+        },
+    )
+    .await
+    .map_err(|e| SttError::Protocol(e.to_string()))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| SttError::Protocol("response contained invalid UTF-8".into()))?;
     if !status.is_success() {
         return Err(SttError::Status {
             status: status.as_u16(),
@@ -396,6 +440,11 @@ impl LiveTurns {
             self.text[channel].push_str(&line.text);
             self.last_end[channel] = line.end;
         }
+        // A provider that misses silence boundaries must not accumulate a whole
+        // meeting in its current turn. Split at a final fragment, preserving words.
+        if self.text[channel].len() >= 64_000 {
+            completed.push(std::mem::take(&mut self.text[channel]));
+        }
         if line.speech_final {
             completed.extend(self.finish(line.channel, line.end));
         }
@@ -580,7 +629,15 @@ impl LiveTranscriber {
         }
         let (socket, _) = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            tokio_tungstenite::connect_async(request),
+            tokio_tungstenite::connect_async_with_config(
+                request,
+                Some(
+                    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                        .max_message_size(Some(1024 * 1024))
+                        .max_frame_size(Some(1024 * 1024)),
+                ),
+                true,
+            ),
         )
         .await
         .map_err(|_| SttError::Socket("Deepgram connection timed out".into()))?
@@ -599,22 +656,24 @@ impl LiveTranscriber {
                     tokio::select! {
                         _ = stop_rx.changed(), if !closing => {
                             // Every previously accepted audio block precedes finalization.
-                            while let Ok(audio) = audio_rx.try_recv() {
-                                let bytes: Vec<u8> = audio.into_iter().flat_map(i16::to_le_bytes).collect();
-                                sink.send(Message::Binary(bytes.into())).await.map_err(|e| e.to_string())?;
-                            }
-                            sink.send(Message::Text(json!({"type":"Finalize"}).to_string().into())).await.map_err(|e| e.to_string())?;
-                            sink.send(Message::Text(json!({"type":"CloseStream"}).to_string().into())).await.map_err(|e| e.to_string())?;
-                            closing = true;
                             deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+                            tokio::time::timeout_at(deadline, async {
+                                while let Ok(audio) = audio_rx.try_recv() {
+                                    let bytes: Vec<u8> = audio.into_iter().flat_map(i16::to_le_bytes).collect();
+                                    send_live(&mut sink, Message::Binary(bytes.into())).await?;
+                                }
+                                send_live(&mut sink, Message::Text(json!({"type":"Finalize"}).to_string().into())).await?;
+                                send_live(&mut sink, Message::Text(json!({"type":"CloseStream"}).to_string().into())).await
+                            }).await.map_err(|_| "The speech connection timed out while finishing the last audio.".to_owned())??;
+                            closing = true;
                         }
                         audio = audio_rx.recv(), if !closing => {
                             let Some(audio) = audio else { break };
                             let bytes: Vec<u8> = audio.into_iter().flat_map(i16::to_le_bytes).collect();
-                            sink.send(Message::Binary(bytes.into())).await.map_err(|e| e.to_string())?;
+                            send_live(&mut sink, Message::Binary(bytes.into())).await?;
                         }
                         _ = keepalive.tick(), if !closing => {
-                            sink.send(Message::Text(json!({"type":"KeepAlive"}).to_string().into())).await.map_err(|e| e.to_string())?;
+                            send_live(&mut sink, Message::Text(json!({"type":"KeepAlive"}).to_string().into())).await?;
                         }
                         _ = tokio::time::sleep_until(deadline), if closing => {
                             return Err("Deepgram did not finish the last words before the close timeout".into());
@@ -623,7 +682,12 @@ impl LiveTranscriber {
                             match message {
                                 Some(Ok(Message::Text(text))) => {
                                     for event in parse_live_events(text.as_bytes()) {
-                                        if event_tx.send(event).await.is_err() { return Ok(()); }
+                                        let delivery_deadline = if closing { deadline } else { tokio::time::Instant::now() + std::time::Duration::from_secs(1) };
+                                        match tokio::time::timeout_at(delivery_deadline, event_tx.send(event)).await {
+                                            Ok(Ok(())) => {},
+                                            Ok(Err(_)) => return Ok(()),
+                                            Err(_) => return Err("The transcript consumer fell behind; recording stopped.".into()),
+                                        }
                                     }
                                 }
                                 Some(Ok(Message::Close(_))) | None => {
@@ -639,9 +703,13 @@ impl LiveTranscriber {
                 Ok(())
             }.await;
             if let Err(error) = result {
-                let _ = event_tx.send(LiveEvent::Failed(error)).await;
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    event_tx.send(LiveEvent::Failed(error)),
+                )
+                .await;
             }
-            let _ = sink.close().await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), sink.close()).await;
         });
         Ok(Self {
             audio: audio_tx,
@@ -679,6 +747,16 @@ impl LiveTranscriber {
     pub fn finish(&self) {
         let _ = self.stop.send(true);
     }
+}
+
+async fn send_live<S>(sink: &mut S, message: Message) -> Result<(), String>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    tokio::time::timeout(std::time::Duration::from_secs(1), sink.send(message)).await
+        .map_err(|_| "The speech connection stopped accepting audio. Recording stopped; start again to reconnect.".to_owned())?
+        .map_err(|e| e.to_string())
 }
 
 type BatchChunk = (u8, f64, f64, Vec<f32>);
@@ -826,6 +904,32 @@ mod tests {
         assert_eq!(turns.finish(1, 3.0), None);
         assert_eq!(turns.finish(1, 7.0).as_deref(), Some("What comes next"));
         assert_eq!(turns.finish(1, 7.0), None);
+    }
+
+    #[test]
+    fn missing_endpoint_events_do_not_grow_a_turn_for_the_whole_meeting() {
+        let mut turns = LiveTurns::default();
+        let mut completed = Vec::new();
+        for i in 0..200 {
+            completed.extend(turns.push(&TranscriptLine {
+                channel: 1,
+                speaker: Some(0),
+                text: "é".repeat(1000),
+                is_final: true,
+                speech_final: false,
+                start: i as f64,
+                end: i as f64 + 1.0,
+            }));
+            assert!(turns.text[1].len() < 64_000);
+        }
+        completed.extend(turns.finish(1, 201.0));
+        assert_eq!(
+            completed
+                .iter()
+                .map(|s| s.matches('é').count())
+                .sum::<usize>(),
+            200_000
+        );
     }
 
     #[test]

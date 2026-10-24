@@ -60,10 +60,11 @@ pub async fn latest() -> Result<Release, String> {
             code => format!("GitHub returned HTTP {code}. Try again later."),
         });
     }
-    let release: Release = response
-        .json()
+    let bytes = crate::core::network::read_body(response, 1024 * 1024)
         .await
         .map_err(|_| "GitHub returned an unreadable release.")?;
+    let release: Release =
+        serde_json::from_slice(&bytes).map_err(|_| "GitHub returned an unreadable release.")?;
     if release.draft || release.prerelease {
         return Err("No stable public release is available.".into());
     }

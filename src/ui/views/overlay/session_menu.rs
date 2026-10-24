@@ -178,8 +178,8 @@ impl Overlay {
             .services
             .connect()
             .ok_or("The local database is unavailable.")?;
-        let lines =
-            crate::db::meetings::lines(db.connection(), &record.id).map_err(|e| e.to_string())?;
+        let lines = crate::db::meetings::recent_lines(db.connection(), &record.id, 500)
+            .map_err(|e| e.to_string())?;
         let chat = crate::db::sessions::meeting_chat(db.connection(), &record.id)
             .map_err(|e| e.to_string())?;
         if let Some(chat) = chat {
@@ -187,16 +187,13 @@ impl Overlay {
         } else {
             self.new_chat();
         }
-        self.meeting_offset = lines
-            .iter()
-            .map(|l| l.end_time)
-            .fold(record.duration_seconds as f64, f64::max);
+        let (end_time, last_speaker): (f64, Option<i64>) = db.connection().query_row(
+            "SELECT COALESCE(MAX(end_time), 0), MAX(speaker) FROM meeting_lines WHERE meeting_id=?1",
+            [&record.id], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).map_err(|e| e.to_string())?;
+        self.meeting_offset = end_time.max(record.duration_seconds as f64);
         self.last_elapsed = self.meeting_offset;
-        self.meeting_speaker_offset = lines
-            .iter()
-            .filter_map(|l| l.speaker)
-            .max()
-            .map_or(0, |s| s + 1);
+        self.meeting_speaker_offset = last_speaker.map_or(0, |s| s + 1);
         self.transcript = lines
             .iter()
             .rev()
@@ -211,6 +208,7 @@ impl Overlay {
                 start: l.start_time,
             })
             .collect();
+        self.transcript_revision = self.transcript.len();
         // Keep the recap plus beginning and recent speech as bounded background.
         let recap = crate::db::meetings::recap(db.connection(), &record.id)
             .ok()
@@ -224,23 +222,10 @@ impl Overlay {
             record.context.chars().take(1_000).collect::<String>(),
             recap.chars().take(3_000).collect::<String>()
         );
-        for line in lines
-            .iter()
-            .take(5)
-            .chain(lines.iter().skip(lines.len().saturating_sub(60).max(5)))
-        {
-            context.push_str(&format!(
-                "{}: {}\n",
-                if line.who == "me" {
-                    "You".to_owned()
-                } else {
-                    line.speaker
-                        .map(|i| format!("Speaker {}", i + 1))
-                        .unwrap_or("Them".into())
-                },
-                line.text.chars().take(160).collect::<String>()
-            ));
-        }
+        context.push_str(
+            &crate::db::meetings::transcript_excerpt(db.connection(), &record.id, 10_000)
+                .map_err(|e| e.to_string())?,
+        );
         self.context_sources
             .retain(|s| !s.id.starts_with("restored-meeting:"));
         let source = crate::core::context::Attachment::text(

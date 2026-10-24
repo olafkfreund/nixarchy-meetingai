@@ -17,6 +17,7 @@ pub enum SendError {
     Empty,
     Database(String),
     AlreadyStreaming,
+    TooLarge,
 }
 
 impl SendError {
@@ -29,6 +30,7 @@ impl SendError {
             SendError::Empty => "Type a question first.".to_owned(),
             SendError::Database(error) => format!("Could not save this conversation: {error}"),
             SendError::AlreadyStreaming => "Wait for the current answer to finish.".to_owned(),
+            SendError::TooLarge => "This question is too large (256,000 characters maximum). Select a smaller reference or ask about a specific excerpt.".to_owned(),
         }
     }
 }
@@ -133,20 +135,14 @@ impl ChatSession {
     pub fn restore(&mut self, database: &Database, id: &str) -> Result<Vec<Message>, String> {
         conversations::require_conversation(database.connection(), id)
             .map_err(|e| e.to_string())?;
-        let records =
-            conversations::messages(database.connection(), id).map_err(|e| e.to_string())?;
+        let records = conversations::recent_messages(database.connection(), id, 200)
+            .map_err(|e| e.to_string())?;
         self.reset();
         self.conversation_id = Some(id.to_owned());
         Ok(records
             .into_iter()
             .filter(|r| !r.content.trim().is_empty())
-            .map(|r| {
-                if r.role == "assistant" {
-                    Message::assistant(r.content)
-                } else {
-                    Message::user(r.content)
-                }
-            })
+            .map(record_message)
             .collect())
     }
 
@@ -166,21 +162,34 @@ impl ChatSession {
         if question.trim().is_empty() {
             return Err(SendError::Empty);
         }
+        if question.chars().nth(256_000).is_some() {
+            return Err(SendError::TooLarge);
+        }
         let database =
             database.ok_or_else(|| SendError::Database("database unavailable".into()))?;
         let connection = database.connection();
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|e| SendError::Database(e.to_string()))?;
+        let connection = &transaction;
         let now = now_millis();
 
         let conversation_id = match self.conversation_id.clone() {
             Some(id) => id,
             None => {
                 let title = conversations::title_from(question);
-                let id = conversations::create(connection, &title, now)
-                    .map_err(|error| SendError::Database(error.to_string()))?;
-                self.conversation_id = Some(id.clone());
-                id
+                conversations::create(connection, &title, now)
+                    .map_err(|error| SendError::Database(error.to_string()))?
             }
         };
+
+        let mut history: Vec<Message> =
+            conversations::recent_messages(connection, &conversation_id, 23)
+                .map_err(|e| SendError::Database(e.to_string()))?
+                .into_iter()
+                .map(record_message)
+                .collect();
+        history.push(Message::user(question.trim()));
 
         conversations::append_message(connection, &conversation_id, "user", question.trim(), now)
             .map_err(|error| SendError::Database(error.to_string()))?;
@@ -188,32 +197,14 @@ impl ChatSession {
         let answer_id =
             conversations::append_message(connection, &conversation_id, "assistant", "", now)
                 .map_err(|error| SendError::Database(error.to_string()))?;
+        transaction
+            .commit()
+            .map_err(|e| SendError::Database(e.to_string()))?;
+        self.conversation_id = Some(conversation_id);
         self.streaming_message_id = Some(answer_id);
         self.answer.clear();
         self.streaming = true;
 
-        // The answer placeholder is intentionally excluded from the request.
-        let mut history: Vec<Message> = conversations::messages(connection, &conversation_id)
-            .map_err(|error| SendError::Database(error.to_string()))?
-            .into_iter()
-            .filter(|record| record.role != "assistant" || !record.content.is_empty())
-            .map(|record| match record.role.as_str() {
-                "assistant" => Message::assistant(record.content),
-                "system" => Message {
-                    role: crate::core::domain::Role::System,
-                    content: record.content,
-                    images: Vec::new(),
-                },
-                _ => Message::user(record.content),
-            })
-            .collect();
-        if let Some(last) = history.last()
-            && last.content == question.trim()
-        {
-            // Already represented by the trailing user message.
-            return Ok(recent_history(history));
-        }
-        history.push(Message::user(question.trim().to_owned()));
         Ok(recent_history(history))
     }
 
@@ -277,6 +268,18 @@ impl ChatSession {
         }
         self.reset();
         Ok(())
+    }
+}
+
+fn record_message(record: conversations::MessageRecord) -> Message {
+    Message {
+        role: match record.role.as_str() {
+            "assistant" => crate::core::domain::Role::Assistant,
+            "system" => crate::core::domain::Role::System,
+            _ => crate::core::domain::Role::User,
+        },
+        content: record.content,
+        images: Vec::new(),
     }
 }
 
@@ -437,6 +440,35 @@ mod tests {
             session.begin(None, "hi").unwrap_err(),
             SendError::Database(_)
         ));
+    }
+
+    #[test]
+    fn a_failed_answer_placeholder_rolls_back_the_entire_turn() {
+        let db = database();
+        db.connection().execute_batch("CREATE TRIGGER fail_answer BEFORE INSERT ON messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT, 'simulated disk failure'); END;").unwrap();
+        let mut session = ChatSession::new();
+        assert!(matches!(
+            session.begin(Some(&db), "Keep this question"),
+            Err(SendError::Database(_))
+        ));
+        assert!(!session.is_streaming());
+        assert!(session.conversation_id().is_none());
+        assert!(conversations::list(db.connection(), 10).unwrap().is_empty());
+        db.connection()
+            .execute_batch("DROP TRIGGER fail_answer")
+            .unwrap();
+        assert!(session.begin(Some(&db), "Retry").is_ok());
+    }
+
+    #[test]
+    fn oversized_questions_are_rejected_before_writing_history() {
+        let db = database();
+        let mut session = ChatSession::new();
+        assert_eq!(
+            session.begin(Some(&db), &"é".repeat(256_001)).unwrap_err(),
+            SendError::TooLarge
+        );
+        assert!(conversations::list(db.connection(), 10).unwrap().is_empty());
     }
 
     #[test]

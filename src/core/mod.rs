@@ -3,6 +3,7 @@
 pub mod composer;
 pub mod context;
 pub mod models;
+pub(crate) mod network;
 pub mod security;
 
 pub use models::domain;

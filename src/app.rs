@@ -122,6 +122,7 @@ impl gpui::AssetSource for EmbeddedAssets {
 }
 
 pub fn run() {
+    let startup = std::time::Instant::now();
     crate::core::install_tls_provider();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -150,7 +151,6 @@ pub fn run() {
         "starting lennette"
     );
 
-    let startup = std::time::Instant::now();
     Application::new()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
@@ -212,9 +212,6 @@ pub fn run() {
 
             // Global shortcuts are grabbed once for the whole process.
             let mut shortcut_listener = None;
-            let mut portal_shortcuts: Option<
-                std::sync::Arc<crate::features::wayland::PortalShortcuts>,
-            > = None;
             let pure_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
                 && std::env::var_os("DISPLAY").is_none();
             // The control socket lets a shortcut flag reach this instance.
@@ -253,46 +250,6 @@ pub fn run() {
                 }
             }
 
-            if pure_wayland && !crate::features::hyprland::is_hyprland() {
-                // Wayland: bind through the desktop portal instead of grabbing keys.
-                let runtime = tokio::runtime::Handle::try_current();
-                let (tx, rx) = std::sync::mpsc::channel();
-                let actions = crate::features::shortcuts::Action::ALL.to_vec();
-                match runtime {
-                    Ok(handle) => {
-                        handle.spawn(async move {
-                            let result =
-                                crate::features::wayland::PortalShortcuts::bind(&actions).await;
-                            let _ = tx.send(result);
-                        });
-                    }
-                    Err(_) => {
-                        std::thread::spawn(move || {
-                            let runtime = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build();
-                            let result = match runtime {
-                                Ok(runtime) => runtime.block_on(
-                                    crate::features::wayland::PortalShortcuts::bind(&actions),
-                                ),
-                                Err(error) => Err(crate::features::wayland::PortalError::Bus(
-                                    error.to_string(),
-                                )),
-                            };
-                            let _ = tx.send(result);
-                        });
-                    }
-                }
-                match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-                    Ok(Ok(portal)) => {
-                        tracing::info!("global shortcuts bound through the desktop portal");
-                        portal_shortcuts = Some(std::sync::Arc::new(portal));
-                    }
-                    Ok(Err(error)) => tracing::warn!(%error, "portal shortcuts unavailable"),
-                    Err(_) => tracing::warn!("the shortcut portal did not answer in time"),
-                }
-            }
-
             let (supported, message) = crate::features::shortcuts::support();
             if !pure_wayland && supported {
                 match crate::features::shortcuts::ShortcutListener::start(
@@ -313,7 +270,7 @@ pub fn run() {
                 tracing::warn!(%message, "global shortcuts disabled");
             }
 
-            let portal_clone = portal_shortcuts.clone();
+            let bind_portal = pure_wayland && !crate::features::hyprland::is_hyprland();
             let control_handle = control.ok().map(std::sync::Arc::new);
             cx.open_window(overlay_options, move |window, cx| {
                 window.set_window_title("lennette");
@@ -334,10 +291,13 @@ pub fn run() {
                         services_for_overlay,
                         shortcut_listener.clone(),
                         tray_state,
-                        portal_clone,
+                        None,
                         control_handle,
                     )
                 });
+                if bind_portal {
+                    overlay.update(cx, |_, cx| Overlay::bind_portal_shortcuts(cx));
+                }
                 let weak = overlay.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {
                     weak.update(cx, |overlay, cx| overlay.close_to_tray(window, cx))

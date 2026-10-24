@@ -9,7 +9,7 @@
 //! same user, and that limitation is intentional to state rather than paper over.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -75,25 +75,34 @@ impl Vault {
     fn cipher(&self) -> Result<Aes256Gcm, VaultError> {
         let key_path = self.directory.join("vault.key");
         let mut key = [0u8; 32];
-        match File::open(&key_path) {
+        match super::files::open_private(&key_path, true) {
             Ok(mut file) => {
+                if self.directory.join("vault.bin").exists() {
+                    drop(file);
+                    fs::remove_file(&key_path)?;
+                    return Err(VaultError::MissingKey);
+                }
+                rand::rng().fill_bytes(&mut key);
+                file.write_all(&key)?;
+                file.sync_all()?;
+                #[cfg(unix)]
+                File::open(&self.directory)?.sync_all()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let mut file = super::files::open_private(&key_path, false)?;
+                if file.metadata()?.len() != 32 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "vault key has the wrong length",
+                    )
+                    .into());
+                }
                 file.read_exact(&mut key).map_err(|_| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "vault key has the wrong length",
                     )
                 })?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // Refuse to mint a new key over existing ciphertext: that would
-                // silently orphan the user's credentials.
-                if self.directory.join("vault.bin").exists() {
-                    return Err(VaultError::MissingKey);
-                }
-                rand::rng().fill_bytes(&mut key);
-                let mut file = private_file(&key_path)?;
-                file.write_all(&key)?;
-                file.sync_all()?;
             }
             Err(error) => return Err(VaultError::Io(error)),
         }
@@ -104,6 +113,11 @@ impl Vault {
 
     /// Read every value. A missing vault file is an empty store.
     pub fn read(&self) -> Result<Store, VaultError> {
+        let _lock = super::files::lock(&self.directory.join("vault.lock"))?;
+        self.read_unlocked()
+    }
+
+    fn read_unlocked(&self) -> Result<Store, VaultError> {
         let bytes = match fs::read(self.directory.join("vault.bin")) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -126,6 +140,11 @@ impl Vault {
 
     /// Replace all values atomically.
     pub fn write(&self, store: &Store) -> Result<(), VaultError> {
+        let _lock = super::files::lock(&self.directory.join("vault.lock"))?;
+        self.write_unlocked(store)
+    }
+
+    fn write_unlocked(&self, store: &Store) -> Result<(), VaultError> {
         let mut nonce = [0u8; 12];
         rand::rng().fill_bytes(&mut nonce);
         let plaintext = serde_json::to_vec(store)?;
@@ -144,7 +163,10 @@ impl Vault {
             file.write_all(&nonce)?;
             file.write_all(&encrypted)?;
             file.sync_all()?;
-            fs::rename(&temporary, self.directory.join("vault.bin"))
+            fs::rename(&temporary, self.directory.join("vault.bin"))?;
+            #[cfg(unix)]
+            File::open(&self.directory)?.sync_all()?;
+            Ok(())
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
@@ -155,9 +177,10 @@ impl Vault {
     /// Read-modify-write under a single lock, so concurrent writers cannot lose
     /// each other's updates.
     pub fn update(&self, change: impl FnOnce(&mut Store)) -> Result<(), VaultError> {
-        let mut store = self.read()?;
+        let _lock = super::files::lock(&self.directory.join("vault.lock"))?;
+        let mut store = self.read_unlocked()?;
         change(&mut store);
-        self.write(&store)
+        self.write_unlocked(&store)
     }
 
     /// Fetch one value.
@@ -194,14 +217,7 @@ fn restrict_directory(path: &Path) -> std::io::Result<()> {
 }
 
 fn private_file(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
+    super::files::open_private(path, true)
 }
 
 #[cfg(test)]
@@ -279,5 +295,35 @@ mod tests {
         vault.set("a", Value::from(1)).unwrap();
         vault.remove(&["a"]).unwrap();
         assert_eq!(vault.get("a").unwrap(), None);
+    }
+
+    #[test]
+    fn concurrent_vault_handles_do_not_lose_credentials() {
+        let directory = temp_dir();
+        let workers: Vec<_> = (0..12)
+            .map(|i| {
+                let directory = directory.clone();
+                std::thread::spawn(move || {
+                    Vault::open(directory)
+                        .unwrap()
+                        .set(&format!("key-{i}"), Value::from(i))
+                        .unwrap()
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(Vault::open(directory).unwrap().read().unwrap().len(), 12);
+    }
+
+    #[test]
+    fn overlong_key_is_rejected_without_replacing_data() {
+        let vault = Vault::open(temp_dir()).unwrap();
+        vault.set("key", Value::from("value")).unwrap();
+        let before = fs::read(vault.directory.join("vault.bin")).unwrap();
+        fs::write(vault.directory.join("vault.key"), [7u8; 33]).unwrap();
+        assert!(vault.set("new", Value::from("value")).is_err());
+        assert_eq!(fs::read(vault.directory.join("vault.bin")).unwrap(), before);
     }
 }

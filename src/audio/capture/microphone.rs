@@ -17,7 +17,7 @@ use std::time::Duration;
 use cpal::FromSample;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::audio::{LinearResampler, SAMPLE_RATE, downmix, rms};
+use crate::audio::{LinearResampler, SAMPLE_RATE, rms};
 
 /// How long startup may take before it is treated as a failure.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -308,26 +308,25 @@ where
     f32: cpal::FromSample<T>,
 {
     let mut resampler = LinearResampler::new(input_rate);
-    let mut pending: Vec<Vec<f32>> = vec![Vec::new(); channels];
+    let mut mono = Vec::new();
+    let mut resampled = Vec::new();
 
     let error_sink = sink.clone();
     device
         .build_input_stream(
             config,
             move |data: &[T], _| {
-                // De-interleave into per-channel blocks for downmixing.
-                for channel in pending.iter_mut() {
-                    channel.clear();
-                }
-                for frame in data.chunks_exact(channels) {
-                    for (channel, sample) in pending.iter_mut().zip(frame) {
-                        channel.push(f32::from_sample_(*sample));
-                    }
-                }
-                let mono = downmix(&pending);
-                let resampled = resampler.process(&mono);
+                mono.clear();
+                mono.extend(data.chunks_exact(channels).map(|frame| {
+                    frame
+                        .iter()
+                        .map(|sample| f32::from_sample_(*sample))
+                        .sum::<f32>()
+                        / channels as f32
+                }));
+                resampler.process_into(&mono, &mut resampled);
                 if let Ok(mut buffer) = sink.lock() {
-                    buffer.push(resampled.into_iter());
+                    buffer.push(resampled.iter().copied());
                 }
             },
             move |error| {

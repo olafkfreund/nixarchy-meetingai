@@ -7,6 +7,7 @@
 //! Monitor sources are the output device played back, so this only works where a
 //! Pulse server is reachable. Every failure is reported, never papered over.
 
+use std::collections::VecDeque;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,7 +94,7 @@ pub fn parse_monitors(json: &str) -> Vec<MonitorSource> {
 
 /// A running system-audio recorder.
 pub struct SystemAudio {
-    buffer: Arc<Mutex<Vec<f32>>>,
+    buffer: Arc<Mutex<VecDeque<f32>>>,
     dropped: Arc<Mutex<u64>>,
     stop: Arc<AtomicBool>,
     child: Arc<Mutex<Option<Child>>>,
@@ -156,7 +157,7 @@ impl SystemAudio {
             .take()
             .ok_or_else(|| SystemAudioError::Spawn("no audio stream from parec".into()))?;
 
-        let buffer = Arc::new(Mutex::new(Vec::<f32>::with_capacity(BUFFER_CAPACITY)));
+        let buffer = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(BUFFER_CAPACITY)));
         let dropped = Arc::new(Mutex::new(0u64));
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -185,12 +186,12 @@ impl SystemAudio {
                             if let Ok(mut sink) = buffer.lock() {
                                 for sample in samples {
                                     if sink.len() >= BUFFER_CAPACITY {
-                                        sink.remove(0);
+                                        sink.pop_front();
                                         if let Ok(mut count) = dropped.lock() {
                                             *count += 1;
                                         }
                                     }
-                                    sink.push(sample);
+                                    sink.push_back(sample);
                                 }
                             }
                         }
