@@ -221,7 +221,7 @@ try {
     Assert-Protection $overlay
     Start-Sleep -Milliseconds 500
     [LennetteWindows]::AssertPillDrag($overlay)
-    [LennetteWindows]::AssertMinimumSize($overlay, 540, 420)
+    [LennetteWindows]::AssertMinimumSize($overlay, 680, 420)
     if ([LennetteWindows]::Find($app.Id, 'lennette tray') -ne [IntPtr]::Zero) { throw 'Privacy launch created an Explorer tray icon' }
     # Exercise RegisterHotKey, not just the one-shot control flags.
     [LennetteWindows]::ToggleHotkey()
@@ -240,7 +240,7 @@ try {
     Assert-Protection $dashboard
     Start-Sleep -Milliseconds 300
     [LennetteWindows]::AssertDashboardDrag($dashboard)
-    [LennetteWindows]::AssertMinimumSize($dashboard, 760, 540)
+    [LennetteWindows]::AssertMinimumSize($dashboard, 960, 540)
     # Capture the whole desktop with a visible, unprotected black positive control.
     # A white backdrop makes even a black-rectangle fallback fail this check.
     [LennetteWindows]::ShowWindow($overlay, 0) | Out-Null
