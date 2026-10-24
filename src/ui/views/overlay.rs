@@ -1656,7 +1656,7 @@ impl Overlay {
     /// The selected instructions plus a bounded window of meeting context.
     fn selected_system_prompt(&self) -> String {
         let base = self
-            .active_prompt
+            .effective_prompt_id()
             .and_then(|id| {
                 self.prompt_choices
                     .iter()
@@ -2244,13 +2244,21 @@ impl Overlay {
 
     #[cfg(windows)]
     fn set_native_visibility(&self, visible: bool, cx: &mut Context<Self>) -> bool {
+        let mut found = false;
+        let mut applied = true;
         for handle in cx.windows() {
-            if handle.downcast::<Self>().is_some() {
-                return handle
+            let overlay = handle.downcast::<Self>().is_some();
+            if overlay
+                || handle
+                    .downcast::<crate::features::dashboard::view::DashboardView>()
+                    .is_some()
+            {
+                found |= overlay;
+                applied &= handle
                     .update(cx, |_, window, _| {
                         let applied =
                             crate::platform::window::set_visible(window, visible).is_yes();
-                        if applied && visible {
+                        if applied && visible && overlay {
                             crate::platform::window::focus(window);
                         }
                         applied
@@ -2258,7 +2266,7 @@ impl Overlay {
                     .unwrap_or(false);
             }
         }
-        false
+        found && applied
     }
 
     fn begin_capture(&mut self, cx: &mut Context<Self>) {
@@ -3364,6 +3372,7 @@ impl Overlay {
                     .w_full()
                     .max_w(px(READING_MEASURE))
                     .mx_auto()
+                    .px(px(space::MD))
                     .child(
                         div()
                             .flex_shrink_0()
@@ -4144,11 +4153,22 @@ impl Overlay {
     }
 
     fn active_prompt_name(&self) -> Option<String> {
-        let id = self.active_prompt?;
+        let id = self.effective_prompt_id()?;
         self.prompt_choices
             .iter()
             .find(|(prompt_id, _, _)| *prompt_id == id)
             .map(|(_, name, _)| name.clone())
+    }
+
+    fn effective_prompt_id(&self) -> Option<i64> {
+        self.active_prompt
+            .filter(|id| self.prompt_choices.iter().any(|p| p.0 == *id))
+            .or_else(|| {
+                self.prompt_choices
+                    .iter()
+                    .find(|p| p.1 == "General")
+                    .map(|p| p.0)
+            })
     }
 
     /// Switch model and persist it to the active credential.
@@ -5971,6 +5991,8 @@ mod tests {
             },
         );
         assert_eq!(body["messages"][0]["content"], system);
+        assert!(system.contains("two- or three-word sentences"));
+        assert!(system.contains("explaining every meaningful code line"));
         assert!(system.contains("I built the Quasar scheduler"));
         assert!(system.contains("Platform engineering interview"));
         assert!(system.contains("You: I used Rust"));
@@ -5997,6 +6019,8 @@ mod tests {
             .prompt_choices
             .push((43, "General".into(), "My edited general instruction".into()));
         overlay.active_prompt = None;
+        assert_eq!(overlay.effective_prompt_id(), Some(43));
+        assert_eq!(overlay.active_prompt_name().as_deref(), Some("General"));
         assert!(
             overlay
                 .selected_system_prompt()

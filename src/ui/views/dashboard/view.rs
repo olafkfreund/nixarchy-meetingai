@@ -73,6 +73,7 @@ pub struct DashboardView {
     page_generation: usize,
     page_scroll: gpui::ScrollHandle,
     content_width: gpui::Pixels,
+    bounds_observer: Option<gpui::Subscription>,
     history_search: [Option<gpui::Entity<crate::ui::widgets::editor::Editor>>; 4],
     history_queries: [String; 4],
     history_observers: [Option<gpui::Subscription>; 4],
@@ -154,6 +155,7 @@ impl DashboardView {
             page_generation: 0,
             page_scroll: gpui::ScrollHandle::new(),
             content_width: px(910.0),
+            bounds_observer: None,
             history_search: Default::default(),
             history_queries: Default::default(),
             history_observers: Default::default(),
@@ -1922,6 +1924,9 @@ impl DashboardView {
 
     fn meeting_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
+        let recap_width = px(300.0);
+        let column_gap = px(18.0);
+        let transcript_width = (self.content_width - recap_width - column_gap).max(px(0.0));
         let delete_id = self.open_meeting.clone();
         let actions: gpui::AnyElement = match delete_id.clone() {
             Some(delete_id) => div()
@@ -2085,7 +2090,8 @@ impl DashboardView {
         transcript = div()
             .flex()
             .flex_col()
-            .w_full()
+            .w(transcript_width)
+            .flex_shrink_0()
             .min_w(px(0.0))
             .gap(px(10.0))
             .child(
@@ -2109,7 +2115,8 @@ impl DashboardView {
                     .flatten()
             });
         let mut panel = div()
-            .w_full()
+            .w(recap_width)
+            .flex_shrink_0()
             .min_w(px(0.0))
             .flex()
             .flex_col()
@@ -2154,10 +2161,10 @@ impl DashboardView {
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .w_full()
+                    .items_start()
+                    .w(self.content_width)
                     .min_w(px(0.0))
-                    .gap(px(18.0))
+                    .gap(column_gap)
                     .child(transcript)
                     .child(panel),
             )
@@ -2167,6 +2174,7 @@ impl DashboardView {
     fn conversation_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = self.theme;
         let surfaces = self.surfaces();
+        let message_width = self.content_width.min(px(760.0));
         let Some(id) = self.open_conversation.clone() else {
             return self
                 .empty_note("Choose a conversation to read it.")
@@ -2180,6 +2188,8 @@ impl DashboardView {
             .flex()
             .flex_col()
             .w_full()
+            .min_w(px(0.0))
+            .flex_shrink_0()
             .gap(px(18.0))
             .pb(px(24.0))
             .child(
@@ -2329,14 +2339,16 @@ impl DashboardView {
                         format!("saved-message-{}", message.id).into(),
                     ))
                     .flex()
-                    .w_full()
-                    .justify_center()
+                    .flex_col()
+                    .w(self.content_width)
+                    .min_w(px(0.0))
+                    .flex_shrink_0()
+                    .items_center()
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .w_full()
-                            .max_w(px(760.0))
+                            .w(message_width)
                             .min_w(px(0.0))
                             .gap(px(8.0))
                             .child(
@@ -2359,6 +2371,8 @@ impl DashboardView {
                             )
                             .child(
                                 div()
+                                    .flex()
+                                    .flex_col()
                                     .w_full()
                                     .min_w(px(0.0))
                                     .rounded(px(12.0))
@@ -2449,6 +2463,9 @@ fn truncate(text: &str, limit: usize) -> String {
 
 impl Render for DashboardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.bounds_observer.is_none() {
+            self.bounds_observer = Some(cx.observe_window_bounds(window, |_, _, cx| cx.notify()));
+        }
         self.content_width = (window.viewport_size().width - px(50.0)).clamp(px(200.0), px(960.0));
         self.init_history_search(cx);
         if self.settings_search.is_none() {
@@ -2712,8 +2729,7 @@ impl Render for DashboardView {
                         }
                         content.child(
                             div()
-                                .w_full()
-                                .max_w(px(960.0))
+                                .w(self.content_width)
                                 .flex_shrink_0()
                                 .min_w(px(0.0))
                                 .child(if self.dashboard.route().is_setting() {

@@ -241,6 +241,14 @@ try {
     Start-Sleep -Milliseconds 300
     [LennetteWindows]::AssertDashboardDrag($dashboard)
     [LennetteWindows]::AssertMinimumSize($dashboard, 960, 540)
+    [LennetteWindows]::ToggleHotkey()
+    Wait-For { -not [LennetteWindows]::IsWindowVisible($overlay) -and -not [LennetteWindows]::IsWindowVisible($dashboard) } 'hotkey hides overlay and dashboard together'
+    Send-Command '--toggle-dashboard'
+    if ([LennetteWindows]::IsWindowVisible($dashboard)) { throw 'Hidden dashboard shortcut restored Settings' }
+    [LennetteWindows]::ToggleHotkey()
+    Wait-For { [LennetteWindows]::IsWindowVisible($overlay) -and [LennetteWindows]::IsWindowVisible($dashboard) } 'hotkey restores overlay and dashboard together'
+    Assert-Protection $overlay
+    Assert-Protection $dashboard
     # Capture the whole desktop with a visible, unprotected black positive control.
     # A white backdrop makes even a black-rectangle fallback fail this check.
     [LennetteWindows]::ShowWindow($overlay, 0) | Out-Null

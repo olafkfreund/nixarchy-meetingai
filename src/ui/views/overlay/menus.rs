@@ -142,7 +142,13 @@ impl Overlay {
                 ));
             }
         } else {
-            rows = rows.child(self.prompt_option(None, "General".into(), 0, cx));
+            if !self
+                .prompt_choices
+                .iter()
+                .any(|(_, name, _)| name == "General")
+            {
+                rows = rows.child(self.prompt_option(None, "General".into(), 0, cx));
+            }
             for (index, (id, name, _)) in self.prompt_choices.iter().enumerate() {
                 rows = rows.child(self.prompt_option(Some(*id), name.clone(), index + 1, cx));
             }
@@ -206,7 +212,7 @@ impl Overlay {
         index: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        self.menu_row(("prompt-option", index), self.active_prompt == id)
+        self.menu_row(("prompt-option", index), self.effective_prompt_id() == id)
             .child(div().flex_1().min_w(px(0.0)).truncate().child(name))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.active_prompt = id;

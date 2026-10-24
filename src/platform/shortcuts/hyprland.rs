@@ -219,7 +219,7 @@ pub fn repair_managed_toggle() -> Result<(), String> {
     ))
 }
 
-/// Park the protected surface on an unopened workspace, retaining its contents.
+/// Park every Lennette window on an unopened workspace, retaining its contents.
 pub fn set_overlay_visible(visible: bool) -> Result<(), String> {
     let workspace = if visible {
         let output = std::process::Command::new("hyprctl")
@@ -235,19 +235,62 @@ pub fn set_overlay_visible(visible: bool) -> Result<(), String> {
     } else {
         "special:lennette-hidden".to_owned()
     };
-    let workspace = serde_json::to_string(&workspace).map_err(|e| e.to_string())?;
-    let selector = r#"window="title:^lennette$""#;
-    let expression = format!(
-        "hl.dispatch(hl.dsp.window.pin({{{selector},action=\"disable\"}})); hl.dispatch(hl.dsp.window.move({{{selector},workspace={workspace},follow=false}}))"
-    );
+    let output = std::process::Command::new("hyprctl")
+        .args(["-j", "clients"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("Could not list Lennette windows".into());
+    }
+    let clients: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    let expression = visibility_expression(&clients, visible, &workspace, std::process::id())?;
     apply_expression(&expression)?;
     if visible {
-        apply_expression(&format!(
-            "hl.dispatch(hl.dsp.window.pin({{{selector},action=\"enable\"}}))"
-        ))?;
         focus_overlay();
     }
     Ok(())
+}
+
+// Use explicit addresses: a title-only selector misses Settings, and a single
+// class selector can resolve just one window instead of the whole app.
+fn visibility_expression(
+    clients: &serde_json::Value,
+    visible: bool,
+    workspace: &str,
+    pid: u32,
+) -> Result<String, String> {
+    let clients = clients.as_array().ok_or("Invalid Hyprland window list")?;
+    let workspace = serde_json::to_string(workspace).map_err(|e| e.to_string())?;
+    let mut commands = Vec::new();
+    for client in clients {
+        if client["pid"].as_u64() != Some(u64::from(pid))
+            || !matches!(
+                client["class"].as_str(),
+                Some("dev.lennette.overlay" | "lennette")
+            )
+        {
+            continue;
+        }
+        let address = client["address"]
+            .as_str()
+            .ok_or("Lennette window has no address")?;
+        let selector =
+            serde_json::to_string(&format!("address:{address}")).map_err(|e| e.to_string())?;
+        commands.push(format!(
+            "hl.dispatch(hl.dsp.window.pin({{window={selector},action=\"disable\"}}))"
+        ));
+        commands.push(format!("hl.dispatch(hl.dsp.window.move({{window={selector},workspace={workspace},follow=false}}))"));
+        if visible {
+            commands.push(format!(
+                "hl.dispatch(hl.dsp.window.pin({{window={selector},action=\"enable\"}}))"
+            ));
+        }
+    }
+    if commands.is_empty() {
+        return Err("No Lennette windows were found".into());
+    }
+    Ok(commands.join("; "))
 }
 
 /// Focus and raise the overlay window in Hyprland.
@@ -283,6 +326,36 @@ pub fn focus_overlay() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visibility_targets_overlay_and_settings_without_touching_other_windows() {
+        let clients = serde_json::json!([
+            {"pid": 42, "class": "dev.lennette.overlay", "title": "lennette", "address": "0x1"},
+            {"pid": 42, "class": "dev.lennette.overlay", "title": "lennette dashboard", "address": "0x2"},
+            {"pid": 99, "class": "dev.lennette.overlay", "address": "0x3"},
+            {"pid": 42, "class": "unrelated", "address": "0x4"}
+        ]);
+        for visible in [false, true] {
+            let workspace = if visible {
+                "2"
+            } else {
+                "special:lennette-hidden"
+            };
+            let expression = visibility_expression(&clients, visible, workspace, 42).unwrap();
+            for address in ["0x1", "0x2"] {
+                assert!(expression.contains(&format!("address:{address}")));
+            }
+            assert!(!expression.contains("0x3"));
+            assert!(!expression.contains("0x4"));
+            assert_eq!(expression.matches("window.move(").count(), 2);
+            assert_eq!(
+                expression.matches("action=\"enable\"").count(),
+                if visible { 2 } else { 0 }
+            );
+            assert!(expression.contains(workspace));
+        }
+        assert!(visibility_expression(&serde_json::json!([]), false, "hidden", 42).is_err());
+    }
 
     #[test]
     fn accelerators_use_hyprland_notation() {
