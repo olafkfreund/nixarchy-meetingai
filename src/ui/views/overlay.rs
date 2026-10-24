@@ -361,7 +361,7 @@ pub struct Overlay {
     app_menu_bounds: MenuBounds,
     restore_chats: Vec<crate::db::conversations::ConversationRecord>,
     restore_meetings: Vec<crate::db::meetings::MeetingRecord>,
-    resume_meeting: Option<crate::db::meetings::MeetingRecord>,
+    resume_meeting: Option<String>,
     meeting_offset: f64,
     meeting_speaker_offset: i64,
     dialog: Option<session_menu::Dialog>,
@@ -810,25 +810,7 @@ impl Overlay {
             return;
         }
         self.interrupt_response();
-        let resuming = self.resume_meeting.clone();
-        if resuming.is_none() {
-            self.meeting_offset = 0.0;
-            self.meeting_speaker_offset = 0;
-            self.chat.reset();
-            self.conversation = Conversation::new();
-            self.message_documents.clear();
-            self.message_signature = (usize::MAX, usize::MAX);
-            self.conversation_response = None;
-            self.transcript.clear();
-        } else {
-            self.meeting_offset = self.last_elapsed.max(self.meeting_offset);
-            self.meeting_speaker_offset = self
-                .transcript
-                .iter()
-                .filter_map(|l| l.speaker)
-                .max()
-                .map_or(0, |s| s + 1);
-        }
+        let resuming = self.prepare_recording_resume();
         self.runtime_settings =
             crate::core::settings::Settings::load_from_path(self.services.database_path.as_deref())
                 .unwrap_or_default();
@@ -864,21 +846,20 @@ impl Overlay {
             self.handle_session_event(event);
         }
         if self.is_listening() {
-            self.meeting_id = if let Some(record) = resuming {
+            self.meeting_id = if let Some(id) = resuming {
                 let result = self
                     .services
                     .connect()
                     .ok_or_else(|| "The local database is unavailable.".to_owned())
                     .and_then(|db| {
-                        crate::db::meetings::reopen(db.connection(), &record.id)
-                            .map_err(|e| e.to_string())
+                        crate::db::meetings::reopen(db.connection(), &id).map_err(|e| e.to_string())
                     });
                 if let Err(error) = result {
                     self.stop_listening();
                     self.listen_error = Some(format!("Could not resume the meeting: {error}"));
                     return;
                 }
-                Some(record.id)
+                Some(id)
             } else {
                 self.create_meeting()
             };
@@ -889,6 +870,18 @@ impl Overlay {
         } else {
             self.session = None;
         }
+    }
+
+    /// Play reconnects capture in the current conversation. Only New clears it.
+    fn prepare_recording_resume(&mut self) -> Option<String> {
+        self.meeting_offset = self.last_elapsed.max(self.meeting_offset);
+        self.meeting_speaker_offset = self
+            .transcript
+            .iter()
+            .filter_map(|line| line.speaker)
+            .max()
+            .map_or(self.meeting_speaker_offset, |speaker| speaker + 1);
+        self.resume_meeting.clone()
     }
 
     /// Stream raw two-channel PCM as capture runs; never wait for a local utterance.
@@ -1221,6 +1214,11 @@ impl Overlay {
         self.listening_device = None;
         self.set_dock_expanded(true);
         let id = self.meeting_id.take();
+        if let Some(id) = &id {
+            // Retain the session on normal stops and provider/capture failures.
+            // Final speech still flushes before Play is allowed to reconnect.
+            self.resume_meeting = Some(id.clone());
+        }
         if self.transcription_busy && id.is_some() {
             self.finishing_meeting_id = id.clone();
             self.finishing_meeting_offsets = (self.meeting_offset, self.meeting_speaker_offset);
@@ -2018,7 +2016,6 @@ impl Overlay {
         self.composer.clear();
         self.composer_marked = None;
         self.draft_attachments.clear();
-        self.resume_meeting = None;
         self.close_pill_menus();
         self.conversation_response = None;
         self.cancel_dictation();
@@ -2029,6 +2026,7 @@ impl Overlay {
             self.stop_listening();
         }
         self.transcription_detached = self.transcription_busy;
+        self.resume_meeting = None;
         self.meeting_offset = 0.0;
         self.meeting_speaker_offset = 0;
         self.chat.reset();
@@ -2496,6 +2494,7 @@ impl Overlay {
     }
 
     fn play_pause_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let resuming = self.resume_meeting.is_some();
         let theme = self.theme;
         let recording = self.is_listening();
         let enabled = recording || self.speech_ready;
@@ -2545,7 +2544,11 @@ impl Overlay {
                     text: if recording {
                         "Stop recording"
                     } else if enabled {
-                        "Start recording"
+                        if resuming {
+                            "Resume recording"
+                        } else {
+                            "Start recording"
+                        }
                     } else {
                         "Add a speech provider key to record"
                     }
@@ -5561,6 +5564,7 @@ impl Render for HoverLabel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::domain::Message;
     use crate::core::security::credentials::{self, Credential, Kind};
 
     fn fixture() -> (std::path::PathBuf, Overlay) {
@@ -5572,6 +5576,117 @@ mod tests {
             database_ready: false,
         };
         (path, Overlay::new(services, None, None, None, None))
+    }
+
+    #[test]
+    fn speech_failure_then_play_keeps_chat_and_resumes_the_same_meeting() {
+        use crate::speech::transcription::{LiveEvent, TranscriptLine};
+        let (path, mut overlay) = fixture();
+        let db_path = path.join("history.db");
+        let db = crate::db::Database::open(&db_path).unwrap();
+        overlay.services.database_path = Some(db_path);
+        let meeting =
+            crate::db::meetings::start(db.connection(), "Interview", "meeting", "en").unwrap();
+        overlay.meeting_id = Some(meeting.clone());
+        overlay.last_elapsed = 120.0;
+        overlay.transcription_busy = true;
+        overlay.push_transcript("Earlier question".into(), 110.0, 5.0, 1, Some(2));
+        overlay
+            .chat
+            .begin(Some(&db), "Explain the tradeoff")
+            .unwrap();
+        overlay.chat.push_delta(Some(&db), "The existing answer");
+        overlay.chat.finish();
+        overlay
+            .conversation
+            .push(Message::user("Explain the tradeoff"));
+        overlay
+            .conversation
+            .push(Message::assistant("The existing answer"));
+        overlay.composer.set_text("Keep this draft");
+        overlay.conversation_response = Some((
+            crate::core::settings::ResponseLength::Medium,
+            "English".into(),
+        ));
+        let conversation = overlay.chat.conversation_id().unwrap().to_owned();
+
+        overlay.handle_live_event(LiveEvent::Failed("Speech provider disconnected".into()));
+        assert!(!overlay.is_listening());
+        assert_eq!(overlay.resume_meeting.as_deref(), Some(meeting.as_str()));
+        assert_eq!(
+            overlay.finishing_meeting_id.as_deref(),
+            Some(meeting.as_str())
+        );
+        // CloseStream can still deliver final words before Play is allowed.
+        overlay.handle_live_event(LiveEvent::Transcript(TranscriptLine {
+            channel: 1,
+            speaker: Some(3),
+            text: "Final words before reconnect".into(),
+            is_final: true,
+            speech_final: true,
+            start: 116.0,
+            end: 119.0,
+        }));
+        overlay.transcription_busy = false;
+        overlay.finishing_meeting_id = None;
+
+        let resumed = overlay.prepare_recording_resume().unwrap();
+        assert_eq!(resumed, meeting);
+        assert_eq!(overlay.chat.conversation_id(), Some(conversation.as_str()));
+        assert_eq!(overlay.conversation.messages().len(), 2);
+        assert_eq!(overlay.composer.text(), "Keep this draft");
+        assert!(overlay.conversation_response.is_some());
+        assert_eq!(overlay.transcript.len(), 2);
+        assert_eq!(overlay.meeting_offset, 120.0);
+        assert_eq!(overlay.meeting_speaker_offset, 4);
+        crate::db::meetings::reopen(db.connection(), &resumed).unwrap();
+        overlay.meeting_id = Some(resumed);
+        overlay.push_transcript("Words after reconnect".into(), 1.0, 2.0, 1, Some(0));
+        let lines = crate::db::meetings::lines(db.connection(), &meeting).unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[2].start_time, 121.0);
+        assert_eq!(lines[2].speaker, Some(4));
+        let next = overlay
+            .chat
+            .begin(Some(&db), "Continue that explanation")
+            .unwrap();
+        assert!(
+            next.iter()
+                .any(|message| message.content == "The existing answer")
+        );
+        assert_eq!(
+            crate::db::meetings::list(db.connection(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Explicit New is still the boundary for clearing the current session.
+        overlay.new_chat();
+        assert!(overlay.resume_meeting.is_none());
+        assert!(overlay.chat.conversation_id().is_none());
+        assert!(overlay.conversation.messages().is_empty());
+        assert!(overlay.transcript.is_empty());
+        assert_eq!(overlay.prepare_recording_resume(), None);
+        assert_eq!(overlay.meeting_offset, 0.0);
+        drop(overlay);
+        drop(db);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn first_play_preserves_an_existing_conversation_without_a_meeting() {
+        let (path, mut overlay) = fixture();
+        overlay
+            .conversation
+            .push(Message::user("Background for the call"));
+        overlay
+            .conversation
+            .push(Message::assistant("Earlier discussion"));
+        assert_eq!(overlay.prepare_recording_resume(), None);
+        assert_eq!(overlay.conversation.messages().len(), 2);
+        drop(overlay);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

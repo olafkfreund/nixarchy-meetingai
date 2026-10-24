@@ -104,7 +104,7 @@ impl Overlay {
             id,
             self.meeting_id
                 .as_deref()
-                .or_else(|| self.resume_meeting.as_ref().map(|m| m.id.as_str())),
+                .or(self.resume_meeting.as_deref()),
             &context,
         ) {
             tracing::warn!(%error, "could not save restoration context");
@@ -234,7 +234,7 @@ impl Overlay {
             context,
         );
         crate::core::context::add(&mut self.context_sources, source)?;
-        self.resume_meeting = Some(record.clone());
+        self.resume_meeting = Some(record.id.clone());
         self.mode = Mode::Listen;
         self.listen_notice = Some("Meeting restored. Ask about it now, or press Play to continue recording into this meeting.".into());
         Ok(())
