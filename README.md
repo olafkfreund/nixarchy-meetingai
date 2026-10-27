@@ -30,7 +30,7 @@ or from local models.
 ```nix
 {
   inputs.nixarchy-meetingai = {
-    url = "github:olafkfreund/mixarchy-meetingai/refactor/omarchy-quickshell-rewrite";
+    url = "github:olafkfreund/nixarchy-meetingai/refactor/omarchy-quickshell-rewrite";
     inputs.nixpkgs.follows = "nixpkgs";
   };
 }

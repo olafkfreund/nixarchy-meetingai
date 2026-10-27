@@ -72,3 +72,8 @@ None yet.
   `xtask` alias to a `lennette-tools` crate that no longer exists. The
   plugin manifest has no icon field, so nothing changed there. The desktop
   entry is named "Meeting AI".
+- **Step 2:** renamed with `gh repo rename` (redirect active); the remote,
+  README and `shell/manifest.json` homepage use the new URL. The flake
+  description already used the product name. The local checkout folder is
+  still `mixarchy-meetingai` (renaming it would break the open worktrees and
+  tooling paths; harmless).
