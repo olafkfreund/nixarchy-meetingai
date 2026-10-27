@@ -64,6 +64,17 @@ impl Database {
              PRAGMA temp_store = MEMORY;",
         )?;
         connection.execute_batch(schema::SCHEMA)?;
+        // Databases made before coverage was tracked by line id lack this column.
+        let has_last_line: bool = connection.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('meeting_note_chunks') WHERE name = 'last_line'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_last_line {
+            connection.execute_batch(
+                "ALTER TABLE meeting_note_chunks ADD COLUMN last_line INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
         seed::seed_listen_modes(&connection)?;
         profiles::migrate_legacy(&connection)?;
         Ok(Self { connection })

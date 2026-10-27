@@ -116,3 +116,52 @@ async fn three_hour_meeting_keeps_its_midpoint_decision() {
         "no prompt holds the whole meeting"
     );
 }
+
+#[tokio::test]
+async fn late_line_with_an_earlier_end_time_still_reaches_the_notes() {
+    let dir =
+        std::env::temp_dir().join(format!("nixarchy-meetingai-late-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.db");
+    let db = Database::open(&path).unwrap();
+    let id = meetings::start(db.connection(), "Late", "", "en").unwrap();
+    meetings::add_line(
+        db.connection(),
+        &id,
+        "them",
+        Some(0),
+        &"word ".repeat(2000),
+        0.0,
+        100.0,
+    )
+    .unwrap();
+    let mut config = ProviderConfig::new("custom-recap", "", "model");
+    config.base_url = fake_provider(Arc::new(Mutex::new(0)));
+    config.custom = Some(CustomProvider {
+        auth: "none".into(),
+        response_format: "text".into(),
+        ..Default::default()
+    });
+    assert!(
+        recap::maybe_chunk(&path, &id, &config, "English")
+            .await
+            .unwrap()
+    );
+    // The other channel's line lands after the chunk but ends before the chunk's t1.
+    meetings::add_line(
+        db.connection(),
+        &id,
+        "me",
+        None,
+        "DECISION-LATE is approved",
+        10.0,
+        20.0,
+    )
+    .unwrap();
+    recap::generate(&path, &id, Some(config), "English")
+        .await
+        .unwrap();
+    let recap = meetings::recap(db.connection(), &id).unwrap().unwrap();
+    assert!(recap.content.contains("DECISION-LATE"), "{}", recap.content);
+    assert_eq!(meetings::chunks(db.connection(), &id).unwrap().len(), 2);
+}
