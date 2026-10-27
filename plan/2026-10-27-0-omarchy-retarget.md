@@ -798,3 +798,38 @@ No colored icons or emoji anywhere in the UI.
 - The transcript pins to its exact bottom (`contentY`, not the estimated
   `positionViewAtEnd`) whenever content, an item, or the list itself
   changes height, because the NOW panel resizes the list.
+
+### Owner request: round 4, modern polish, icons and text scale (2026-10-27)
+
+1. **Monochrome icons** are Nerd Font Material Design glyphs (`nf-md-*`)
+   in `Style.font.family` (a Nerd Font on Omarchy), colored with
+   `popups.text`, the same family the Omarchy bar uses. Every icon button
+   has a tooltip.
+   - Record/Stop: `record`/`stop`. Mic: `microphone`/`microphone-off`.
+     System: `volume-high`/`volume-off`. Settings: `cog`.
+     Screenshot: `camera`. Attach: `paperclip`. Send: `send`.
+     Transcript toggle: `chevron-down`/`chevron-right`.
+     "What should I say?": `lightbulb-outline` plus its label.
+   - No emoji, nothing filled with color.
+2. **A modern, slick look:**
+   - the header as one quiet toolbar row of icon buttons (no boxed text
+     buttons), with General/Interview as a segmented control
+   - the composer as one rounded field with icon buttons inside it (attach,
+     screenshot, send)
+   - section labels (NOW, ASK NEXT) in small caps with letter spacing
+   - a subtle 1 px separator in `popups.border` at low alpha instead of
+     hard lines
+   - consistent spacing using the round-3 padding values
+3. **Text scaling:** a `text_scale` setting (80–160%, default 100%,
+   persisted in the daemon) multiplies every font size in the overlay.
+   - Ctrl+= / Ctrl+- / Ctrl+0 when the overlay has focus.
+   - A slider in Settings.
+   - Bubbles, cards and rows grow with the text, with nothing clipped.
+     Checked at 80%, 100% and 160% in screenshots.
+4. **Provider dropdown** shows readable names ("Claude (subscription)").
+   Settings gains a "Live answers" provider and model pair
+   (`live_provider`/`live_model`).
+5. **The k8s example:** run the real daemon with Claude in Interview mode,
+   have it answer "Explain k8s and how it is working?", and save the real
+   answer as `shell/tests/fixtures/k8s-answer.md`. The fake `--live`
+   scenario uses it, so the screenshot shows a real model answer.
