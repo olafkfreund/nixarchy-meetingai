@@ -60,7 +60,8 @@ in
     whisper = {
       model = lib.mkOption {
         type = lib.types.package;
-        default = self.packages.${sys}.whisper-model-small-en;
+        # Default per docs/whisper-bench.md; built here, not via flake packages.
+        default = (pkgs.callPackage ./whisper-model.nix { })."large-v3-turbo";
         description = "A whisper.cpp model package (one with `passthru.modelName`).";
       };
       package = lib.mkOption {
