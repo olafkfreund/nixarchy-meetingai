@@ -337,7 +337,6 @@ mod tests {
     #[test]
     fn malformed_output_yields_nothing() {
         assert!(parse_monitors("not json").is_empty());
-        assert!(monitor_sources().len() <= 8);
     }
 
     #[test]

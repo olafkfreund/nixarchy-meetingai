@@ -7,8 +7,9 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 root=$(cd "$here/.." && pwd)
 tree=${OMARCHY_SHELL_TREE:-/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/shell}
-bin=$root/target/debug/nixarchy-meetingai
-(cd "$root" && devenv shell -- cargo build)
+# MEETINGAI_BIN: a prebuilt daemon (the flake check); else build it
+bin=${MEETINGAI_BIN:-$root/target/debug/nixarchy-meetingai}
+[ -n "${MEETINGAI_BIN:-}" ] || (cd "$root" && if command -v devenv >/dev/null; then devenv shell -- cargo build; else cargo build; fi)
 
 work=$(mktemp -d /tmp/nm.XXXX)   # short: unix socket paths cap at 108 bytes
 trap 'kill $(jobs -p) 2>/dev/null || true; chmod -R u+w "$work"; rm -rf "$work"' EXIT
@@ -48,5 +49,5 @@ for _ in $(seq 30); do kill -0 "$daemon" 2>/dev/null || break; sleep 0.1; done
 kill -0 "$daemon" 2>/dev/null && { echo "FAIL: daemon did not exit on quit" >&2; exit 1; }
 
 if grep -E 'ERROR|\.qml:[0-9]+' "$work/qs.err"; then echo "FAIL: QML errors above" >&2; exit 1; fi
-[ "$rc" = 0 ] || { echo "FAIL: protocol checks (see BAD lines)" >&2; exit 1; }
+[ "$rc" = 0 ] || { tail -n 30 "$work/daemon.log" >&2; echo "FAIL: protocol checks (see BAD lines)" >&2; exit 1; }
 echo "smoke-real ok"

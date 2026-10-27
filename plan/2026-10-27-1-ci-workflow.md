@@ -83,3 +83,19 @@ One `coder` does steps 1–3 and 6 in a worktree; the lead does steps 4–5
 ## Deviations log (recorded with the implementation commit)
 
 None yet.
+- **Steps 1–4:** the shell suite runs inside the Nix sandbox (no fallback
+  needed) with `QT_QUICK_BACKEND=software`, `SSL_CERT_FILE` and `curl`;
+  `shell/tests/ci.sh` is the entry point. `devShells.default` uses
+  nixpkgs' Rust 1.99.0 (not rust-overlay 1.99.1; `rust-toolchain.toml` is
+  ignored there) and builds the vendored SQLCipher with perl/gnumake; it
+  sets `TMPDIR=/tmp` so test socket paths stay under 108 bytes. `headless.sh`
+  honours `SWAY_BIN`, `smoke-real.sh` honours `MEETINGAI_BIN`, `contrast.py`
+  reads themes from `OMARCHY_SHELL_TREE`. **#5 fixed instead of skipped:**
+  the host-dependent `monitor_sources().len() <= 8` assert is removed (it
+  tested the machine, not the parser); no test needs a CI skip.
+  `cargo fmt --all` reformatted `src/db/mod.rs` so the full `cargo fmt
+  --check` can run in CI. The `nix` job evaluates with `--no-build` and
+  builds every check except `shell` (own job); the `shell` job keeps failed
+  build dirs (`--keep-failed`) for the artifact upload. Actions pinned:
+  checkout v7.0.1, nix-installer v23, magic-nix-cache v15,
+  upload-artifact v7.0.2.

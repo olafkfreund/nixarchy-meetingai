@@ -1151,6 +1151,22 @@ windows on your desktop; set `MEETINGAI_ON_DESKTOP=1` to watch one.
 `tools/provider-probe.py` asks every provider one question through a
 throwaway daemon. Design notes live in `intent/`, `spec/` and `plan/`.
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request, with three
+jobs that need only Nix:
+
+| Job | Runs |
+|---|---|
+| `rust` | `cargo test --workspace` (with `CI=1`), clippy with `-D warnings`, rustfmt check, in `nix develop` |
+| `nix` | `nix flake check -L`: the Home Manager module checks, the package and plugin builds, and the README options match |
+| `shell` | `nix build .#checks.x86_64-linux.shell -L`: lint, smoke, smoke-real, keys, every `live-shots.sh` scenario at 100 % and 150 % with the geometry check, and contrast, in a headless sway |
+
+Run the same things locally with `nix develop -c cargo test --workspace`,
+`nix develop .#shell -c bash shell/tests/ci.sh` and `nix flake check`.
+Requiring these checks on `main` is a follow-up once CI has been green for
+two weeks.
+
 ## License and history
 
 AGPL-3.0 while original code remains; MIT once the rewrite is complete (see
