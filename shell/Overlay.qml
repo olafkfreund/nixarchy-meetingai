@@ -65,6 +65,9 @@ Item {
     readonly property string iQuestion: String.fromCodePoint(0xf02d7)
     readonly property var kinds: [{ kind: "action", title: "Actions", glyph: root.iAction }, { kind: "decision", title: "Decisions", glyph: root.iDecision }, { kind: "question", title: "Questions", glyph: root.iQuestion }]
     readonly property bool team: daemon.settings.meeting_mode === "team_meeting"
+    readonly property bool iv: daemon.settings.meeting_mode === "interviewer"
+    readonly property bool panel: root.team || root.iv   // the card above NOW: Items (team) or Question bank (interviewer)
+    readonly property var qStatuses: [{ status: "asked", title: "Asked" }, { status: "covered", title: "Covered" }, { status: "skipped", title: "Skipped" }]
     readonly property string seriesId: String(daemon.state.series || "")
     readonly property string meetingId: String(daemon.state.meeting || "")
     property bool lastOpen: false
@@ -135,6 +138,7 @@ Item {
     // Hooks for tests/shots.sh.
     function openModelPicker() { root.library = true; lib.tab = "settings"; }
     function showLibrary(tab) { root.library = true; lib.tab = tab; }
+    function recordHook(consent) { daemon.startRecording(consent); }
 
     function close() {
         root.opened = false;
@@ -242,7 +246,7 @@ Item {
                     Row {
                         id: hdrLeft
                         spacing: Style.spacing.xs
-                        IconButton { ts: root.ts; iconText: daemon.recording ? root.iStop : root.iRecord; active: daemon.recording; tooltipText: daemon.recording ? "Stop recording" : "Start recording"; onClicked: daemon.send(daemon.recording ? "record.stop" : "record.start", {}) }
+                        IconButton { ts: root.ts; iconText: daemon.recording ? root.iStop : root.iRecord; active: daemon.recording; tooltipText: daemon.recording ? "Stop recording" : "Start recording"; onClicked: { if (daemon.recording) daemon.send("record.stop", {}); else daemon.startRecording(false); } }
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
                             visible: daemon.recording
@@ -277,9 +281,10 @@ Item {
                             Row {
                                 id: seg
                                 anchors.centerIn: parent
-                                IconButton { ts: root.ts; text: "General"; radius: root.round; active: daemon.settings.meeting_mode !== "interview" && !root.team; tooltipText: "General meeting"; onClicked: daemon.setSetting("meeting_mode", "general") }
+                                IconButton { ts: root.ts; text: "General"; radius: root.round; active: daemon.settings.meeting_mode !== "interview" && !root.team && !root.iv; tooltipText: "General meeting"; onClicked: daemon.setSetting("meeting_mode", "general") }
                                 IconButton { ts: root.ts; text: "Interview"; radius: root.round; active: daemon.settings.meeting_mode === "interview"; tooltipText: "Interview mode"; onClicked: daemon.setSetting("meeting_mode", "interview") }
                                 IconButton { ts: root.ts; text: "Team"; radius: root.round; active: root.team; tooltipText: "Team meeting: items and series"; onClicked: daemon.setSetting("meeting_mode", "team_meeting") }
+                                IconButton { ts: root.ts; text: "Interviewer"; radius: root.round; active: root.iv; tooltipText: "Interviewer: question bank and evidence notes for a candidate"; onClicked: daemon.setSetting("meeting_mode", "interviewer") }
                             }
                         }
                         IconButton { ts: root.ts; iconText: root.iCog; active: root.library; tooltipText: "Settings"; onClicked: { root.library = !root.library; lib.tab = "settings"; } }
@@ -295,6 +300,29 @@ Item {
                     text: daemon.connected ? daemon.lastError : "The nixarchy-meetingai daemon is not running."
                     color: Commons.Color.urgent
                     font.pixelSize: Style.font.caption * root.ts
+                }
+
+                Rectangle {   // consent: the daemon refused record.start until the candidate is told
+                    visible: daemon.consentPrompt !== ""
+                    width: parent.width
+                    height: ccol2.implicitHeight + root.padY * 2
+                    radius: root.round
+                    color: Qt.alpha(Commons.Color.foreground, 0.10)
+                    border.width: Style.normalBorderWidth
+                    border.color: Commons.Color.popups.border
+                    Column {
+                        id: ccol2
+                        x: root.padX; y: root.padY
+                        width: parent.width - root.padX * 2
+                        spacing: Style.space(6)
+                        Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: daemon.consentPrompt; color: Commons.Color.popups.text; font.pixelSize: Style.font.body * root.ts; font.bold: true }
+                        Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: daemon.cand && daemon.cand.candidate.local_only ? "Local-only is on: audio and text stay on this machine." : "Recommended: turn on Local-only in the Candidate tab so nothing leaves this machine."; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: Style.font.caption * root.ts }
+                        Row {
+                            spacing: Style.spacing.xs
+                            IconButton { ts: root.ts; iconText: root.iRecord; text: "Recording is announced \u2014 start"; bordered: true; tooltipText: "Start recording; the candidate has been told"; onClicked: daemon.startRecording(true) }
+                            IconButton { ts: root.ts; text: "Cancel"; bordered: true; tooltipText: "Do not record"; onClicked: daemon.consentPrompt = "" }
+                        }
+                    }
                 }
 
                 Library {
@@ -402,7 +430,7 @@ Item {
                         anchors.bottom: sugg.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
-                        height: root.team ? Math.min(nowWant, convo.avail * 0.35) : root.transcriptOpen ? Math.min(nowWant, convo.avail * 0.7) : Math.max(nowWant, convo.avail)
+                        height: root.panel ? Math.min(nowWant, convo.avail * 0.35) : root.transcriptOpen ? Math.min(nowWant, convo.avail * 0.7) : Math.max(nowWant, convo.avail)
                         readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.implicitHeight + nowCol.spacing * 2 + root.padY * 2
                         radius: root.round
                         color: Qt.alpha(Commons.Color.accent, 0.12)
@@ -465,12 +493,12 @@ Item {
                     // Team meeting: replaces NOW. Last time drawer, "Earlier task?" callout, items by kind.
                     Rectangle {
                         id: itemsPanel
-                        visible: root.team
+                        visible: root.panel
                         anchors.bottom: nowPanel.visible ? nowPanel.top : sugg.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
                         height: root.transcriptOpen ? Math.min(want, convo.avail * (nowPanel.visible ? 0.4 : 0.7)) : Math.max(want, convo.avail - (nowPanel.visible ? nowPanel.height + Style.spacing.md : 0))
-                        readonly property real want: icol.implicitHeight + root.padY * 2
+                        readonly property real want: (root.iv ? qcol : icol).implicitHeight + root.padY * 2
                         radius: root.round
                         color: Qt.alpha(Commons.Color.accent, 0.12)
                         Rectangle { width: Style.space(4); height: parent.height - root.round; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
@@ -478,10 +506,65 @@ Item {
                             x: root.padX; y: root.padY
                             width: parent.width - root.padX * 2
                             height: parent.height - root.padY * 2
-                            contentHeight: icol.implicitHeight
+                            contentHeight: (root.iv ? qcol : icol).implicitHeight
                             clip: true
+                            Column {   // Interviewer: the Question bank checklist
+                                id: qcol
+                                visible: root.iv
+                                width: parent.width
+                                spacing: Style.space(8)
+                                Text { textFormat: Text.PlainText; text: "Question bank" + (daemon.cand ? "  " + daemon.cand.questions.filter(function(q) { return q.status !== "planned"; }).length + "/" + daemon.cand.questions.length : ""); color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
+                                Text { visible: !daemon.cand || daemon.cand.questions.length === 0; textFormat: Text.PlainText; text: "No questions: pick a candidate and generate a bank in Settings, Candidate"; color: Commons.Color.popups.text; opacity: 0.6; font.italic: true; font.pixelSize: Style.font.body * root.ts }
+                                Repeater {
+                                    model: daemon.cand ? daemon.cand.questions : []
+                                    Column {
+                                        id: qrow
+                                        required property var modelData
+                                        width: qcol.width
+                                        spacing: Style.space(2)
+                                        Item {
+                                            width: parent.width
+                                            height: Math.max(Style.spacing.controlHeight, qtext.implicitHeight + Style.space(4))
+                                            Row {
+                                                id: qacts
+                                                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                                Repeater {
+                                                    model: root.qStatuses
+                                                    IconButton {
+                                                        required property var modelData
+                                                        ts: root.ts
+                                                        text: modelData.title
+                                                        active: qrow.modelData.status === modelData.status
+                                                        tooltipText: active ? "Back to planned" : "Mark " + modelData.status
+                                                        onClicked: daemon.updateQuestion(qrow.modelData.id, { status: active ? "planned" : modelData.status })
+                                                    }
+                                                }
+                                            }
+                                            Text {
+                                                id: qtext
+                                                anchors.left: parent.left; anchors.right: qacts.left; anchors.rightMargin: Style.spacing.md
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                textFormat: Text.PlainText
+                                                wrapMode: Text.Wrap
+                                                text: qrow.modelData.text
+                                                color: Commons.Color.popups.text
+                                                opacity: qrow.modelData.status === "planned" ? 1 : 0.6
+                                                font.pixelSize: Style.font.body * root.ts
+                                                font.strikeout: qrow.modelData.status === "skipped"
+                                            }
+                                        }
+                                        TextField {   // evidence note: what the candidate said; never generated
+                                            width: parent.width
+                                            placeholderText: "Evidence note"
+                                            text: String(qrow.modelData.note || "")
+                                            onEditingFinished: { if (text !== String(qrow.modelData.note || "")) daemon.updateQuestion(qrow.modelData.id, { note: text }); }
+                                        }
+                                    }
+                                }
+                            }
                             Column {
                                 id: icol
+                                visible: !root.iv
                                 width: parent.width
                                 spacing: Style.space(8)
                                 Row {
@@ -602,7 +685,7 @@ Item {
                     // Transcript and archived answers in one virtualized list (capped at 500 rows by Client).
                     Item {
                         visible: root.transcriptOpen
-                        anchors { top: tbar.bottom; left: parent.left; right: parent.right; bottom: root.team ? itemsPanel.top : nowPanel.top; bottomMargin: Style.spacing.md }
+                        anchors { top: tbar.bottom; left: parent.left; right: parent.right; bottom: root.panel ? itemsPanel.top : nowPanel.top; bottomMargin: Style.spacing.md }
                         ListView {
                             id: tlist
                             anchors { bottom: parent.bottom; left: parent.left; right: parent.right }

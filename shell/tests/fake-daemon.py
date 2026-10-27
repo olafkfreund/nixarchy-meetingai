@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
 
 --team is a team meeting in a series: items (with drafts), one earlier_item event, last_time. It runs on --live's paced stream.
+
+--interviewer is the interviewer-mode protocol: a candidate with documents and 8 questions in mixed statuses,
+record.start refused with consent_required until it carries consent:true, then a transcript and one probe (automatic answer).
 
 --live plays a paced meeting instead: recording on, words arriving as
 partials, a question from the other side, a streamed answer (with a link), 3 suggestions, levels events, and a
@@ -28,7 +31,8 @@ sock_path, log_path = sys.argv[1], sys.argv[2]
 auto = "--auto" in sys.argv
 k8s = "--k8s" in sys.argv
 team = "--team" in sys.argv
-live = "--live" in sys.argv or k8s or team
+iv = "--interviewer" in sys.argv
+live = "--live" in sys.argv or k8s or team or iv
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 state = {"recording": live, "since": int(time.time() * 1000) - 754_000 if live else 0, "mic": True, "system": True}
@@ -49,6 +53,7 @@ DATA = {
         {"key": "reduce_motion", "label": "Reduce motion", "value": False},
     ],
     "series.list": [],
+    "candidates.list": [],
     "items.list": [],
     "notes.get": {"text": "## Summary\nfake"},
 }
@@ -110,7 +115,24 @@ def profiles_cmd(cmd, a):
 
 
 if live:
-    settings["meeting_mode"] = "team_meeting" if team else "interview"
+    settings["meeting_mode"] = "team_meeting" if team else "interviewer" if iv else "interview"
+if iv:
+    state.update(recording=False, since=0, candidate="c1", consent=False)
+    CANDS = {"c1": {"row": {"id": "c1", "name": "Dana Whitfield", "local_only": False, "meeting_id": None, "created_at": "2026-10-27 09:00:00"},
+                    "docs": [{"id": "d1", "kind": "cv", "name": "dana-cv.pdf", "chars": 5210}, {"id": "d2", "kind": "job", "name": "staff-platform.md", "chars": 2380}],
+                    "qs": [{"id": "q%d" % n, "text": t, "source": src, "competency": c, "status": st, "note": note, "position": n}
+                           for n, (t, src, c, st, note) in enumerate([
+                               ("Walk me through the Kafka migration you led.", "Led the migration of 40 services to Kafka", "Technical depth", "covered", "Cut lag from 9 min to 40 s; owned the rollout plan."),
+                               ("What was your part in the on-call redesign?", "Redesigned the on-call rotation", "Ownership", "asked", ""),
+                               ("How did you decide what to leave out of the first release?", "Scoped the v1 release", "Prioritisation", "asked", "Dropped multi-region; shipped single-region first."),
+                               ("Tell me about a disagreement with another team.", "Worked across four product teams", "Collaboration", "skipped", ""),
+                               ("How do you measure the reliability of a platform?", "Defined SLOs for the ingestion platform", "Technical depth", "planned", ""),
+                               ("What did you mentor others on?", "Mentored three junior engineers", "Leadership", "planned", ""),
+                               ("Describe an incident you handled end to end.", "Incident commander for two sev-1 outages", "Ownership", "planned", ""),
+                               ("What would you change in this role's first 90 days?", "Own the platform roadmap", "Role fit", "planned", ""),
+                           ])]}}
+    DATA["candidates.list"] = [CANDS["c1"]["row"]]
+    DATA["items.list"] = []
 if team:
     state["series"] = "s1"
     state["meeting"] = "m2"
@@ -125,6 +147,54 @@ if team:
     DATA["last_time.get"] = {"meeting": "m1", "title": "Platform sync, 20 Oct", "started_at": "2026-10-20 10:00:00", "recap": "## Recap\nAgreed to **review the Kafka migration** this week.", "items": [{"id": "e1", "kind": "action", "text": "Write the migration runbook", "status": "open"}]}
 LOCK = threading.Lock()
 PROVIDER = {"provider": "claude-sub", "model": "haiku"}
+
+
+def iv_cmd(cmd, a):
+    """Returns (ok, data_or_error, candidate_to_announce) for candidate.*, candidates.* and questions.*."""
+    c = CANDS.get(a.get("id") or a.get("candidate"))
+    q = next((q for k in CANDS.values() for q in k["qs"] if q["id"] == a.get("id")), None)
+    if cmd == "candidate.create":
+        cid = "c%d" % (len(CANDS) + 1)
+        CANDS[cid] = {"row": {"id": cid, "name": a["name"], "local_only": False, "meeting_id": None, "created_at": "2026-10-27 11:00:00"}, "docs": [], "qs": []}
+        DATA["candidates.list"] = [k["row"] for k in CANDS.values()]
+        return True, CANDS[cid]["row"], None
+    if cmd == "candidates.list":
+        return True, DATA["candidates.list"], None
+    if c is None and cmd.startswith("candidate"):
+        return False, "no such candidate", None
+    if cmd == "candidate.get":
+        return True, {"candidate": c["row"], "documents": c["docs"], "questions": sorted(c["qs"], key=lambda x: x["position"])}, None
+    if cmd == "candidate.attach":
+        d = {"id": "d%d" % next_doc[0], "kind": a["kind"], "name": os.path.basename(a["path"]), "chars": 1000}
+        next_doc[0] += 1
+        c["docs"] = [x for x in c["docs"] if x["kind"] != a["kind"]] + [d]
+        return True, d, None
+    if cmd == "candidate.local_only":
+        c["row"]["local_only"] = a["on"]
+        return True, c["row"], None
+    if cmd == "candidates.delete":
+        del CANDS[a["id"]]
+        DATA["candidates.list"] = [k["row"] for k in CANDS.values()]
+        return True, {}, None
+    if cmd == "questions.generate":
+        return True, {"questions": c["qs"], "dropped": 2}, c["row"]["id"]
+    if cmd == "questions.add":
+        q = {"id": "q%d" % next_doc[0], "text": a["text"], "source": a.get("source", ""), "competency": a.get("competency"), "status": "planned", "note": "", "position": len(c["qs"])}
+        next_doc[0] += 1
+        c["qs"].append(q)
+        return True, q, c["row"]["id"]
+    owner = next((k for k in CANDS.values() if q in k["qs"]), None)
+    if cmd == "questions.update" and q:
+        q.update({k: v for k, v in a.items() if k != "id"})
+        return True, q, owner["row"]["id"]
+    if cmd == "questions.delete" and q:
+        owner["qs"].remove(q)
+        return True, {}, owner["row"]["id"]
+    if cmd == "questions.reorder":
+        for n, i in enumerate(a["ids"]):
+            next(x for x in c["qs"] if x["id"] == i)["position"] = n
+        return True, {}, c["row"]["id"]
+    return False, "bad request", None
 
 
 def log(line):
@@ -183,6 +253,8 @@ class Handler(socketserver.StreamRequestHandler):
             return self.stream_k8s()
         if team:
             return self.stream_team()
+        if iv:
+            return   # the call starts with record.start
         self.say("system", "Priya", "Thanks for joining. Can you walk us through how you would design the ingestion pipeline?", 740, 0.05)
         self.say("mic", "", "Sure. I would start with an event queue in front of the workers so producers never block.", 748, 0.05)
         self.say("system", "Priya", "Okay. And how would you handle a consumer that falls behind for an hour?", 756)
@@ -198,6 +270,18 @@ class Handler(socketserver.StreamRequestHandler):
         self.say("mic", "", "Good question. First I would make the lag visible", 766, 0.3)
         time.sleep(1.2)
         self.typed("What should I say?")
+
+    def stream_iv_call(self):
+        """After record.start: the candidate answers, then one automatic probe grounded in a quote."""
+        self.send({"event": "state", **state})
+        self.say("system", "Dana", "I led the Kafka migration, forty services over six months, and cut consumer lag from nine minutes to forty seconds.", 12, 0.02)
+        self.say("mic", "", "What was your part in the cutover itself?", 20, 0.02)
+        time.sleep(0.4)
+        self.send({"event": "answer.started", "turn": 1, "question": "", "automatic": True, **PROVIDER})
+        for chunk in ["**Probes**\n\n", "- \u201ccut consumer lag from nine minutes to forty seconds\u201d: what did you change to get that?\n", "- \u201cforty services over six months\u201d: how did you order the rollout?\n"]:
+            self.send({"event": "answer.delta", "turn": 1, "text": chunk, **PROVIDER})
+            time.sleep(0.1)
+        self.send({"event": "answer.done", "turn": 1, **PROVIDER})
 
     def stream_team(self):
         self.send({"event": "items.updated", "meeting": "m2"})
@@ -237,11 +321,28 @@ class Handler(socketserver.StreamRequestHandler):
             req = json.loads(raw)
             cmd = req["cmd"]
             log(cmd)
+            if cmd == "record.start" and iv and not (state["consent"] or req.get("args", {}).get("consent")):
+                self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed."})
+                continue
             if cmd == "record.start":
                 state.update(recording=True, since=int(time.time() * 1000))
+                if iv:
+                    state["consent"] = True
+                    threading.Thread(target=self.stream_iv_call, daemon=True).start()
             elif cmd == "record.stop":
                 state["recording"] = False
             data = state if cmd == "state.get" else settings if cmd == "settings.get" else DATA.get(cmd, {})
+            if iv and cmd.startswith(("candidate", "questions.")):
+                ok, data, announce = iv_cmd(cmd, req.get("args", {}))
+                self.send({"id": req["id"], "ok": ok, **({"data": data} if ok else {"error": data})})
+                if announce:
+                    self.send({"event": "questions.updated", "candidate": announce})
+                continue
+            if iv and cmd == "session.new":
+                state["candidate"] = req.get("args", {}).get("candidate")
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                self.send({"event": "state", **state})
+                continue
             if cmd.startswith(("profiles.", "prompts.")):
                 ok, data = profiles_cmd(cmd, req.get("args", {}))
                 self.send({"id": req["id"], "ok": ok, **({"data": data} if ok else {"error": data})})
