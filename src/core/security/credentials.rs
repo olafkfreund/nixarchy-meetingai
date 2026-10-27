@@ -89,6 +89,9 @@ impl Credential {
             if !matches!(url.scheme(), "http" | "https") {
                 return Err("Use an http:// or https:// endpoint.".into());
             }
+            if !crate::ai::providers::endpoint_allowed(&self.base_url) {
+                return Err("Plain http:// is only allowed for localhost; use https://.".into());
+            }
             if custom.auth != "none" && self.api_key.trim().is_empty() {
                 return Err("Enter an API key or choose no authentication.".into());
             }
@@ -113,15 +116,15 @@ impl Credential {
             }
         }
         let needs_key = ChatProvider::by_id(&self.provider)
-            .map(|provider| provider.requires_key())
+            .map(|provider| provider.requires_key)
             .unwrap_or(true);
         if needs_key && self.api_key.trim().is_empty() {
             return Err("Enter an API key.".to_owned());
         }
-        if !self.base_url.is_empty()
-            && !(self.base_url.starts_with("http://") || self.base_url.starts_with("https://"))
-        {
-            return Err("The custom endpoint must start with http:// or https://.".to_owned());
+        if !self.base_url.is_empty() && !crate::ai::providers::endpoint_allowed(&self.base_url) {
+            return Err(
+                "The custom endpoint must be https://, or http:// on localhost.".to_owned(),
+            );
         }
         Ok(())
     }
@@ -216,7 +219,8 @@ mod tests {
     use super::*;
 
     fn vault() -> Vault {
-        let dir = std::env::temp_dir().join(format!("nixarchy-meetingai-cred-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("nixarchy-meetingai-cred-{}", uuid::Uuid::new_v4()));
         Vault::open(dir).unwrap()
     }
 
@@ -233,7 +237,8 @@ mod tests {
 
     #[test]
     fn keys_are_never_stored_in_plaintext_in_settings_but_are_encrypted() {
-        let dir = std::env::temp_dir().join(format!("nixarchy-meetingai-cred2-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("nixarchy-meetingai-cred2-{}", uuid::Uuid::new_v4()));
         let vault = Vault::open(&dir).unwrap();
         save(&vault, &Credential::chat("gemini", "sk-secret-value")).unwrap();
         let bytes = std::fs::read(dir.join("vault.bin")).unwrap();
@@ -251,7 +256,7 @@ mod tests {
 
     #[test]
     fn retired_provider_is_rejected() {
-        assert!(Credential::chat("ollama", "key").validate().is_err());
+        assert!(Credential::chat("openai", "key").validate().is_err());
     }
 
     #[test]
@@ -267,6 +272,17 @@ mod tests {
         assert!(credential.validate().unwrap_err().contains("http"));
         credential.base_url = "http://localhost:1234/v1".into();
         assert!(credential.validate().is_ok());
+        credential.base_url = "http://[::1]:1234/v1".into();
+        assert!(credential.validate().is_ok());
+        credential.base_url = "http://example.com/v1".into();
+        assert!(credential.validate().is_err());
+        let mut custom = Credential::chat("custom-x", "k");
+        custom.custom = Some(Default::default());
+        custom.model = "m".into();
+        custom.base_url = "http://example.com/v1".into();
+        assert!(custom.validate().is_err());
+        custom.base_url = "http://127.0.0.1:1/v1".into();
+        assert!(custom.validate().is_ok());
     }
 
     #[test]
@@ -286,10 +302,10 @@ mod tests {
     fn removing_clears_only_that_provider() {
         let vault = vault();
         save(&vault, &Credential::chat("gemini", "a")).unwrap();
-        save(&vault, &Credential::chat("merge-gateway", "b")).unwrap();
+        save(&vault, &Credential::chat("ollama", "b")).unwrap();
         remove(&vault, Kind::Chat, "gemini").unwrap();
         assert!(load(&vault, Kind::Chat, "gemini").unwrap().is_none());
-        assert!(load(&vault, Kind::Chat, "merge-gateway").unwrap().is_some());
+        assert!(load(&vault, Kind::Chat, "ollama").unwrap().is_some());
     }
 
     #[test]
@@ -308,11 +324,11 @@ mod tests {
     }
 
     #[test]
-    fn gateway_models_are_selectable_and_blank_models_have_working_defaults() {
-        let config = Credential::chat("merge-gateway", "test-key").to_config();
-        assert_eq!(config.model, crate::ai::models::MERGE_MODEL);
+    fn models_are_selectable_and_blank_models_have_working_defaults() {
+        let config = Credential::chat("claude-sub", "").to_config();
+        assert_eq!(config.model, "sonnet");
         assert!(config.is_usable());
-        let mut credential = Credential::chat("merge-gateway", "test-key");
+        let mut credential = Credential::chat("ollama", "");
         credential.model = "some-other-model".into();
         assert!(credential.validate().is_ok());
         assert_eq!(

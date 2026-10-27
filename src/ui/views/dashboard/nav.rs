@@ -104,7 +104,7 @@ impl Route {
             Route::Settings => "Overlay, appearance, capture timing and startup preferences.",
             Route::Audio => "Devices, levels and speech-to-text providers.",
             Route::Shortcuts => "Keyboard combinations that work from anywhere.",
-            Route::DevSpace => "Gemini, Merge Gateway and Deepgram credentials.",
+            Route::DevSpace => "Gemini and Deepgram credentials.",
             Route::About => "A little help with what to say next.",
             Route::Profiles => "Reusable background for meetings and interviews.",
             Route::Responses => {

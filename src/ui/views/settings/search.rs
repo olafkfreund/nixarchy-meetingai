@@ -87,7 +87,7 @@ const INDEX: &[(Route, &str, &str)] = &[
     (
         Route::DevSpace,
         "AI providers",
-        "gemini merge gateway llm model api key credentials",
+        "gemini llm model api key credentials",
     ),
     (
         Route::DevSpace,

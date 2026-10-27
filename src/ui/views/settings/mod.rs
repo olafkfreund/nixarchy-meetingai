@@ -52,7 +52,6 @@ pub enum CaptureCheck {
 
 pub const KEY_PROVIDERS: &[(&str, &str)] = &[
     ("Gemini", "gemini"),
-    ("Merge Gateway", "merge-gateway"),
     ("Deepgram", "deepgram-stt"),
 ];
 
@@ -1565,12 +1564,12 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("nixarchy-meetingai-saved-model-key-{}", uuid::Uuid::new_v4()));
         let vault = crate::core::vault::Vault::open(&path).unwrap();
-        let mut saved = Credential::chat("merge-gateway", " saved-api-key ");
+        let mut saved = Credential::chat("gemini", " saved-api-key ");
         saved.model = "my-custom-model".into();
         saved.base_url = "http://127.0.0.1:1234/v1/chat/completions".into();
         credentials::save(&vault, &saved).unwrap();
         let mut state = SettingsState::with_vault(None, Some(vault));
-        assert_eq!(state.key_provider, "merge-gateway");
+        assert_eq!(state.key_provider, "gemini");
         assert!(state.key_input.is_empty());
         assert_eq!(state.key_model, "my-custom-model");
         let config = state.model_discovery_config().unwrap();
@@ -1583,7 +1582,7 @@ mod tests {
             "replacement-key"
         );
         assert_eq!(
-            credentials::load(state.vault.as_ref().unwrap(), Kind::Chat, "merge-gateway")
+            credentials::load(state.vault.as_ref().unwrap(), Kind::Chat, "gemini")
                 .unwrap()
                 .unwrap()
                 .api_key,
@@ -1591,7 +1590,7 @@ mod tests {
         );
         // A key for one service must never be reused for a different service.
         state.key_input.clear();
-        state.key_provider = "gemini".into();
+        state.key_provider = "deepgram-stt".into();
         assert!(state.model_discovery_config().is_err());
         std::fs::remove_dir_all(path).unwrap();
     }

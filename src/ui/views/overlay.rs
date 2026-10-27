@@ -4120,7 +4120,7 @@ impl Overlay {
                                     div()
                                         .text_size(scaled(11.5))
                                         .text_color(theme.foreground)
-                                        .child("Connect Deepgram for speech and Gemini or Merge Gateway for answers in Settings."),
+                                        .child("Connect Deepgram for speech and Gemini for answers in Settings."),
                                 ),
                         )
                         .child(
@@ -6601,21 +6601,21 @@ mod tests {
     fn selected_provider_and_model_back_the_actual_chat_request() {
         let (path, mut overlay) = fixture();
         let vault = overlay.services.vault.as_ref().as_ref().unwrap();
-        for id in ["gemini", "merge-gateway"] {
+        for id in ["gemini", "ollama"] {
             let mut credential = Credential::chat(id, "unit-test-placeholder");
             credential.model = crate::ai::models::default_for(id).unwrap().into();
             credentials::save(vault, &credential).unwrap();
         }
         overlay.refresh_configuration();
-        overlay.model_provider = Some("merge-gateway".into());
-        overlay.select_model(crate::ai::models::MERGE_MODEL);
+        overlay.model_provider = Some("ollama".into());
+        overlay.select_model("llama3.2");
         let config = overlay.selected_chat_config().unwrap();
-        assert_eq!(config.id, "merge-gateway");
-        assert_eq!(config.model, crate::ai::models::MERGE_MODEL);
+        assert_eq!(config.id, "ollama");
+        assert_eq!(config.model, "llama3.2");
         overlay.refresh_configuration();
         assert_eq!(
             overlay.selected_chat_config().unwrap().model,
-            crate::ai::models::MERGE_MODEL
+            "llama3.2"
         );
         std::fs::remove_dir_all(path).unwrap();
     }
