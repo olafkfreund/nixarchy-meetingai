@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live]
+
+--live plays a paced meeting instead: recording on, words arriving as
+partials, a question from the other side, a streamed answer, suggestions.
 
 Speaks the newline-delimited JSON protocol: replies to every request with
 {"id","ok":true,"data":...}, appends each received cmd to LOG_PATH, and
@@ -16,7 +19,8 @@ import time
 
 sock_path, log_path = sys.argv[1], sys.argv[2]
 auto = "--auto" in sys.argv
-state = {"recording": False, "since": 0, "mic": True, "system": True}
+live = "--live" in sys.argv
+state = {"recording": live, "since": int(time.time() * 1000) - 754_000 if live else 0, "mic": True, "system": True}
 settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "ollama", "chat_model": "llama3", "response_pace": "Balanced"}
 DATA = {
     "providers.list": [{"id": "ollama", "name": "Ollama", "requires_key": False, "has_key": False}],
@@ -31,6 +35,8 @@ DATA = {
     "prompts.get": {"text": "fake prompt"},
     "notes.get": {"text": "## Summary\nfake"},
 }
+if live:
+    settings["meeting_mode"] = "interview"
 LOCK = threading.Lock()
 
 
@@ -65,6 +71,30 @@ class Handler(socketserver.StreamRequestHandler):
         self.send({"event": "answer.done", "turn": 1})
         self.send({"event": "suggestion", "text": "Who owns it?"})
 
+    def say(self, who, speaker, text, t0, pace=0.12):
+        words = text.split()
+        for n in range(1, len(words)):
+            self.send({"event": "transcript.partial", "who": who, "speaker": speaker, "text": " ".join(words[:n]), "t0": t0, "t1": t0 + n * 0.4})
+            time.sleep(pace)
+        self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": t0, "t1": t0 + len(words) * 0.4})
+
+    def stream_live(self):
+        time.sleep(0.3)
+        self.send({"event": "settings", "settings": settings})
+        self.send({"event": "state", **state})
+        self.say("system", "Priya", "Thanks for joining. Can you walk us through how you would design the ingestion pipeline?", 740, 0.05)
+        self.say("mic", "", "Sure. I would start with an event queue in front of the workers so producers never block.", 748, 0.05)
+        self.say("system", "Priya", "Okay. And how would you handle a consumer that falls behind for an hour?", 756)
+        time.sleep(0.6)  # Balanced pacing: answer after the question settles
+        answer = ["**Talking points**\n\n", "- Lag is visible: alert on ", "consumer lag, not CPU.\n", "- Scale out consumers ", "per partition; ", "the queue keeps ", "ordering per key.\n", "- If it is a poison message, ", "park it in a ", "dead-letter queue and move on.\n\n", "*Mention:* you did this at your last job ", "with Kafka lag alerts."]
+        for chunk in answer:
+            self.send({"event": "answer.delta", "turn": 1, "text": chunk})
+            time.sleep(0.25)
+        self.send({"event": "answer.done", "turn": 1})
+        for s in ["Give a concrete lag number", "Ask how they monitor today", "Explain back-pressure"]:
+            self.send({"event": "suggestion", "text": s})
+        self.say("mic", "", "Good question. First I would make the lag visible", 766, 0.3)
+
     def handle(self):
         for raw in self.rfile:
             req = json.loads(raw)
@@ -83,7 +113,7 @@ class Handler(socketserver.StreamRequestHandler):
                 self.send({"event": "session.reset"})
                 self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})
             if cmd == "state.get":
-                threading.Thread(target=self.stream, daemon=True).start()
+                threading.Thread(target=self.stream_live if live else self.stream, daemon=True).start()
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
