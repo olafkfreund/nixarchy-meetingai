@@ -863,3 +863,29 @@ No colored icons or emoji anywhere in the UI.
      schema column or table, and tests for the budget and the ordering.
 4. **Prompts tab:** a one-line explanation under each kind (answer /
    follow_up / recap) and a "Reset to default" button.
+5. **Live answers you can glance at** (owner approved 2026-10-27). Automatic
+   answers (`automatic=true`) use a new editable prompt kind `live_answer`
+   per mode, with the default:
+   - one **bold** sentence the user can say first, then 3–4 short bullet
+     talking points
+   - about 80 words or fewer, no preamble
+   - grounded in the profile and documents; never invented experience
+
+   Automatic turns use `ResponseLength::Short`. Typed questions keep the
+   `answer` prompt and the user's length setting. Test: an automatic turn's
+   prompt contains the `live_answer` text and the Short instruction; a
+   typed turn does not.
+
+Round 5 protocol (daemon and shell must agree):
+- settings `overlay_x`, `overlay_y`, `overlay_w`, `overlay_h` (int; -1
+  means the default, centred)
+- `profiles.list` returns `[{name, selected, personal_context,
+  meeting_context, documents:[{id, name, chars}]}]`
+- `profiles.save{name, personal_context?, meeting_context?}`
+  (create/update), `profiles.select{name}`,
+  `profiles.rename{name, new_name}`, `profiles.delete{name}`
+- `profiles.attach{name, path}` imports through `core::context::import`
+  (PDF, text or markdown; existing size limits) and stores the text in the
+  encrypted database; `profiles.detach{name, id}`
+- `prompts.reset{mode, kind}`; kinds are `answer`, `live_answer`,
+  `follow_up` and `recap`
