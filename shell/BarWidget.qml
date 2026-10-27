@@ -1,9 +1,10 @@
 pragma ComponentBehavior: Bound
 // qmllint disable missing-property
+// ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
-import qs.Commons // qmllint disable import
-import qs.Commons as Commons // qmllint disable import
-import qs.Ui // qmllint disable import
+import qs.Commons
+import qs.Commons as Commons
+import qs.Ui
 
 // Meeting AI bar indicator: a dot and timer while recording. Click opens a
 // small menu (New / Restore / Quit); Quit asks for confirmation.

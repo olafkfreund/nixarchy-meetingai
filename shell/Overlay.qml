@@ -1,12 +1,13 @@
 pragma ComponentBehavior: Bound
 // qmllint disable missing-property
+// ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
 import QtQuick.Controls
 import Quickshell
 import Quickshell.Wayland
-import qs.Commons // qmllint disable import
-import qs.Commons as Commons // qmllint disable import
-import qs.Ui // qmllint disable import
+import qs.Commons
+import qs.Commons as Commons
+import qs.Ui
 
 // Meeting AI overlay: transcript, streamed answer, follow-ups, selectors and
 // the question box. `omarchy-shell meetingai toggle` opens it.
@@ -23,6 +24,8 @@ Item {
     property var asked: null   // last sent question: { text, chips }
 
     readonly property string pluginId: String((root.manifest && root.manifest.id) || "nixarchy.meetingai")
+    // popups.background carries the theme alpha; the overlay must not show what is behind it.
+    readonly property color solid: Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 1)
     readonly property var paces: ["Fast", "Balanced", "Relaxed"]
 
     Client { id: daemon }
@@ -34,7 +37,7 @@ Item {
     }
 
     // Hooks for tests/shots.sh.
-    function openModelPicker() { modelBox.open(); }
+    function openModelPicker() { modelBox.open(); customModel.text = "my-custom-model"; }
     function showLibrary(tab) { modelBox.close(); root.library = true; lib.tab = tab; }
 
     function close() {
@@ -84,8 +87,8 @@ Item {
             width: Math.min(parent.width - Style.space(80), Style.space(900))
             height: Math.min(parent.height - Style.space(80), Style.space(760))
             radius: Style.cornerRadius
-            color: Commons.Color.menu.background
-            border.color: Commons.Color.menu.border
+            color: root.solid
+            border.color: Commons.Color.popups.border
             border.width: Style.normalBorderWidth
             focus: true
             Keys.onEscapePressed: root.close()
@@ -111,7 +114,8 @@ Item {
                     Button { text: "Library"; active: root.library; onClicked: root.library = !root.library }
                     Button { text: "Close"; onClicked: root.close() }
                 }
-                Row {
+                Flow {
+                    width: parent.width
                     spacing: Style.spacing.md
                     Dropdown {
                         label: "Provider"
@@ -124,7 +128,18 @@ Item {
                         label: "Model"
                         value: String(daemon.settings.chat_model || "")
                         options: root.models.map(function(m) { return String(m); })
+                        triggerLabel: "default"
                         onChanged: function(v) { daemon.setSetting("chat_model", v); }
+                    }
+                    Item {
+                        width: Style.space(200); height: modelBox.height
+                        TextField {   // a model id the list does not have
+                            id: customModel
+                            anchors.bottom: parent.bottom
+                            width: parent.width
+                            placeholderText: "or type a model id"
+                            onAccepted: { if (text.trim() !== "") daemon.setSetting("chat_model", text.trim()); text = ""; }
+                        }
                     }
                     Dropdown {
                         label: "Pace"
@@ -132,17 +147,21 @@ Item {
                         options: root.paces
                         onChanged: function(v) { daemon.setSetting("response_pace", v); }
                     }
-                    Row {
-                        spacing: Style.spacing.xs
-                        anchors.bottom: parent.bottom
-                        height: Style.spacing.controlHeight
-                        ToggleSwitch { id: noContext; anchors.verticalCenter: parent.verticalCenter; onToggled: checked = !checked }
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            textFormat: Text.PlainText
-                            text: "No context"
-                            color: Commons.Color.menu.text
-                            font.pixelSize: Style.font.caption
+                    Item {
+                        width: ncRow.width; height: modelBox.height
+                        Row {
+                            id: ncRow
+                            anchors.bottom: parent.bottom
+                            height: Style.spacing.controlHeight
+                            spacing: Style.spacing.xs
+                            ToggleSwitch { id: noContext; anchors.verticalCenter: parent.verticalCenter; onToggled: checked = !checked }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                textFormat: Text.PlainText
+                                text: "No context"
+                                color: Commons.Color.popups.text
+                                font.pixelSize: Style.font.caption
+                            }
                         }
                     }
                 }
@@ -166,26 +185,33 @@ Item {
                     height: parent.height - y
                 }
 
-                // Transcript: mic and system are visually distinct.
+                // Transcript and answers in one virtualized list (capped at 500 rows
+                // by Client): mic right and accent, system left, answers markdown.
                 ListView {
                     id: tlist
                     visible: !root.library
                     width: parent.width
-                    height: (parent.height - y) * 0.4
+                    height: Math.max(0, parent.height - y - (askedRow.visible ? askedRow.height : 0) - sugg.height - composer.height - Style.spacing.md * 3)
                     clip: true
+                    spacing: Style.spacing.sm
                     model: daemon.transcript
-                    onCountChanged: positionViewAtEnd()
+                    property bool follow: true
+                    onContentHeightChanged: if (follow) Qt.callLater(positionViewAtEnd)
+                    onMovementEnded: follow = atYEnd
                     delegate: Text {
                         required property string who
                         required property string speaker
                         required property string body
                         required property bool partial
                         width: ListView.view.width
-                        textFormat: Text.PlainText
+                        textFormat: who === "answer" ? Text.MarkdownText : Text.PlainText
                         wrapMode: Text.Wrap
                         horizontalAlignment: who === "mic" ? Text.AlignRight : Text.AlignLeft
-                        text: (speaker !== "" ? speaker + ": " : (who === "mic" ? "You: " : "")) + body
-                        color: who === "mic" ? Commons.Color.accent : Commons.Color.menu.text
+                        text: who === "answer" || who === "error" ? body
+                            : (speaker !== "" ? speaker + ": " : (who === "mic" ? "You: " : "")) + body
+                        color: who === "mic" ? Commons.Color.accent
+                            : who === "error" ? Commons.Color.urgent
+                            : who === "system" ? Qt.darker(Commons.Color.popups.text, 1.3) : Commons.Color.popups.text
                         opacity: partial ? 0.55 : 1
                         font.italic: partial
                         font.pixelSize: Style.font.body
@@ -194,12 +220,13 @@ Item {
 
                 // The sent question; its attachments reopen a preview.
                 Row {
+                    id: askedRow
                     visible: !root.library && root.asked !== null
                     spacing: Style.spacing.xs
                     Text {
                         textFormat: Text.PlainText
                         text: root.asked ? "Q: " + root.asked.text : ""
-                        color: Commons.Color.menu.text
+                        color: Commons.Color.popups.text
                         font.pixelSize: Style.font.caption
                         elide: Text.ElideRight
                         width: Math.min(implicitWidth, Style.space(500))
@@ -207,20 +234,6 @@ Item {
                     Repeater {
                         model: root.asked ? root.asked.chips : []
                         Button { required property var modelData; text: modelData.label; bordered: true; onClicked: root.openRef(modelData) }
-                    }
-                }
-
-                ScrollView {
-                    visible: !root.library
-                    width: parent.width
-                    height: (parent.height - y) - composer.height - sugg.height - Style.spacing.md * 2
-                    Text {
-                        width: card.width - Style.spacing.lg * 2
-                        textFormat: Text.MarkdownText
-                        wrapMode: Text.Wrap
-                        text: daemon.answerError !== "" ? daemon.answerError : daemon.answer
-                        color: daemon.answerError !== "" ? Commons.Color.urgent : Commons.Color.menu.text
-                        font.pixelSize: Style.font.body
                     }
                 }
 
@@ -249,8 +262,8 @@ Item {
                 visible: root.previewText !== ""
                 anchors.fill: parent
                 anchors.margins: Style.space(40)
-                color: Commons.Color.menu.background
-                border.color: Commons.Color.menu.border
+                color: root.solid
+                border.color: Commons.Color.popups.border
                 border.width: Style.normalBorderWidth
                 radius: Style.cornerRadius
                 ScrollView {
@@ -261,7 +274,7 @@ Item {
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                         text: root.previewText
-                        color: Commons.Color.menu.text
+                        color: Commons.Color.popups.text
                         font.pixelSize: Style.font.body
                     }
                 }
