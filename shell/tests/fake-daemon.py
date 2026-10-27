@@ -23,16 +23,21 @@ sock_path, log_path = sys.argv[1], sys.argv[2]
 auto = "--auto" in sys.argv
 live = "--live" in sys.argv
 state = {"recording": live, "since": int(time.time() * 1000) - 754_000 if live else 0, "mic": True, "system": True}
-settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "ollama", "chat_model": "llama3", "response_pace": "Balanced"}
+settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced"}
 DATA = {
-    "providers.list": [{"id": "ollama", "name": "Ollama", "requires_key": False, "has_key": False}],
-    "models.list": ["llama3", "qwen3"],
+    # Mirrors the real daemon's defaults: frontier first, local last.
+    "providers.list": [
+        {"id": "claude-sub", "name": "Claude (subscription)", "requires_key": False, "has_key": False},
+        {"id": "codex-sub", "name": "ChatGPT / Codex (subscription)", "requires_key": False, "has_key": False},
+        {"id": "gemini", "name": "Google Gemini", "requires_key": True, "has_key": True},
+        {"id": "ollama", "name": "Ollama (local)", "requires_key": False, "has_key": False},
+    ],
+    "models.list": ["sonnet", "opus", "haiku"],
     "session.list": [{"id": 1, "kind": "meeting", "title": "Fake standup"}],
     "profiles.list": [],
     "settings.search": [
         {"key": "auto_record_on_call", "label": "Take notes automatically when a call starts", "value": auto},
         {"key": "reduce_motion", "label": "Reduce motion", "value": False},
-        {"key": "chat_model", "label": "Chat model", "value": "llama3"},
     ],
     "prompts.get": {"text": "fake prompt"},
     "notes.get": {"text": "## Summary\nfake"},
