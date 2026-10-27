@@ -18,7 +18,7 @@ Item {
     required property bool open
     signal toggled()
 
-    readonly property real barHeight: tbar.height
+    readonly property real barHeight: tbar.height + (hint.visible ? hint.height + Style.spacing.md : 0)   // the toggle, and the hint while there is nothing to list
     readonly property string iDown: String.fromCodePoint(0xf0140)
     readonly property string iRight: String.fromCodePoint(0xf0142)
 
@@ -28,13 +28,14 @@ Item {
         IconButton { ts: root.theme.ts; iconText: root.open ? root.iDown : root.iRight; text: "Transcript"; tooltipText: root.open ? "Collapse the transcript" : "Expand the transcript"; onClicked: root.toggled() }
     }
 
-    UiText {   // nothing yet: one line, not an empty box
+    UiText {   // nothing yet: one line under the toggle, and NOW moves up to it
+        id: hint
         visible: root.open && root.daemon.transcript.count === 0
-        anchors { left: parent.left; right: parent.right; bottom: parent.bottom; bottomMargin: Style.spacing.md }
+        anchors { left: parent.left; right: parent.right; top: tbar.bottom; topMargin: Style.spacing.xs }
         textFormat: Text.PlainText
         text: root.daemon.recording ? "Listening for speech\u2026" : "Press record to start"
         color: Commons.Color.popups.text
-        opacity: 0.6
+        opacity: root.theme.dim
         font.italic: true
         font.pixelSize: root.theme.bodySmall
     }
@@ -85,7 +86,7 @@ Item {
                         x: root.theme.padX * 0.75; y: root.theme.padY * 0.75
                         width: parent.width - root.theme.padX * 1.5
                         spacing: Style.space(3)
-                        UiText { id: blabel; textFormat: Text.PlainText; text: row.label; color: Commons.Color.popups.text; opacity: 0.75; font.pixelSize: root.theme.caption; font.bold: true }
+                        UiText { id: blabel; textFormat: Text.PlainText; text: row.label; color: Commons.Color.popups.text; opacity: root.theme.dim; font.pixelSize: root.theme.caption; font.bold: true }
                         UiText {
                             id: btxt
                             width: parent.width
@@ -114,7 +115,7 @@ Item {
                         spacing: Style.space(4)
                         RowLayout {
                             width: parent.width
-                            UiText { Layout.fillWidth: true; textFormat: Text.PlainText; text: "Suggested answer"; color: Commons.Color.popups.text; opacity: 0.75; font.pixelSize: root.theme.caption; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
+                            UiText { Layout.fillWidth: true; textFormat: Text.PlainText; text: "Suggested answer"; color: Commons.Color.popups.text; opacity: root.theme.dim; font.pixelSize: root.theme.caption; font.bold: true; }
                             IconButton { objectName: "answerToggle"; ts: root.theme.ts; visible: row.expanded || ansText.truncated; text: row.expanded ? "Hide" : "Show"; tooltipText: row.expanded ? "Collapse the answer" : "Show the whole answer"; onClicked: row.expanded = !row.expanded }
                         }
                         UiText {
@@ -124,6 +125,7 @@ Item {
                             textFormat: row.expanded ? Text.MarkdownText : Text.PlainText
                             wrapMode: Text.Wrap
                             maximumLineCount: row.expanded ? 100000 : 2
+                            mayCut: !row.expanded   // folded to two lines; Show opens it
                             elide: row.expanded ? Text.ElideNone : Text.ElideRight
                             text: row.expanded ? root.themedLinks(row.body) : String(row.body).replace(/\*+|__|`/g, "").replace(/^#+\s*/gm, "").replace(/^\s*[-*]\s+/gm, "\u2022 ").replace(/\s*\n+\s*/g, "  ")
                             color: Commons.Color.popups.text
@@ -140,9 +142,9 @@ Item {
                     width: parent.width
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
-                    text: row.body
-                    color: row.who === "error" ? Commons.Color.urgent : Commons.Color.popups.text
-                    opacity: row.who === "notice" ? 0.6 : 1
+                    text: row.who === "error" ? "Error: " + row.body : row.body
+                    color: Commons.Color.popups.text
+                    opacity: row.who === "notice" ? root.theme.dim : 1
                     font.italic: row.who === "notice"
                     font.pixelSize: (row.who === "notice" ? Style.font.caption : Style.font.bodySmall) * root.theme.ts
                 }

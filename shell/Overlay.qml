@@ -34,6 +34,8 @@ Item {
     property bool noContext: false
     property real now: Date.now()
     property bool transcriptOpen: true
+    readonly property bool tList: root.transcriptOpen && backend.transcript.count > 0   // an empty or collapsed transcript gives its room to NOW
+    readonly property bool tEmpty: root.transcriptOpen && backend.transcript.count === 0 && !root.panel   // nothing to list: NOW sits right under the hint line
     readonly property string status: backend.answering ? "Writing" : backend.now.error ? "Failed" : backend.now.body !== "" ? "Ready" : "Listening"
 
     readonly property string pluginId: String((root.manifest && root.manifest.id) || "nixarchy.meetingai")
@@ -150,12 +152,45 @@ Item {
         backend.setSetting("text_scale", delta === 0 ? 100 : Math.max(80, Math.min(160, cur + delta)));
     }
 
+    // Each model list belongs to the provider picked above it. A reply for a provider that is no longer
+    // picked is dropped; a failed list clears the dropdown and shows the error with the fix.
+    readonly property string chatProvider: String(backend.settings.chat_provider || "")
+    readonly property string liveProvider: String(backend.settings.live_provider || "")
+    property string resetChat: ""   // set by setProvider: when this provider's list arrives, its first model replaces the old model
+    property string resetLive: ""   // (a provider, not a flag: a settings echo can flip the provider back and forth before the list arrives)
+    property string modelsError: ""
+    property string liveModelsError: ""
+    property var pstatus: ({})   // providers.status by id, for the fix shown under a failed list
+    onChatProviderChanged: root.loadModelList(false, true)
+    onLiveProviderChanged: root.loadModelList(true, true)
+
     function loadModels() {
         backend.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
-        var p = backend.settings.chat_provider;
-        if (p) backend.send("models.list", { provider: p }, function(r) { if (r.ok) root.models = r.data || []; });
-        var lp = backend.settings.live_provider;
-        if (lp) backend.send("models.list", { provider: lp }, function(r) { if (r.ok) root.liveModels = r.data || []; });
+        root.loadModelList(false, false);
+        root.loadModelList(true, false);
+    }
+    function loadModelList(live, clear) {
+        var p = live ? root.liveProvider : root.chatProvider;
+        if (clear) { if (live) { root.liveModels = []; root.liveModelsError = ""; } else { root.models = []; root.modelsError = ""; } }
+        if (p === "") return;
+        backend.send("models.list", { provider: p }, function(r) {
+            if ((live ? root.liveProvider : root.chatProvider) !== p || (r.provider !== undefined && r.provider !== p)) return;
+            var list = r.ok ? (r.data || []).map(String) : [], err = r.ok ? "" : String(r.error || "request failed"), reset = (live ? root.resetLive : root.resetChat) === p;
+            if (reset) { if (live) root.resetLive = ""; else root.resetChat = ""; }
+            if (live) { root.liveModels = list; root.liveModelsError = err; } else { root.models = list; root.modelsError = err; }
+            if (!r.ok) backend.send("providers.status", {}, function(s) { if (s.ok) { var m = {}; (s.data || []).forEach(function(row) { m[row.id] = row; }); root.pstatus = m; } });
+            else if (reset && list.length > 0) backend.setSetting(live ? "live_model" : "chat_model", list[0]);
+        });
+    }
+    function fix(id) { var s = root.pstatus[id]; return s && s.state !== "ready" && s.login ? " Fix: " + s.login + "." : ""; }
+    function setProvider(live, id) {   // the provider pickers, and tests/harness-providers.qml
+        if (id === (live ? root.liveProvider : root.chatProvider)) return;
+        if (live) root.resetLive = id; else root.resetChat = id;
+        backend.setSetting(live ? "live_provider" : "chat_provider", id);
+        backend.setSetting(live ? "live_model" : "chat_model", "");
+    }
+    function providerDump() {   // tests/harness-providers.qml
+        return JSON.stringify({ chat: root.chatProvider, models: root.models, error: root.modelsError, fix: root.fix(root.chatProvider), model: String(backend.settings.chat_model || ""), live: root.liveProvider, liveModels: root.liveModels, liveError: root.liveModelsError, liveModel: String(backend.settings.live_model || "") });
     }
 
     function submit(text, chips) {
@@ -177,7 +212,6 @@ Item {
     Connections {
         target: backend
         function onConnectedChanged() { if (backend.connected) root.loadModels(); }
-        function onSettingsChanged() { if (root.models.length === 0 || root.liveModels.length === 0) root.loadModels(); }
     }
 
     PanelWindow { // qmllint disable uncreatable-type
@@ -252,8 +286,8 @@ Item {
                     width: parent.width
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
-                    text: "Not connected to the Meeting AI daemon. Retrying."
-                    color: Commons.Color.urgent
+                    text: "Error: not connected to the Meeting AI daemon. Retrying."
+                    color: Commons.Color.popups.text
                     font.pixelSize: metrics.caption
                 }
 
@@ -323,8 +357,6 @@ Item {
                             color: Commons.Color.popups.text
                             font.pixelSize: metrics.caption
                             font.bold: true
-                            font.capitalization: Font.SmallCaps
-                            font.letterSpacing: 1.5
                             bottomPadding: Style.spacing.xs
                         }
                         Repeater {
@@ -372,6 +404,7 @@ Item {
                                     wrapMode: Text.Wrap
                                     maximumLineCount: 2
                                     elide: Text.ElideRight
+                                    mayCut: true
                                     text: srow.modelData
                                     color: Commons.Color.popups.text
                                     font.pixelSize: metrics.subtitle
@@ -393,9 +426,9 @@ Item {
                         // Team mode: only for a typed question, above the items.
                         visible: !root.team || (backend.now.turn >= 0 && !backend.now.automatic)
                         anchors.bottom: sugg.top
-                        anchors.bottomMargin: Style.spacing.md
+                        anchors.bottomMargin: root.tEmpty ? Style.spacing.md + convo.avail - height : Style.spacing.md   // nothing to list: rise to the hint line
                         width: parent.width
-                        height: root.panel ? Math.min(nowWant, convo.avail * 0.35) : root.transcriptOpen ? Math.min(nowWant, convo.avail * 0.7) : Math.max(nowWant, convo.avail)
+                        height: root.panel ? Math.min(nowWant, convo.avail * 0.35) : root.tEmpty ? Math.min(nowWant, convo.avail) : root.tList ? Math.min(nowWant, convo.avail * 0.7) : convo.avail
                     }
 
                     // Team meeting: replaces NOW. Last time drawer, "Earlier task?" callout, items by kind.
@@ -413,7 +446,7 @@ Item {
                         anchors.bottom: nowPanel.visible ? nowPanel.top : sugg.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
-                        height: root.transcriptOpen ? Math.min(want, convo.avail * (nowPanel.visible ? 0.4 : 0.7)) : Math.max(want, convo.avail - (nowPanel.visible ? nowPanel.height + Style.spacing.md : 0))
+                        height: root.tList ? Math.min(want, convo.avail * (nowPanel.visible ? 0.4 : 0.7)) : Math.max(0, convo.avail - (nowPanel.visible ? nowPanel.height + Style.spacing.md : 0))
                     }
 
                     Transcript {
@@ -425,17 +458,20 @@ Item {
                         onToggled: root.transcriptOpen = !root.transcriptOpen
                         anchors.top: parent.top
                         width: parent.width
-                        height: (root.panel ? itemsPanel : nowPanel).y
+                        height: root.tEmpty ? barHeight : (root.panel ? itemsPanel : nowPanel).y
                     }
                 }
             }
 
             Component {   // top of the Library's Settings tab: captioned cells, one control tall each
                 id: settingsControls
+                Column {   // the cells, then why a model list is empty
+                    id: scol
+                    width: parent ? parent.width : 0
                 Flow {
                     id: sflow
                     readonly property real cellW: Math.round(Style.space(240) * metrics.ts)
-                    width: parent ? parent.width : 0
+                    width: scol.width
                     spacing: metrics.gap
                     bottomPadding: metrics.gap
                     Cell {
@@ -446,7 +482,7 @@ Item {
                             theme: metrics; anchors.fill: parent
                             value: String(backend.settings.chat_provider || "")
                             options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
-                            onChanged: function(v) { backend.setSetting("chat_provider", v); backend.setSetting("chat_model", ""); root.loadModels(); }
+                            onChanged: function(v) { root.setProvider(false, v); }
                         }
                     }
                     Cell {
@@ -481,7 +517,7 @@ Item {
                             theme: metrics; anchors.fill: parent
                             value: String(backend.settings.live_provider || "")
                             options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
-                            onChanged: function(v) { backend.setSetting("live_provider", v); backend.setSetting("live_model", ""); root.loadModels(); }
+                            onChanged: function(v) { root.setProvider(true, v); }
                         }
                     }
                     Cell {
@@ -512,17 +548,19 @@ Item {
                         theme: metrics; width: sflow.cellW; label: "No context"
                         RowLayout {
                             anchors.fill: parent
-                            Check { objectName: "noContext"; accessibleName: "No context"; Layout.alignment: Qt.AlignVCenter; checked: root.noContext; onToggled: root.noContext = !root.noContext }
+                            Check { objectName: "noContext"; ts: metrics.ts; accessibleName: "No context"; Layout.alignment: Qt.AlignVCenter; checked: root.noContext; onToggled: root.noContext = !root.noContext }
                         }
                     }
                     Cell {   // overlay text size, 80..160 % (Ctrl+= / Ctrl+- / Ctrl+0)
                         theme: metrics; width: sflow.cellW; label: "Text size " + Math.round(backend.textScale * 100) + "%"
                         PanelSlider {
                             objectName: "textSize"
-                            Accessible.role: Accessible.Slider; Accessible.name: "Text size"
+                            Accessible.role: Accessible.Slider; Accessible.name: "Text size"; property string accName: "Text size"
                             anchors.verticalCenter: parent.verticalCenter
                             width: parent.width
                             minimum: 80; maximum: 160; step: 10; integer: true
+                            trackHeight: Math.max(4, Math.round(Style.spacing.controlHeight * 0.11 * metrics.ts))
+                            knobSize: Math.max(14, Math.round(Style.spacing.controlHeight * 0.38 * metrics.ts))
                             value: Math.round(backend.textScale * 100)
                             trackColor: Qt.alpha(Commons.Color.popups.text, 0.2)
                             fillColor: Commons.Color.popups.text
@@ -530,6 +568,9 @@ Item {
                             onMoved: function(v) { var n = Math.round(v / 10) * 10; if (n !== Math.round(backend.textScale * 100)) backend.setSetting("text_scale", n); }
                         }
                     }
+                }
+                UiText { visible: root.modelsError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Error: could not list chat models. " + root.modelsError + root.fix(root.chatProvider); color: Commons.Color.popups.text; font.pixelSize: metrics.caption }
+                UiText { visible: root.liveModelsError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Error: could not list live answer models. " + root.liveModelsError + root.fix(root.liveProvider); color: Commons.Color.popups.text; font.pixelSize: metrics.caption }
                 }
             }
 

@@ -4,7 +4,6 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import Quickshell.Io
-import qs.Commons
 import qs.Commons as Commons
 
 // First run: what stands between the user and a working overlay, one next step each.
@@ -34,30 +33,15 @@ Rectangle {
     Accessible.role: Accessible.Pane
     Accessible.name: "Set up Meeting AI"
 
-    Process { id: starter; command: ["systemctl", "--user", "start", "nixarchy-meetingai"] }
-
-    component Title: UiText { textFormat: Text.PlainText; color: Commons.Color.popups.text; font.pixelSize: root.theme.body; font.bold: true }
-    component Body: UiText { Layout.fillWidth: true; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: root.theme.caption }
-    component Command: RowLayout {   // a command to copy, and the button that copies it
-        id: cmdRow
-        property string cmd
-        Layout.fillWidth: true
-        spacing: root.theme.gap
-        TextInput {
-            id: field
-            Layout.fillWidth: true
-            Layout.alignment: Qt.AlignVCenter
-            readOnly: true
-            selectByMouse: true
-            text: cmdRow.cmd
-            color: Commons.Color.popups.text
-            font.family: Style.font.family
-            font.pixelSize: root.theme.caption
-            Accessible.name: "Command: " + cmdRow.cmd
-        }
-        IconButton { objectName: "copy"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Copy"; bordered: true; tooltipText: "Copy the command"; onClicked: { field.selectAll(); field.copy(); field.deselect(); } }
+    property bool startFailed: false
+    Process {
+        id: starter
+        command: ["systemctl", "--user", "start", "nixarchy-meetingai"]
+        onExited: function(code) { root.startFailed = code !== 0; }
     }
 
+    component Title: UiText { textFormat: Text.PlainText; color: Commons.Color.popups.text; font.pixelSize: root.theme.body; font.bold: true }
+    component Body: UiText { Layout.fillWidth: true; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.popups.text; opacity: root.theme.dim; font.pixelSize: root.theme.caption }
     Column {
         id: col
         x: root.theme.padX; y: root.theme.padY
@@ -75,8 +59,9 @@ Rectangle {
             spacing: root.theme.gap / 2
             Title { text: "Start the service" }
             Body { text: "The Meeting AI daemon is not running. Start it, or run the command in a terminal." }
-            Command { cmd: root.startCmd }
-            RowLayout { IconButton { objectName: "startService"; ts: root.theme.ts; text: "Start the service"; bordered: true; onClicked: starter.running = true } }
+            CommandRow { theme: root.theme; cmd: root.startCmd }
+            RowLayout { IconButton { objectName: "startService"; ts: root.theme.ts; text: "Start the service"; bordered: true; onClicked: { root.startFailed = false; starter.running = true; } } }
+            Body { visible: root.startFailed; text: "Error: the service did not start. Run the command above in a terminal to see why." }
         }
         ColumnLayout {   // 2. a provider
             visible: root.needChat
@@ -92,7 +77,7 @@ Rectangle {
             spacing: root.theme.gap / 2
             Title { text: "Check speech-to-text" }
             Body { text: String(root.hints.speech || "Speech-to-text is not ready.") }
-            Command { cmd: root.whisperCmd }
+            CommandRow { theme: root.theme; cmd: root.whisperCmd }
         }
     }
 }

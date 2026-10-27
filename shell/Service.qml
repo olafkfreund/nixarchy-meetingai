@@ -18,6 +18,14 @@ Item {
 
     Client { id: client }
 
+    // The daemon tells its first client once about provider changes (the removed Gemini key): that is this one.
+    Connections {
+        target: client
+        function onProviderNoticeChanged() {
+            if (client.providerNotice !== "") Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", client.providerNotice]);
+        }
+    }
+
     // notify-send -A waits, then prints the chosen action id.
     Component {
         id: notifier

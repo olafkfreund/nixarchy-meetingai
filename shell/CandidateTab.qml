@@ -20,6 +20,9 @@ Item {
 
     readonly property var cand: client.cand   // candidate.get of the shown candidate
     readonly property bool linked: root.cand !== null && !!root.cand.candidate.meeting_id
+    readonly property string candId: root.cand !== null ? String(root.cand.candidate.id) : ""
+    // this candidate's interview is being recorded (or its notes written): it cannot be deleted under the recording
+    readonly property bool inUse: root.candId !== "" && root.client.currentCandidate === root.candId && (root.client.recording || root.client.state.finishing === true)
     property bool newOpen: false         // the inline "new candidate" name row
     property string attachKind: ""       // "cv" | "job": which document the open path row attaches
     property bool generating: false
@@ -45,11 +48,11 @@ Item {
     function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
     function askDelete() {
         var c = root.cand;
-        if (c === null) return;
+        if (c === null || root.inUse) return;
         root.confirmRequested("Delete " + (c.candidate.name || "this candidate") + "? This removes their " + root.plural(c.documents.length, "document") + " and " + root.plural(c.questions.length, "question") + (root.linked ? ", and the recorded interview with its notes and transcript" : "") + ". It cannot be undone.", "Delete",
-            function() { root.client.send("candidates.delete", { id: c.candidate.id }, function(r) { root.fail(r, "danger"); root.client.viewId = ""; root.client.refreshCand(); root.client.refreshCandidates(); }); });
+            function() { root.client.send("candidates.delete", { id: c.candidate.id }, function(r) { root.fail(r, "danger"); if (!r.ok) return; root.client.viewId = ""; root.client.refreshCand(); root.client.refreshCandidates(); }); });
     }
-    onCandChanged: { root.attachKind = ""; root.genNote = ""; root.errors = ({}); }
+    onCandIdChanged: { root.attachKind = ""; root.genNote = ""; root.errors = ({}); }   // another candidate, not a refetch of this one
 
     component Section: PanelSectionHeader { fontSize: root.theme.caption }
     component Note: UiText {
@@ -57,7 +60,7 @@ Item {
         textFormat: Text.PlainText
         wrapMode: Text.Wrap
         color: Commons.Color.popups.text
-        opacity: 0.7
+        opacity: root.theme.dim
         font.pixelSize: root.theme.caption
     }
     component Err: UiText {   // the section's last failure
@@ -66,8 +69,8 @@ Item {
         width: parent.width
         textFormat: Text.PlainText
         wrapMode: Text.Wrap
-        text: String(root.errors[section] || "")
-        color: Commons.Color.urgent
+        text: "Error: " + String(root.errors[section] || "")
+        color: Commons.Color.popups.text
         font.pixelSize: root.theme.caption
     }
     component QField: TextArea {   // wraps; the field grows with its text
@@ -116,6 +119,7 @@ Item {
                     visible: root.newOpen
                     width: parent.width
                     spacing: root.theme.gap
+                    Keys.onEscapePressed: function(e) { newName.text = ""; root.newOpen = false; e.accepted = true; }   // cancels the row, not the Library
                     Input { id: newName; objectName: "candidateName"; ts: root.theme.ts; Layout.fillWidth: true; placeholderText: "Candidate name"; onAccepted: create.clicked() }
                     IconButton {
                         id: create
@@ -149,7 +153,7 @@ Item {
                     opacity: enabled ? 1 : 0.6
                     width: parent.width
                     spacing: root.theme.gap
-                    Check { objectName: "localOnly"; accessibleName: "Local-only"; Layout.alignment: Qt.AlignVCenter; checked: root.cand !== null && root.cand.candidate.local_only === true; onToggled: root.client.send("candidate.local_only", { id: root.cand.candidate.id, on: !checked }, function(r) { root.fail(r, "candidate"); root.client.refreshCand(); }) }
+                    Check { objectName: "localOnly"; ts: root.theme.ts; accessibleName: "Local-only"; Layout.alignment: Qt.AlignVCenter; checked: root.cand !== null && root.cand.candidate.local_only === true; onToggled: root.client.send("candidate.local_only", { id: root.cand.candidate.id, on: !checked }, function(r) { root.fail(r, "candidate"); root.client.refreshCand(); }) }
                     UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; wrapMode: Text.Wrap; textFormat: Text.PlainText; text: "Local-only: speech-to-text and models stay on this machine"; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
                 }
                 RowLayout {
@@ -198,6 +202,7 @@ Item {
                         visible: root.attachKind !== ""
                         width: parent.width
                         spacing: root.theme.gap
+                        Keys.onEscapePressed: function(e) { apath.text = ""; root.attachKind = ""; e.accepted = true; }
                         Input { id: apath; objectName: "attachPath"; ts: root.theme.ts; Layout.fillWidth: true; placeholderText: root.attachKind === "cv" ? "Path to the CV file" : "Path to the job description file" }
                         IconButton {
                             ts: root.theme.ts; text: "Attach"; bordered: true
@@ -253,7 +258,7 @@ Item {
                     Accessible.name: "Question text"
                                     width: parent.width
                                     text: qc.modelData.text
-                                    onActiveFocusChanged: { if (!activeFocus && text.trim() !== "" && text !== qc.modelData.text) root.client.send("questions.update", { id: qc.modelData.id, text: text.trim() }); }
+                                    onActiveFocusChanged: { if (!activeFocus && text.trim() !== "" && text !== qc.modelData.text) root.client.send("questions.update", { id: qc.modelData.id, text: text.trim() }, function(r) { root.fail(r, "questions"); }); }
                                 }
                                 UiText {
                                     visible: String(qc.modelData.source || "") !== ""
@@ -262,14 +267,14 @@ Item {
                                     wrapMode: Text.Wrap
                                     text: "“" + String(qc.modelData.source || "") + "”"
                                     color: Commons.Color.popups.text
-                                    opacity: 0.7
+                                    opacity: root.theme.dim
                                     font.italic: true
                                     font.pixelSize: root.theme.caption
                                 }
                                 RowLayout {   // footer: competency tag left, order and delete right
                                     width: parent.width
                                     spacing: root.theme.gap
-                                    Input { objectName: "questionCompetency"; ts: root.theme.ts; Layout.preferredWidth: Math.round(Style.space(190) * root.theme.ts); placeholderText: "Competency"; text: String(qc.modelData.competency || ""); onEditingFinished: { if (text !== String(qc.modelData.competency || "")) root.client.send("questions.update", { id: qc.modelData.id, competency: text }); } }
+                                    Input { objectName: "questionCompetency"; ts: root.theme.ts; Layout.preferredWidth: Math.round(Style.space(190) * root.theme.ts); placeholderText: "Competency"; text: String(qc.modelData.competency || ""); onEditingFinished: { if (text !== String(qc.modelData.competency || "")) root.client.send("questions.update", { id: qc.modelData.id, competency: text }, function(r) { root.fail(r, "questions"); }); } }
                                     Item { Layout.fillWidth: true }
                                     IconButton { ts: root.theme.ts; iconText: String.fromCodePoint(0xf0143); enabled: qc.index > 0; opacity: enabled ? 1 : 0.4; tooltipText: "Move up"; onClicked: root.moveQuestion(qc.index, -1) }
                                     IconButton { ts: root.theme.ts; iconText: String.fromCodePoint(0xf0140); enabled: qc.index < root.cand.questions.length - 1; opacity: enabled ? 1 : 0.4; tooltipText: "Move down"; onClicked: root.moveQuestion(qc.index, 1) }
@@ -298,8 +303,9 @@ Item {
                     Err { section: "danger" }
                     Flow {
                         width: parent.width
-                        IconButton { objectName: "deleteCandidate"; ts: root.theme.ts; text: "Delete candidate…"; bordered: true; tooltipText: "Remove this candidate and everything linked to them"; onClicked: root.askDelete() }
+                        IconButton { objectName: "deleteCandidate"; ts: root.theme.ts; text: "Delete candidate…"; bordered: true; enabled: !root.inUse; opacity: enabled ? 1 : 0.5; tooltipText: "Remove this candidate and everything linked to them"; onClicked: root.askDelete() }
                     }
+                    Note { visible: root.inUse; width: parent.width; text: "This candidate is being recorded. Stop the recording to delete them." }
                 }
             }
         }

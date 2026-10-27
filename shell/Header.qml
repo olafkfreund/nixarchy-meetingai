@@ -36,9 +36,11 @@ Item {
     readonly property bool live: root.daemon.recording || root.finishing
     property real pulse: 1
     Rec { id: rec }
-    SequentialAnimation on pulse {   // a gentle breath (Omarchy exposes no reduced-motion flag to honour)
+    // a gentle breath; off with reduced motion (Hyprland animations off, or the setting) and while the overlay is hidden
+    readonly property bool pulsing: root.daemon.recording && !Style.reduceMotion && !root.daemon.reduceMotion && root.Window.window !== null && root.Window.window.visible
+    SequentialAnimation on pulse {
         loops: Animation.Infinite
-        running: root.daemon.recording
+        running: root.pulsing
         NumberAnimation { to: 0.6; duration: 900; easing.type: Easing.InOutSine }
         NumberAnimation { to: 1; duration: 900; easing.type: Easing.InOutSine }
     }
@@ -71,7 +73,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             width: Math.round(Style.space(11) * root.theme.ts); height: width; radius: width / 2
             color: rec.red
-            opacity: root.daemon.recording ? root.pulse : 1
+            opacity: root.pulsing ? root.pulse : 1
         }
         UiText {
             anchors.verticalCenter: parent.verticalCenter
@@ -104,8 +106,9 @@ Item {
             textFormat: Text.PlainText
             text: root.profileName
             elide: Text.ElideRight
+            mayCut: true
             color: Commons.Color.popups.text
-            opacity: 0.7
+            opacity: root.theme.dim
             font.pixelSize: root.theme.caption
         }
         ModePicker { id: picker; daemon: root.daemon; theme: root.theme; bounds: root; Layout.alignment: Qt.AlignVCenter }

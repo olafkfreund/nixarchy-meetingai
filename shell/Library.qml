@@ -27,11 +27,15 @@ Item {
     property string promptMode: "general"
     property string notes: ""
     property string modelsText: ""
+    property string modelsFor: ""   // the provider the Models button asked about; a reply for another one is stale
+    property var status: ({})        // providers.status rows by id: ready / not installed / not logged in / no key, with the login command
+    readonly property var stateLabels: ({ ready: "ready", not_installed: "not installed", not_logged_in: "not logged in", no_key: "no key" })
     property Component settingsHeader: null   // controls shown above the Settings list
 
     readonly property bool iv: client.settings.meeting_mode === "interviewer"
     readonly property var tabs: root.iv ? ["restore", "profiles", "candidate", "prompts", "providers", "settings"] : ["restore", "profiles", "prompts", "providers", "settings"]
-    readonly property var promptKinds: ["answer", "live_answer", "follow_up", "recap"]
+    readonly property var promptModes: [{ value: "general", name: "Assist" }, { value: "interview", name: "Interview me" }, { value: "team_meeting", name: "Team" }, { value: "interviewer", name: "Interview someone" }]
+    readonly property var promptKinds: [{ value: "answer", name: "Answer" }, { value: "live_answer", name: "Live answer" }, { value: "follow_up", name: "Follow-ups" }, { value: "recap", name: "Recap" }]
     readonly property var kindHelp: ({
         answer: "Used for questions you type: how the model answers you.",
         live_answer: "Used for automatic answers during a call: one sentence to say, then short talking points.",
@@ -68,6 +72,7 @@ Item {
         root.client.send("session.list", {}, function(r) { if (r.ok) root.sessions = r.data || []; });
         root.reload();
         root.client.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
+        if (root.tab === "providers") root.client.send("providers.status", {}, function(r) { if (r.ok) { var m = {}; (r.data || []).forEach(function(row) { m[row.id] = row; }); root.status = m; } });
         root.search();
         root.loadPrompt();
         root.client.refreshCandidates();
@@ -127,8 +132,8 @@ Item {
             width: parent.width
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: root.error
-            color: Commons.Color.urgent
+            text: "Error: " + root.error
+            color: Commons.Color.popups.text
             font.pixelSize: root.theme.caption
         }
 
@@ -149,6 +154,7 @@ Item {
                     Layout.alignment: Qt.AlignVCenter
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
+                    mayCut: true
                     text: (rrow.modelData.kind === "meeting" ? "Meeting · " : "Chat · ") + rrow.modelData.title
                     color: Commons.Color.popups.text
                     font.pixelSize: root.theme.body
@@ -162,17 +168,21 @@ Item {
                 IconButton { objectName: "deleteSession"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: root.confirmRequested("Delete \"" + rrow.modelData.title + "\"? " + (rrow.modelData.kind === "meeting" ? "The transcript, notes and items of this meeting are removed." : "This chat is removed."), "Delete", function() { root.client.send("session.delete", { id: rrow.modelData.id }); root.load(); }) }
             }
         }
-        UiText {
+        ScrollView {   // long notes scroll
             id: notesBox
             visible: root.tab === "restore" && root.notes !== ""
             width: parent.width
-            height: visible ? Style.space(160) : 0
-            textFormat: Text.MarkdownText
-            wrapMode: Text.Wrap
+            height: visible ? Math.round(Style.space(160) * root.theme.ts) : 0
+            contentWidth: availableWidth
             clip: true
-            text: root.notes
-            color: Commons.Color.popups.text
-            font.pixelSize: root.theme.body
+            UiText {
+                width: notesBox.availableWidth
+                textFormat: Text.MarkdownText
+                wrapMode: Text.Wrap
+                text: root.notes
+                color: Commons.Color.popups.text
+                font.pixelSize: root.theme.body
+            }
         }
 
         component Field: TextArea {
@@ -192,7 +202,7 @@ Item {
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             color: Commons.Color.popups.text
-            opacity: 0.7
+            opacity: root.theme.dim
             font.pixelSize: root.theme.caption
         }
 
@@ -241,10 +251,10 @@ Item {
                     }
                     UiText { textFormat: Text.PlainText; text: "About me"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
                     Hint { text: "Your role and experience; used in every answer." }
-                    Field { id: aboutText; Accessible.name: "About me"; width: parent.width; height: Style.space(64) }
+                    Field { id: aboutText; Accessible.name: "About me"; width: parent.width; height: Math.round(Style.space(64) * root.theme.ts) }
                     UiText { textFormat: Text.PlainText; text: "Meeting brief"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
                     Hint { text: "What this meeting is about (role, company, agenda)." }
-                    Field { id: briefText; Accessible.name: "Meeting brief"; width: parent.width; height: Style.space(64) }
+                    Field { id: briefText; Accessible.name: "Meeting brief"; width: parent.width; height: Math.round(Style.space(64) * root.theme.ts) }
                     IconButton { ts: root.theme.ts; text: "Save"; onClicked: root.saveProfile() }
                     UiText { textFormat: Text.PlainText; text: "Documents"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body; topPadding: Style.spacing.xs }
                     Hint { text: "CV, job description, runbooks (PDF, text, markdown). Newest first in the prompt." }
@@ -260,6 +270,7 @@ Item {
                                 Layout.alignment: Qt.AlignVCenter
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
+                                mayCut: true
                                 text: drow.modelData.name + "  ·  " + drow.modelData.chars + " chars"
                                 color: Commons.Color.popups.text
                                 font.pixelSize: root.theme.body
@@ -293,16 +304,20 @@ Item {
             visible: root.tab === "prompts"
             width: parent.width; height: parent.height - y
             spacing: Style.spacing.xs
-            Flow {
+            Flow {   // which mode (the names of the mode picker)
                 width: parent.width
                 spacing: Style.spacing.xs
                 Repeater {
-                    model: ["general", "interview", "team_meeting", "interviewer"]
-                    IconButton { ts: root.theme.ts; required property string modelData; text: modelData === "team_meeting" ? "Team" : modelData; active: root.promptMode === modelData; onClicked: root.promptMode = modelData }
+                    model: root.promptModes
+                    IconButton { ts: root.theme.ts; required property var modelData; text: modelData.name; active: root.promptMode === modelData.value; onClicked: root.promptMode = modelData.value }
                 }
+            }
+            Flow {   // which prompt; a second row, so each row has one active button
+                width: parent.width
+                spacing: Style.spacing.xs
                 Repeater {
                     model: root.promptKinds
-                    IconButton { ts: root.theme.ts; required property string modelData; text: modelData; active: root.promptKind === modelData; onClicked: root.promptKind = modelData }
+                    IconButton { ts: root.theme.ts; required property var modelData; text: modelData.name; active: root.promptKind === modelData.value; onClicked: root.promptKind = modelData.value }
                 }
             }
             Hint { text: root.kindHelp[root.promptKind] || "" }
@@ -335,44 +350,86 @@ Item {
             visible: root.tab === "providers"
             width: parent.width; height: parent.height - y
             clip: true
+            spacing: Style.spacing.xs
             model: root.providers.filter(function(p) { return root.match(p.name || p.id); })
-            delegate: RowLayout {
+            header: Rectangle {   // the daemon's one-time notice (the removed Gemini key)
+                visible: root.client.providerNotice !== ""
+                width: ListView.view.width
+                height: visible ? pn.implicitHeight + root.theme.padY * 2 : 0
+                radius: root.theme.radius
+                color: Qt.alpha(Commons.Color.accent, 0.12)
+                RowLayout {
+                    id: pn
+                    x: root.theme.padX; y: root.theme.padY
+                    width: parent.width - root.theme.padX * 2
+                    spacing: root.theme.gap
+                    UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.client.providerNotice; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                    IconButton { objectName: "noticeDismiss"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Got it"; bordered: true; onClicked: root.client.providerNotice = "" }
+                }
+            }
+            delegate: Column {   // the provider and its Models button; a key row if it takes one; then its status and, when not ready, the fix
                 id: prow
                 required property var modelData
+                readonly property var st: root.status[modelData.id] || null
                 width: ListView.view.width
-                height: root.theme.ctl + Style.spacing.xs
-                spacing: root.theme.gap
-                UiText {
-                    Layout.preferredWidth: Math.round(Style.space(220) * root.theme.ts)
-                    Layout.fillWidth: !keyField.visible
-                    Layout.alignment: Qt.AlignVCenter
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    text: (prow.modelData.name || prow.modelData.id) + (prow.modelData.requires_key === false ? "" : (prow.modelData.has_key ? " · key set" : " · no key"))
-                    color: Commons.Color.popups.text
-                    font.pixelSize: root.theme.body
+                spacing: Style.spacing.xs
+                bottomPadding: Style.spacing.sm
+                RowLayout {
+                    width: parent.width
+                    height: root.theme.ctl
+                    spacing: root.theme.gap
+                    UiText {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        text: prow.modelData.name || prow.modelData.id
+                        color: Commons.Color.popups.text
+                        font.pixelSize: root.theme.body
+                        font.bold: true
+                    }
+                    IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
+                        text: "Models"
+                        onClicked: { root.modelsFor = prow.modelData.id; root.client.send("models.list", { provider: prow.modelData.id }, function(r) { if (r.provider !== undefined && r.provider !== root.modelsFor) return; root.modelsText = r.ok ? (r.data || []).join(", ") : "Error: " + r.error; }); }
+                    }
                 }
-                Input {
-                    id: keyField
-                    objectName: "apiKey"
-                    accessibleName: "API key for " + (prow.modelData.name || prow.modelData.id)
-                    ts: root.theme.ts
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignVCenter
+                RowLayout {   // the key: only for a provider that takes one (Antigravity, the CLIs and local Ollama have none)
                     visible: prow.modelData.requires_key !== false
-                    echoMode: TextInput.Password
-                    placeholderText: "API key"
+                    width: parent.width
+                    height: root.theme.ctl
+                    spacing: root.theme.gap
+                    Input {
+                        id: keyField
+                        objectName: "apiKey"
+                        accessibleName: "API key for " + (prow.modelData.name || prow.modelData.id)
+                        ts: root.theme.ts
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                        echoMode: TextInput.Password
+                        placeholderText: prow.modelData.has_key ? "API key (set; type a new one to replace it)" : "API key"
+                    }
+                    IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
+                        text: "Set key"
+                        enabled: keyField.text !== ""
+                        opacity: enabled ? 1 : 0.5
+                        onClicked: { root.client.send("settings.set", { key: "api_key", provider: prow.modelData.id, value: keyField.text }); keyField.text = ""; root.load(); }
+                    }
                 }
-                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
-                    text: "Set key"
-                    visible: keyField.visible
-                    enabled: keyField.text !== ""
-                    opacity: enabled ? 1 : 0.5
-                    onClicked: { root.client.send("settings.set", { key: "api_key", provider: prow.modelData.id, value: keyField.text }); keyField.text = ""; root.load(); }
+                UiText {   // ready / not installed / not logged in / no key
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    text: prow.st ? "Status: " + (root.stateLabels[prow.st.state] || prow.st.state) + (prow.st.state === "ready" || !prow.st.login ? "" : ". To fix, run:") : ""
+                    visible: text !== ""
+                    color: Commons.Color.popups.text
+                    opacity: root.theme.dim
+                    font.pixelSize: root.theme.caption
                 }
-                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
-                    text: "Models"
-                    onClicked: root.client.send("models.list", { provider: prow.modelData.id }, function(r) { root.modelsText = r.ok ? (r.data || []).join(", ") : r.error; })
+                CommandRow {   // the fix, to copy; a ready provider needs none
+                    visible: prow.st !== null && prow.st.state !== "ready" && !!prow.st.login
+                    width: parent.width
+                    theme: root.theme
+                    cmd: prow.st ? String(prow.st.login) : ""
                 }
             }
             footer: UiText { text: root.modelsText; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption }
@@ -405,6 +462,7 @@ Item {
                     Layout.alignment: Qt.AlignVCenter
                     Check {
                         objectName: "settingToggle"
+                        ts: root.theme.ts
                         accessibleName: String(srow.modelData.label || srow.modelData.key)
                         visible: typeof srow.modelData.value === "boolean"
                         anchors.right: parent.right

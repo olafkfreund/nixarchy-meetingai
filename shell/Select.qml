@@ -20,10 +20,13 @@ Item {
     property string triggerLabel: ""   // shown while `value` is empty
     property bool searchable: false
     property string query: ""
-    property string accessibleName: "Choice"
+    property string accessibleName: ""   // required: tests/check-geometry.py fails an unnamed select
     readonly property string accName: trigger.Accessible.name
     readonly property real fontPx: root.theme.body   // tests/geometry.js compares it with the fields in the same row
     readonly property bool popupOpen: popup.opened
+    readonly property Item popupContent: popup.contentItem   // tests/geometry.js walks an open popup
+    function openPopup() { popup.open(); }
+    function closePopup() { popup.close(); }
     readonly property string iChevron: String.fromCodePoint(0xf0140)
 
     signal changed(string value)
@@ -50,6 +53,7 @@ Item {
 
     implicitWidth: Math.round(Style.space(240) * root.theme.ts)
     implicitHeight: root.theme.ctl
+    opacity: root.enabled ? 1 : 0.5   // a disabled select (a locked series) looks it; it takes no clicks or keys
 
     BorderSurface {
         id: trigger
@@ -60,7 +64,7 @@ Item {
         borderSpec: Border.controlSpec(trigger.activeFocus ? "focus" : (trigger.hot ? "hover-cursor" : "normal"), Commons.Color.popups.text, Commons.Color.accent)
         activeFocusOnTab: true
         Accessible.role: Accessible.ComboBox
-        Accessible.name: root.accessibleName + ": " + root.currentLabel()
+        Accessible.name: root.accessibleName !== "" ? root.accessibleName + ": " + root.currentLabel() : ""
         HoverHandler { id: hover }
         Keys.onPressed: function(e) {
             if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Space || e.key === Qt.Key_Down) { popup.open(); e.accepted = true; }
@@ -69,10 +73,11 @@ Item {
             anchors.left: parent.left; anchors.right: chevron.left
             anchors.verticalCenter: parent.verticalCenter
             anchors.leftMargin: trigger.borderLeft + Style.spacing.controlPaddingX
-            anchors.rightMargin: Style.spacing.md
+            anchors.rightMargin: trigger.borderRight + Style.spacing.md
             textFormat: Text.PlainText
             text: root.currentLabel()
             elide: Text.ElideRight
+            mayCut: true   // a long model id
             color: Commons.Color.popups.text
             font.pixelSize: root.fontPx
         }
@@ -97,8 +102,18 @@ Item {
         x: 0
         y: root.height + Style.spacing.xxs
         width: root.width
-        padding: 1
+        readonly property var borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
+        padding: Style.spacing.hairline
+        leftPadding: Border.left(popup.borderSpec) + Style.spacing.hairline
+        rightPadding: Border.right(popup.borderSpec) + Style.spacing.hairline
+        topPadding: Border.top(popup.borderSpec) + Style.spacing.hairline
+        bottomPadding: Border.bottom(popup.borderSpec) + Style.spacing.hairline
         focus: true
+        onAboutToShow: {   // stay inside the window: slide sideways, or open upwards when there is no room below
+            var p = root.mapToItem(null, 0, 0), gap = Style.spacing.xxs;
+            popup.x = Math.max(-p.x, Math.min(0, root.Window.width - p.x - popup.width));
+            popup.y = (p.y + root.height + gap + popup.implicitHeight > root.Window.height && p.y - gap - popup.implicitHeight >= 0) ? -popup.implicitHeight - gap : root.height + gap;
+        }
         onOpened: {
             root.query = "";
             list.currentIndex = Math.max(0, root.shown.findIndex(function(o) { return root.optionValue(o) === root.value; }));
@@ -106,7 +121,7 @@ Item {
         }
         background: BorderSurface {
             color: Commons.Color.popups.background
-            borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
+            borderSpec: popup.borderSpec
             radius: Style.cornerRadius
         }
         contentItem: Column {
@@ -135,6 +150,9 @@ Item {
                     required property int index
                     width: list.width
                     height: root.theme.ctl
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: root.optionLabel(opt.modelData)
+                    Accessible.selected: root.optionValue(opt.modelData) === root.value
                     color: opt.index === list.currentIndex ? Style.hoverFillFor(Commons.Color.popups.text, Commons.Color.accent) : "transparent"
                     UiText {
                         anchors.fill: parent
@@ -143,7 +161,8 @@ Item {
                         textFormat: Text.PlainText
                         text: root.optionLabel(opt.modelData)
                         elide: Text.ElideRight
-                        color: Commons.Color.popups.text
+                        mayCut: true
+                        color: opt.index === list.currentIndex ? Style.hoverStateColor(Commons.Color.popups.text, Commons.Color.accent) : Commons.Color.popups.text
                         font.pixelSize: root.fontPx
                     }
                     MouseArea {

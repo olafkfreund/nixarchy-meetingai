@@ -74,6 +74,7 @@ Item {
                         ts: root.theme.ts
                         text: "\u00d7"
                         tooltipText: "Remove"
+                        Accessible.name: "Remove " + chip.modelData.label
                         onClicked: root.chips = root.chips.filter(function(c, i) { return i !== chip.index; })
                     }
                 }
@@ -84,11 +85,13 @@ Item {
             visible: root.team
             width: parent.width
             spacing: root.theme.gap
+            Keys.onEscapePressed: function(e) { if (newName.visible) { newName.text = ""; newName.visible = false; e.accepted = true; } else e.accepted = false; }   // cancels the name row first
             UiText { Layout.alignment: Qt.AlignVCenter; textFormat: Text.PlainText; text: "Series"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true }
             Select {
                 id: seriesBox
                 theme: root.theme
                 objectName: "seriesPick"
+                accessibleName: "Series"
                 enabled: !root.seriesLocked
                 Layout.preferredWidth: Math.round(Style.space(240) * root.theme.ts)
                 Layout.preferredHeight: root.theme.ctl
@@ -110,7 +113,7 @@ Item {
             Item { Layout.fillWidth: !newName.visible }
         }
 
-        UiText { visible: root.team && root.seriesError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.seriesError; color: Commons.Color.urgent; font.pixelSize: root.theme.caption }
+        UiText { visible: root.team && root.seriesError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Error: " + root.seriesError; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption }
 
         IconButton {   // quick action, above the field
             ts: root.theme.ts

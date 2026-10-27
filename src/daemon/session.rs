@@ -658,7 +658,7 @@ impl Daemon {
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
         let receiver = self.tx.subscribe();
         if let Some(text) = self.startup_notice.lock().take() {
-            self.emit("notice", json!({"text": text}));
+            self.emit("notice", json!({"text": text, "kind": "providers"}));
         }
         receiver
     }
@@ -1913,7 +1913,9 @@ impl Daemon {
             self.emit_state(g);
         }
         self.finish_meeting_artifacts(meeting).await;
-        self.inner.lock().finishing_meeting = None;
+        let mut g = self.inner.lock();
+        g.finishing_meeting = None;
+        self.emit_state(&g); // the shell shows "Finishing" until it hears this
     }
 
     /// Name the meeting, then summarise what is left and consolidate every chunk.
@@ -2362,6 +2364,7 @@ impl Daemon {
         g.settings = Settings::load(&g.db).unwrap_or_default();
         let all = self.settings_map(g)?;
         self.emit("settings", json!({"settings": all}));
+        self.emit_state(g); // a provider or Local-only change flips state.ready
         Ok(json!({}))
     }
 
@@ -2379,6 +2382,7 @@ impl Daemon {
         };
         if remove {
             credentials::remove(&self.vault, kind, &provider)?;
+            self.emit_state(&self.inner.lock());
             return Ok(json!({}));
         }
         if key.is_empty() {
@@ -2391,6 +2395,7 @@ impl Daemon {
             });
         credential.api_key = key;
         credentials::save(&self.vault, &credential)?;
+        self.emit_state(&self.inner.lock()); // a saved key can make a provider ready
         Ok(json!({}))
     }
 
@@ -3865,6 +3870,22 @@ mod command_tests {
         let g = d.inner.lock();
         let left = items::list(g.db.connection(), items::Scope::Meeting(&m), None).unwrap();
         assert!(left.len() == 1 && !left[0].draft);
+    }
+
+    #[tokio::test]
+    async fn finishing_a_recording_announces_the_end_of_finishing() {
+        let d = daemon();
+        let mut events = d.subscribe();
+        let m = {
+            let g = d.inner.lock();
+            meetings::start(g.db.connection(), "T", "", "en", None, Default::default()).unwrap()
+        };
+        d.finish_recording(&m).await;
+        let finishing: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|e| e["event"] == "state")
+            .map(|e| e["finishing"].as_bool().unwrap())
+            .collect();
+        assert_eq!(finishing, [true, false]);
     }
 
     #[tokio::test]

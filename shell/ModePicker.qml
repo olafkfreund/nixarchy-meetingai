@@ -25,6 +25,8 @@ Item {
     readonly property string mode: String(root.daemon.settings.meeting_mode || "general")
     readonly property var cur: root.modes.find(function(m) { return m.value === root.mode; }) || root.modes[0]
     readonly property bool popupOpen: popup.opened
+    readonly property Item popupContent: popup.contentItem   // tests/geometry.js walks an open popup
+    function closePopup() { popup.close(); }
 
     implicitWidth: btn.implicitWidth
     implicitHeight: btn.implicitHeight
@@ -84,7 +86,7 @@ Item {
                     anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: Style.spacing.controlPaddingX; anchors.rightMargin: Style.spacing.controlPaddingX
                     UiText { width: parent.width; textFormat: Text.PlainText; elide: Text.ElideRight; text: row.modelData.name; color: Commons.Color.popups.text; font.pixelSize: root.theme.body; font.bold: true }
-                    UiText { width: parent.width; textFormat: Text.PlainText; elide: Text.ElideRight; text: row.modelData.hint; color: Commons.Color.popups.text; opacity: 0.7; font.pixelSize: root.theme.caption }
+                    UiText { width: parent.width; textFormat: Text.PlainText; elide: Text.ElideRight; text: row.modelData.hint; color: Commons.Color.popups.text; opacity: root.theme.dim; font.pixelSize: root.theme.caption }
                 }
                 MouseArea { anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onPositionChanged: list.currentIndex = row.index; onClicked: list.choose(row.index) }
             }

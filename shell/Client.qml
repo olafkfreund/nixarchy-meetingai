@@ -24,6 +24,8 @@ Item {
     property var now: ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" })
     property string lastSpeaker: ""   // last remote speaker, for "who asked"
     property var lastAsk: null           // the last typed question, for Retry
+    property int staleTurn: -1           // the turn that was streaming when a new question was asked: its late events are dropped
+    property string providerNotice: ""   // the daemon's one-time provider notice (e.g. the removed Gemini key); Providers shows it, Service notifies
     property bool libraryOpen: false     // set by the overlay: request failures then go to the Library, not the transcript
     signal libraryError(string message)
     property real micLevel: 0     // 0..1, from the daemon's levels events
@@ -133,6 +135,7 @@ Item {
     function ask(text, attachments, screenshot, noContext) {
         root.lastAsk = { text: text, attachments: attachments || [], screenshot: screenshot === true, noContext: noContext === true };
         root.archiveNow();
+        root.staleTurn = root.now.turn;
         root.answering = true;
         root.suggestions = [];
         // NOW shows the question and the waiting bar at once; answer.started fills in the rest
@@ -149,9 +152,37 @@ Item {
     // Everything the daemon's current session owns; also what a lost connection leaves behind.
     function resetSession() {
         lines.clear();
+        root.staleTurn = -1;
         root.answering = false; root.suggestions = []; root.itemEditing = false; root.pendingItems = null; root.items = []; root.earlierItem = null; root.consentPrompt = "";
         root.micLevel = 0; root.systemLevel = 0;
         root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "", error: "" });
+    }
+
+    // The daemon replays nothing to a client that connects (or reconnects): ask it for the stored
+    // transcript and the current answer. now.turn is -2 (unknown) while an answer is still streaming:
+    // the next delta says which turn it is. Pages of 500 lines; the cap keeps the newest.
+    function rebuild() {
+        var page = function(after, first) {
+            root.send("transcript.get", { after_line: after, limit: root.maxLines }, function(r) {
+                var rows = r.ok && r.data ? r.data.lines : undefined;
+                if (!Array.isArray(rows)) return;
+                if (first) lines.clear();
+                for (var i = 0; i < rows.length; i++) {
+                    if (rows[i].who === "system" && rows[i].speaker) root.lastSpeaker = String(rows[i].speaker);
+                    root.addRow(String(rows[i].who), String(rows[i].speaker || ""), String(rows[i].text), false);
+                }
+                if (rows.length >= root.maxLines) page(rows[rows.length - 1].line, false);
+            });
+        };
+        page(0, true);
+        root.send("now.get", {}, function(r) {
+            if (!r.ok || !r.data || r.data.status === undefined) return;
+            var n = r.data, live = n.status === "writing" || n.status === "loading";
+            root.answering = live;
+            root.suggestions = (n.suggestions || []).slice(0, 3).map(String);
+            if (n.answer === "" && n.question === "") return;
+            root.now = { turn: live ? -2 : -1, question: String(n.question || ""), automatic: false, asker: "You", provider: String(n.provider || ""), model: String(n.model || ""), body: String(n.answer || ""), error: "" };
+        });
     }
 
     function archiveNow() {
@@ -176,6 +207,8 @@ Item {
     }
 
     function onEvent(ev) {
+        // the tail of a turn that was superseded by a new question must not touch the new one
+        if (ev.turn !== undefined && ev.turn === root.staleTurn && (ev.event === "answer.delta" || ev.event === "answer.done" || ev.event === "answer.error")) return;
         switch (ev.event) {
         case "settings": root.settings = ev.settings || ({}); break;
         case "session.reset": root.resetSession(); break;
@@ -196,13 +229,14 @@ Item {
             break;
         case "answer.delta":
             root.answering = true;
+            if (root.now.turn === -2) root.now = Object.assign({}, root.now, { turn: ev.turn });
             if (root.now.turn !== ev.turn) { root.archiveNow(); root.now = { turn: ev.turn, question: "", automatic: true, asker: root.lastSpeaker || "Them", provider: "", model: "", body: "" }; }
             root.now = Object.assign({}, root.now, { body: root.now.body + (ev.text || ""), provider: String(ev.provider || root.now.provider), model: String(ev.model || root.now.model) });
             break;
         case "answer.done": root.answering = false; if (ev.provider) root.now = Object.assign({}, root.now, { provider: String(ev.provider), model: String(ev.model || root.now.model) }); break;
-        case "answer.error": root.answerFailed(String(ev.message || ev.error || "")); break;
+        case "answer.error": if (ev.turn === undefined || ev.turn === root.now.turn || root.now.turn === -2) root.answerFailed(String(ev.message || ev.error || "")); break;
         case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
-        case "notice": root.addRow("notice", "", String(ev.text || ""), false); break;
+        case "notice": if (ev.kind === "providers") root.providerNotice = String(ev.text || ""); else root.addRow("notice", "", String(ev.text || ""), false); break;
         case "items.updated": if (ev.meeting === root.state.meeting) root.refreshItems(ev.meeting); break;
         case "earlier_item": if (ev.meeting === root.state.meeting) root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
         case "questions.updated": if (ev.candidate === root.shownCandidate) root.refreshCand(); break;
@@ -240,6 +274,7 @@ Item {
                 root.delay = 500;
                 retry.stop();
                 root.refresh();
+                root.rebuild();
             } else {
                 var p = root.pending;
                 root.pending = ({});

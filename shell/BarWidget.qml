@@ -30,9 +30,10 @@ BarWidget {
     Rec { id: rec; background: Commons.Color.bar.background }
     readonly property bool finishing: !client.recording && client.state.finishing === true
     property real pulse: 1
+    readonly property bool pulsing: client.recording && !Style.reduceMotion && !client.reduceMotion
     SequentialAnimation on pulse {
         loops: Animation.Infinite
-        running: client.recording
+        running: root.pulsing
         NumberAnimation { to: 0.6; duration: 900; easing.type: Easing.InOutSine }
         NumberAnimation { to: 1; duration: 900; easing.type: Easing.InOutSine }
     }
@@ -77,7 +78,7 @@ BarWidget {
             width: Style.space(11); height: width; radius: width / 2
             anchors.verticalCenter: parent.verticalCenter
             color: rec.red
-            opacity: client.recording ? root.pulse : 1
+            opacity: root.pulsing ? root.pulse : 1
         }
         Text {
             visible: client.recording
@@ -86,6 +87,7 @@ BarWidget {
             text: root.timer
             color: Commons.Color.bar.text
             font.bold: true
+            font.family: Style.font.family
             font.pixelSize: Style.font.caption
         }
     }

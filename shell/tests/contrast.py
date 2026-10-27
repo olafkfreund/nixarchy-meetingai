@@ -4,7 +4,7 @@
 usage: contrast.py [--all | colors.toml ...]   (default: the current theme + the light themes flexoki-light, catppuccin-latte, white; --all: every theme)
 Fills are Qt.alpha(role, a) over the opaque popups background (popups.background = background,
 popups.text = foreground unless a theme's shell.toml overrides them; this reads colors.toml only).
-Keep the alphas below in step with shell/Overlay.qml. Exit 1 if any text pair is under 4.5:1
+Keep the alphas below in step with the QML, and DIM with Theme.qml's `dim` (secondary text is the text colour at that opacity). Exit 1 if any text pair is under 4.5:1
 or the recording dot (shell/Rec.qml) is under 3:1 on the header or the bar.
 """
 import os
@@ -15,6 +15,8 @@ TREE = "/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/themes
 DEFAULT = [os.path.expanduser("~/.local/state/omarchy/current/theme/colors.toml"),
            f"{TREE}/flexoki-light/colors.toml", f"{TREE}/catppuccin-latte/colors.toml", f"{TREE}/white/colors.toml"]
 MEETING, YOU, CARD = 0.06, 0.14, 0.12   # Transcript.qml / NowCard.qml: bubbles and the NOW card (archived answers use 0.08)
+CALLOUT = 0.10                          # ConsentBanner.qml / ItemsPanel.qml: the foreground tint of the consent and Earlier-task callouts
+DIM = 0.9                               # Theme.qml dim: opacity of secondary text (captions, hints, notes)
 FALLBACK_RED = "#e5484d"
 
 
@@ -38,8 +40,10 @@ def ratio(a, b):
 
 
 def record_red(c, bg, fg):
-    """Rec.qml: the vivid fallback red if it reads at 3:1 on the background, else the theme's urgent, else the foreground."""
-    for cand in (rgb(FALLBACK_RED), rgb(c["urgent"]) if "urgent" in c else rgb("#a55555")):
+    """Rec.qml: the vivid fallback red if it reads at 3:1 on the background, else the theme's urgent, else the foreground.
+    Omarchy derives `urgent` from the theme's `red` (alacritty/kitty `color1`), so this reads those keys; there is no `urgent` key."""
+    urgent = c.get("red") or c.get("color1")
+    for cand in (rgb(FALLBACK_RED), rgb(urgent) if urgent else rgb("#a55555")):
         if cand is not None and ratio(cand, bg) >= 3:
             return cand
     return fg
@@ -58,6 +62,9 @@ def check(path):
         ("link (accent) on card", ac, over(ac, CARD, bg)),
         ("recording dot on header/bar", record_red(c, bg, fg), bg),
     ]
+    # secondary text: the text colour at DIM opacity, on every surface it sits on
+    for name, card in (("panel", bg), ("meeting bubble", over(fg, MEETING, bg)), ("you bubble", over(ac, YOU, bg)), ("NOW/answer card", over(ac, CARD, bg)), ("callout", over(fg, CALLOUT, bg))):
+        rows.append((f"dimmed text on {name}", over(fg, DIM, card), card))
     print(f"{path}  ({c.get('mode', '?')})")
     ok = True
     for name, a, b in rows:

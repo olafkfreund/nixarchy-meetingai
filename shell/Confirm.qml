@@ -16,16 +16,24 @@ FocusScope {
     property string message: ""
     property string confirmText: "Confirm"
     property var yes: null
+    property Item returnTo: null   // what had the focus when the dialog opened; it gets it back on close
 
     function ask(message, confirmText, yes) {
+        if (!root.opened) root.returnTo = root.Window.window ? root.Window.window.activeFocusItem : null;
         root.message = message; root.confirmText = confirmText; root.yes = yes;
         root.opened = true;
         cancel.forceActiveFocus();
     }
-    function close() { root.opened = false; root.yes = null; }
+    function close() {
+        var back = root.returnTo;
+        root.returnTo = null; root.opened = false; root.yes = null;
+        // a hidden FocusScope keeps no focus: without this Escape would reach nothing
+        if (back && back.visible) back.forceActiveFocus(); else root.parent.forceActiveFocus();
+    }
 
     visible: opened
     Keys.onPressed: function(e) {
+        if (!root.opened) return;
         if (e.key === Qt.Key_Escape) { root.close(); e.accepted = true; }
         else if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab || e.key === Qt.Key_Left || e.key === Qt.Key_Right) {
             if (cancel.activeFocus) ok.forceActiveFocus(); else cancel.forceActiveFocus();
@@ -60,7 +68,7 @@ FocusScope {
                 anchors.right: parent.right
                 spacing: root.theme.gap
                 IconButton { id: cancel; objectName: "confirmCancel"; ts: root.theme.ts; text: "Cancel"; bordered: true; onClicked: root.close() }
-                IconButton { id: ok; objectName: "confirmOk"; ts: root.theme.ts; text: root.confirmText; bordered: true; foreground: Commons.Color.urgent; onClicked: { var f = root.yes; root.close(); if (f) f(); } }
+                IconButton { id: ok; objectName: "confirmOk"; ts: root.theme.ts; text: root.confirmText; bordered: true; onClicked: { var f = root.yes; root.close(); if (f) f(); } }
             }
         }
     }

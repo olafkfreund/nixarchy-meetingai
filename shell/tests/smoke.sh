@@ -3,6 +3,8 @@
 # for 5 s, fail on any QML error, and check the call-offer logic both ways.
 # Needs a running Wayland session (the overlay is a layer-shell window).
 set -euo pipefail
+# QML problems show as warnings on stdout or stderr: a binding loop, a TypeError, a ReferenceError, any file.qml:line
+qml_bad='ERROR|\.qml:[0-9]+|Binding loop|TypeError|ReferenceError'
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 tree=${OMARCHY_SHELL_TREE:-/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/shell}
@@ -33,13 +35,13 @@ run() { # run <label> [--auto]
     python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/$label.log" $auto &
     local fake=$!
     sleep 0.5
-    timeout 5 quickshell -p "$work/cfg" 2> "$work/$label.err" || true &
+    timeout 5 quickshell -p "$work/cfg" > "$work/$label.out" 2> "$work/$label.err" || true &
     local qs=$!
     sleep 2.5
     echo '{"active":true}' > "$XDG_RUNTIME_DIR/meeting-mode.json"
     wait "$qs" || true
     kill "$fake" 2>/dev/null || true
-    if grep -E 'ERROR|\.qml:[0-9]+' "$work/$label.err"; then
+    if grep -aE "$qml_bad" "$work/$label.err" "$work/$label.out"; then
         echo "FAIL ($label): QML errors above" >&2
         exit 1
     fi
@@ -59,7 +61,7 @@ fake=$!
 sleep 0.5
 timeout 14 quickshell -p "$work/cfg" > "$work/drop.out" 2> "$work/drop.err" || true
 kill "$fake" 2>/dev/null || true
-if grep -E 'ERROR|\.qml:[0-9]+' "$work/drop.err" "$work/drop.out"; then echo "FAIL (drop): QML errors above" >&2; exit 1; fi
+if grep -aE "$qml_bad" "$work/drop.err" "$work/drop.out"; then echo "FAIL (drop): QML errors above" >&2; exit 1; fi
 [ "$(grep -c state.get "$work/drop.log")" -ge 2 ] || { echo "FAIL (drop): the client did not reconnect" >&2; exit 1; }
 python3 - "$work/drop.out" <<'PY'
 import json, sys
@@ -68,12 +70,14 @@ if line is None:
     sys.exit("FAIL (drop): no transcript dump")
 d = json.loads(line[line.index("DROP ") + 5:])
 rows = d["rows"]
-want = ["asked|And how would you handle a consumer that falls behind for an hour?"]   # the history the daemon replays
+# The daemon replays nothing: the client asks transcript.get and now.get, so the three spoken lines come back once
+# and NOW holds the whole answer (the chunks sent while it was disconnected too), finished by the deltas after the reconnect.
+want = ["system|Thanks for joining. Can you walk us through how you would design the ingestion pipeline?", "mic|Sure. I would start with an event queue in front of the workers so producers never block.", "system|Okay. And how would you handle a consumer that falls behind for an hour?"]
 if rows != want:
-    sys.exit(f"FAIL (drop): the transcript is not the replayed history (stale or duplicated rows): {rows}")
-if not d["connected"] or d["answering"] or "Scale out consumers" not in d["now"]:
-    sys.exit(f"FAIL (drop): the answer did not finish after the reconnect: {d}")
-print(f"drop: reconnected, the transcript is exactly the replayed history")
+    sys.exit(f"FAIL (drop): the transcript is not the stored lines, once (stale or duplicated rows): {rows}")
+if not d["connected"] or d["answering"] or not d["now"].startswith("**Talking points**") or "Kafka docs" not in d["now"] or d["now"].count("Talking points") != 1:
+    sys.exit(f"FAIL (drop): NOW is not the whole answer, once, after the reconnect: {d}")
+print("drop: reconnected, the transcript and NOW were rebuilt from transcript.get and now.get")
 PY
 
 if grep -q record.start "$work/off.log"; then echo "FAIL: record.start sent with auto_record_on_call off" >&2; exit 1; fi

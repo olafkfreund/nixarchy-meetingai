@@ -215,3 +215,19 @@ None yet.
   `oauth_creds.json` (heuristic), OpenCode `auth.json`, the cloud key, a
   listener on 11434. The HM module sets the service PATH to the user and
   system profiles and adds `ollamaCloud.environmentFile` (`-` prefixed).
+- **Step 7 (UI):** provider dropdowns load with the picked provider, drop
+  replies tagged for another provider, show the error with the fix under
+  the list, and reset the model per provider (keyed by provider, because a
+  settings echo can flip the provider back and forth before the list
+  arrives). The Providers tab shows `providers.status` with the login
+  command and Copy; only Ollama Cloud has a key field; the startup notice
+  (`kind: "providers"`) shows as a banner and a desktop notification.
+  `SCENARIO=providers` asserts each provider's own models with the first
+  selected, including an out-of-order reply and a failing provider.
+  **Not done:** the presets picker for Custom providers — the socket has no
+  command to list presets or create a custom provider yet (needs
+  `presets.list`/`providers.add`).
+- **Flaky test (pre-existing, original code):**
+  `system_audio::tests::malformed_output_yields_nothing` asserts this host
+  has ≤ 8 monitor sources, so it fails when more audio devices are active.
+  Fixed in the rewrite plan.

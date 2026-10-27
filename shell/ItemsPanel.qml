@@ -56,7 +56,7 @@ Rectangle {
             spacing: Style.space(8)
             Row {
                 spacing: Style.spacing.md
-                UiText { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "Items"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
+                UiText { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "Items"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true; }
                 IconButton { ts: root.theme.ts; visible: root.lastTime && root.lastTime.meeting; iconText: root.lastOpen ? root.iDown : root.iRight; text: "Last time"; tooltipText: "Recap and open items of the previous meeting in this series"; onClicked: root.lastOpenToggled() }
             }
             Column {   // Last time drawer
@@ -67,7 +67,7 @@ Rectangle {
                 UiText { width: parent.width; textFormat: Text.MarkdownText; wrapMode: Text.Wrap; text: root.lastTime ? String(root.lastTime.recap || "") : ""; color: Commons.Color.popups.text; font.pixelSize: root.theme.body; lineHeight: root.theme.leading }
                 Repeater {
                     model: root.lastTime ? (root.lastTime.items || []) : []
-                    UiText { required property var modelData; width: icol.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "- " + modelData.text; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: root.theme.body }
+                    UiText { required property var modelData; width: icol.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "- " + modelData.text; color: Commons.Color.popups.text; opacity: root.theme.dim; font.pixelSize: root.theme.body }
                 }
             }
             Rectangle {   // Earlier task?
@@ -86,9 +86,9 @@ Rectangle {
                     x: root.theme.padX; y: root.theme.padY
                     width: parent.width - root.theme.padX * 2
                     spacing: Style.space(6)
-                    UiText { textFormat: Text.PlainText; text: "Earlier task?"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
+                    UiText { textFormat: Text.PlainText; text: "Earlier task?"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true; }
                     UiText { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(callout.it.text || "") + "  (" + String(callout.it.created_at || "").slice(0, 10) + ")"; color: Commons.Color.popups.text; font.pixelSize: root.theme.body; font.bold: true }
-                    UiText { width: parent.width; visible: root.daemon.earlierItem !== null && root.daemon.earlierItem.quote !== ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.daemon.earlierItem ? "“" + root.daemon.earlierItem.quote + "”" : ""; color: Commons.Color.popups.text; opacity: 0.8; font.italic: true; font.pixelSize: root.theme.body }
+                    UiText { width: parent.width; visible: root.daemon.earlierItem !== null && root.daemon.earlierItem.quote !== ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.daemon.earlierItem ? "“" + root.daemon.earlierItem.quote + "”" : ""; color: Commons.Color.popups.text; opacity: root.theme.dim; font.italic: true; font.pixelSize: root.theme.body }
                     Row {
                         spacing: Style.spacing.xs
                         IconButton { ts: root.theme.ts; text: "Discussed"; bordered: true; tooltipText: "It came up again; the link is already saved"; onClicked: callout.dismiss() }
@@ -102,7 +102,7 @@ Rectangle {
                 textFormat: Text.PlainText
                 text: "Nothing captured yet"
                 color: Commons.Color.popups.text
-                opacity: 0.6
+                opacity: root.theme.dim
                 font.italic: true
                 font.pixelSize: root.theme.body
             }
@@ -115,7 +115,7 @@ Rectangle {
                     visible: rows.length > 0
                     width: icol.width
                     spacing: Style.space(4)
-                    UiText { textFormat: Text.PlainText; text: grp.modelData.title; color: Commons.Color.popups.text; opacity: 0.7; font.pixelSize: root.theme.caption; font.bold: true }
+                    UiText { textFormat: Text.PlainText; text: grp.modelData.title; color: Commons.Color.popups.text; opacity: root.theme.dim; font.pixelSize: root.theme.caption; font.bold: true }
                     Repeater {
                         model: grp.rows
                         Column {
@@ -142,7 +142,7 @@ Rectangle {
                                     textFormat: Text.PlainText
                                     text: [irow.modelData.owner, irow.modelData.due, irow.modelData.t0 !== null && irow.modelData.t0 !== undefined ? Math.floor(irow.modelData.t0 / 60) + ":" + ("0" + Math.floor(irow.modelData.t0 % 60)).slice(-2) : ""].filter(function(x) { return x; }).join(" · ")
                                     color: Commons.Color.popups.text
-                                    opacity: 0.7
+                                    opacity: root.theme.dim
                                     font.pixelSize: root.theme.caption
                                 }
                                 TextInput {   // inline edit; a draft is shown italic
@@ -167,7 +167,7 @@ Rectangle {
                                 visible: !!cell.modelData.origin_item
                                 x: Style.spacing.md + root.iconPx
                                 spacing: Style.spacing.xs
-                                UiText { width: Math.min(implicitWidth, grp.width - unlink.width - Style.spacing.md * 3 - root.iconPx); elide: Text.ElideRight; textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: "continues: " + String(cell.modelData.origin_text || "an earlier item"); color: Commons.Color.popups.text; opacity: 0.6; font.pixelSize: root.theme.caption }
+                                UiText { width: Math.min(implicitWidth, grp.width - unlink.width - Style.spacing.md * 3 - root.iconPx); elide: Text.ElideRight; mayCut: true; textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: "continues: " + String(cell.modelData.origin_text || "an earlier item"); color: Commons.Color.popups.text; opacity: root.theme.dim; font.pixelSize: root.theme.caption }
                                 IconButton { id: unlink; ts: root.theme.ts; iconText: root.iClose; tooltipText: "Unlink from the earlier item"; onClicked: root.daemon.updateItem(cell.modelData.id, { origin_item: "" }) }
                             }
                         }

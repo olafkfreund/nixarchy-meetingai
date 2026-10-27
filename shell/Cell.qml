@@ -21,7 +21,7 @@ Column {
         textFormat: Text.PlainText
         text: root.label
         elide: Text.ElideRight
-        color: Qt.darker(Commons.Color.popups.text, 1.4)
+        color: Qt.alpha(Commons.Color.popups.text, root.theme.dim)
         font.pixelSize: root.theme.caption
         font.bold: true
     }

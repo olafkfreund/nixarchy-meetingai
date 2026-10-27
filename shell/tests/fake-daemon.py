@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--providers] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -11,6 +11,12 @@ answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, 
 --interviewer is the interviewer-mode protocol: a candidate with documents and 8 questions in mixed statuses,
 record.start refused with consent_required until it carries consent:true, then a transcript and one probe (automatic answer).
 
+--providers: the real provider list, providers.status and a models.list per provider (replies carry `provider`; claude-sub answers a second late,
+out of order, and opencode fails), for the SCENARIO=providers switch in live-shots.sh.
+
+--drop cuts the first connection mid-answer. Like the real daemon, the answer goes on for whoever is connected, and a client that
+(re)connects gets nothing replayed: it must ask transcript.get and now.get for what it missed.
+
 --live plays a paced meeting instead: recording on, words arriving as
 partials, a question from the other side, a streamed answer (with a link), 3 suggestions, levels events, and a
 typed question (answer.started with a question and automatic=false). chat.send in any mode answers the same way.
@@ -19,6 +25,7 @@ Speaks the newline-delimited JSON protocol: replies to every request with
 {"id","ok":true,"data":...}, appends each received cmd to LOG_PATH, and
 streams a fake transcript and answer to each client once it asks state.get.
 """
+import itertools
 import json
 import math
 import os
@@ -36,23 +43,46 @@ iv = "--interviewer" in sys.argv
 dropped = [False]
 first_run = "--first-run" in sys.argv   # no provider, speech not ready: the Setup card
 err = "--error" in sys.argv          # a typed question starts, waits, then fails (Writing bar, then Retry)
-drop = "--drop" in sys.argv          # the first connection is cut mid-answer; the client reconnects and the daemon replays only the history
+drop = "--drop" in sys.argv          # the first connection is cut mid-answer; the client reconnects and asks transcript.get / now.get
+providers = "--providers" in sys.argv
 live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 state = {"recording": live, "since": int(time.time() * 1000) - 754_000 if live else 0, "mic": True, "system": True}
 if first_run:
     state.update(ready={"chat": False, "speech": False}, hints={"chat": "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama.", "speech": "Speech-to-text is not ready. Check nixarchy-meetingai-whisper.service, or add a Deepgram key in Providers."})
+MODELS = {   # models.list per provider; a string is the daemon's error
+    "claude-sub": ["sonnet", "opus", "haiku"],
+    "agy-sub": ["gemini-3.8-flash-low", "gemini-3.8-pro"],
+    "opencode": "OpenCode is not signed in. Run `opencode auth login`.",
+    "codex-sub": ["default", "gpt-5.2-codex", "gpt-5.2"],
+    "ollama-cloud": ["gpt-oss:120b", "qwen3-coder:480b"],
+    "ollama": ["qwen3.8:27b", "llama4:8b"],
+}
+SPOKEN = []   # the final transcript lines so far, for transcript.get
+ANSWER = {"question": "", "body": "", "streaming": False, "suggestions": []}   # the answer in flight, for now.get
+NOTICED = []
+TURNS = itertools.count(2)
+HANDLERS = set()   # connected clients: --drop's answer goes to whoever is connected, as the real daemon's does
 settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced", "text_scale": scale}
 DATA = {
-    # Mirrors the real daemon's defaults: frontier first, local last.
+    # The real daemon's providers (src/ai/catalog/providers.rs).
     "providers.list": [
         {"id": "claude-sub", "name": "Claude (subscription)", "requires_key": False, "has_key": False},
+        {"id": "agy-sub", "name": "Antigravity (subscription)", "requires_key": False, "has_key": False},
+        {"id": "opencode", "name": "OpenCode", "requires_key": False, "has_key": False},
         {"id": "codex-sub", "name": "ChatGPT / Codex (subscription)", "requires_key": False, "has_key": False},
-        {"id": "gemini", "name": "Google Gemini", "requires_key": True, "has_key": True},
+        {"id": "ollama-cloud", "name": "Ollama Cloud", "requires_key": True, "has_key": False},
         {"id": "ollama", "name": "Ollama (local)", "requires_key": False, "has_key": False},
     ],
-    "models.list": ["sonnet", "opus", "haiku"],
+    "providers.status": [
+        {"id": "claude-sub", "name": "Claude (subscription)", "state": "ready", "login": "claude", "cli": "claude"},
+        {"id": "agy-sub", "name": "Antigravity (subscription)", "state": "not_logged_in", "login": "agy", "cli": "agy"},
+        {"id": "opencode", "name": "OpenCode", "state": "not_logged_in", "login": "opencode auth login", "cli": "opencode"},
+        {"id": "codex-sub", "name": "ChatGPT / Codex (subscription)", "state": "not_installed", "login": "codex login", "cli": "codex"},
+        {"id": "ollama-cloud", "name": "Ollama Cloud", "state": "no_key", "login": "set OLLAMA_API_KEY in the service environment, or add the key here", "cli": None},
+        {"id": "ollama", "name": "Ollama (local)", "state": "ready", "login": "ollama serve", "cli": None},
+    ],
     "session.list": [{"id": 1, "kind": "meeting", "title": "Fake standup"}],
     "settings.search": [
         {"key": "overlay_w", "label": "Overlay width", "value": -1},
@@ -209,7 +239,20 @@ def log(line):
         f.write(line + "\n")
 
 
+def cast(obj):
+    for h in list(HANDLERS):
+        h.send(obj)
+
+
 class Handler(socketserver.StreamRequestHandler):
+    def setup(self):
+        super().setup()
+        HANDLERS.add(self)
+
+    def finish(self):
+        HANDLERS.discard(self)
+        super().finish()
+
     def send(self, obj):
         try:
             self.wfile.write((json.dumps(obj) + "\n").encode())
@@ -231,6 +274,9 @@ class Handler(socketserver.StreamRequestHandler):
         ]:
             self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": 3, "t1": 6})
         self.send({"event": "notice", "text": "An agent started recording"})
+        if providers and not NOTICED:   # the daemon tells its first client, once
+            NOTICED.append(1)
+            self.send({"event": "notice", "kind": "providers", "text": "Removed the stored Gemini API key; Gemini now runs through Antigravity (sign in with `agy`)."})
         self.send({"event": "answer.started", "turn": 1, "question": "What is the plan?", "automatic": True, **PROVIDER})
         for word in ["Ship ", "it ", "**next Tuesday**.\n\n", "- QA sign-off first\n", "- Pad the migration by two days\n"]:
             self.send({"event": "answer.delta", "turn": 1, "text": word, **PROVIDER})
@@ -243,6 +289,7 @@ class Handler(socketserver.StreamRequestHandler):
             self.send({"event": "transcript.partial", "who": who, "speaker": speaker, "text": " ".join(words[:n]), "t0": t0, "t1": t0 + n * 0.4})
             time.sleep(pace)
         self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": t0, "t1": t0 + len(words) * 0.4})
+        SPOKEN.append({"line": len(SPOKEN) + 1, "who": who, "speaker": speaker, "text": text, "t0": t0, "t1": t0 + len(words) * 0.4})
 
     def levels(self):
         n = 0
@@ -266,33 +313,33 @@ class Handler(socketserver.StreamRequestHandler):
         self.say("mic", "", "Sure. I would start with an event queue in front of the workers so producers never block.", 748, 0.05)
         self.say("system", "Priya", "Okay. And how would you handle a consumer that falls behind for an hour?", 756)
         time.sleep(0.6)  # Balanced pacing: answer after the question settles
-        self.send({"event": "answer.started", "turn": 1, "question": "And how would you handle a consumer that falls behind for an hour?", "automatic": True, **PROVIDER})
+        emit = cast if drop else self.send
+        ANSWER.update(question="And how would you handle a consumer that falls behind for an hour?", body="", streaming=True)
+        emit({"event": "answer.started", "turn": 1, "question": ANSWER["question"], "automatic": True, **PROVIDER})
         answer = ["**Talking points**\n\n", "- Lag is visible: alert on ", "consumer lag, not CPU.\n", "- Scale out consumers ", "per partition; ", "the queue keeps ", "ordering per key.\n", "- If it is a poison message, ", "park it in a ", "dead-letter queue and move on.\n\n", "*Mention:* you did this at your last job ", "with Kafka lag alerts. See the ", "[Kafka docs](https://kafka.apache.org/documentation/)."]
         for n, chunk in enumerate(answer):
-            self.send({"event": "answer.delta", "turn": 1, "text": chunk, **PROVIDER})
+            ANSWER["body"] += chunk
+            emit({"event": "answer.delta", "turn": 1, "text": chunk, **PROVIDER})
             time.sleep(0.25)
-            if drop and not dropped[0] and n == 3:   # mid-answer: cut the connection
+            if drop and not dropped[0] and n == 3:   # mid-answer: cut this connection; the answer goes on
                 dropped[0] = True
                 self.request.shutdown(socket.SHUT_RDWR)
-                return
-        self.send({"event": "answer.done", "turn": 1, **PROVIDER})
-        for s in ["Give a concrete lag number", "Ask how they monitor today", "Explain back-pressure"]:
-            self.send({"event": "suggestion", "text": s})
+        ANSWER["streaming"] = False
+        emit({"event": "answer.done", "turn": 1, **PROVIDER})
+        ANSWER["suggestions"] = ["Give a concrete lag number", "Ask how they monitor today", "Explain back-pressure"]
+        for s in ANSWER["suggestions"]:
+            emit({"event": "suggestion", "text": s})
+        if drop:
+            return
         self.say("mic", "", "Good question. First I would make the lag visible", 766, 0.3)
         time.sleep(1.2)
         self.typed("What should I say?")
 
     def stream_resume(self):
-        """After a dropped connection: the daemon still has the session and sends no session.reset: history alone has to replace the transcript, then the answer finishes."""
+        """After a dropped connection: like the real daemon, send nothing but the settings and state. The client asks transcript.get and now.get itself."""
         time.sleep(0.3)
         self.send({"event": "settings", "settings": settings})
         self.send({"event": "state", **state})
-        self.send({"event": "history", "rows": [{"who": "question", "text": "And how would you handle a consumer that falls behind for an hour?"}]})
-        self.send({"event": "answer.started", "turn": 1, "question": "", "automatic": True, **PROVIDER})
-        for chunk in ["**Talking points**\n\n", "- Lag is visible: alert on consumer lag, not CPU.\n", "- Scale out consumers per partition.\n"]:
-            self.send({"event": "answer.delta", "turn": 1, "text": chunk, **PROVIDER})
-            time.sleep(0.1)
-        self.send({"event": "answer.done", "turn": 1, **PROVIDER})
 
     def stream_iv_call(self):
         """After record.start: the candidate answers, then one automatic probe grounded in a quote."""
@@ -331,18 +378,25 @@ class Handler(socketserver.StreamRequestHandler):
         """A typed question: started carries it, then deltas, done, and at most 3 follow-ups."""
         time.sleep(0.2)
         typed_provider = {"provider": "claude-sub", "model": "sonnet"}
-        self.send({"event": "answer.started", "turn": 2, "question": question, "automatic": False, **typed_provider})
+        turn = next(TURNS)   # like the daemon: every question is a new turn
+        self.send({"event": "answer.started", "turn": turn, "question": question, "automatic": False, **typed_provider})
         if err:
             time.sleep(4)
-            return self.send({"event": "answer.error", "turn": 2, "message": "claude: the provider did not answer within 30 s", **typed_provider})
+            return self.send({"event": "answer.error", "turn": turn, "message": "claude: the provider did not answer within 30 s", **typed_provider})
         for chunk in ["Say the number first: ", "**under a minute of lag** ", "is fine, past ten minutes ", "you page someone."]:
-            self.send({"event": "answer.delta", "turn": 2, "text": chunk, **typed_provider})
+            self.send({"event": "answer.delta", "turn": turn, "text": chunk, **typed_provider})
             time.sleep(0.25)
-        self.send({"event": "answer.done", "turn": 2, **typed_provider})
+        self.send({"event": "answer.done", "turn": turn, **typed_provider})
         for s in ["Who owns the alert?", "What is the retry policy?", "How do you replay?"]:
             self.send({"event": "suggestion", "text": s})
 
     def handle(self):
+        try:
+            self.serve()
+        except OSError:   # the client went away
+            pass
+
+    def serve(self):
         for raw in self.rfile:
             req = json.loads(raw)
             cmd = req["cmd"]
@@ -358,6 +412,19 @@ class Handler(socketserver.StreamRequestHandler):
             elif cmd == "record.stop":
                 state["recording"] = False
             data = state if cmd == "state.get" else settings if cmd == "settings.get" else DATA.get(cmd, {})
+            if cmd == "models.list":   # the reply carries the provider it answers, so a client can drop a stale one
+                p = req.get("args", {}).get("provider")
+                models = MODELS.get(p, "unknown provider")
+                reply = {"id": req["id"], "provider": p, **({"ok": True, "data": models} if isinstance(models, list) else {"ok": False, "error": models})}
+                if providers and p == "claude-sub":   # slow and out of order: a client that already moved on must drop it
+                    threading.Timer(1.0, self.send, args=(reply,)).start()
+                else:
+                    self.send(reply)
+                continue
+            if drop and cmd == "transcript.get":
+                data = {"meeting": "m1", "lines": [l for l in SPOKEN if l["line"] > req.get("args", {}).get("after_line", 0)]}
+            elif drop and cmd == "now.get":
+                data = {"status": "writing" if ANSWER["streaming"] else "ready" if ANSWER["body"] else "idle", "question": ANSWER["question"], "answer": ANSWER["body"], "provider": PROVIDER["provider"], "model": PROVIDER["model"], "suggestions": ANSWER["suggestions"]}
             if iv and cmd.startswith(("candidate", "questions.")):
                 ok, data, announce = iv_cmd(cmd, req.get("args", {}))
                 self.send({"id": req["id"], "ok": ok, **({"data": data} if ok else {"error": data})})
