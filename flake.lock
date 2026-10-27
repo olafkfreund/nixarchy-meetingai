@@ -20,6 +20,26 @@
         "type": "github"
       }
     },
+    "nixarchy-meeting-mode": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1792505410,
+        "narHash": "sha256-kBjBh39W07HiA1MWIVrE/TBxEcKUOE8iKqTY9ap7kuE=",
+        "owner": "olafkfreund",
+        "repo": "nixarchy-meeting-mode",
+        "rev": "05c4f32f8f2965a1021ab90f987a2ada33ee57a8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "olafkfreund",
+        "repo": "nixarchy-meeting-mode",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1792842277,
@@ -39,6 +59,7 @@
     "root": {
       "inputs": {
         "home-manager": "home-manager",
+        "nixarchy-meeting-mode": "nixarchy-meeting-mode",
         "nixpkgs": "nixpkgs",
         "systems": "systems"
       }

@@ -78,7 +78,7 @@ pub async fn status(id: &str, name: &str, has_key: bool) -> Value {
             _ => ready(
                 tokio::time::timeout(
                     Duration::from_secs(1),
-                    tokio::net::TcpStream::connect("127.0.0.1:11434"),
+                    tokio::net::TcpStream::connect(ollama_addr()),
                 )
                 .await
                 .is_ok_and(|r| r.is_ok()),
@@ -87,6 +87,15 @@ pub async fn status(id: &str, name: &str, has_key: bool) -> Value {
         }
     };
     json!({"id": id, "name": name, "state": state, "login": login_hint(id), "cli": cli})
+}
+
+/// `host:port` of the local Ollama; the Nix module may move it.
+fn ollama_addr() -> String {
+    std::env::var("NIXARCHY_MEETINGAI_OLLAMA_URL")
+        .ok()
+        .and_then(|u| reqwest::Url::parse(&u).ok())
+        .and_then(|u| Some(format!("{}:{}", u.host_str()?, u.port_or_known_default()?)))
+        .unwrap_or_else(|| "127.0.0.1:11434".into())
 }
 
 fn ready(ok: bool, otherwise: &'static str) -> &'static str {

@@ -452,7 +452,7 @@ Item {
                     Layout.alignment: Qt.AlignVCenter
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
-                    text: root.labelOverrides[srow.modelData.key] || srow.modelData.label || srow.modelData.key
+                    text: root.client.lockedLabel(srow.modelData.key, root.labelOverrides[srow.modelData.key] || srow.modelData.label || srow.modelData.key)
                     color: Commons.Color.popups.text
                     font.pixelSize: root.theme.body
                 }
@@ -464,6 +464,7 @@ Item {
                         objectName: "settingToggle"
                         ts: root.theme.ts
                         accessibleName: String(srow.modelData.label || srow.modelData.key)
+                        enabled: !root.client.isLocked(srow.modelData.key)
                         visible: typeof srow.modelData.value === "boolean"
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
@@ -474,6 +475,7 @@ Item {
                         objectName: "settingField"
                         accessibleName: String(srow.modelData.label || srow.modelData.key)
                         ts: root.theme.ts
+                        enabled: !root.client.isLocked(srow.modelData.key)
                         visible: typeof srow.modelData.value !== "boolean"
                         anchors.fill: parent
                         text: String(srow.modelData.value)

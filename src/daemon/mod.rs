@@ -1,6 +1,7 @@
 //! The headless daemon: orchestration of capture, speech, chat and notes,
 //! driven over a unix socket by the Quickshell plugin and `ctl`.
 
+pub mod nix_settings;
 pub mod protocol;
 pub mod server;
 pub mod session;
@@ -34,6 +35,9 @@ pub fn run() -> Result<(), String> {
     runtime.block_on(async {
         let socket = crate::cli::socket_path().ok_or("XDG_RUNTIME_DIR is not set")?;
         let daemon = Daemon::new(Options::from_env()?)?;
+        if let Some(path) = nix_settings::path() {
+            daemon.apply_nix_settings(&path);
+        }
         tracing::info!(version = env!("CARGO_PKG_VERSION"), socket = %socket.display(), "daemon ready");
         for name in ["claude", "codex", "agy", "opencode"] {
             if let Some(path) = which_on_path(name) {

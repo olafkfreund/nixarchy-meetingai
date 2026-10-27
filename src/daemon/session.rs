@@ -251,6 +251,8 @@ pub struct Daemon {
     chunking: AtomicBool,
     /// The session's candidate is local-only: only ollama and whisper-local may be used.
     local_only: AtomicBool,
+    /// Settings fixed by `programs.nixarchy-meetingai.settings.enforce`; `settings.set` refuses them.
+    locked: Mutex<Vec<String>>,
     /// Shown to the first client that connects, then cleared.
     startup_notice: Mutex<Option<String>>,
     /// Serializes rolling-notes chunking and recap generation (no duplicate chunks).
@@ -466,6 +468,36 @@ fn stays_local(config: &ProviderConfig) -> bool {
     loopback && config.id != "ollama-cloud" && !config.model.to_lowercase().ends_with("-cloud")
 }
 
+/// The Nix module tells the daemon where its whisper-server listens (`http://host:port`).
+fn apply_whisper_url(config: &mut ProviderConfig, url: Option<String>) {
+    if let Some(url) = url.filter(|u| !u.is_empty() && config.base_url.is_empty()) {
+        config.base_url = format!("{}/inference", url.trim_end_matches('/'));
+    }
+}
+
+/// The Nix module points the daemon at its Ollama (`http://host:port`); stays local only on loopback.
+fn apply_ollama_url(config: &mut ProviderConfig, url: Option<String>) {
+    if let Some(url) = url.filter(|u| !u.is_empty()) {
+        config.base_url = format!("{}/v1/chat/completions", url.trim_end_matches('/'));
+    }
+}
+
+/// A key from a systemd credential file.
+fn read_credential(dir: Option<std::ffi::OsString>, name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(std::path::Path::new(&dir?).join(name)).ok()?;
+    Some(text.trim().to_owned()).filter(|k| !k.is_empty())
+}
+
+/// The Ollama Cloud key given outside the app: the `ollama` credential, then `OLLAMA_API_KEY`.
+fn external_ollama_key() -> Option<String> {
+    read_credential(std::env::var_os("CREDENTIALS_DIRECTORY"), "ollama").or_else(|| {
+        std::env::var("OLLAMA_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_owned())
+            .filter(|k| !k.is_empty())
+    })
+}
+
 /// Loopback ollama: the one provider that may sit silent while a cold model loads.
 fn loopback_ollama(config: &ProviderConfig) -> bool {
     config.id == "ollama" && stays_local(config)
@@ -606,6 +638,7 @@ impl Daemon {
             shutdown: Notify::new(),
             chunking: AtomicBool::new(false),
             local_only: AtomicBool::new(false),
+            locked: Mutex::new(Vec::new()),
             startup_notice: Mutex::new(startup_notice),
             notes: tokio::sync::Mutex::new(()),
             inner: Mutex::new(Inner {
@@ -740,9 +773,17 @@ impl Daemon {
                     ProviderConfig::new(id, "", models::default_for(id).unwrap_or_default())
                 })?,
         };
-        if id == "ollama-cloud" && config.api_key.trim().is_empty() {
-            // The service environment is the other place the key may live; never logged.
-            config.api_key = std::env::var("OLLAMA_API_KEY").unwrap_or_default();
+        if id == "ollama-cloud"
+            && let Some(key) = external_ollama_key()
+        {
+            // The Nix credential or service environment beats the vault; never logged.
+            config.api_key = key;
+        }
+        if id == "ollama" && config.base_url.is_empty() {
+            apply_ollama_url(
+                &mut config,
+                std::env::var("NIXARCHY_MEETINGAI_OLLAMA_URL").ok(),
+            );
         }
         if !model.is_empty() {
             config.model = model.to_owned();
@@ -830,6 +871,12 @@ impl Daemon {
         config.language.clone_from(&s.speech_language);
         if !s.speech_model.is_empty() {
             config.model.clone_from(&s.speech_model);
+        }
+        if id == "whisper-local" {
+            apply_whisper_url(
+                &mut config,
+                std::env::var("NIXARCHY_MEETINGAI_WHISPER_URL").ok(),
+            );
         }
         (config.speech_usable() && (!local || stays_local(&config))).then_some(config)
     }
@@ -2346,9 +2393,37 @@ impl Daemon {
             .collect())
     }
 
+    /// Apply the Nix-declared settings file at start.
+    pub fn apply_nix_settings(&self, path: &Path) {
+        let Some(nix) = super::nix_settings::read(path) else {
+            return;
+        };
+        let mut g = self.inner.lock();
+        match super::nix_settings::apply(&g.db, &nix) {
+            Ok(locked) => {
+                *self.locked.lock() = locked;
+                g.settings = Settings::load(&g.db).unwrap_or_default();
+            }
+            Err(error) => tracing::warn!(%error, "could not apply Nix settings"),
+        }
+    }
+
+    /// [`Self::settings_map`] plus `locked`: the keys the app must show disabled.
+    fn settings_reply(&self, g: &Inner) -> Result<Map<String, Value>, String> {
+        let mut all = self.settings_map(g)?;
+        all.insert("locked".into(), json!(*self.locked.lock()));
+        Ok(all)
+    }
+
     fn settings_set(&self, args: protocol::SettingSet) -> Result<Value, String> {
         if args.key == "api_key" {
             return self.set_api_key(args);
+        }
+        if self.locked.lock().contains(&args.key) {
+            return Err(format!(
+                "Set in Nix: '{}' is fixed by programs.nixarchy-meetingai.settings.",
+                args.key
+            ));
         }
         let mut guard = self.inner.lock();
         let g = &mut *guard;
@@ -2362,7 +2437,7 @@ impl Daemon {
         };
         Settings::set(&g.db, &args.key, &text).map_err(|e| e.to_string())?;
         g.settings = Settings::load(&g.db).unwrap_or_default();
-        let all = self.settings_map(g)?;
+        let all = self.settings_reply(g)?;
         self.emit("settings", json!({"settings": all}));
         self.emit_state(g); // a provider or Local-only change flips state.ready
         Ok(json!({}))
@@ -2426,7 +2501,7 @@ impl Daemon {
                     .ok()
                     .flatten()
                     .is_some_and(|c| !c.api_key.trim().is_empty())
-                    || (p.id == "ollama-cloud" && std::env::var_os("OLLAMA_API_KEY").is_some());
+                    || (p.id == "ollama-cloud" && external_ollama_key().is_some());
                 json!({"id": p.id, "name": p.name, "requires_key": p.requires_key, "has_key": has_key})
             })
             .collect()
@@ -2439,7 +2514,7 @@ impl Daemon {
                 .ok()
                 .flatten()
                 .is_some_and(|c| !c.api_key.trim().is_empty())
-                || (p.id == "ollama-cloud" && std::env::var_os("OLLAMA_API_KEY").is_some());
+                || (p.id == "ollama-cloud" && external_ollama_key().is_some());
             crate::ai::chat::status::status(p.id, p.name, has_key)
         });
         json!(futures_util::future::join_all(rows).await)
@@ -3232,7 +3307,7 @@ impl Daemon {
                 };
                 Ok(json!({"text": text}))
             }
-            "settings.get" => Ok(Value::Object(self.settings_map(&self.inner.lock())?)),
+            "settings.get" => Ok(Value::Object(self.settings_reply(&self.inner.lock())?)),
             "settings.set" => self.settings_set(parse(args)?),
             "settings.search" => self.settings_search(&parse::<protocol::QueryArg>(args)?.query),
             "profiles.list" | "profiles.save" | "profiles.delete" | "profiles.select"
@@ -3579,6 +3654,40 @@ mod command_tests {
             capture: false,
         })
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn enforced_nix_settings_are_locked_and_refused() {
+        let d = daemon();
+        let file = std::env::temp_dir().join(format!("nm-nix-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &file,
+            r#"{"enforce": true, "values": {"text_scale": "120", "bogus": "x"}}"#,
+        )
+        .unwrap();
+        d.apply_nix_settings(&file);
+        std::fs::remove_file(&file).ok();
+        let got = d.handle("settings.get", json!({}), None).await.unwrap();
+        assert_eq!(
+            (got["text_scale"].clone(), got["locked"].clone()),
+            (json!(120), json!(["text_scale"]))
+        );
+        let refused = d
+            .handle(
+                "settings.set",
+                json!({"key": "text_scale", "value": 90}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.contains("Set in Nix"), "{refused}");
+        d.handle(
+            "settings.set",
+            json!({"key": "reduce_motion", "value": true}),
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -4007,6 +4116,51 @@ mod command_tests {
         // The same read is fine for a person at the overlay.
         call("transcript.get", json!({})).await.unwrap();
         call("record.stop", json!({})).await.unwrap();
+    }
+
+    #[test]
+    fn whisper_url_env_sets_the_inference_endpoint_once() {
+        let mut c = ProviderConfig::new("whisper-local", "", "m");
+        apply_whisper_url(&mut c, None);
+        assert_eq!(c.base_url, "");
+        apply_whisper_url(&mut c, Some("http://127.0.0.1:9000/".into()));
+        assert_eq!(c.base_url, "http://127.0.0.1:9000/inference");
+        apply_whisper_url(&mut c, Some("http://127.0.0.1:1".into()));
+        assert_eq!(c.base_url, "http://127.0.0.1:9000/inference");
+        assert!(stays_local(&c));
+    }
+
+    #[test]
+    fn credential_file_is_read_and_trimmed() {
+        let dir = std::env::temp_dir().join(format!("nm-cred-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ollama"), "fake-key-123\n").unwrap();
+        std::fs::write(dir.join("empty"), "\n").unwrap();
+        let d = || Some(dir.clone().into_os_string());
+        assert_eq!(
+            read_credential(d(), "ollama").as_deref(),
+            Some("fake-key-123")
+        );
+        assert_eq!(read_credential(d(), "empty"), None);
+        assert_eq!(read_credential(d(), "missing"), None);
+        assert_eq!(read_credential(None, "ollama"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ollama_url_env_must_be_loopback_to_count_as_local() {
+        let apply = |url: &str| {
+            let mut c = ProviderConfig::new("ollama", "", "llama3");
+            apply_ollama_url(&mut c, Some(url.into()));
+            c
+        };
+        let ok = apply("http://127.0.0.1:9999/");
+        assert_eq!(ok.base_url, "http://127.0.0.1:9999/v1/chat/completions");
+        assert!(stays_local(&ok));
+        assert!(!stays_local(&apply("http://10.0.0.5:11434")));
+        let mut none = ProviderConfig::new("ollama", "", "llama3");
+        apply_ollama_url(&mut none, None);
+        assert_eq!(none.base_url, "");
     }
 
     #[test]

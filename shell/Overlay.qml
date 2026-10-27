@@ -486,12 +486,13 @@ Item {
                         }
                     }
                     Cell {
-                        theme: metrics; width: sflow.cellW; label: "Chat model"
+                        theme: metrics; width: sflow.cellW; label: backend.lockedLabel("chat_model", "Chat model")
                         Select {   // typing filters the list
                             objectName: "chatModel"
                             accessibleName: "Chat model"
                             searchable: true
                             theme: metrics; anchors.fill: parent
+                            enabled: !backend.isLocked("chat_model")
                             value: String(backend.settings.chat_model || "")
                             options: root.models.map(function(m) { return String(m); })
                             triggerLabel: "default"
@@ -521,12 +522,13 @@ Item {
                         }
                     }
                     Cell {
-                        theme: metrics; width: sflow.cellW; label: "Live answers model"
+                        theme: metrics; width: sflow.cellW; label: backend.lockedLabel("live_model", "Live answers model")
                         Select {
                             objectName: "liveModel"
                             accessibleName: "Live answers model"
                             searchable: true
                             theme: metrics; anchors.fill: parent
+                            enabled: !backend.isLocked("live_model")
                             value: String(backend.settings.live_model || "")
                             options: root.liveModels.map(function(m) { return String(m); })
                             triggerLabel: "default"
@@ -534,11 +536,12 @@ Item {
                         }
                     }
                     Cell {
-                        theme: metrics; width: sflow.cellW; label: "Pace"
+                        theme: metrics; width: sflow.cellW; label: backend.lockedLabel("response_pace", "Pace")
                         Select {
                             objectName: "pace"
                             accessibleName: "Pace"
                             theme: metrics; anchors.fill: parent
+                            enabled: !backend.isLocked("response_pace")
                             value: String(backend.settings.response_pace || "Balanced")
                             options: root.paces
                             onChanged: function(v) { backend.setSetting("response_pace", v); }
@@ -552,12 +555,13 @@ Item {
                         }
                     }
                     Cell {   // overlay text size, 80..160 % (Ctrl+= / Ctrl+- / Ctrl+0)
-                        theme: metrics; width: sflow.cellW; label: "Text size " + Math.round(backend.textScale * 100) + "%"
+                        theme: metrics; width: sflow.cellW; label: backend.lockedLabel("text_scale", "Text size " + Math.round(backend.textScale * 100) + "%")
                         PanelSlider {
                             objectName: "textSize"
                             Accessible.role: Accessible.Slider; Accessible.name: "Text size"; property string accName: "Text size"
                             anchors.verticalCenter: parent.verticalCenter
                             width: parent.width
+                            enabled: !backend.isLocked("text_scale")
                             minimum: 80; maximum: 160; step: 10; integer: true
                             trackHeight: Math.max(4, Math.round(Style.spacing.controlHeight * 0.11 * metrics.ts))
                             knobSize: Math.max(14, Math.round(Style.spacing.controlHeight * 0.38 * metrics.ts))

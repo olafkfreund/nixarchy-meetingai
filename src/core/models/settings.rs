@@ -24,7 +24,7 @@ impl AutoResponse {
             Self::Pauses => "After every pause",
         }
     }
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Questions => "questions",
@@ -490,6 +490,11 @@ impl Settings {
             ("overlay_w", self.overlay_w.max(-1).to_string()),
             ("overlay_h", self.overlay_h.max(-1).to_string()),
         ]
+    }
+
+    /// Whether `key` is a setting `settings.set` accepts.
+    pub fn is_key(key: &str) -> bool {
+        Self::default().pairs().iter().any(|(k, _)| *k == key)
     }
 
     /// Write a single setting without touching the rest.

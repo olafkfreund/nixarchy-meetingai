@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--providers] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--providers] [--locked] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -45,6 +45,7 @@ first_run = "--first-run" in sys.argv   # no provider, speech not ready: the Set
 err = "--error" in sys.argv          # a typed question starts, waits, then fails (Writing bar, then Retry)
 drop = "--drop" in sys.argv          # the first connection is cut mid-answer; the client reconnects and asks transcript.get / now.get
 providers = "--providers" in sys.argv
+locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, chat_model, text_scale
 live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
@@ -94,6 +95,8 @@ DATA = {
     "items.list": [],
     "notes.get": {"text": "## Summary\nfake"},
 }
+if locked:
+    settings["locked"] = ["chat_provider", "chat_model", "text_scale"]
 settings.update(overlay_x=-1, overlay_y=-1, overlay_w=-1, overlay_h=-1)
 size = next((a.split("=")[1] for a in sys.argv if a.startswith("--size=")), "")   # --size=WxH: start with a non-default card
 if size:
@@ -400,7 +403,7 @@ class Handler(socketserver.StreamRequestHandler):
         for raw in self.rfile:
             req = json.loads(raw)
             cmd = req["cmd"]
-            log(cmd)
+            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else ""))
             if cmd == "record.start" and iv and not (state["consent"] or req.get("args", {}).get("consent")):
                 self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed."})
                 continue

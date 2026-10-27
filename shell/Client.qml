@@ -125,7 +125,12 @@ Item {
         root.send("profiles.list", {}, function(r) { if (r.ok) root.profiles = r.data || []; });
     }
 
+    // Fixed by programs.nixarchy-meetingai.settings.enforce: shown disabled, never sent.
+    function isLocked(key) { return (root.settings.locked || []).indexOf(key) >= 0; }
+    function lockedLabel(key, label) { return root.isLocked(key) ? label + " (Set in Nix)" : label; }
+
     function setSetting(key, value) {
+        if (root.isLocked(key)) return;
         var next = Object.assign({}, root.settings);
         next[key] = value;
         root.settings = next;

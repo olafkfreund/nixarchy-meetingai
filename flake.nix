@@ -7,6 +7,9 @@
     # Only so `nix flake check` can evaluate the module this repo ships.
     home-manager.url = "github:nix-community/home-manager";
     home-manager.inputs.nixpkgs.follows = "nixpkgs";
+    # The call-detection plugin; `callDetection.enable` adds it.
+    nixarchy-meeting-mode.url = "github:olafkfreund/nixarchy-meeting-mode";
+    nixarchy-meeting-mode.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -15,8 +18,36 @@
       nixpkgs,
       systems,
       home-manager,
+      nixarchy-meeting-mode,
     }:
     let
+      inherit (nixpkgs) lib;
+      # The module's options as CommonMark, for the README section between the nix-options markers.
+      optionsDoc =
+        pkgs:
+        let
+          hm = home-manager.lib.homeManagerConfiguration {
+            inherit pkgs;
+            modules = [
+              self.homeManagerModules.default
+              {
+                home = {
+                  username = "docs";
+                  homeDirectory = "/home/docs";
+                  stateVersion = "25.05";
+                };
+              }
+            ];
+          };
+          doc = pkgs.nixosOptionsDoc {
+            options = {
+              inherit (hm.options.programs) nixarchy-meetingai;
+            };
+            transformOptions = o: o // { declarations = [ ]; };
+            warningsAreErrors = false;
+          };
+        in
+        doc.optionsCommonMark;
       eachSystem = f: nixpkgs.lib.genAttrs (import systems) (system: f nixpkgs.legacyPackages.${system});
     in
     {
@@ -26,23 +57,34 @@
           models = pkgs.callPackage ./nix/whisper-model.nix { };
         in
         {
-          default = pkgs.callPackage ./nix/package.nix { };
+          default = self.packages.${pkgs.stdenv.hostPlatform.system}.nixarchy-meetingai;
+          nixarchy-meetingai = pkgs.callPackage ./nix/package.nix { };
+          plugin = pkgs.callPackage ./nix/plugin.nix { };
           whisper-model-small-en = models."small.en";
           whisper-model-small = models."small";
+          whisper-model-large-v3-turbo = models."large-v3-turbo";
+          docs = optionsDoc pkgs;
         }
       );
 
-      homeManagerModules.default = import ./nix/hm-module.nix self;
+      homeManagerModules = rec {
+        default = import ./nix/hm-module.nix self { inherit nixarchy-meeting-mode; };
+        nixarchy-meetingai = default;
+      };
 
       overlays.default = final: _prev: {
         nixarchy-meetingai = final.callPackage ./nix/package.nix { };
+        nixarchy-meetingai-plugin = final.callPackage ./nix/plugin.nix { };
+        whisper-models = final.callPackage ./nix/whisper-model.nix { };
       };
 
       # A module nothing evaluates is a module nothing checks.
-      checks = eachSystem (pkgs: {
-        hm-module =
-          let
-            hm = home-manager.lib.homeManagerConfiguration {
+      checks = eachSystem (
+        pkgs:
+        let
+          evalHm =
+            extra:
+            (home-manager.lib.homeManagerConfiguration {
               inherit pkgs;
               modules = [
                 self.homeManagerModules.default
@@ -54,12 +96,144 @@
                   };
                   programs.nixarchy-meetingai.enable = true;
                 }
+                extra
               ];
+            }).config;
+          minimal = evalHm { };
+          full = evalHm {
+            programs.nixarchy-meetingai = {
+              autostart = false;
+              logLevel = "debug";
+              extraEnvironment.FOO = "bar";
+              ollamaCloud.keyFile = "/run/agenix/ollama-cloud";
+              ollama.url = "http://127.0.0.1:12345";
+              settings = {
+                enforce = true;
+                meetingMode = "interviewer";
+                chatProvider = "claude-sub";
+                chatModel = "opus";
+                liveProvider = "claude-sub";
+                liveModel = "haiku";
+                responsePace = "Fast";
+                responseLength = "Short";
+                responseLanguage = "English";
+                autoResponse = "pauses";
+                smartFollowUps = false;
+                autoRecordOnCall = true;
+                speechProvider = "whisper-local";
+                speechModel = "ggml-large-v3-turbo";
+                speechLanguage = "en";
+                textScale = 120;
+                reduceMotion = true;
+                mcpAllowRecord = false;
+              };
+              whisper = {
+                port = 9000;
+                threads = 4;
+                extraArgs = [ "--no-gpu" ];
+              };
             };
-          in
-          pkgs.writeText "hm-module-check" (
-            builtins.toJSON (builtins.attrNames hm.config.systemd.user.services)
-          );
-      });
+          };
+          # Stand-in for nixarchy's own option, whose module is not an input of this flake.
+          stubPlugins = {
+            options.programs.nixarchy.plugins = nixpkgs.lib.mkOption {
+              type = lib.types.attrsOf (
+                lib.types.submodule { options.src = nixpkgs.lib.mkOption { type = lib.types.path; }; }
+              );
+              default = { };
+            };
+          };
+          withPlugins = evalHm stubPlugins;
+          userMeetingMode = evalHm {
+            imports = [ stubPlugins ];
+            programs.nixarchy.plugins.meeting-mode.src = "/user/meeting-mode";
+          };
+          svc = c: c.systemd.user.services;
+          assertThat =
+            name: cond: msg:
+            pkgs.writeText name (if cond then "ok" else throw "${name}: ${msg}");
+          fullDaemon = (svc full).nixarchy-meetingai.Service;
+          fullWhisper = (svc full).nixarchy-meetingai-whisper;
+        in
+        {
+          hm-module = pkgs.writeText "hm-module-check" (builtins.toJSON (builtins.attrNames (svc minimal)));
+          hm-plugin-nixarchy = assertThat "hm-plugin-nixarchy" (
+            withPlugins.programs.nixarchy.plugins."nixarchy.meetingai".src
+            == self.packages.${pkgs.stdenv.hostPlatform.system}.plugin
+            &&
+              withPlugins.programs.nixarchy.plugins.meeting-mode.src
+              == nixarchy-meeting-mode.packages.${pkgs.stdenv.hostPlatform.system}.default
+            && !(withPlugins.xdg.configFile ? "omarchy/plugins/nixarchy.meetingai")
+            && userMeetingMode.programs.nixarchy.plugins.meeting-mode.src == "/user/meeting-mode"
+            &&
+              builtins.attrNames userMeetingMode.programs.nixarchy.plugins == [
+                "meeting-mode"
+                "nixarchy.meetingai"
+              ]
+          ) "plugins not registered through programs.nixarchy.plugins";
+          hm-plugin-xdg = assertThat "hm-plugin-xdg" (
+            minimal.xdg.configFile ? "omarchy/plugins/nixarchy.meetingai" && !(minimal.programs ? nixarchy)
+          ) "plugin not installed to the omarchy folder without nixarchy";
+          # Home Manager throws "Failed assertions" on any access to a config that breaks one.
+          hm-assertions =
+            let
+              evaluates = extra: (builtins.tryEval (evalHm extra).home.username).success;
+              wrong = [
+                {
+                  programs.nixarchy-meetingai = {
+                    whisper.enable = false;
+                    settings.speechProvider = "whisper-local";
+                  };
+                }
+                { programs.nixarchy-meetingai.settings.extra.api_key = "fake-key"; }
+                {
+                  programs.nixarchy-meetingai.ollamaCloud = {
+                    keyFile = "/run/fake";
+                    environmentFile = "/run/fake.env";
+                  };
+                }
+              ];
+            in
+            assertThat "hm-assertions" (
+              evaluates { }
+              && lib.all (c: !evaluates c) wrong
+              && evaluates {
+                programs.nixarchy-meetingai = {
+                  whisper.enable = false;
+                  settings.speechProvider = "deepgram-stt";
+                };
+              }
+            ) "an assertion did not fire (or fired for a valid setup)";
+          docs-match =
+            let
+              readme = builtins.readFile ./README.md;
+              afterBegin = builtins.elemAt (lib.splitString "<!-- nix-options:begin -->\n" readme) 1;
+              committed = builtins.head (lib.splitString "<!-- nix-options:end -->" afterBegin);
+            in
+            pkgs.runCommandLocal "docs-match" { } ''
+              printf '%s' ${lib.escapeShellArg committed} > committed.md
+              if ! diff -u committed.md ${self.packages.${pkgs.stdenv.hostPlatform.system}.docs}; then
+                echo "README 'Nix options' is stale: nix build .#docs and paste result between the markers" >&2
+                exit 1
+              fi
+              touch $out
+            '';
+          hm-settings-file = assertThat "hm-settings-file" (
+            builtins.fromJSON full.xdg.configFile."nixarchy-meetingai/settings.json".text
+            == builtins.fromJSON (builtins.readFile ./tests/fixtures/nix-settings.json)
+            && !(minimal.xdg.configFile ? "nixarchy-meetingai/settings.json")
+          ) "settings.json differs from tests/fixtures/nix-settings.json";
+          hm-service-options = assertThat "hm-service-options" (
+            lib.hasInfix "--port 9000 -t 4 --no-gpu" (toString fullWhisper.Service.ExecStart)
+            && fullWhisper.Install.WantedBy == [ ]
+            && builtins.elem "NIXARCHY_MEETINGAI_WHISPER_URL=http://127.0.0.1:9000" fullDaemon.Environment
+            && builtins.elem "RUST_LOG=nixarchy_meetingai=debug" fullDaemon.Environment
+            && builtins.elem "FOO=bar" fullDaemon.Environment
+            && fullDaemon.LoadCredential == [ "ollama:/run/agenix/ollama-cloud" ]
+            && builtins.elem "NIXARCHY_MEETINGAI_OLLAMA_URL=http://127.0.0.1:12345" fullDaemon.Environment
+            && (svc full).nixarchy-meetingai.Install.WantedBy == [ ]
+          ) "service options not applied";
+        }
+      );
     };
 }

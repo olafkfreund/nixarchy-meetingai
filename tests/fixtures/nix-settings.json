@@ -1,0 +1,22 @@
+{
+  "enforce": true,
+  "values": {
+    "auto_record_on_call": "true",
+    "auto_response": "pauses",
+    "chat_model": "opus",
+    "chat_provider": "claude-sub",
+    "live_model": "haiku",
+    "live_provider": "claude-sub",
+    "mcp_allow_record": "false",
+    "meeting_mode": "interviewer",
+    "reduce_motion": "true",
+    "response_language": "English",
+    "response_length": "Short",
+    "response_pace": "Fast",
+    "smart_follow_ups": "false",
+    "speech_language": "en",
+    "speech_model": "ggml-large-v3-turbo",
+    "speech_provider": "whisper-local",
+    "text_scale": "120"
+  }
+}

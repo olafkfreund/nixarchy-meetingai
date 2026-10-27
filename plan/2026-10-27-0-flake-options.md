@@ -119,3 +119,15 @@ step 7.
 ## Deviations log (recorded with the implementation commit)
 
 None yet.
+- **Steps 1–6 (one commit; coders cannot commit):** `settings.textScale`
+  is 80–160 (what the app clamps to), not 80–200. `logLevel` sets
+  `RUST_LOG=nixarchy_meetingai=<level>` so dependencies stay quiet. The
+  module is `self: inputs: { … }` to reach the meeting-mode input. The enum
+  JSON (`nix/settings-enums.json`) is hand-written and a Rust test checks it
+  against the types; the fixture test lives in `src/daemon/nix_settings.rs`.
+  Ollama key order is credential file, then `OLLAMA_API_KEY`, then the vault
+  (was vault first). `callDetection` sets the meeting-mode plugin with
+  `mkDefault`, so a user's own entry wins. The headless check asserts that
+  no `settings.set` is sent for locked keys (not each control's `enabled`).
+  `providers.status` probes the configured Ollama address; IPv6 hosts are
+  untested. The flake has no `nix fmt` formatter.

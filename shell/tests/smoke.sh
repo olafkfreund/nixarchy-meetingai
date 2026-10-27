@@ -80,6 +80,20 @@ if not d["connected"] or d["answering"] or not d["now"].startswith("**Talking po
 print("drop: reconnected, the transcript and NOW were rebuilt from transcript.get and now.get")
 PY
 
+# --locked: settings fixed by Nix are never sent (live_provider is free and still is), and the Settings page loads.
+ln -sf "$here/tests/harness-locked.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-locked"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/locked.log" --locked &
+fake=$!
+sleep 0.5
+timeout 6 quickshell -p "$work/cfg" > "$work/locked.out" 2> "$work/locked.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/locked.err" "$work/locked.out"; then echo "FAIL (locked): QML errors above" >&2; exit 1; fi
+grep -q "settings.set live_provider" "$work/locked.log" || { echo "FAIL (locked): the free setting was not sent" >&2; exit 1; }
+if grep -qE "settings.set (chat_provider|chat_model|text_scale)" "$work/locked.log"; then echo "FAIL (locked): a setting fixed by Nix was sent" >&2; exit 1; fi
+echo "locked: Nix-fixed settings are never sent"
+
 if grep -q record.start "$work/off.log"; then echo "FAIL: record.start sent with auto_record_on_call off" >&2; exit 1; fi
 grep -q record.start "$work/auto.log" || { echo "FAIL: record.start not sent with auto_record_on_call on" >&2; exit 1; }
 grep -q -- '-A take=' "$work/notify.log" || { echo "FAIL: no Take notes offer with the setting off" >&2; exit 1; }
