@@ -5,6 +5,7 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import qs.Commons // qmllint disable import
 import qs.Commons as Commons // qmllint disable import
+import qs.Ui // qmllint disable import
 
 // Question box. Grows to 5 lines then scrolls; Enter sends, Shift+Enter adds
 // a line. Code and large pastes become chips; files go as paths.
@@ -40,38 +41,19 @@ Item {
 
             Repeater {
                 model: root.chips
-                Rectangle {
-                    required property var modelData
+                Row {
                     id: chip
+                    required property var modelData
                     required property int index
-                    width: Style.space(84); height: width
-                    radius: Style.cornerRadius
-                    color: Commons.Color.menu.selectedBackground
-                    border.color: Commons.Color.menu.border
-
-                    Text {
-                        anchors.fill: parent
-                        anchors.margins: Style.spacing.xs
-                        textFormat: Text.PlainText
-                        wrapMode: Text.Wrap
-                        elide: Text.ElideRight
-                        text: parent.modelData.label
-                        color: Commons.Color.menu.text
-                        font.pixelSize: Style.font.caption
+                    Button {
+                        text: chip.modelData.label
+                        bordered: true
+                        onClicked: if (chip.modelData.kind === "text") root.preview(chip.modelData.text)
                     }
-                    MouseArea {
-                        anchors.fill: parent
-                        onClicked: if (parent.modelData.kind === "text") root.preview(parent.modelData.text)
-                    }
-                    Text {
-                        anchors.top: parent.top; anchors.right: parent.right
-                        textFormat: Text.PlainText
-                        text: "×"
-                        color: Commons.Color.urgent
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.chips = root.chips.filter(function(c, i) { return i !== chip.index; })
-                        }
+                    PanelActionButton {
+                        iconText: "\u00d7"
+                        hoverColor: Commons.Color.urgent
+                        onClicked: root.chips = root.chips.filter(function(c, i) { return i !== chip.index; })
                     }
                 }
             }
@@ -81,7 +63,7 @@ Item {
             width: parent.width
             spacing: Style.spacing.xs
 
-            Pill { label: "+"; onClicked: files.open() }
+            Button { text: "+"; bordered: true; onClicked: files.open() }
 
             ScrollView {
                 width: parent.width - Style.space(120)
@@ -94,9 +76,9 @@ Item {
                     color: Commons.Color.menu.text
                     placeholderTextColor: Qt.alpha(Commons.Color.menu.text, 0.5)
                     font.pixelSize: Style.font.body
-                    background: Rectangle {
-                        color: "transparent"
-                        border.color: Commons.Color.menu.border
+                    background: BorderSurface {
+                        color: Style.controlFill(input.activeFocus, input.hovered, Commons.Color.foreground, Commons.Color.accent)
+                        borderSpec: Border.controlSpec(input.activeFocus ? "focus" : (input.hovered ? "hover-cursor" : "normal"), Commons.Color.foreground, Commons.Color.accent)
                         radius: Style.cornerRadius
                     }
                     Keys.onPressed: function(e) {
@@ -114,7 +96,7 @@ Item {
                 }
             }
 
-            Pill { label: "Send"; on: input.text.trim() !== "" || root.chips.length > 0; onClicked: root.send() }
+            Button { text: "Send"; active: input.text.trim() !== "" || root.chips.length > 0; bordered: true; onClicked: root.send() }
         }
     }
 

@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Controls
 import qs.Commons // qmllint disable import
 import qs.Commons as Commons // qmllint disable import
+import qs.Ui // qmllint disable import
 
 // Restore / Profiles / Prompts / Providers / Settings. One search field asks
 // the daemon (settings.search) and also filters the lists on the other tabs.
@@ -63,22 +64,20 @@ Item {
             spacing: Style.spacing.xs
             Repeater {
                 model: root.tabs
-                Pill {
+                Button {
                     required property string modelData
-                    label: modelData.charAt(0).toUpperCase() + modelData.slice(1)
-                    on: root.tab === modelData
+                    text: modelData.charAt(0).toUpperCase() + modelData.slice(1)
+                    active: root.tab === modelData
                     onClicked: root.tab = modelData
                 }
             }
         }
 
+        PanelSeparator {}
+
         TextField {
             width: parent.width
             placeholderText: "Search settings, chats, profiles"
-            color: Commons.Color.menu.text
-            placeholderTextColor: Qt.alpha(Commons.Color.menu.text, 0.5)
-            font.pixelSize: Style.font.body
-            background: Rectangle { color: "transparent"; border.color: Commons.Color.menu.border; radius: Style.cornerRadius }
             onTextChanged: { root.query = text; root.search(); }
         }
 
@@ -100,13 +99,13 @@ Item {
                     color: Commons.Color.menu.text
                     font.pixelSize: Style.font.body
                 }
-                Pill { label: "Restore"; onClicked: root.client.send("session.restore", { id: parent.modelData.id }) }
-                Pill {
-                    label: "Notes"
+                Button { text: "Restore"; onClicked: root.client.send("session.restore", { id: parent.modelData.id }) }
+                Button {
+                    text: "Notes"
                     visible: parent.modelData.kind === "meeting"
                     onClicked: root.client.send("notes.get", { meeting: parent.modelData.id }, function(r) { root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; })
                 }
-                Pill { label: "Delete"; onClicked: { root.client.send("session.delete", { id: parent.modelData.id }); root.load(); } }
+                Button { text: "Delete"; onClicked: { root.client.send("session.delete", { id: parent.modelData.id }); root.load(); } }
             }
         }
         Text {
@@ -138,12 +137,12 @@ Item {
                     color: Commons.Color.menu.text
                     font.pixelSize: Style.font.body
                 }
-                Pill { label: "Delete"; onClicked: { root.client.send("profiles.delete", { name: parent.modelData.name }); root.load(); } }
+                Button { text: "Delete"; onClicked: { root.client.send("profiles.delete", { name: parent.modelData.name }); root.load(); } }
             }
             footer: Row {
                 spacing: Style.spacing.xs
-                TextField { id: profileName; placeholderText: "Profile name"; color: Commons.Color.menu.text; font.pixelSize: Style.font.body }
-                Pill { label: "Save current"; onClicked: { root.client.send("profiles.save", { name: profileName.text }); root.load(); } }
+                TextField { id: profileName; placeholderText: "Profile name" }
+                Button { text: "Save current"; onClicked: { root.client.send("profiles.save", { name: profileName.text }); root.load(); } }
             }
         }
 
@@ -155,18 +154,28 @@ Item {
                 spacing: Style.spacing.xs
                 Repeater {
                     model: ["general", "interview"]
-                    Pill { required property string modelData; label: modelData; on: root.promptMode === modelData; onClicked: root.promptMode = modelData }
+                    Button { required property string modelData; text: modelData; active: root.promptMode === modelData; onClicked: root.promptMode = modelData }
                 }
                 Repeater {
                     model: root.promptKinds
-                    Pill { required property string modelData; label: modelData; on: root.promptKind === modelData; onClicked: root.promptKind = modelData }
+                    Button { required property string modelData; text: modelData; active: root.promptKind === modelData; onClicked: root.promptKind = modelData }
                 }
             }
             ScrollView {
                 width: parent.width; height: parent.height - Style.space(80)
-                TextArea { id: promptText; wrapMode: TextEdit.Wrap; color: Commons.Color.menu.text; font.pixelSize: Style.font.body }
+                TextArea {
+                    id: promptText
+                    wrapMode: TextEdit.Wrap
+                    color: Commons.Color.menu.text
+                    font.pixelSize: Style.font.body
+                    background: BorderSurface {
+                        color: Style.controlFill(promptText.activeFocus, promptText.hovered, Commons.Color.foreground, Commons.Color.accent)
+                        borderSpec: Border.controlSpec(promptText.activeFocus ? "focus" : (promptText.hovered ? "hover-cursor" : "normal"), Commons.Color.foreground, Commons.Color.accent)
+                        radius: Style.cornerRadius
+                    }
+                }
             }
-            Pill { label: "Save"; onClicked: root.client.send("prompts.set", { mode: root.promptMode, kind: root.promptKind, text: promptText.text }) }
+            Button { text: "Save"; onClicked: root.client.send("prompts.set", { mode: root.promptMode, kind: root.promptKind, text: promptText.text }) }
         }
 
         ListView {
@@ -191,16 +200,14 @@ Item {
                     visible: prow.modelData.requires_key !== false
                     echoMode: TextInput.Password
                     placeholderText: "API key"
-                    color: Commons.Color.menu.text
-                    font.pixelSize: Style.font.body
                 }
-                Pill {
-                    label: "Set key"
+                Button {
+                    text: "Set key"
                     visible: keyField.visible
                     onClicked: { root.client.send("settings.set", { key: "api_key", provider: prow.modelData.id, value: keyField.text }); keyField.text = ""; root.load(); }
                 }
-                Pill {
-                    label: "Models"
+                Button {
+                    text: "Models"
                     onClicked: root.client.send("models.list", { provider: prow.modelData.id }, function(r) { root.modelsText = r.ok ? (r.data || []).join(", ") : r.error; })
                 }
             }
@@ -212,10 +219,21 @@ Item {
             width: parent.width; height: parent.height - y
             clip: true
             model: root.found
-            header: Pill {
-                label: "Take notes automatically when a call starts"
-                on: root.client.settings.auto_record_on_call === true
-                onClicked: root.client.setSetting("auto_record_on_call", !(root.client.settings.auto_record_on_call === true))
+            header: Row {
+                width: ListView.view.width
+                spacing: Style.spacing.xs
+                Text {
+                    width: parent.width / 2
+                    textFormat: Text.PlainText
+                    text: "Take notes automatically when a call starts"
+                    wrapMode: Text.Wrap
+                    color: Commons.Color.menu.text
+                    font.pixelSize: Style.font.body
+                }
+                ToggleSwitch {
+                    checked: root.client.settings.auto_record_on_call === true
+                    onToggled: root.client.setSetting("auto_record_on_call", !checked)
+                }
             }
             delegate: Row {
                 id: srow
@@ -229,17 +247,14 @@ Item {
                     color: Commons.Color.menu.text
                     font.pixelSize: Style.font.body
                 }
-                Pill {
+                ToggleSwitch {
                     visible: typeof srow.modelData.value === "boolean"
-                    label: srow.modelData.value ? "On" : "Off"
-                    on: srow.modelData.value === true
-                    onClicked: { root.client.setSetting(srow.modelData.key, !srow.modelData.value); root.search(); }
+                    checked: srow.modelData.value === true
+                    onToggled: { root.client.setSetting(srow.modelData.key, !srow.modelData.value); root.search(); }
                 }
                 TextField {
                     visible: typeof srow.modelData.value !== "boolean"
                     text: String(srow.modelData.value)
-                    color: Commons.Color.menu.text
-                    font.pixelSize: Style.font.body
                     onEditingFinished: root.client.setSetting(srow.modelData.key, typeof srow.modelData.value === "number" ? Number(text) : text)
                 }
             }

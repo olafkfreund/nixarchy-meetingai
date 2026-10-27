@@ -6,6 +6,7 @@ import Quickshell
 import Quickshell.Wayland
 import qs.Commons // qmllint disable import
 import qs.Commons as Commons // qmllint disable import
+import qs.Ui // qmllint disable import
 
 // Meeting AI overlay: transcript, streamed answer, follow-ups, selectors and
 // the question box. `omarchy-shell meetingai toggle` opens it.
@@ -31,6 +32,10 @@ Item {
         daemon.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
         root.loadModels();
     }
+
+    // Hooks for tests/shots.sh.
+    function openModelPicker() { modelBox.open(); }
+    function showLibrary(tab) { modelBox.close(); root.library = true; lib.tab = tab; }
 
     function close() {
         root.opened = false;
@@ -58,6 +63,7 @@ Item {
     Connections {
         target: daemon
         function onConnectedChanged() { if (daemon.connected) root.loadModels(); }
+        function onSettingsChanged() { if (root.models.length === 0) root.loadModels(); }
     }
 
     PanelWindow { // qmllint disable uncreatable-type
@@ -80,6 +86,7 @@ Item {
             radius: Style.cornerRadius
             color: Commons.Color.menu.background
             border.color: Commons.Color.menu.border
+            border.width: Style.normalBorderWidth
             focus: true
             Keys.onEscapePressed: root.close()
 
@@ -92,43 +99,54 @@ Item {
                 spacing: Style.spacing.md
 
                 // Header: recording state and selectors.
-                Row {
+                Flow {
+                    width: parent.width
                     spacing: Style.spacing.xs
-                    Pill { label: daemon.recording ? "Stop" : "Record"; on: daemon.recording; onClicked: daemon.send(daemon.recording ? "record.stop" : "record.start", {}) }
-                    Pill { label: "Mic"; on: daemon.state.mic === true; onClicked: daemon.send("record.toggle_mic", {}) }
-                    Pill { label: "System"; on: daemon.state.system === true; onClicked: daemon.send("record.toggle_system", {}) }
-                    Pill { label: "Screenshot"; onClicked: daemon.send("screenshot.capture", { region: true }) }
-                    Pill { label: "General"; on: daemon.settings.meeting_mode !== "interview"; onClicked: daemon.setSetting("meeting_mode", "general") }
-                    Pill { label: "Interview"; on: daemon.settings.meeting_mode === "interview"; onClicked: daemon.setSetting("meeting_mode", "interview") }
-                    Pill { label: "Library"; on: root.library; onClicked: root.library = !root.library }
-                    Pill { label: "Close"; onClicked: root.close() }
+                    Button { text: daemon.recording ? "Stop" : "Record"; active: daemon.recording; onClicked: daemon.send(daemon.recording ? "record.stop" : "record.start", {}) }
+                    Button { text: "Mic"; active: daemon.state.mic === true; onClicked: daemon.send("record.toggle_mic", {}) }
+                    Button { text: "System"; active: daemon.state.system === true; onClicked: daemon.send("record.toggle_system", {}) }
+                    Button { text: "Screenshot"; onClicked: daemon.send("screenshot.capture", { region: true }) }
+                    Button { text: "General"; active: daemon.settings.meeting_mode !== "interview"; onClicked: daemon.setSetting("meeting_mode", "general") }
+                    Button { text: "Interview"; active: daemon.settings.meeting_mode === "interview"; onClicked: daemon.setSetting("meeting_mode", "interview") }
+                    Button { text: "Library"; active: root.library; onClicked: root.library = !root.library }
+                    Button { text: "Close"; onClicked: root.close() }
                 }
                 Row {
-                    spacing: Style.spacing.xs
-                    ComboBox {
-                        model: root.providers.map(function(p) { return p.name || p.id; })
-                        currentIndex: root.providers.findIndex(function(p) { return p.id === daemon.settings.chat_provider; })
-                        onActivated: function(i) { daemon.setSetting("chat_provider", root.providers[i].id); root.loadModels(); }
+                    spacing: Style.spacing.md
+                    Dropdown {
+                        label: "Provider"
+                        value: String(daemon.settings.chat_provider || "")
+                        options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
+                        onChanged: function(v) { daemon.setSetting("chat_provider", v); root.loadModels(); }
                     }
-                    ComboBox {
+                    SearchableDropdown {   // typing filters the list
                         id: modelBox
-                        editable: true   // typing filters the list
-                        model: root.models.filter(function(m) { return editText === "" || String(m).toLowerCase().indexOf(editText.toLowerCase()) >= 0; })
-                        editText: String(daemon.settings.chat_model || "")
-                        onAccepted: daemon.setSetting("chat_model", editText)
-                        onActivated: daemon.setSetting("chat_model", currentText)
+                        label: "Model"
+                        value: String(daemon.settings.chat_model || "")
+                        options: root.models.map(function(m) { return String(m); })
+                        onChanged: function(v) { daemon.setSetting("chat_model", v); }
                     }
-                    ComboBox {
-                        model: root.paces
-                        currentIndex: Math.max(0, root.paces.indexOf(daemon.settings.response_pace))
-                        onActivated: function(i) { daemon.setSetting("response_pace", root.paces[i]); }
+                    Dropdown {
+                        label: "Pace"
+                        value: String(daemon.settings.response_pace || "Balanced")
+                        options: root.paces
+                        onChanged: function(v) { daemon.setSetting("response_pace", v); }
                     }
-                    CheckBox {
-                        id: noContext
-                        text: "No context"
-                        contentItem: Text { text: noContext.text; leftPadding: noContext.indicator.width + 4; color: Commons.Color.menu.text; font.pixelSize: Style.font.caption; verticalAlignment: Text.AlignVCenter }
+                    Row {
+                        spacing: Style.spacing.xs
+                        anchors.bottom: parent.bottom
+                        height: Style.spacing.controlHeight
+                        ToggleSwitch { id: noContext; anchors.verticalCenter: parent.verticalCenter; onToggled: checked = !checked }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            textFormat: Text.PlainText
+                            text: "No context"
+                            color: Commons.Color.menu.text
+                            font.pixelSize: Style.font.caption
+                        }
                     }
                 }
+                PanelSeparator {}
 
                 Text {
                     visible: !daemon.connected || daemon.lastError !== ""
@@ -141,6 +159,7 @@ Item {
                 }
 
                 Library {
+                    id: lib
                     visible: root.library
                     client: daemon
                     width: parent.width
@@ -187,7 +206,7 @@ Item {
                     }
                     Repeater {
                         model: root.asked ? root.asked.chips : []
-                        Pill { required property var modelData; label: modelData.label; onClicked: root.openRef(modelData) }
+                        Button { required property var modelData; text: modelData.label; bordered: true; onClicked: root.openRef(modelData) }
                     }
                 }
 
@@ -212,7 +231,7 @@ Item {
                     spacing: Style.spacing.xs
                     Repeater {
                         model: daemon.suggestions
-                        Pill { required property string modelData; label: modelData; onClicked: root.submit(modelData, []) }
+                        Button { required property string modelData; text: modelData; bordered: true; onClicked: root.submit(modelData, []) }
                     }
                 }
 
@@ -232,6 +251,7 @@ Item {
                 anchors.margins: Style.space(40)
                 color: Commons.Color.menu.background
                 border.color: Commons.Color.menu.border
+                border.width: Style.normalBorderWidth
                 radius: Style.cornerRadius
                 ScrollView {
                     anchors.fill: parent
@@ -245,7 +265,7 @@ Item {
                         font.pixelSize: Style.font.body
                     }
                 }
-                Pill { anchors.top: parent.top; anchors.right: parent.right; label: "Close"; onClicked: root.previewText = "" }
+                Button { anchors.top: parent.top; anchors.right: parent.right; text: "Close"; onClicked: root.previewText = "" }
             }
         }
     }

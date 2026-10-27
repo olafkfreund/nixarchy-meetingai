@@ -6,7 +6,7 @@ import qs.Commons as Commons // qmllint disable import
 import qs.Ui // qmllint disable import
 
 // Meeting AI bar indicator: a dot and timer while recording. Click opens a
-// small menu (New / Restore / Quit); Quit asks for confirmation inline.
+// small menu (New / Restore / Quit); Quit asks for confirmation.
 BarWidget {
     id: root
     moduleName: "nixarchy.meetingai"
@@ -31,6 +31,8 @@ BarWidget {
         interval: 1000; repeat: true; running: client.recording
         onTriggered: root.now = Date.now()
     }
+
+    function close() { root.menuOpen = false; root.confirmQuit = false; }
 
     function run(cmd) { if (root.bar) root.bar.run(cmd); }
 
@@ -75,50 +77,44 @@ BarWidget {
         }
     }
 
-    // Popup menu below the widget; a plain Rectangle keeps this free of the host's popup plumbing.
-    Rectangle {
-        visible: root.menuOpen
-        y: root.height + Style.spacing.xs
-        width: Style.space(180)
-        height: col.implicitHeight + Style.spacing.md * 2
-        radius: Style.cornerRadius
-        color: Commons.Color.menu.background
-        border.color: Commons.Color.menu.border
-        z: 10
+    PopupCard {
+        id: popup
+        anchorItem: root
+        bar: root.bar
+        owner: root
+        open: root.menuOpen
+        contentWidth: popup.fittedContentWidth(Style.space(180))
+        contentHeight: popup.fittedContentHeight(root.confirmQuit ? Style.space(140) : col.implicitHeight)
 
         Column {
             id: col
-            x: Style.spacing.md; y: Style.spacing.md
-            width: parent.width - Style.spacing.md * 2
+            width: parent.width
             spacing: Style.spacing.xs
 
             Repeater {
-                model: root.confirmQuit
-                    ? [{ label: "Quit the daemon?", cmd: "" }, { label: "Yes, quit", cmd: "quit" }, { label: "Cancel", cmd: "cancel" }]
-                    : [{ label: "New", cmd: "session.new" }, { label: "Restore", cmd: "restore" }, { label: "Quit", cmd: "ask-quit" }]
-
-                Text {
+                model: [{ label: "New", cmd: "session.new" }, { label: "Restore", cmd: "restore" }, { label: "Quit", cmd: "ask-quit" }]
+                Button {
                     required property var modelData
                     width: col.width
-                    textFormat: Text.PlainText
+                    leftAlign: true
                     text: modelData.label
-                    color: modelData.cmd === "" ? Commons.Color.menu.text : (area.containsMouse ? Commons.Color.menu.selectedText : Commons.Color.menu.text)
-                    opacity: modelData.cmd === "" ? 0.6 : 1
-                    font.pixelSize: Style.font.body
-                    MouseArea {
-                        id: area
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        enabled: parent.modelData.cmd !== ""
-                        onClicked: {
-                            var c = parent.modelData.cmd;
-                            if (c === "ask-quit") root.confirmQuit = true;
-                            else if (c === "cancel") { root.confirmQuit = false; root.menuOpen = false; }
-                            else root.choose(c);
-                        }
+                    onClicked: {
+                        if (modelData.cmd === "ask-quit") root.confirmQuit = true;
+                        else root.choose(modelData.cmd);
                     }
                 }
             }
+        }
+
+        ConfirmDialog {
+            anchors.fill: parent
+            opened: root.confirmQuit
+            z: 10
+            message: "Quit the daemon?"
+            confirmText: "Quit"
+            background: Commons.Color.popups.background
+            onCanceled: { root.confirmQuit = false; root.menuOpen = false; }
+            onConfirmed: root.choose("quit")
         }
     }
 }
