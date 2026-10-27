@@ -160,3 +160,7 @@ None yet.
 - Plan step 4 becomes: the agy adapter with the private-HOME overlay, a
   recorded stream fixture and parser tests, `agy models` discovery, and the
   probe measurement that decides the live chain.
+- **Owner refinement:** the `gemini` entry is replaced in one change by
+  `agy-sub`, shown as "Antigravity (subscription)", with no key field
+  (status from install/login). Stored `gemini` settings migrate straight
+  to `agy-sub`. This unit runs right after step 1, ahead of steps 2–3.
