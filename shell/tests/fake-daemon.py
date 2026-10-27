@@ -4,7 +4,8 @@
 usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live]
 
 --live plays a paced meeting instead: recording on, words arriving as
-partials, a question from the other side, a streamed answer (with a link), suggestions, and levels events.
+partials, a question from the other side, a streamed answer (with a link), 3 suggestions, levels events, and a
+typed question (answer.started with a question and automatic=false). chat.send in any mode answers the same way.
 
 Speaks the newline-delimited JSON protocol: replies to every request with
 {"id","ok":true,"data":...}, appends each received cmd to LOG_PATH, and
@@ -39,6 +40,7 @@ DATA = {
 if live:
     settings["meeting_mode"] = "interview"
 LOCK = threading.Lock()
+PROVIDER = {"provider": "claude-sub", "model": "haiku"}
 
 
 def log(line):
@@ -67,9 +69,10 @@ class Handler(socketserver.StreamRequestHandler):
             ("mic", "", "Fine, let us say next Tuesday."),
         ]:
             self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": 3, "t1": 6})
+        self.send({"event": "answer.started", "turn": 1, "question": "What is the plan?", "automatic": True, **PROVIDER})
         for word in ["Ship ", "it ", "**next Tuesday**.\n\n", "- QA sign-off first\n", "- Pad the migration by two days\n"]:
-            self.send({"event": "answer.delta", "turn": 1, "text": word})
-        self.send({"event": "answer.done", "turn": 1})
+            self.send({"event": "answer.delta", "turn": 1, "text": word, **PROVIDER})
+        self.send({"event": "answer.done", "turn": 1, **PROVIDER})
         self.send({"event": "suggestion", "text": "Who owns it?"})
 
     def say(self, who, speaker, text, t0, pace=0.12):
@@ -95,14 +98,29 @@ class Handler(socketserver.StreamRequestHandler):
         self.say("mic", "", "Sure. I would start with an event queue in front of the workers so producers never block.", 748, 0.05)
         self.say("system", "Priya", "Okay. And how would you handle a consumer that falls behind for an hour?", 756)
         time.sleep(0.6)  # Balanced pacing: answer after the question settles
+        self.send({"event": "answer.started", "turn": 1, "question": "And how would you handle a consumer that falls behind for an hour?", "automatic": True, **PROVIDER})
         answer = ["**Talking points**\n\n", "- Lag is visible: alert on ", "consumer lag, not CPU.\n", "- Scale out consumers ", "per partition; ", "the queue keeps ", "ordering per key.\n", "- If it is a poison message, ", "park it in a ", "dead-letter queue and move on.\n\n", "*Mention:* you did this at your last job ", "with Kafka lag alerts. See the ", "[Kafka docs](https://kafka.apache.org/documentation/)."]
         for chunk in answer:
-            self.send({"event": "answer.delta", "turn": 1, "text": chunk})
+            self.send({"event": "answer.delta", "turn": 1, "text": chunk, **PROVIDER})
             time.sleep(0.25)
-        self.send({"event": "answer.done", "turn": 1})
+        self.send({"event": "answer.done", "turn": 1, **PROVIDER})
         for s in ["Give a concrete lag number", "Ask how they monitor today", "Explain back-pressure"]:
             self.send({"event": "suggestion", "text": s})
         self.say("mic", "", "Good question. First I would make the lag visible", 766, 0.3)
+        time.sleep(1.2)
+        self.typed("What should I say?")
+
+    def typed(self, question):
+        """A typed question: started carries it, then deltas, done, and at most 3 follow-ups."""
+        time.sleep(0.2)
+        typed_provider = {"provider": "claude-sub", "model": "sonnet"}
+        self.send({"event": "answer.started", "turn": 2, "question": question, "automatic": False, **typed_provider})
+        for chunk in ["Say the number first: ", "**under a minute of lag** ", "is fine, past ten minutes ", "you page someone."]:
+            self.send({"event": "answer.delta", "turn": 2, "text": chunk, **typed_provider})
+            time.sleep(0.25)
+        self.send({"event": "answer.done", "turn": 2, **typed_provider})
+        for s in ["Who owns the alert?", "What is the retry policy?", "How do you replay?"]:
+            self.send({"event": "suggestion", "text": s})
 
     def handle(self):
         for raw in self.rfile:
@@ -121,6 +139,8 @@ class Handler(socketserver.StreamRequestHandler):
             elif cmd == "session.restore":
                 self.send({"event": "session.reset"})
                 self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})
+            if cmd == "chat.send":
+                threading.Thread(target=self.typed, args=(req["args"].get("text", ""),), daemon=True).start()
             if cmd == "state.get":
                 threading.Thread(target=self.stream_live if live else self.stream, daemon=True).start()
 

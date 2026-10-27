@@ -19,7 +19,7 @@ export XDG_RUNTIME_DIR="$work/run"
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/fake.log" --live &
 sleep 0.5
-timeout 16 quickshell -p "$work/cfg" 2> "$work/qs.err" &
+timeout 20 quickshell -p "$work/cfg" 2> "$work/qs.err" &
 # Capture only the overlay card (it is centred on its full-screen layer on the
 # focused monitor): full-desktop frames would include whatever else is open.
 geom() {
@@ -39,8 +39,8 @@ cw, ch = min(w - 80, 900), min(h - 80, 760)   # Overlay.qml card size at scale 1
 print("%d,%d %dx%d" % (x + (w - cw) / 2, y + (h - ch) / 2, cw, ch))' $layer
 }
 sleep 3.4; g=$(geom)
-for t in 1-question 2-answering 3-suggestions 4-you-speaking 5-settings; do
-    case $t in 1-*) sleep 1 ;; 2-*) sleep 2.4 ;; 3-*) sleep 3.0 ;; 4-*) sleep 2.2 ;; 5-*) sleep 1.6 ;; esac
+for t in 1-question 2-answering 3-suggestions 4-you-speaking 5-asked 6-settings; do
+    case $t in 1-*) sleep 1 ;; 2-*) sleep 2.4 ;; 3-*) sleep 3.0 ;; 4-*) sleep 2.2 ;; 5-*) sleep 2.4 ;; 6-*) sleep 4 ;; esac
     grim -g "$g" "$out/crop-$t.png"
 done
 wait %2 || true

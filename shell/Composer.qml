@@ -17,6 +17,10 @@ Item {
     property var chips: []   // { kind: "text"|"file", label, text?, path? }
     signal submit(string text, var chips)
     signal preview(string text)
+    signal screenshot()
+    signal quick()
+    signal pick(int n)   // 1..3 typed into an empty composer: choose that suggestion
+    readonly property bool empty: input.text.trim() === "" && root.chips.length === 0
 
     implicitHeight: col.implicitHeight
 
@@ -64,10 +68,8 @@ Item {
             width: parent.width
             spacing: Style.spacing.xs
 
-            Button { text: "+"; bordered: true; onClicked: files.open() }
-
             ScrollView {
-                width: parent.width - Style.space(120)
+                width: parent.width - Style.space(80)
                 height: Math.min(input.implicitHeight, fm.height * 5 + Style.spacing.md * 2)
 
                 TextArea {
@@ -83,6 +85,11 @@ Item {
                         radius: Math.max(Style.cornerRadius, 12)
                     }
                     Keys.onPressed: function(e) {
+                        if (root.empty && e.key >= Qt.Key_1 && e.key <= Qt.Key_3 && !(e.modifiers & ~Qt.KeypadModifier)) {
+                            root.pick(e.key - Qt.Key_0);
+                            e.accepted = true;
+                            return;
+                        }
                         if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && !(e.modifiers & Qt.ShiftModifier)) {
                             root.send();
                             e.accepted = true;
@@ -97,7 +104,14 @@ Item {
                 }
             }
 
-            Button { text: "Send"; active: input.text.trim() !== "" || root.chips.length > 0; bordered: true; onClicked: root.send() }
+            Button { text: "Send"; active: !root.empty; bordered: true; onClicked: root.send() }
+        }
+
+        Row {
+            spacing: Style.spacing.xs
+            Button { text: "+"; bordered: true; onClicked: files.open() }
+            Button { text: "\ud83d\udcf7 Screenshot"; bordered: true; onClicked: root.screenshot() }
+            Button { text: "What should I say?"; bordered: true; onClicked: root.quick() }
         }
     }
 
