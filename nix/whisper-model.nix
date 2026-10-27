@@ -37,4 +37,8 @@ in
     name = "small";
     sha256 = "0ywqxbziyp2bv72riyjpw4brk9v46d4cfbjfwqvvjrrq0srakqqv";
   };
+  "large-v3-turbo" = mkModel {
+    name = "large-v3-turbo";
+    sha256 = "0sdwwblbfy9qjkjjxxvyfn47rx3y6pm1wfdcjfcidsrq9mvhziqz";
+  };
 }
