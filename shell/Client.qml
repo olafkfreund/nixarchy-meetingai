@@ -17,7 +17,10 @@ Item {
     readonly property bool reduceMotion: settings.reduce_motion === true
     property alias transcript: lines
     property bool answering: false
-    property var suggestions: []
+    property var suggestions: []   // at most 3, cleared when a new answer starts
+    // The live answer (NOW panel). A finished one moves into the transcript when the next starts.
+    property var now: ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" })
+    property string lastSpeaker: ""   // last remote speaker, for "who asked"
     property string lastError: ""
     property real micLevel: 0     // 0..1, from the daemon's levels events
     property real systemLevel: 0
@@ -61,7 +64,12 @@ Item {
         root.send("chat.send", { text: text, attachments: attachments || [], screenshot: screenshot === true, no_context: noContext === true });
     }
 
+    function archiveNow() {
+        if (root.now.body !== "") root.addRow("answer", "", root.now.body, false, root.now.turn);
+    }
+
     function pushLine(ev, partial) {
+        if (!partial && ev.who === "system" && ev.speaker) root.lastSpeaker = String(ev.speaker);
         for (var i = lines.count - 1; i >= 0 && i >= lines.count - 4; i--) {
             if (lines.get(i).partial && lines.get(i).who === ev.who) {
                 lines.remove(i);
@@ -80,24 +88,29 @@ Item {
     function onEvent(ev) {
         switch (ev.event) {
         case "settings": root.settings = ev.settings || ({}); break;
-        case "session.reset": lines.clear(); root.answering = false; root.suggestions = []; break;
+        case "session.reset": lines.clear(); root.answering = false; root.suggestions = []; root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" }); break;
         case "history":
-            for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(String(ev.rows[h].who), "", String(ev.rows[h].text), false);
+            for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(ev.rows[h].who === "question" ? "asked" : String(ev.rows[h].who), "", String(ev.rows[h].text), false);
             break;
         case "state": root.state = Object.assign({}, root.state, ev); if (ev.recording === false) { root.micLevel = 0; root.systemLevel = 0; } break;
         case "levels": root.micLevel = Number(ev.mic) || 0; root.systemLevel = Number(ev.system) || 0; break;
         case "transcript.partial": root.pushLine(ev, true); break;
         case "transcript.final": root.pushLine(ev, false); break;
+        case "answer.started":
+            root.archiveNow();
+            if (ev.automatic !== true && String(ev.question || "") !== "") root.addRow("asked", "", String(ev.question), false);
+            root.suggestions = [];
+            root.answering = true;
+            root.now = { turn: ev.turn, question: String(ev.question || ""), automatic: ev.automatic === true, asker: ev.automatic === true ? (root.lastSpeaker || "Them") : "You", provider: String(ev.provider || ""), model: String(ev.model || ""), body: "" };
+            break;
         case "answer.delta":
             root.answering = true;
-            var at = -1;   // transcript lines may interleave with the stream
-            for (var i = lines.count - 1; i >= 0 && at < 0; i--) if (lines.get(i).who === "answer" && lines.get(i).turn === ev.turn) at = i;
-            if (at < 0) { root.addRow("answer", "", "", false, ev.turn); at = lines.count - 1; }
-            lines.setProperty(at, "body", lines.get(at).body + (ev.text || ""));
+            if (root.now.turn !== ev.turn) { root.archiveNow(); root.now = { turn: ev.turn, question: "", automatic: true, asker: root.lastSpeaker || "Them", provider: "", model: "", body: "" }; }
+            root.now = Object.assign({}, root.now, { body: root.now.body + (ev.text || ""), provider: String(ev.provider || root.now.provider), model: String(ev.model || root.now.model) });
             break;
-        case "answer.done": root.answering = false; break;
+        case "answer.done": root.answering = false; if (ev.provider) root.now = Object.assign({}, root.now, { provider: String(ev.provider), model: String(ev.model || root.now.model) }); break;
         case "answer.error": root.answering = false; root.addRow("error", "", String(ev.message || ev.error || "answer failed"), false); break;
-        case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]); break;
+        case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
         case "error": root.lastError = String(ev.message || ""); break;
         }
