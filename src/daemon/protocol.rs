@@ -18,6 +18,9 @@ pub struct Request {
     pub cmd: String,
     #[serde(default)]
     pub args: Value,
+    /// Who sent it; `"mcp"` for the MCP server.
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 pub fn reply(id: &Value, result: Result<Value, String>) -> String {
@@ -64,6 +67,14 @@ pub struct MeetingArg {
 #[serde(default)]
 pub struct RegionArg {
     pub region: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TranscriptGet {
+    pub meeting: Option<String>,
+    pub after_line: Option<i64>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -195,6 +195,8 @@ pub struct Settings {
     pub meeting_mode: String,
     /// Overlay text size in percent, 80..=160.
     pub text_scale: u32,
+    /// Whether MCP clients (AI agents) may start recording.
+    pub mcp_allow_record: bool,
 }
 
 impl Default for Settings {
@@ -225,6 +227,7 @@ impl Default for Settings {
             live_model: "haiku".into(),
             meeting_mode: "general".into(),
             text_scale: 100,
+            mcp_allow_record: false,
         }
     }
 }
@@ -246,6 +249,7 @@ mod keys {
     pub const CHAT_MODEL: &str = "chat_model";
     pub const MEETING_MODE: &str = "meeting_mode";
     pub const TEXT_SCALE: &str = "text_scale";
+    pub const MCP_ALLOW_RECORD: &str = "mcp_allow_record";
 }
 
 impl Settings {
@@ -319,6 +323,7 @@ impl Settings {
                 _ => defaults.meeting_mode,
             },
             text_scale: number(keys::TEXT_SCALE, defaults.text_scale).clamp(80, 160),
+            mcp_allow_record: flag(keys::MCP_ALLOW_RECORD, defaults.mcp_allow_record),
         })
     }
 
@@ -399,6 +404,7 @@ impl Settings {
             ("live_model", self.live_model.clone()),
             (keys::MEETING_MODE, self.meeting_mode.clone()),
             (keys::TEXT_SCALE, self.text_scale.clamp(80, 160).to_string()),
+            (keys::MCP_ALLOW_RECORD, self.mcp_allow_record.to_string()),
         ]
     }
 
@@ -506,6 +512,7 @@ mod tests {
             live_model: "flash".into(),
             meeting_mode: "interview".into(),
             text_scale: 130,
+            mcp_allow_record: true,
         };
         settings.save(&database).unwrap();
         assert_eq!(Settings::load(&database).unwrap(), settings);

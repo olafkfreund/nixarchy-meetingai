@@ -6,4 +6,5 @@ pub mod cli;
 pub mod core;
 pub mod daemon;
 pub mod db;
+pub mod mcp;
 pub mod speech;

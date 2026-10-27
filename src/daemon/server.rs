@@ -88,7 +88,9 @@ async fn client(stream: UnixStream, daemon: Arc<Daemon>) {
             }
         };
         // In order on this connection; events still stream through `forward`.
-        let result = daemon.handle(&request.cmd, request.args).await;
+        let result = daemon
+            .handle(&request.cmd, request.args, request.origin.as_deref())
+            .await;
         let _ = out.send(protocol::reply(&request.id, result)).await;
     }
     forward.abort();

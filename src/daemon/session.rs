@@ -175,6 +175,9 @@ struct Inner {
     automatic_inflight: bool,
     dictation: Option<Dictation>,
     dictation_seq: u64,
+    /// The last question asked and the follow-ups generated for it (for `now.get`).
+    last_question: String,
+    suggestions: Vec<String>,
 }
 
 pub struct Daemon {
@@ -470,6 +473,8 @@ impl Daemon {
                 automatic_inflight: false,
                 dictation: None,
                 dictation_seq: 0,
+                last_question: String::new(),
+                suggestions: Vec::new(),
             }),
         }))
     }
@@ -778,6 +783,8 @@ impl Daemon {
             }
         }
         let question_text = question.clone();
+        g.last_question.clone_from(&question);
+        g.suggestions.clear();
         g.conversation.push(Message::user(question));
         let mut images: Vec<String> = image.map(|i| vec![i.base64]).unwrap_or_default();
         images.extend(g.sources.iter().filter_map(|s| s.image.clone()));
@@ -929,6 +936,7 @@ impl Daemon {
             images: Vec::new(),
         };
         let me = self.clone();
+        let turn = g.turn;
         g.follow_up_task = Some(tokio::spawn(async move {
             let result = tokio::time::timeout(
                 Duration::from_secs(25),
@@ -947,6 +955,12 @@ impl Daemon {
                 _ => Vec::new(),
             };
             for text in visible_follow_ups(&generated) {
+                {
+                    let mut g = me.inner.lock();
+                    if g.turn == turn {
+                        g.suggestions.push(text.clone());
+                    }
+                }
                 me.emit("suggestion", json!({"text": text}));
             }
         }));
@@ -1629,6 +1643,8 @@ impl Daemon {
         g.conversation_response = None;
         g.live_turns = LiveTurns::default();
         g.live_interim = Default::default();
+        g.last_question.clear();
+        g.suggestions.clear();
     }
 
     fn require_idle(g: &Inner) -> Result<(), String> {
@@ -2029,9 +2045,97 @@ impl Daemon {
         Ok(json!({"text": text}))
     }
 
+    /// Stored lines of a meeting (default: the current session), paged by rowid.
+    fn transcript_get(&self, args: protocol::TranscriptGet) -> Result<Value, String> {
+        let g = self.inner.lock();
+        let meeting = args
+            .meeting
+            .or_else(|| g.meeting_id.clone())
+            .or_else(|| g.finishing_meeting.clone())
+            .or_else(|| g.resume_meeting.clone());
+        let Some(meeting) = meeting else {
+            return Ok(json!({"meeting": null, "lines": []}));
+        };
+        let limit = args.limit.unwrap_or(200).clamp(1, 500);
+        let mut statement =
+            g.db.connection()
+                .prepare(
+                    "SELECT rowid, who, speaker, text, start_time, end_time FROM meeting_lines
+                 WHERE meeting_id = ?1 AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3",
+                )
+                .map_err(|e| e.to_string())?;
+        let lines = statement
+            .query_map(
+                rusqlite::params![meeting, args.after_line.unwrap_or(0), limit as i64],
+                |r| {
+                    let who: String = r.get(1)?;
+                    let speaker: Option<i64> = r.get(2)?;
+                    let (who, name) = Self::who(u8::from(who != "me"), speaker);
+                    Ok(
+                        json!({"line": r.get::<_, i64>(0)?, "who": who, "speaker": name,
+                              "text": r.get::<_, String>(3)?,
+                              "t0": r.get::<_, f64>(4)?, "t1": r.get::<_, f64>(5)?}),
+                    )
+                },
+            )
+            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+            .map_err(|e| e.to_string())?;
+        Ok(json!({"meeting": meeting, "lines": lines}))
+    }
+
+    /// What the overlay shows now. `writing` while an answer streams, `ready` when
+    /// one is waiting, else `listening` while recording, else `idle`.
+    fn now_get(&self) -> Value {
+        let g = self.inner.lock();
+        let status = if g.chat.is_streaming() {
+            "writing"
+        } else if !g.chat.answer().is_empty() {
+            "ready"
+        } else if g.recording.is_some() {
+            "listening"
+        } else {
+            "idle"
+        };
+        json!({"status": status, "question": g.last_question, "answer": g.chat.answer(),
+               "provider": g.effective.0, "model": g.effective.1, "suggestions": g.suggestions})
+    }
+
     // ----- dispatch -----------------------------------------------------
 
-    pub async fn handle(self: &Arc<Self>, cmd: &str, args: Value) -> Result<Value, String> {
+    /// Run one command. `origin` is `Some("mcp")` for requests from the MCP server.
+    pub async fn handle(
+        self: &Arc<Self>,
+        cmd: &str,
+        args: Value,
+        origin: Option<&str>,
+    ) -> Result<Value, String> {
+        if origin != Some("mcp") {
+            return self.dispatch(cmd, args).await;
+        }
+        tracing::info!(origin = "mcp", cmd);
+        if cmd == "record.start" && !self.inner.lock().settings.mcp_allow_record {
+            return Err("Recording by agents is disabled (setting mcp_allow_record)".into());
+        }
+        let notice = match cmd {
+            "record.start" => Some("An agent started recording".to_owned()),
+            "record.stop" => Some("An agent stopped recording".to_owned()),
+            "chat.send" => {
+                let text = args["text"].as_str().unwrap_or_default();
+                Some(format!(
+                    "An agent asked: {}",
+                    text.chars().take(80).collect::<String>()
+                ))
+            }
+            _ => None,
+        };
+        let result = self.dispatch(cmd, args).await;
+        if let (Ok(_), Some(text)) = (&result, notice) {
+            self.emit("notice", json!({"text": text}));
+        }
+        result
+    }
+
+    async fn dispatch(self: &Arc<Self>, cmd: &str, args: Value) -> Result<Value, String> {
         match cmd {
             "state.get" => Ok(Self::state_value(&self.inner.lock())),
             "quit" => {
@@ -2104,6 +2208,8 @@ impl Daemon {
                 self.models_list(&parse::<protocol::ProviderArg>(args)?.provider)
                     .await
             }
+            "transcript.get" => self.transcript_get(parse(args)?),
+            "now.get" => Ok(self.now_get()),
             "notes.get" => self.notes_get(&parse::<protocol::MeetingArg>(args)?.meeting),
             "notes.regenerate" => {
                 let meeting = parse::<protocol::MeetingArg>(args)?.meeting;
@@ -2216,5 +2322,123 @@ mod glossary_tests {
         assert_eq!(g, "Olaf SRE Freundcloud Interview Priya Kafka k8s");
         let long = "Word ".repeat(10) + &(0..100).map(|i| format!("Term{i} ")).collect::<String>();
         assert!(glossary(&long, "").len() <= 200);
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use crate::speech::transcription::{LiveEvent, TranscriptLine};
+
+    fn daemon() -> Arc<Daemon> {
+        let root = std::env::temp_dir().join(format!("nm-unit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        Daemon::new(Options {
+            db_path: root.join("t.db"),
+            vault_dir: root,
+            capture: false,
+        })
+        .unwrap()
+    }
+
+    fn line(text: &str, start: f64) -> LiveEvent {
+        LiveEvent::Transcript(TranscriptLine {
+            channel: 1,
+            speaker: None,
+            text: text.into(),
+            is_final: true,
+            speech_final: true,
+            start,
+            end: start + 1.0,
+        })
+    }
+
+    #[tokio::test]
+    async fn mcp_recording_needs_consent_and_announces_itself() {
+        let d = daemon();
+        let mut events = d.subscribe();
+        let err = d.handle("record.start", json!({}), Some("mcp")).await;
+        assert!(err.unwrap_err().contains("mcp_allow_record"));
+        d.handle(
+            "settings.set",
+            json!({"key": "mcp_allow_record", "value": true}),
+            None,
+        )
+        .await
+        .unwrap();
+        d.handle("record.start", json!({}), Some("mcp"))
+            .await
+            .unwrap();
+        d.handle("record.stop", json!({}), Some("mcp"))
+            .await
+            .unwrap();
+        let mut notices = Vec::new();
+        while let Ok(e) = events.try_recv() {
+            if e["event"] == "notice" {
+                notices.push(e["text"].as_str().unwrap().to_owned());
+            }
+        }
+        assert_eq!(
+            notices,
+            ["An agent started recording", "An agent stopped recording"]
+        );
+    }
+
+    #[tokio::test]
+    async fn other_origins_need_no_consent() {
+        let d = daemon();
+        let mut events = d.subscribe();
+        d.handle("record.start", json!({}), None).await.unwrap();
+        d.handle("record.stop", json!({}), Some("shell"))
+            .await
+            .unwrap();
+        while let Ok(e) = events.try_recv() {
+            assert_ne!(e["event"], "notice");
+        }
+    }
+
+    #[tokio::test]
+    async fn transcript_pages_by_line_and_now_reports_status() {
+        let d = daemon();
+        let now = |d: &Arc<Daemon>| d.now_get()["status"].clone();
+        assert_eq!(now(&d), "idle");
+        d.handle("record.start", json!({}), None).await.unwrap();
+        assert_eq!(now(&d), "listening");
+        for (i, t) in ["a", "b", "c"].iter().enumerate() {
+            d.inject_live(line(t, i as f64));
+        }
+        let first = d
+            .handle("transcript.get", json!({"limit": 2}), None)
+            .await
+            .unwrap();
+        let rows = first["lines"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["text"], "a");
+        let after = rows[1]["line"].as_i64().unwrap();
+        let rest = d
+            .handle("transcript.get", json!({"after_line": after}), None)
+            .await
+            .unwrap();
+        let rest = rest["lines"].as_array().unwrap();
+        assert_eq!((rest.len(), rest[0]["text"].clone()), (1, json!("c")));
+        assert_eq!(rest[0]["who"], "system");
+        let capped = d
+            .handle("transcript.get", json!({"limit": 99999}), None)
+            .await
+            .unwrap();
+        assert_eq!(capped["lines"].as_array().unwrap().len(), 3);
+        {
+            let mut guard = d.inner.lock();
+            let g = &mut *guard;
+            g.chat.begin(Some(&g.db), "q?").unwrap();
+            g.chat.append_delta("a!");
+        }
+        assert_eq!(now(&d), "writing");
+        d.inner.lock().chat.finish();
+        let ready = d.now_get();
+        assert_eq!(
+            (&ready["status"], &ready["answer"]),
+            (&json!("ready"), &json!("a!"))
+        );
     }
 }

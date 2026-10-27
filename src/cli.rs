@@ -15,6 +15,10 @@ use std::{
 pub fn run_cli(args: &[String]) -> Option<(String, i32)> {
     match args.first().map(String::as_str)? {
         "ctl" => Some(ctl(&args[1..])),
+        "mcp" => Some(match crate::mcp::run() {
+            Ok(()) => (String::new(), 0),
+            Err(error) => (format!("nixarchy-meetingai mcp: {error}"), 1),
+        }),
         "--version" | "-V" => Some((
             format!("nixarchy-meetingai {}", env!("CARGO_PKG_VERSION")),
             0,
@@ -38,6 +42,7 @@ fn usage() -> String {
         "  nixarchy-meetingai                  run the daemon",
         "  nixarchy-meetingai ctl CMD [JSON]   send one command, e.g. ctl state.get",
         "                                      or ctl chat.send '{\"text\":\"hi\"}'",
+        "  nixarchy-meetingai mcp              MCP server over stdio, for AI agents",
         "  nixarchy-meetingai --version | --help",
     ]
     .join("\n")

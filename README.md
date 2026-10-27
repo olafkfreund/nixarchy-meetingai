@@ -76,6 +76,55 @@ Override with `programs.nixarchy-meetingai.keybindings.<name> = "…"`, or set
 one to `null` to drop it. The same actions are available from a shell:
 `nixarchy-meetingai ctl state.get`.
 
+## Use from AI agents
+
+`nixarchy-meetingai mcp` is an MCP server over stdio. It talks to the running
+daemon, so `nixarchy-meetingai.service` must be up. Register it once per client
+(nothing in the module edits their config files):
+
+```sh
+claude mcp add --scope user meetingai -- nixarchy-meetingai mcp
+codex mcp add meetingai -- nixarchy-meetingai mcp
+agy mcp add meetingai nixarchy-meetingai mcp
+```
+
+Remove it with `claude mcp remove meetingai` (and the equivalents for Codex
+and agy).
+
+Tools:
+
+- `meeting_status`: state plus the current question and answer
+- `transcript_get`: transcript lines of a meeting (`meeting`, `after_line`, `limit` up to 500)
+- `current_answer`: the copilot's current answer
+- `ask`: ask the copilot a question (up to 8k characters) and wait for the answer
+- `meetings_list`: list past meetings (`query`, `limit`)
+- `meeting_notes`: the notes of a meeting
+- `notes_regenerate`: regenerate the notes of a meeting
+- `session_new`: start a new session
+- `session_restore`: restore a past meeting
+- `record_start`: start recording (needs the consent setting below)
+- `record_stop`: stop recording
+- `settings_set`: change `meeting_mode`, `response_pace`, `chat_provider`,
+  `chat_model`, `live_provider`, `live_model` or `text_scale`; `api_key` and
+  `mcp_allow_record` are always refused
+
+Resources:
+
+- `meeting://current/transcript`: the last 200 lines, as markdown
+- `meeting://{id}/transcript`
+- `meeting://{id}/notes`
+
+`resources/list` returns the current meeting and the 20 most recent.
+
+**Consent.** `record_start` is refused unless you turn on "Let AI agents start
+recording" in Settings (`mcp_allow_record`, off by default). Agents cannot
+change this setting.
+
+**Privacy.** Anything an agent reads, including transcripts and notes, goes to
+that agent's provider. The overlay shows a quiet notice when an agent starts
+or stops recording or asks the copilot a question. The daemon logs only the
+command name of agent calls, never the arguments.
+
 ## Development
 
 ```sh
