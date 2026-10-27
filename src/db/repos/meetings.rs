@@ -256,19 +256,21 @@ pub fn recent_lines(
     Ok(rows)
 }
 
-/// One rolling-notes summary covering transcript time `t0..t1`.
+/// One rolling-notes summary covering transcript time `t0..t1` and every line up to `last_line`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NoteChunk {
     pub t0: f64,
     pub t1: f64,
+    /// Highest line rowid the summary covers (arrival order, not time).
+    pub last_line: i64,
     pub body: String,
 }
 
 /// Save a summary of a slice of final lines.
 pub fn add_chunk(connection: &Connection, meeting_id: &str, chunk: &NoteChunk) -> Result<()> {
     connection.execute(
-        "INSERT INTO meeting_note_chunks (meeting_id, t0, t1, body) VALUES (?1, ?2, ?3, ?4)",
-        params![meeting_id, chunk.t0, chunk.t1, chunk.body],
+        "INSERT INTO meeting_note_chunks (meeting_id, t0, t1, last_line, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![meeting_id, chunk.t0, chunk.t1, chunk.last_line, chunk.body],
     )?;
     Ok(())
 }
@@ -276,34 +278,43 @@ pub fn add_chunk(connection: &Connection, meeting_id: &str, chunk: &NoteChunk) -
 /// Rolling-notes summaries in time order.
 pub fn chunks(connection: &Connection, meeting_id: &str) -> Result<Vec<NoteChunk>> {
     let mut statement = connection.prepare(
-        "SELECT t0, t1, body FROM meeting_note_chunks WHERE meeting_id = ?1 ORDER BY t1, id",
+        "SELECT t0, t1, last_line, body FROM meeting_note_chunks WHERE meeting_id = ?1 ORDER BY id",
     )?;
     let rows = statement.query_map(params![meeting_id], |r| {
         Ok(NoteChunk {
             t0: r.get(0)?,
             t1: r.get(1)?,
-            body: r.get(2)?,
+            last_line: r.get(2)?,
+            body: r.get(3)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
-/// Lines that end after `t1`, in spoken order: what no chunk covers yet.
-pub fn lines_after(connection: &Connection, meeting_id: &str, t1: f64) -> Result<Vec<LineRecord>> {
+/// Lines stored after rowid `last_line`, in arrival order, with their rowids: what no chunk
+/// covers yet. Arrival order, not time, so a late line with an early end time is never skipped.
+pub fn lines_after(
+    connection: &Connection,
+    meeting_id: &str,
+    last_line: i64,
+) -> Result<Vec<(i64, LineRecord)>> {
     let mut statement = connection.prepare(
-        "SELECT id, who, speaker, text, start_time, end_time FROM meeting_lines
-         WHERE meeting_id = ?1 AND end_time > ?2
-         ORDER BY start_time ASC, rowid ASC",
+        "SELECT rowid, id, who, speaker, text, start_time, end_time FROM meeting_lines
+         WHERE meeting_id = ?1 AND rowid > ?2
+         ORDER BY rowid ASC",
     )?;
-    let rows = statement.query_map(params![meeting_id, t1], |row| {
-        Ok(LineRecord {
-            id: row.get(0)?,
-            who: row.get(1)?,
-            speaker: row.get(2)?,
-            text: row.get(3)?,
-            start_time: row.get(4)?,
-            end_time: row.get(5)?,
-        })
+    let rows = statement.query_map(params![meeting_id, last_line], |row| {
+        Ok((
+            row.get(0)?,
+            LineRecord {
+                id: row.get(1)?,
+                who: row.get(2)?,
+                speaker: row.get(3)?,
+                text: row.get(4)?,
+                start_time: row.get(5)?,
+                end_time: row.get(6)?,
+            },
+        ))
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
@@ -560,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn chunks_cover_time_and_leave_the_rest() {
+    fn chunks_cover_lines_and_leave_the_rest() {
         let db = database();
         let c = db.connection();
         let id = start(c, "M", "", "en").unwrap();
@@ -572,12 +583,17 @@ mod tests {
             &NoteChunk {
                 t0: 0.0,
                 t1: 1.0,
+                last_line: 1,
                 body: "n".into(),
             },
         )
         .unwrap();
         assert_eq!(chunks(c, &id).unwrap().len(), 1);
-        let rest = lines_after(c, &id, 1.0).unwrap();
+        let rest: Vec<_> = lines_after(c, &id, 1)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.1)
+            .collect();
         assert_eq!(format_lines(&rest), "Them: two\n");
         delete(c, &id).unwrap();
         assert!(chunks(c, &id).unwrap().is_empty());

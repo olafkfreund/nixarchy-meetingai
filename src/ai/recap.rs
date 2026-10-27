@@ -105,6 +105,18 @@ pub async fn consolidate(
     .await
 }
 
+/// Split pending rows into arrival-ordered lines and their rowids.
+fn unzip(rows: Vec<(i64, LineRecord)>) -> (Vec<i64>, Vec<LineRecord>) {
+    rows.into_iter().unzip()
+}
+
+/// Lines in spoken order for a prompt.
+fn spoken(lines: &[LineRecord]) -> Vec<LineRecord> {
+    let mut lines = lines.to_vec();
+    lines.sort_by(|a, b| a.start_time.total_cmp(&b.start_time));
+    lines
+}
+
 /// How many leading lines form the next slice: up to `CHUNK_CHARS`, at least one.
 fn slice_len(lines: &[LineRecord]) -> usize {
     let mut chars = 0;
@@ -138,21 +150,25 @@ async fn chunk_pending(
     let mut made = 0;
     loop {
         let owned = id.to_owned();
-        let lines = db(path, move |db| {
-            let last = meetings::chunks(db.connection(), &owned)?
-                .last()
-                .map_or(-1.0, |c| c.t1);
-            meetings::lines_after(db.connection(), &owned, last)
-        })
-        .await?;
+        let (ids, lines) = unzip(
+            db(path, move |db| {
+                let last = meetings::chunks(db.connection(), &owned)?
+                    .last()
+                    .map_or(0, |c| c.last_line);
+                meetings::lines_after(db.connection(), &owned, last)
+            })
+            .await?,
+        );
         if lines.is_empty() || (!force && !due(&lines)) {
             return Ok(made);
         }
-        let slice = &lines[..slice_len(&lines)];
+        let n = slice_len(&lines);
+        let slice = spoken(&lines[..n]);
         let chunk = NoteChunk {
             t0: slice[0].start_time,
             t1: slice.iter().map(|l| l.end_time).fold(f64::MIN, f64::max),
-            body: summarise_slice(config, slice, language).await?,
+            last_line: ids[n - 1],
+            body: summarise_slice(config, &slice, language).await?,
         };
         let owned = id.to_owned();
         db(path, move |db| {
@@ -219,16 +235,23 @@ async fn notes(
     let owned = id.to_owned();
     let (saved, rest) = db(path, move |db| {
         let saved = meetings::chunks(db.connection(), &owned)?;
-        let last = saved.last().map_or(-1.0, |c| c.t1);
+        let last = saved.last().map_or(0, |c| c.last_line);
         Ok((saved, meetings::lines_after(db.connection(), &owned, last)?))
     })
     .await?;
+    let rest = unzip(rest).1;
     if saved.is_empty() && rest.is_empty() {
         return Err("This meeting has no transcript to recap.".into());
     }
     // A short meeting skips the slice step: its raw words fit in one prompt.
     if saved.is_empty() && slice_len(&rest) == rest.len() {
-        return consolidate(config, &[meetings::format_lines(&rest)], prompt, language).await;
+        return consolidate(
+            config,
+            &[meetings::format_lines(&spoken(&rest))],
+            prompt,
+            language,
+        )
+        .await;
     }
     chunk_pending(path, id, config, language, true).await?;
     let owned = id.to_owned();

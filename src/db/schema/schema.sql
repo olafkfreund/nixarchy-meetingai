@@ -190,6 +190,7 @@ CREATE TABLE IF NOT EXISTS meeting_note_chunks (
     t0 REAL NOT NULL,
     t1 REAL NOT NULL,
     body TEXT NOT NULL,
+    last_line INTEGER NOT NULL DEFAULT 0, -- highest meeting_lines rowid this chunk covers
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_note_chunks_meeting ON meeting_note_chunks (meeting_id);
