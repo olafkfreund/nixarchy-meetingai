@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 1
 author: olafkfreund
 ---
@@ -57,13 +57,10 @@ Two things make CI harder than "run the tests":
   on CI until it is rewritten, or fix it first.
 - Free GitHub-hosted runners only, unless the owner chooses otherwise.
 
-## Open questions
+## Decisions (owner approved the proposals)
 
-1. **Cache:** a free cache (`DeterminateSystems/magic-nix-cache`, GitHub's
-   own cache) (proposed), or a Cachix cache the owner pays for?
-2. **Shell tests in Nix:** run the shell suite as a `nix flake check` entry,
-   so it runs identically locally and in CI (proposed), or as plain workflow
-   steps?
-3. **Branch protection:** require the CI checks before merging into `main`
-   (proposed, once CI is stable), or leave it advisory?
-4. **Flaky test #5:** skip on CI now (proposed), or fix before enabling CI?
+1. Free cache: `DeterminateSystems/magic-nix-cache` (GitHub's cache).
+2. The shell suite runs as a `nix flake check` entry, identical locally and
+   in CI.
+3. `main` requires the CI checks before merging, once CI is stable.
+4. Flaky test #5 is skipped on CI until it is rewritten.
