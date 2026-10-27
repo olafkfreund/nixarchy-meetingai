@@ -439,8 +439,23 @@ There is no data migration, so there is nothing to undo on disk. Disabling
 
 ## Implementation split (managed policy)
 
-Steps 1-11 go to one `coder` agent (Sonnet), started with this path and
-step 1, with later steps sent through `SendMessage`. Step 12 and all reviews
-stay with the session model. After step 11: a fresh Opus reviewer gets only
-this path and `git diff main...`. Codex `review --base main` and agy run as
-read-only reviewers, per `reviewers:`.
+Changed at the owner's request on 2026-10-27 ("use dynamic workflows with
+max 5 agents in a team"), replacing the single-coder split. All implementers
+are `coder` (Sonnet) agents run by a Workflow, at most 5 at once:
+
+- **Wave 1 (in order, main tree):** step 1, then step 2.
+- **Wave 2 (in parallel, one git worktree each, merged by the session
+  model):**
+  - A: steps 3 + 4, plus the `whisper-local` catalog entry from step 5
+  - B: step 5 without the catalog entry
+  - C: step 6
+  - D: steps 9 + 10 QML, built against the protocol in Approved decisions
+    and a fake daemon
+  - E: step 11 Nix and README
+
+  The Rust setting `auto_record_on_call` from step 10 goes to C, so that
+  `settings.rs` is edited in fewer places.
+- **Wave 3 (in order):** step 7, then step 8.
+- Step 12 and merge-conflict resolution stay with the session model.
+- Review after wave 3: a fresh Opus agent gets only this path and `git diff
+  main...`, plus Codex `review --base main` and agy, per `reviewers:`.
