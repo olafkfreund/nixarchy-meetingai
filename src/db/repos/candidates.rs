@@ -99,6 +99,28 @@ pub fn set_local_only(connection: &Connection, id: &str, on: bool) -> Result<boo
     )? > 0)
 }
 
+/// What the candidate said (channel 1) in a meeting: the only text a quote may come from.
+pub fn said(connection: &Connection, meeting: &str) -> Vec<String> {
+    let Ok(mut statement) =
+        connection.prepare("SELECT text FROM meeting_lines WHERE meeting_id = ?1 AND who = 'them'")
+    else {
+        return Vec::new();
+    };
+    statement
+        .query_map(params![meeting], |r| r.get(0))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+/// Tie a chat started before the meeting exists to the candidate, so deletion finds it.
+pub fn link_conversation(connection: &Connection, id: &str, conversation: &str) -> Result<()> {
+    connection.execute(
+        "INSERT OR IGNORE INTO candidate_conversations VALUES (?1, ?2)",
+        params![id, conversation],
+    )?;
+    Ok(())
+}
+
 /// The candidate linked to a meeting, if any.
 pub fn for_meeting(connection: &Connection, meeting_id: &str) -> Result<Option<Candidate>> {
     Ok(connection
@@ -242,7 +264,9 @@ pub fn local_only_ids(connection: &Connection) -> Result<std::collections::HashS
     let mut statement = connection.prepare(
         "SELECT meeting_id FROM candidates WHERE local_only = 1 AND meeting_id IS NOT NULL
          UNION SELECT mc.conversation_id FROM meeting_conversations mc
-           JOIN candidates c ON c.meeting_id = mc.meeting_id WHERE c.local_only = 1",
+           JOIN candidates c ON c.meeting_id = mc.meeting_id WHERE c.local_only = 1
+         UNION SELECT cc.conversation_id FROM candidate_conversations cc
+           JOIN candidates c ON c.id = cc.candidate_id WHERE c.local_only = 1",
     )?;
     let rows = statement.query_map([], |row| row.get(0))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -250,13 +274,15 @@ pub fn local_only_ids(connection: &Connection) -> Result<std::collections::HashS
 
 /// Remove the candidate, their documents and questions, and the linked meeting with every
 /// row that hangs off it, in one transaction. Returns false when the candidate is unknown.
-/// Chats that were never linked to the meeting (started before recording, no meeting yet)
-/// cannot be found from here; `record_start` links the open chat when the meeting is made.
 pub fn delete_all(connection: &Connection, id: &str) -> Result<bool> {
     let tx = connection.unchecked_transaction()?;
     let Some(candidate) = get(&tx, id)? else {
         return Ok(false);
     };
+    tx.execute(
+        "DELETE FROM conversations WHERE id IN (SELECT conversation_id FROM candidate_conversations WHERE candidate_id = ?1)",
+        params![id],
+    )?;
     if let Some(meeting) = candidate.meeting_id {
         // Chat about the interview is candidate data too; messages cascade from the conversation.
         tx.execute(
@@ -413,8 +439,11 @@ mod tests {
         )
         .unwrap();
 
+        c.execute("INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('prep', 't', 0, 0)", []).unwrap();
+        link_conversation(c, &a.id, "prep").unwrap();
         let hidden = local_only_ids(c).unwrap();
         assert!(hidden.contains(&m) && hidden.contains("conv") && !hidden.contains(&other));
+        assert!(hidden.contains("prep"));
         assert!(delete_all(c, &a.id).unwrap());
         assert!(!delete_all(c, &a.id).unwrap());
         for table in [
@@ -445,6 +474,7 @@ mod tests {
             };
             assert_eq!(left, 0, "{table}");
         }
+        assert_eq!(count(c, "candidate_conversations"), 0);
         assert_eq!(count(c, "meetings"), 1);
         assert_eq!(count(c, "candidates"), 1);
         assert_eq!(count(c, "interview_questions"), 1);

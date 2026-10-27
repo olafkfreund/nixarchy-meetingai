@@ -259,4 +259,10 @@ CREATE TABLE IF NOT EXISTS interview_questions (
     note TEXT,
     position INTEGER NOT NULL
 );
+-- A prep chat started before the meeting row exists hangs off the candidate instead.
+CREATE TABLE IF NOT EXISTS candidate_conversations (
+    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    PRIMARY KEY (candidate_id, conversation_id)
+);
 CREATE INDEX IF NOT EXISTS idx_interview_questions_candidate ON interview_questions (candidate_id, position);

@@ -223,7 +223,13 @@ const EARLIER_GAP: Duration = Duration::from_secs(180);
 
 /// True at most once per `EARLIER_GAP`; records the time when it is.
 fn continued_mode_is_team(me: &Daemon, meeting: &str) -> bool {
-    meetings::mode(me.inner.lock().db.connection(), meeting) == MeetingMode::TeamMeeting
+    team_items(me.inner.lock().db.connection(), meeting)
+}
+
+/// Team item extraction applies to team meetings, never to an interview (it has a candidate).
+fn team_items(c: &rusqlite::Connection, meeting: &str) -> bool {
+    meetings::mode(c, meeting) == MeetingMode::TeamMeeting
+        && candidates::for_meeting(c, meeting).ok().flatten().is_none()
 }
 
 fn earlier_due(last: &mut Option<Instant>, now: Instant) -> bool {
@@ -471,12 +477,20 @@ fn normalize(text: &str) -> String {
 }
 
 /// A title that passes judgement is replaced for interviews.
-fn neutral_title(title: String, interview: bool) -> String {
-    if interview && guard::assessment(&title).is_some() {
+fn neutral_title(title: String, interview: bool, said: &[String]) -> String {
+    if interview && guard::assessment(&title, said).is_some() {
         "Interview".into()
     } else {
         title
     }
+}
+
+/// A generated question (or its competency) that passes judgement is dropped.
+fn judges(text: &str, competency: Option<&str>) -> bool {
+    [Some(text), competency]
+        .into_iter()
+        .flatten()
+        .any(|t| guard::assessment(t, &[]).is_some())
 }
 
 /// What to tell the user when no usable model is left.
@@ -726,6 +740,15 @@ impl Daemon {
     /// Chat and probes must not assess when this is an interview (mode or candidate).
     fn guarded(g: &Inner) -> bool {
         g.settings.meeting_mode == MeetingMode::Interviewer || g.candidate.is_some()
+    }
+
+    /// What the candidate said in the meeting the session is in: the only quotable text.
+    fn said_now(g: &Inner) -> Vec<String> {
+        g.meeting_id
+            .as_deref()
+            .or(g.finishing_meeting.as_deref())
+            .or(g.resume_meeting.as_deref())
+            .map_or_else(Vec::new, |m| candidates::said(g.db.connection(), m))
     }
 
     /// [`Self::local_for`] the meeting the session is in.
@@ -989,6 +1012,12 @@ impl Daemon {
             if let Err(error) = sessions::save(g.db.connection(), id, meeting, &context) {
                 tracing::warn!(%error, "could not save restoration context");
             }
+            // Prep chat: no meeting yet, so hang it off the candidate for deletion and hiding.
+            if meeting.is_none()
+                && let Some(candidate) = &g.candidate
+            {
+                let _ = candidates::link_conversation(g.db.connection(), candidate, id);
+            }
         }
         let question_text = question.clone();
         g.last_question.clone_from(&question);
@@ -1012,12 +1041,13 @@ impl Daemon {
         g.cancel = Some(cancel_tx);
         g.automatic_inflight = automatic;
         let guarded = Self::guarded(g);
+        let said = Self::said_now(g);
         let me = self.clone();
         let cancel = Arc::new(cancel_rx);
         g.request = Some(tokio::spawn(async move {
             let result = if guarded {
                 // Interviewer answers are held back until the verdict guard has seen them.
-                let text = guard::with_retry(|extra| {
+                let text = guard::with_retry(&said, |extra| {
                     let mut context = context.clone();
                     context.system = context.system.map(|s| format!("{s}\n\n{extra}"));
                     let (me, chain, history, cancel) =
@@ -1183,6 +1213,7 @@ impl Daemon {
         let me = self.clone();
         let turn = g.turn;
         let guarded = Self::guarded(g);
+        let said = Self::said_now(g);
         g.follow_up_task = Some(tokio::spawn(async move {
             let result = tokio::time::timeout(
                 Duration::from_secs(25),
@@ -1203,7 +1234,7 @@ impl Daemon {
             // An assessment is dropped rather than retried: suggestions are optional.
             let generated: Vec<String> = generated
                 .into_iter()
-                .filter(|t| !guarded || guard::assessment(t).is_none())
+                .filter(|t| !guarded || guard::assessment(t, &said).is_none())
                 .collect();
             for text in visible_follow_ups(&generated) {
                 {
@@ -1219,7 +1250,7 @@ impl Daemon {
 
     /// Name the current conversation once it has a real exchange in it.
     fn spawn_conversation_title(self: &Arc<Self>) {
-        let (config, id, body, guarded) = {
+        let (config, id, body, guarded, said) = {
             let mut g = self.inner.lock();
             let Some(id) = g.chat.conversation_id().map(str::to_owned) else {
                 return;
@@ -1246,14 +1277,14 @@ impl Daemon {
                 return;
             }
             g.named_conversations.push(id.clone());
-            (config, id, body, Self::guarded(&g))
+            (config, id, body, Self::guarded(&g), Self::said_now(&g))
         };
         let me = self.clone();
         tokio::spawn(async move {
             if let Some(title) =
                 titling::request_title(&engine::http_client(), &config, &body).await
             {
-                let title = neutral_title(title, guarded);
+                let title = neutral_title(title, guarded, &said);
                 let g = me.inner.lock();
                 let _ = conversations::rename(g.db.connection(), &id, &title);
             }
@@ -1548,7 +1579,7 @@ impl Daemon {
                 return Err("local_only: this interview is local-only. Choose whisper-local for speech-to-text.".into());
             }
             // Any session with a candidate is an interview, whatever the mode button says.
-            if g.candidate.is_some() {
+            if g.candidate.is_some() || g.settings.meeting_mode == MeetingMode::Interviewer {
                 if !consent && !g.consent {
                     return Err("consent_required: Tell the candidate this interview is being recorded and transcribed.".into());
                 }
@@ -1634,7 +1665,7 @@ impl Daemon {
                     &format!("Session · {}", clock()),
                     "meeting",
                     "en",
-                    g.series.as_deref(),
+                    g.series.as_deref().filter(|_| g.candidate.is_none()),
                     g.settings.meeting_mode,
                 )
                 .map_err(|e| e.to_string())
@@ -1829,7 +1860,7 @@ impl Daemon {
 
     /// Name the meeting, then summarise what is left and consolidate every chunk.
     async fn finish_meeting_artifacts(self: &Arc<Self>, meeting: &str) {
-        let (config, language, body, local, interview) = {
+        let (config, language, body, local, interview, said) = {
             let g = self.inner.lock();
             let c = g.db.connection();
             let local = self.local_for(c, Some(meeting));
@@ -1839,6 +1870,7 @@ impl Daemon {
                 meetings::transcript_excerpt(c, meeting, 6000).unwrap_or_default(),
                 local,
                 candidates::for_meeting(c, meeting).ok().flatten().is_some(),
+                candidates::said(c, meeting),
             )
         };
         // Merging duplicates needs no model, so every path ends here, and tells the shell once.
@@ -1846,7 +1878,7 @@ impl Daemon {
             {
                 let g = self.inner.lock();
                 let c = g.db.connection();
-                let _ = if meetings::mode(c, meeting) == MeetingMode::TeamMeeting {
+                let _ = if team_items(c, meeting) {
                     recap::reconcile(c, meeting)
                 } else {
                     items::finalize(c, meeting)
@@ -1866,7 +1898,7 @@ impl Daemon {
             && let Some(title) =
                 titling::request_title(&engine::http_client(), &config, &body).await
         {
-            let title = neutral_title(title, interview);
+            let title = neutral_title(title, interview, &said);
             let g = self.inner.lock();
             let _ = meetings::rename(g.db.connection(), meeting, &title);
         }
@@ -2666,7 +2698,10 @@ impl Daemon {
             dropped += generated.len().saturating_sub(12);
             for q in generated.into_iter().take(12) {
                 let source = q.source.trim();
-                if q.text.trim().is_empty() || !grounded(source) {
+                if q.text.trim().is_empty()
+                    || !grounded(source)
+                    || judges(&q.text, q.competency.as_deref())
+                {
                     dropped += 1;
                     continue;
                 }
@@ -2924,7 +2959,7 @@ impl Daemon {
         }
         if matches!(
             cmd,
-            "transcript.get" | "notes.get" | "now.get" | "chat.send"
+            "transcript.get" | "notes.get" | "now.get" | "chat.send" | "items.list"
         ) {
             let g = self.inner.lock();
             let meeting = args["meeting"].as_str().map(str::to_owned).or_else(|| {
@@ -3784,6 +3819,12 @@ mod command_tests {
         let err = d.handle("transcript.get", json!({}), Some("mcp")).await;
         assert!(err.unwrap_err().contains("local-only"));
         assert!(d.handle("now.get", json!({}), Some("mcp")).await.is_err());
+        let items = d.handle(
+            "items.list",
+            json!({"meeting": state["meeting"]}),
+            Some("mcp"),
+        );
+        assert!(items.await.unwrap_err().contains("local-only"));
         // The same read is fine for a person at the overlay.
         call("transcript.get", json!({})).await.unwrap();
         call("record.stop", json!({})).await.unwrap();
@@ -3815,6 +3856,13 @@ mod command_tests {
             assert!(!stays_local(&cfg(bad, "llama3")), "{bad}");
         }
         assert!(!stays_local(&cfg("", "gpt-oss:120b-cloud")));
+    }
+
+    #[test]
+    fn generated_questions_that_judge_are_dropped() {
+        assert!(judges("Would you hire yourself?", None));
+        assert!(judges("Describe the migration.", Some("culture fit")));
+        assert!(!judges("Describe the migration.", Some("rust")));
     }
 
     #[test]
@@ -3919,6 +3967,50 @@ mod command_tests {
         call("candidate.local_only", json!({"id": id, "on": false}))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn interviewer_mode_alone_needs_consent_and_a_candidate_blocks_team_series() {
+        let d = daemon();
+        let call = |cmd: &'static str, args: Value| {
+            let d = d.clone();
+            async move { d.handle(cmd, args, None).await }
+        };
+        let set_mode = |mode: &'static str| {
+            call(
+                "settings.set",
+                json!({"key": "meeting_mode", "value": mode}),
+            )
+        };
+        // Interviewer mode without a candidate still needs consent.
+        set_mode("interviewer").await.unwrap();
+        let err = call("record.start", json!({})).await.unwrap_err();
+        assert!(err.starts_with("consent_required: "), "{err}");
+        // A team meeting with a candidate gets no series and no team extraction.
+        set_mode("team").await.unwrap();
+        let series = call("series.create", json!({"name": "Weekly"}))
+            .await
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let cand = call("candidate.create", json!({"name": "Ada"}))
+            .await
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        call("session.new", json!({"series": series, "candidate": cand}))
+            .await
+            .unwrap();
+        call("record.start", json!({"consent": true}))
+            .await
+            .unwrap();
+        let g = d.inner.lock();
+        let m = g.meeting_id.clone().unwrap();
+        let c = g.db.connection();
+        assert_eq!(items::meeting_series(c, &m).unwrap(), None);
+        assert!(!team_items(c, &m));
     }
 
     #[tokio::test]

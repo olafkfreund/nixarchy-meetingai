@@ -40,10 +40,12 @@ const PATTERNS: &[&str] = &[
 ];
 
 /// The pattern that makes `text` an assessment, if any. False positives ("hire date")
-/// only cost one retry, so the list stays strict. Quoted speech is the candidate's own
-/// words, not the model's judgement, so it is ignored.
-pub fn assessment(text: &str) -> Option<&'static str> {
-    let text = unquoted(text);
+/// only cost one retry, so the list stays strict. A quote that appears in the candidate's own
+/// lines (`said`, any case or spacing) is their words, not the model's judgement, so it is
+/// ignored; any other quote is checked like the rest. With no lines, everything is checked.
+pub fn assessment(text: &str, said: &[String]) -> Option<&'static str> {
+    let said: Vec<String> = said.iter().map(|l| squash(l)).collect();
+    let text = unquoted(text, &said);
     if has_ratio(&text) {
         return Some("n/m");
     }
@@ -59,9 +61,17 @@ pub fn assessment(text: &str) -> Option<&'static str> {
         .copied()
 }
 
-/// `text` without anything inside "…", “…” or '…'. An apostrophe inside a word is not a quote,
-/// and a quote that never closes is kept (it must not hide what follows it).
-fn unquoted(text: &str) -> String {
+/// Lowercase with whitespace runs as one space.
+fn squash(text: &str) -> String {
+    text.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `text` without a "…", “…” or '…' span that `said` contains. An apostrophe inside a word is
+/// not a quote, and a quote that never closes is kept (it must not hide what follows it).
+fn unquoted(text: &str, said: &[String]) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -78,7 +88,11 @@ fn unquoted(text: &str) -> String {
                     && (q != '\'' || !chars.get(j + 1).is_some_and(|c| c.is_alphanumeric()))
             })
         });
-        match end {
+        let spoken = end.filter(|&j| {
+            let quote = squash(&chars[i + 1..j].iter().collect::<String>());
+            said.iter().any(|l| l.contains(&quote))
+        });
+        match spoken {
             Some(j) => {
                 out.push(' ');
                 i = j + 1;
@@ -107,14 +121,14 @@ fn has_ratio(text: &str) -> bool {
 
 /// Run `call` (given extra prompt text, empty on the first try); on an assessment run it
 /// once more with [`REMINDER`], and withhold the answer if that one also fails.
-pub async fn with_retry<F, Fut>(mut call: F) -> Result<String, String>
+pub async fn with_retry<F, Fut>(said: &[String], mut call: F) -> Result<String, String>
 where
     F: FnMut(&'static str) -> Fut,
     Fut: Future<Output = Result<String, String>>,
 {
     for extra in ["", REMINDER] {
         let text = call(extra).await?;
-        if assessment(&text).is_none() {
+        if assessment(&text, said).is_none() {
             return Ok(text);
         }
     }
@@ -143,31 +157,36 @@ mod tests {
             "He said \"fine\" but she is a strong candidate",
             "It's a 'maybe' and I'd hire her",
             "An unclosed \"quote then I'd hire her",
+            "My assessment: \"hire her\"",
         ] {
-            assert!(assessment(hit).is_some(), "{hit}");
+            assert!(assessment(hit, &[]).is_some(), "{hit}");
         }
+        let said = [
+            "So I got a 9/10   rating in the story".to_owned(),
+            "I was nervous and 7/10 confident".to_owned(),
+            "I was anxious that day, to be honest".to_owned(),
+        ];
         for miss in [
             "What was your part in the migration?",
-            "\"We moved 10 services\" - which ones?",
             "Tell me about the failure rate.",
-            "She said \"I got a 9/10 rating\" in the story, so ask about that",
+            "She said \"I got a 9/10 RATING\" in the story, so ask about that",
             "She said \u{201c}I was nervous and 7/10 confident\u{201d}, which part?",
             "Quoted: 'I was anxious that day' - what changed?",
+            "She said \"to be honest\" - about what?",
             "Don't assume; it's the candidate's call",
-            "Their hire date was in May",
         ] {
-            // "hire date" is a known cheap false positive, asserted separately below.
-            if !miss.contains("hire") {
-                assert!(assessment(miss).is_none(), "{miss}");
-            }
+            assert!(assessment(miss, &said).is_none(), "{miss}");
         }
-        assert_eq!(assessment("Their hire date"), Some("hire"));
+        // A quote the candidate never said is the model's own words.
+        assert!(assessment("My assessment: \"hire her\"", &said).is_some());
+        assert!(assessment("She said \"to be honest\"", &[]).is_some());
+        assert_eq!(assessment("Their hire date", &[]), Some("hire"));
     }
 
     #[tokio::test]
     async fn retries_once_then_withholds() {
         let mut calls = Vec::new();
-        let ok = with_retry(|extra| {
+        let ok = with_retry(&[], |extra| {
             calls.push(extra);
             let reply = if extra.is_empty() {
                 "She is a strong candidate"
@@ -181,7 +200,7 @@ mod tests {
         assert_eq!(calls, ["", REMINDER]);
 
         let n = std::cell::Cell::new(0);
-        let err = with_retry(|_| {
+        let err = with_retry(&[], |_| {
             n.set(n.get() + 1);
             async { Ok("7/10".to_owned()) }
         })

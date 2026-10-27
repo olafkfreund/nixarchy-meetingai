@@ -246,3 +246,17 @@ step 8.
   never the CV.
 - **Auto-record / IPC** in interviewer mode reports the consent refusal as
   a desktop notification (the banner lives in the overlay).
+- **Codex review fixes (supersede two lines above):** a meeting with a
+  candidate never extracts team items and never joins a series, whatever
+  the mode; MCP `items.list` is refused while local-only applies (also for
+  series scope, since a missing `meeting` means "this session"). Prep
+  chats are linked to the candidate in `candidate_conversations` when sent
+  with no meeting yet, so `delete_all` removes them and `local_only_ids`
+  covers them — the earlier "prep chat is not deleted" note no longer
+  holds. The guard ignores a quoted span **only** when it matches the
+  candidate's own transcript lines (`candidates::said`); otherwise quotes
+  are checked like any text (replaces "text inside quotes is ignored").
+  Consent is required in Interviewer mode even with no candidate selected.
+  Generated questions whose text or competency hits the guard are dropped
+  and counted. agy's Phase B review returned only its plan preamble (not
+  obtained).

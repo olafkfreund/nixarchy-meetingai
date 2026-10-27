@@ -395,17 +395,19 @@ async fn chunk_pending(
     force: bool,
 ) -> Result<(usize, Vec<Continuation>), String> {
     let owned = id.to_owned();
-    let (team, series, open, interview) = db(path, move |db| {
+    let (team, series, open, interview, said) = db(path, move |db| {
         let mode = meetings::mode(db.connection(), &owned);
-        let team = mode == MeetingMode::TeamMeeting;
         let interview = mode == MeetingMode::Interviewer
             || candidates::for_meeting(db.connection(), &owned)?.is_some();
+        // An interview never extracts team items, whatever mode it was recorded in.
+        let team = mode == MeetingMode::TeamMeeting && !interview;
         let series = items::meeting_series(db.connection(), &owned)?.filter(|_| team);
         let open = match &series {
             Some(s) => items::open_for_series(db.connection(), s, Some(&owned))?,
             None => Vec::new(),
         };
-        Ok((team, series, open, interview))
+        let said = candidates::said(db.connection(), &owned);
+        Ok((team, series, open, interview, said))
     })
     .await?;
     let (mut made, mut continued) = (0, Vec::new());
@@ -431,7 +433,7 @@ async fn chunk_pending(
             )
         } else {
             let body = summarise_slice(config, &slice, language, interview).await?;
-            let hit = interview && guard::assessment(&body).is_some();
+            let hit = interview && guard::assessment(&body, &said).is_some();
             (if hit { WITHHELD_CHUNK.into() } else { body }, Vec::new())
         };
         let chunk = NoteChunk {
@@ -553,12 +555,18 @@ pub async fn generate(
     language: &str,
 ) -> Result<(), String> {
     let owned = id.to_owned();
-    let (settings, mode, interview) = db(path, move |db| {
+    let (settings, mode, interview, said) = db(path, move |db| {
         meetings::begin_recap(db.connection(), &owned)?;
         let mode = meetings::mode(db.connection(), &owned);
         let interview = mode == MeetingMode::Interviewer
             || candidates::for_meeting(db.connection(), &owned)?.is_some();
-        Ok((Settings::load(db).unwrap_or_default(), mode, interview))
+        let said = candidates::said(db.connection(), &owned);
+        Ok((
+            Settings::load(db).unwrap_or_default(),
+            mode,
+            interview,
+            said,
+        ))
     })
     .await?;
     let prompt = match mode {
@@ -573,7 +581,7 @@ pub async fn generate(
             let owned = id.to_owned();
             let bank = db(path, move |db| question_bank(db.connection(), &owned)).await?;
             // The recap is evidence only: retry once, then withhold, if it passes judgement.
-            guard::with_retry(|extra| {
+            guard::with_retry(&said, |extra| {
                 let prompt = format!("{prompt}\n\n{bank}\n\n{extra}");
                 let config = &config;
                 async move { notes(path, id, config, &prompt, language, false).await }
