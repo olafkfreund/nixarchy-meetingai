@@ -9,6 +9,9 @@ ShellRoot {
         id: overlay
         Component.onCompleted: overlay.open("{}")
     }
+    Timer { interval: 19500; running: overlay.iv; onTriggered: overlay.candidateHook("new") }   // interviewer: inline rows, then the delete dialog
+    Timer { interval: 21500; running: overlay.iv; onTriggered: overlay.candidateHook("attach") }
+    Timer { interval: 23500; running: overlay.iv; onTriggered: overlay.candidateHook("delete") }
     Timer { interval: 1500; repeat: true; running: Quickshell.env("MEETINGAI_GEOMETRY") === "1"; onTriggered: Geo.dump(overlay.geometryRoot(), overlay.ctl, "") }   // tests/check-geometry.py
     Timer { interval: 10000; running: true; onTriggered: overlay.lastOpen = true }   // team scenario: Last time drawer
     Timer { interval: 2000; running: overlay.iv; onTriggered: overlay.recordHook(false) }   // interviewer: the consent banner

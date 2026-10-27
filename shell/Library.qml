@@ -31,10 +31,6 @@ Item {
 
     readonly property bool iv: client.settings.meeting_mode === "interviewer"
     readonly property var tabs: root.iv ? ["restore", "profiles", "candidate", "prompts", "providers", "settings"] : ["restore", "profiles", "prompts", "providers", "settings"]
-    readonly property var cand: client.cand   // candidate.get of the shown candidate
-    readonly property bool candLinked: root.cand !== null && !!root.cand.candidate.meeting_id   // already interviewed: read-only
-    property string genNote: ""
-    property bool confirmDelete: false
     readonly property var promptKinds: ["answer", "live_answer", "follow_up", "recap"]
     readonly property var kindHelp: ({
         answer: "Used for questions you type: how the model answers you.",
@@ -63,6 +59,7 @@ Item {
         if (cur.selected) { root.client.setSetting("personal_context", a); root.client.setSetting("meeting_context", b); }
     }
     property string promptKind: "answer"
+    function candidateHook(what) { candTab.hook(what); }
 
     function match(s) { return root.query === "" || String(s).toLowerCase().indexOf(root.query.toLowerCase()) >= 0; }
 
@@ -73,20 +70,7 @@ Item {
         root.search();
         root.loadPrompt();
         root.client.refreshCandidates();
-        root.confirmDelete = false;
     }
-    function fail(r) { if (!r.ok) root.client.lastError = String(r.error); }
-    // Any candidate can be opened to view or delete; only one without a meeting is chosen for a new interview.
-    function pickCandidate(id, unlinked) {
-        root.client.viewCandidate(id);
-        if (unlinked) root.client.send("session.new", { candidate: id }, root.fail);
-    }
-    function moveQuestion(i, d) {
-        var ids = root.cand.questions.map(function(q) { return q.id; }), t = ids[i + d];
-        ids[i + d] = ids[i]; ids[i] = t;
-        root.client.send("questions.reorder", { candidate: root.cand.candidate.id, ids: ids }, function(r) { root.fail(r); root.client.refreshCand(); });
-    }
-
     function search() {
         root.client.send("settings.search", { query: root.query }, function(r) { if (r.ok) root.found = (r.data || []).filter(function(f) { return String(f.key).indexOf("overlay_") !== 0; }); });
     }
@@ -279,120 +263,12 @@ Item {
             }
         }
 
-        // Candidate (interviewer mode): documents, question bank, local-only, deletion.
-        ScrollView {
-            id: candView
+        CandidateTab {
+            id: candTab
             visible: root.tab === "candidate"
+            client: root.client
+            theme: root.theme
             width: parent.width; height: parent.height - y
-            contentWidth: availableWidth
-            clip: true
-            Column {
-                width: candView.availableWidth
-                spacing: Style.spacing.xs
-                UiText { textFormat: Text.PlainText; text: "Candidate"; color: Qt.darker(Commons.Color.popups.text, 1.4); font.bold: true; font.pixelSize: root.theme.caption }
-                RowLayout {
-                    width: parent.width
-                    spacing: root.theme.gap
-                    Dropdown {
-                        objectName: "candidatePick"
-                        showLabel: false; rowHeight: root.theme.ctl
-                        Layout.fillWidth: true; Layout.preferredHeight: root.theme.ctl; Layout.alignment: Qt.AlignVCenter
-                        value: String(root.client.shownCandidate)
-                        options: root.client.candidates.map(function(c) { return { value: c.id, label: (c.name || "Unnamed") + (c.meeting_id ? " (interviewed)" : " (new)") }; })
-                        onChanged: function(v) { root.pickCandidate(v, root.client.candidates.some(function(c) { return c.id === v && !c.meeting_id; })); }
-                    }
-                    Input { id: newCand; objectName: "candidateName"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; placeholderText: "Candidate name" }
-                    IconButton { objectName: "candidateNew"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "New"; bordered: true; enabled: newCand.text.trim() !== ""; opacity: enabled ? 1 : 0.5
-                        onClicked: root.client.send("candidate.create", { name: newCand.text.trim() }, function(r) { root.fail(r); if (!r.ok) return; newCand.text = ""; root.client.refreshCandidates(); root.pickCandidate(r.data.id, true); }) }
-                }
-                Hint { visible: root.cand === null; text: "Pick or create a candidate to prepare the interview. Their data stays in this interview only." }
-                Column {
-                    visible: root.cand !== null
-                    width: parent.width
-                    spacing: Style.spacing.xs
-                    Hint { visible: root.candLinked; text: "This interview has been recorded. Its data is read-only here; you can delete it." }
-                  Column {   // everything but Delete is locked once the interview has a meeting
-                    enabled: !root.candLinked
-                    opacity: enabled ? 1 : 0.6
-                    width: parent.width
-                    spacing: Style.spacing.xs
-                    RowLayout {
-                        width: parent.width
-                        spacing: root.theme.gap
-                        ToggleSwitch { id: lo; objectName: "localOnly"; Layout.alignment: Qt.AlignVCenter; checked: root.cand !== null && root.cand.candidate.local_only === true; onToggled: root.client.send("candidate.local_only", { id: root.cand.candidate.id, on: !checked }, function(r) { root.fail(r); root.client.refreshCand(); }) }
-                        UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; wrapMode: Text.Wrap; textFormat: Text.PlainText; text: "Local-only: speech-to-text and models stay on this machine"; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
-                    }
-                    UiText { textFormat: Text.PlainText; text: "Documents"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body; topPadding: Style.spacing.xs }
-                    Repeater {
-                        model: root.cand ? root.cand.documents : []
-                        UiText {
-                            required property var modelData
-                            width: parent.width
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            text: modelData.kind.toUpperCase() + "  ·  " + modelData.name + "  ·  " + modelData.chars + " chars"
-                            color: Commons.Color.popups.text
-                            font.pixelSize: root.theme.body
-                        }
-                    }
-                    Repeater {
-                        model: [{ kind: "cv", title: "CV" }, { kind: "job", title: "Job description" }]
-                        RowLayout {
-                            id: arow
-                            required property var modelData
-                            width: parent.width
-                            spacing: root.theme.gap
-                            Input { id: apath; objectName: "attachPath"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; placeholderText: arow.modelData.title + " file path" }
-                            IconButton { id: abtn; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Attach"; bordered: true; tooltipText: "Attach the " + arow.modelData.title; enabled: apath.text.trim() !== ""; opacity: enabled ? 1 : 0.5
-                                onClicked: root.client.send("candidate.attach", { id: root.cand.candidate.id, kind: arow.modelData.kind, path: apath.text.trim() }, function(r) { root.fail(r); if (r.ok) { apath.text = ""; root.client.refreshCand(); } }) }
-                        }
-                    }
-                    RowLayout {
-                        width: parent.width
-                        spacing: root.theme.gap
-                        IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Generate question bank"; bordered: true
-                            onClicked: { root.genNote = "Generating..."; root.client.send("questions.generate", { candidate: root.cand.candidate.id }, function(r) { root.fail(r); root.genNote = r.ok && r.data.dropped > 0 ? r.data.dropped + " dropped (source not in documents)" : ""; root.client.refreshCand(); }); } }
-                        UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; wrapMode: Text.Wrap; visible: root.genNote !== ""; textFormat: Text.PlainText; text: root.genNote; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: root.theme.caption }
-                    }
-                    UiText { textFormat: Text.PlainText; text: "Questions"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body; topPadding: Style.spacing.xs }
-                    Repeater {
-                        model: root.cand ? root.cand.questions : []
-                        Column {
-                            id: qr
-                            required property var modelData
-                            required property int index
-                            width: parent.width
-                            spacing: Style.space(2)
-                            RowLayout {
-                                width: parent.width
-                                spacing: root.theme.gap
-                                Input { objectName: "questionText"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; text: qr.modelData.text; onEditingFinished: { if (text.trim() !== "" && text !== qr.modelData.text) root.client.send("questions.update", { id: qr.modelData.id, text: text.trim() }); } }
-                                Input { id: qcomp; objectName: "questionCompetency"; ts: root.theme.ts; Layout.preferredWidth: Math.round(Style.space(170) * root.theme.ts); Layout.alignment: Qt.AlignVCenter; placeholderText: "Competency"; text: String(qr.modelData.competency || ""); onEditingFinished: { if (text !== String(qr.modelData.competency || "")) root.client.send("questions.update", { id: qr.modelData.id, competency: text }); } }
-                                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; iconText: String.fromCodePoint(0xf0143); enabled: qr.index > 0; opacity: enabled ? 1 : 0.4; tooltipText: "Move up"; onClicked: root.moveQuestion(qr.index, -1) }
-                                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; iconText: String.fromCodePoint(0xf0140); enabled: qr.index < root.cand.questions.length - 1; opacity: enabled ? 1 : 0.4; tooltipText: "Move down"; onClicked: root.moveQuestion(qr.index, 1) }
-                                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; iconText: String.fromCodePoint(0xf0156); tooltipText: "Delete question"; onClicked: root.client.send("questions.delete", { id: qr.modelData.id }, function(r) { root.fail(r); root.client.refreshCand(); }) }
-                            }
-                            Hint { text: "\u201c" + String(qr.modelData.source || "") + "\u201d"; font.italic: true }
-                        }
-                    }
-                    RowLayout {
-                        width: parent.width
-                        spacing: root.theme.gap
-                        Input { id: addQ; objectName: "addQuestion"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; placeholderText: "Add a question" }
-                        IconButton { id: addBtn; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Add"; bordered: true; enabled: addQ.text.trim() !== ""; opacity: enabled ? 1 : 0.5
-                            onClicked: root.client.send("questions.add", { candidate: root.cand.candidate.id, text: addQ.text.trim() }, function(r) { root.fail(r); if (r.ok) { addQ.text = ""; root.client.refreshCand(); } }) }
-                    }
-                  }
-                    IconButton { ts: root.theme.ts; text: root.confirmDelete ? "Click again to delete" : "Delete candidate data"; bordered: true; active: root.confirmDelete
-                        tooltipText: "Removes the candidate, documents, questions and the linked meeting"
-                        onClicked: {
-                            if (!root.confirmDelete) { root.confirmDelete = true; return; }
-                            root.confirmDelete = false;
-                            root.client.send("candidates.delete", { id: root.cand.candidate.id }, function(r) { root.fail(r); root.client.viewId = ""; root.client.refreshCand(); root.client.refreshCandidates(); });
-                        }
-                    }
-                }
-            }
         }
 
         Column {

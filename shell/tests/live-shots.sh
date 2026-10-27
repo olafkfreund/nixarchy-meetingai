@@ -48,7 +48,7 @@ sleep 3.4; g=$(geom)
 case $scenario in
     r5) frames="1-resized:1 2-profiles:4.5 3-prompts:4" ;;
     team) frames="1-items:3 2-last-time:6 3-settings:4" ;;
-    interviewer) frames="1-consent:0.1 2-bank:5.5 3-candidate:9.5" ;;   # banner at ~3.5 s, bank after consent at 6 s, Candidate tab after 16 s
+    interviewer) frames="1-consent:0.1 2-bank:5.5 3-candidate:9.5 4-new:2 5-attach:2 6-delete:2" ;;   # banner at ~3.5 s, bank after consent at 6 s, Candidate tab after 16 s
     k8s) frames="1-answering:2 2-ready:9 3-settings:4" ;;
     *) frames="1-question:1 2-answering:2.4 3-suggestions:3 4-you-speaking:2.2 5-asked:2.4 6-settings:4" ;;
 esac

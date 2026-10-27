@@ -7,7 +7,6 @@ import QtQuick.Dialogs
 import QtQuick.Layouts
 import qs.Commons
 import qs.Commons as Commons
-import qs.Ui
 
 // Question box. Grows to 5 lines then scrolls; Enter sends, Shift+Enter adds
 // a line. Code and large pastes become chips; files go as paths.
@@ -83,12 +82,11 @@ Item {
             width: parent.width
             spacing: root.theme.gap
             UiText { Layout.alignment: Qt.AlignVCenter; textFormat: Text.PlainText; text: "Series"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true }
-            Dropdown {
+            Select {
                 id: seriesBox
+                theme: root.theme
                 objectName: "seriesPick"
                 enabled: !root.seriesLocked
-                showLabel: false
-                rowHeight: root.theme.ctl
                 Layout.preferredWidth: Math.round(Style.space(240) * root.theme.ts)
                 Layout.preferredHeight: root.theme.ctl
                 Layout.alignment: Qt.AlignVCenter

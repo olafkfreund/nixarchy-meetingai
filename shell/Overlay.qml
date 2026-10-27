@@ -117,6 +117,7 @@ Item {
     function openModelPicker() { root.library = true; lib.tab = "settings"; }
     function showLibrary(tab) { root.library = true; lib.tab = tab; }
     function recordHook(consent) { backend.startRecording(consent); }
+    function candidateHook(what) { lib.candidateHook(what); }
     function geometryRoot() { return card; }   // tests/geometry.js walks this item
     readonly property real ctl: metrics.ctl
 
@@ -398,9 +399,9 @@ Item {
                     bottomPadding: metrics.gap
                     Cell {
                         theme: metrics; width: sflow.cellW; label: "Chat provider"
-                        Dropdown {
+                        Select {
                             objectName: "chatProvider"
-                            anchors.fill: parent; showLabel: false; rowHeight: metrics.ctl
+                            theme: metrics; anchors.fill: parent
                             value: String(backend.settings.chat_provider || "")
                             options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
                             onChanged: function(v) { backend.setSetting("chat_provider", v); backend.setSetting("chat_model", ""); root.loadModels(); }
@@ -408,9 +409,10 @@ Item {
                     }
                     Cell {
                         theme: metrics; width: sflow.cellW; label: "Chat model"
-                        SearchableDropdown {   // typing filters the list
+                        Select {   // typing filters the list
                             objectName: "chatModel"
-                            anchors.fill: parent; showLabel: false; rowHeight: metrics.ctl
+                            searchable: true
+                            theme: metrics; anchors.fill: parent
                             value: String(backend.settings.chat_model || "")
                             options: root.models.map(function(m) { return String(m); })
                             triggerLabel: "default"
@@ -429,9 +431,9 @@ Item {
                     }
                     Cell {   // automatic answers while a call is recorded
                         theme: metrics; width: sflow.cellW; label: "Live answers provider"
-                        Dropdown {
+                        Select {
                             objectName: "liveProvider"
-                            anchors.fill: parent; showLabel: false; rowHeight: metrics.ctl
+                            theme: metrics; anchors.fill: parent
                             value: String(backend.settings.live_provider || "")
                             options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
                             onChanged: function(v) { backend.setSetting("live_provider", v); backend.setSetting("live_model", ""); root.loadModels(); }
@@ -439,9 +441,10 @@ Item {
                     }
                     Cell {
                         theme: metrics; width: sflow.cellW; label: "Live answers model"
-                        SearchableDropdown {
+                        Select {
                             objectName: "liveModel"
-                            anchors.fill: parent; showLabel: false; rowHeight: metrics.ctl
+                            searchable: true
+                            theme: metrics; anchors.fill: parent
                             value: String(backend.settings.live_model || "")
                             options: root.liveModels.map(function(m) { return String(m); })
                             triggerLabel: "default"
@@ -450,9 +453,9 @@ Item {
                     }
                     Cell {
                         theme: metrics; width: sflow.cellW; label: "Pace"
-                        Dropdown {
+                        Select {
                             objectName: "pace"
-                            anchors.fill: parent; showLabel: false; rowHeight: metrics.ctl
+                            theme: metrics; anchors.fill: parent
                             value: String(backend.settings.response_pace || "Balanced")
                             options: root.paces
                             onChanged: function(v) { backend.setSetting("response_pace", v); }

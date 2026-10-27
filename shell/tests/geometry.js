@@ -5,7 +5,8 @@
 function isControl(it) {
     return (it.tooltipText !== undefined && it.iconText !== undefined)   // IconButton
         || (it.placeholderText !== undefined && it.echoMode !== undefined)   // Input / TextField
-        || it.rowHeight !== undefined;   // Dropdown, SearchableDropdown
+        || it.fontPx !== undefined      // Select
+        || it.rowHeight !== undefined;   // qs.Ui Dropdown / SearchableDropdown: fixed font size, must not be used
 }
 function isText(it) { return it.truncated !== undefined && it.textFormat !== undefined && it.elide !== undefined; }
 
@@ -23,6 +24,8 @@ function walk(it, card, out, depth, vp) {
         var r = { n: String(it.objectName || ""), t: String(it).split("(")[0], x: p.x, y: p.y, w: it.width, h: it.height };
         if (ctl) {
             r.c = 1;
+            r.fpx = it.fontPx !== undefined ? it.fontPx : it.fontSize !== undefined ? it.fontSize : (it.font ? it.font.pixelSize : 0);
+            r.ui = it.rowHeight !== undefined && it.fontPx === undefined;
             r.label = String(it.text || it.placeholderText || it.iconText || "");
             r.clip = it.iconText !== undefined && it.implicitWidth > it.width + 1;
             out.push(r);

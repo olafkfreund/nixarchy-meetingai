@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the "GEO {json}" lines tests/geometry.js logged (stdin or a file).
 
-Fails on: a control (button, field, dropdown) whose height is not the shared control height;
+Fails on: a qs.Ui dropdown (use Select); a control (button, field, dropdown) whose height is not the shared control height;
 controls on one visual row whose tops or bottoms differ by more than 1 px; text or buttons
 wider than their box (clipped); anything sticking out of the card sideways.
 usage: check-geometry.py geometry.log
@@ -23,6 +23,9 @@ def check(snap):
     for i in cs:
         if abs(i["h"] - ctl) > TOL:
             fail(("h", i["t"], i["label"]), f"{i['t']} '{i['label']}' ({i['n']}) is {i['h']:.1f} px tall, control height is {ctl}")
+    for i in cs:
+        if i.get("ui"):
+            fail(("ui", i["t"], i["label"]), f"{i['t']} ({i['n']}) is a qs.Ui dropdown: its text ignores the text-size setting; use Select")
     for a in cs:
         for b in cs:
             if a is b or a["y"] > b["y"] or (a["y"] == b["y"] and a["x"] >= b["x"]):
@@ -32,6 +35,8 @@ def check(snap):
             ov = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
             if ov < 0.5 * min(a["h"], b["h"]):
                 continue
+            if abs(a["fpx"] - b["fpx"]) > 0.5:
+                fail(("font", a["label"], b["label"]), f"font sizes differ in one row: '{a['label']}' {a['fpx']:.1f} px vs '{b['label']}' {b['fpx']:.1f} px")
             if abs(a["y"] - b["y"]) > TOL or abs((a["y"] + a["h"]) - (b["y"] + b["h"])) > TOL:
                 fail(("row", a["label"], b["label"]), f"row misaligned: '{a['label']}' y={a['y']:.1f}..{a['y']+a['h']:.1f} vs '{b['label']}' y={b['y']:.1f}..{b['y']+b['h']:.1f}")
     for i in its:
