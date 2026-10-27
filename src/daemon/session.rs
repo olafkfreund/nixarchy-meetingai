@@ -41,9 +41,37 @@ use crate::{
     db::{self, Database, conversations, meetings, profiles, sessions, settings as store},
     speech::{
         listen::{ListenSession, SessionConfig, SessionEvent},
-        transcription::{self, LiveEvent, LiveTranscriber, LiveTurns},
+        transcription::{self, LiveEvent, LiveTranscriber, LiveTurns, SttHints},
     },
 };
+
+/// Names and terms from the profile and meeting brief for whisper to spell right:
+/// capitalised words, acronyms and words with digits, first-seen order, <= 200 chars.
+fn glossary(personal: &str, meeting: &str) -> String {
+    let mut out = String::new();
+    let mut seen = std::collections::HashSet::new();
+    for raw in personal
+        .split_whitespace()
+        .chain(meeting.split_whitespace())
+    {
+        let word = raw.trim_matches(|c: char| !c.is_alphanumeric());
+        // shortcut: sentence-initial words count as terms too; harmless as a whisper hint.
+        let term = word.chars().count() >= 2
+            && word.chars().all(char::is_alphanumeric)
+            && (word.starts_with(char::is_uppercase) || word.chars().any(|c| c.is_ascii_digit()));
+        if !term || !seen.insert(word.to_lowercase()) {
+            continue;
+        }
+        if out.len() + word.len() + 1 > 200 {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
 
 /// Quick actions the shell offers itself; generated suggestions never repeat them.
 const FIXED_FOLLOW_UPS: [&str; 3] = ["What should I say?", "Follow-up questions", "Fact check"];
@@ -1332,7 +1360,13 @@ impl Daemon {
     ) {
         let mut live = None;
         if let (Some(_), Some(config)) = (&session, &speech) {
-            match LiveTranscriber::connect_config(config).await {
+            let hints = {
+                let g = self.inner.lock();
+                SttHints {
+                    glossary: glossary(&g.settings.personal_context, &g.settings.meeting_context),
+                }
+            };
+            match LiveTranscriber::connect_config_with(config, hints).await {
                 Ok(l) => live = Some(l),
                 Err(error) => {
                     self.error(error.to_string());
@@ -2166,5 +2200,21 @@ mod routing_tests {
         for key in ["chat_provider", "live_model", "recap_prompt_general"] {
             assert!(MANAGED_SETTINGS.contains(&key));
         }
+    }
+}
+
+#[cfg(test)]
+mod glossary_tests {
+    use super::glossary;
+
+    #[test]
+    fn keeps_names_and_terms_once_and_caps_length() {
+        let g = glossary(
+            "I'm Olaf, an SRE at Freundcloud.",
+            "Interview with Priya about Kafka, k8s and Kafka.",
+        );
+        assert_eq!(g, "Olaf SRE Freundcloud Interview Priya Kafka k8s");
+        let long = "Word ".repeat(10) + &(0..100).map(|i| format!("Term{i} ")).collect::<String>();
+        assert!(glossary(&long, "").len() <= 200);
     }
 }

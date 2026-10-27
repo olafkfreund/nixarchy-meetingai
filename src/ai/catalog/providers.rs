@@ -116,7 +116,7 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
         name: "whisper.cpp (local)",
         endpoint: "http://127.0.0.1:8178/inference",
         wire: SttWire::WhisperServer,
-        default_model: "ggml-small.en",
+        default_model: "ggml-large-v3-turbo",
     },
 ];
 
