@@ -191,7 +191,7 @@ async fn mcp_flow() {
     let provider = fake_provider().await;
     {
         let vault = Vault::open(&vault_dir).unwrap();
-        let mut credential = credentials::Credential::chat("gemini", "sk-test");
+        let mut credential = credentials::Credential::chat("ollama", "sk-test");
         credential.model = "mock".into();
         credential.base_url = provider;
         credentials::save(&vault, &credential).unwrap();
@@ -214,7 +214,7 @@ async fn mcp_flow() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     for (key, value) in [
-        ("chat_provider", json!("gemini")),
+        ("chat_provider", json!("ollama")),
         ("chat_model", json!("")),
         ("auto_response", json!("off")),
     ] {
@@ -238,7 +238,7 @@ async fn mcp_flow() {
     assert_eq!(data["answer"], "Mock answer.");
     assert_eq!(
         (data["provider"].clone(), data["partial"].clone()),
-        (json!("gemini"), json!(false))
+        (json!("ollama"), json!(false))
     );
     assert!(
         !data["suggestions"].as_array().unwrap().is_empty(),

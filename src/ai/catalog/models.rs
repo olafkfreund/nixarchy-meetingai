@@ -18,8 +18,8 @@ const EMPTY_CATALOG: &str = "This account's catalog has no text-chat models. You
 
 pub const MODELS: &[ModelList] = &[
     ModelList {
-        provider: "gemini",
-        models: &["gemini-3.8-flash"],
+        provider: "agy-sub",
+        models: &["gemini-3.8-flash-low"],
     },
     // Ollama's real list comes from /api/tags; this is only the starting choice.
     ModelList {
@@ -97,9 +97,9 @@ mod tests {
 
     #[test]
     fn label_prefers_the_configured_model() {
-        assert_eq!(label(Some("gpt-4o"), Some("gemini")), "gpt-4o");
-        assert_eq!(label(None, Some("gemini")), "gemini-3.8-flash");
-        assert_eq!(label(Some("   "), Some("gemini")), "gemini-3.8-flash");
+        assert_eq!(label(Some("gpt-4o"), Some("agy-sub")), "gpt-4o");
+        assert_eq!(label(None, Some("agy-sub")), "gemini-3.8-flash-low");
+        assert_eq!(label(Some("   "), Some("agy-sub")), "gemini-3.8-flash-low");
         assert_eq!(label(None, None), "Add a provider");
     }
 
@@ -239,6 +239,11 @@ pub async fn discover(
     if super::providers::ChatProvider::by_id(&config.id)
         .is_some_and(|p| p.wire == super::providers::ChatWire::Cli)
     {
+        if config.id == "agy-sub"
+            && let Ok(models) = crate::ai::chat::cli::agy_models().await
+        {
+            return Ok(models);
+        }
         return Ok(for_provider(&config.id)
             .iter()
             .map(|m| (*m).to_owned())
@@ -388,12 +393,19 @@ mod discovery_tests {
         );
     }
 
+    /// A keyed OpenAI-style provider; the catalog has none built in.
+    fn openai_config(key: &str, model: &str) -> ProviderConfig {
+        let mut config = ProviderConfig::new("custom-test", key, model);
+        config.custom = Some(crate::ai::catalog::custom::CustomProvider::default());
+        config
+    }
+
     fn catalog_server(
         pages: Vec<(u16, serde_json::Value)>,
     ) -> (ProviderConfig, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
-        let mut config = ProviderConfig::new("gemini", "saved-list-key", "my-custom-model");
+        let mut config = openai_config("saved-list-key", "my-custom-model");
         config.base_url = format!(
             "http://{}/v1/chat/completions",
             listener.local_addr().unwrap()
@@ -460,10 +472,7 @@ mod discovery_tests {
                     ),
                 ]
             };
-            let (mut config, server) = catalog_server(pages);
-            if google {
-                config.id = "gemini".into();
-            }
+            let (config, server) = catalog_server(pages);
             assert_eq!(discover(None, config, false).await.unwrap(), ["a", "b"]);
             let requests = server.join().unwrap();
             assert!(
@@ -530,10 +539,11 @@ mod discovery_tests {
 
     #[test]
     fn endpoint_and_cache_scope_follow_the_actual_account_and_gateway() {
-        let mut config = ProviderConfig::new("gemini", "key-a", "m");
+        let mut config = openai_config("key-a", "m");
+        config.base_url = "https://api.example.test/v1/chat/completions".into();
         assert_eq!(
             models_endpoint(&config).unwrap(),
-            "https://generativelanguage.googleapis.com/v1beta/openai/models"
+            "https://api.example.test/v1/models"
         );
         let scope = cache_key(&config);
         config.api_key = "key-b".into();
@@ -573,7 +583,7 @@ mod discovery_tests {
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("catalog.db");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut config = ProviderConfig::new("gemini", "catalog-test-key", "custom-model");
+        let mut config = openai_config("catalog-test-key", "custom-model");
         config.base_url = format!(
             "http://{}/v1/chat/completions",
             listener.local_addr().unwrap()

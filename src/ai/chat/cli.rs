@@ -28,6 +28,7 @@ pub const CLI_DEFAULT_MODEL: &str = "default";
 pub enum Kind {
     Claude,
     Codex,
+    Agy,
 }
 
 /// One parsed stdout line.
@@ -43,6 +44,26 @@ pub enum CliEvent {
 pub fn parse_line(kind: Kind, line: &str) -> Option<CliEvent> {
     let value: Value = serde_json::from_str(line).ok()?;
     let text = |pointer: &str| value.pointer(pointer).and_then(Value::as_str);
+    if kind == Kind::Agy {
+        // text_delta is incremental, including the last DONE step.
+        return match value.get("event")?.as_str()? {
+            "step_update" if text("/step_update/step_type") == Some("agent_response") => {
+                text("/step_update/text_delta")
+                    .filter(|t| !t.is_empty())
+                    .map(|t| CliEvent::Delta(t.to_owned()))
+            }
+            "result" if text("/result/status") == Some("SUCCESS") => {
+                Some(CliEvent::Done(text("/result/response").map(str::to_owned)))
+            }
+            "result" => Some(CliEvent::Failed(
+                text("/result/error")
+                    .or(text("/result/response"))
+                    .unwrap_or("agy did not finish the turn")
+                    .to_owned(),
+            )),
+            _ => None,
+        };
+    }
     match (kind, value.get("type")?.as_str()?) {
         (Kind::Claude, "stream_event") => {
             if text("/event/type") == Some("content_block_delta") {
@@ -116,6 +137,92 @@ pub fn claude_args(model: &str, system_file: &Path) -> Vec<String> {
         args.extend(["--model".into(), model.to_owned()]);
     }
     args
+}
+
+/// Antigravity argv. agy takes the prompt only as an argument and has no system-prompt flag.
+pub fn agy_args(model: &str, prompt: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "--mode",
+        "plan",
+        "--output-format",
+        "stream-json",
+        "--print-timeout",
+        "120s",
+    ]
+    .map(String::from)
+    .to_vec();
+    if model != CLI_DEFAULT_MODEL && !model.is_empty() {
+        args.extend(["--model".into(), model.to_owned()]);
+    }
+    args.extend(["-p".into(), prompt.to_owned()]);
+    args
+}
+
+/// Private HOME for agy: the real `~/.gemini` (login, state) linked in, except its MCP servers
+/// and settings, which are emptied. agy starts every configured MCP server on each call
+/// (~40 s here); with none it answers in seconds, and no tool can reach the call.
+fn agy_home(dir: &Path) -> Result<std::path::PathBuf, ChatError> {
+    use std::os::unix::fs::symlink;
+    let io = |e: std::io::Error| ChatError::Cli(format!("could not prepare agy: {e}"));
+    let real = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| ChatError::Cli("HOME is not set".into()))?;
+    let home = dir.join("home");
+    let gemini = home.join(".gemini");
+    std::fs::create_dir_all(gemini.join("config")).map_err(io)?;
+    let link_all = |from: &Path, to: &Path, skip: &dyn Fn(&str) -> bool| -> Result<(), ChatError> {
+        let Ok(entries) = std::fs::read_dir(from) else {
+            return Ok(());
+        };
+        for entry in entries.flatten() {
+            if !skip(&entry.file_name().to_string_lossy()) {
+                symlink(entry.path(), to.join(entry.file_name())).map_err(io)?;
+            }
+        }
+        Ok(())
+    };
+    link_all(&real.join(".gemini"), &gemini, &|n| {
+        matches!(
+            n,
+            "config" | "settings.json" | "settings.json.orig" | "settings.nix"
+        )
+    })?;
+    link_all(&real.join(".gemini/config"), &gemini.join("config"), &|n| {
+        n.starts_with("mcp_config")
+    })?;
+    std::fs::write(
+        gemini.join("config/mcp_config.json"),
+        r#"{"mcpServers":{}}"#,
+    )
+    .map_err(io)?;
+    std::fs::write(gemini.join("settings.json"), "{}").map_err(io)?;
+    for name in [".config", ".local", ".cache"] {
+        let _ = symlink(real.join(name), home.join(name));
+    }
+    Ok(home)
+}
+
+/// Models agy offers: the first column of `agy models`.
+pub async fn agy_models() -> Result<Vec<String>, String> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        Command::new("agy")
+            .arg("models")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "`agy models` timed out".to_owned())?
+    .map_err(|e| format!("could not run `agy models`: {e}"))?;
+    let models: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|l| l.split_once('\t').map(|(id, _)| id.trim().to_owned()))
+        .filter(|id| !id.is_empty() && !id.starts_with('-'))
+        .collect();
+    if models.is_empty() {
+        return Err("`agy models` listed nothing; sign in with `agy`".into());
+    }
+    Ok(models)
 }
 
 /// Codex argv; the prompt arrives on stdin (`-`).
@@ -243,10 +350,10 @@ pub async fn stream<F: Future<Output = ()>>(
     cancel: Arc<watch::Receiver<bool>>,
     on_text: impl FnMut(String) -> F,
 ) -> Result<String, ChatError> {
-    let kind = if config.id == "codex-sub" {
-        Kind::Codex
-    } else {
-        Kind::Claude
+    let kind = match config.id.as_str() {
+        "codex-sub" => Kind::Codex,
+        "agy-sub" => Kind::Agy,
+        _ => Kind::Claude,
     };
     let (last, earlier) = history
         .split_last()
@@ -282,6 +389,17 @@ pub async fn stream<F: Future<Output = ()>>(
             let prompt = format!("{system}\n\n{text}");
             ("codex", codex_args(&config.model, &dir.0, &files), prompt)
         }
+        Kind::Agy => {
+            let prompt = format!("{system}\n\n{text}");
+            // One argv string is capped near 128 KiB; a Cli error lets the chain try the next provider.
+            if prompt.len() > 100_000 {
+                return Err(ChatError::Cli(
+                    "the conversation is too long for the Antigravity CLI".into(),
+                ));
+            }
+            agy_home(&dir.0)?;
+            ("agy", agy_args(&config.model, &prompt), String::new())
+        }
     };
     run(program, kind, args, payload, &dir.0, cancel, on_text).await
 }
@@ -306,7 +424,13 @@ pub(super) async fn run<F: Future<Output = ()>>(
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("OPENAI_API_KEY_FILE")
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("GEMINI_API_KEY_FILE")
+        .env_remove("GOOGLE_API_KEY")
         .current_dir(dir);
+    if kind == Kind::Agy {
+        command.env("HOME", dir.join("home"));
+    }
     // SAFETY: setsid is async-signal-safe and runs between fork and exec; it drops the
     // controlling terminal, so a wrapper (mise) that opens /dev/tty cannot stall. pgid == pid.
     unsafe {
@@ -420,6 +544,77 @@ mod tests {
                 CliEvent::Done(Some("hi there".into()))
             ]
         );
+    }
+
+    #[test]
+    fn agy_fixture_yields_incremental_deltas_then_result() {
+        let events = events(Kind::Agy, "agy-stream.ndjson");
+        let deltas: String = events
+            .iter()
+            .filter_map(|e| match e {
+                CliEvent::Delta(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events.len(), 5);
+        assert!(deltas.starts_with("Kubernetes is an open-source"));
+        // The result carries the same text the deltas add up to.
+        assert_eq!(events.last(), Some(&CliEvent::Done(Some(deltas))));
+    }
+
+    #[test]
+    fn agy_failure_status_is_an_error() {
+        let line = r#"{"event":"result","result":{"status":"ERROR","error":"not signed in"}}"#;
+        assert_eq!(
+            parse_line(Kind::Agy, line),
+            Some(CliEvent::Failed("not signed in".into()))
+        );
+        assert_eq!(
+            parse_line(
+                Kind::Agy,
+                r#"{"event":"result","result":{"status":"TIMEOUT"}}"#
+            ),
+            Some(CliEvent::Failed("agy did not finish the turn".into()))
+        );
+    }
+
+    #[test]
+    fn agy_home_replaces_mcp_and_settings_but_keeps_the_login() {
+        let real = std::env::temp_dir().join(format!("agy-real-{}", uuid::Uuid::new_v4()));
+        let g = real.join(".gemini");
+        std::fs::create_dir_all(g.join("config")).unwrap();
+        for f in [
+            "oauth_creds.json",
+            "settings.json",
+            "settings.nix",
+            "config/config.json",
+            "config/mcp_config.json",
+            "config/mcp_config.sync-conflict.json",
+        ] {
+            std::fs::write(g.join(f), "real").unwrap();
+        }
+        let dir = real.join("run");
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: only this test touches HOME, and it restores it before returning.
+        let old = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &real) };
+        let home = agy_home(&dir).unwrap();
+        unsafe { std::env::set_var("HOME", old.unwrap_or_default()) };
+        let read = |p: &str| std::fs::read_to_string(home.join(p)).unwrap();
+        assert_eq!(read(".gemini/oauth_creds.json"), "real");
+        assert_eq!(read(".gemini/config/config.json"), "real");
+        assert_eq!(
+            read(".gemini/config/mcp_config.json"),
+            r#"{"mcpServers":{}}"#
+        );
+        assert_eq!(read(".gemini/settings.json"), "{}");
+        assert!(!home.join(".gemini/settings.nix").exists());
+        assert!(
+            !home
+                .join(".gemini/config/mcp_config.sync-conflict.json")
+                .exists()
+        );
+        let _ = std::fs::remove_dir_all(&real);
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
     pub kind: Kind,
-    /// Catalog id, e.g. `gemini` or `deepgram-stt`.
+    /// Catalog id, e.g. `claude-sub` or `deepgram-stt`.
     pub provider: String,
     pub api_key: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -224,13 +224,22 @@ mod tests {
         Vault::open(dir).unwrap()
     }
 
+    /// A keyed chat credential; no keyed provider is built in.
+    fn keyed(key: &str) -> Credential {
+        let mut credential = Credential::chat("custom-test", key);
+        credential.custom = Some(Default::default());
+        credential.model = "m".into();
+        credential.base_url = "http://127.0.0.1:1/v1".into();
+        credential
+    }
+
     #[test]
     fn saves_and_loads_a_chat_key() {
         let vault = vault();
-        let mut credential = Credential::chat("gemini", "sk-test-123");
+        let mut credential = keyed("sk-test-123");
         credential.model = "gpt-4o".into();
         save(&vault, &credential).unwrap();
-        let loaded = load(&vault, Kind::Chat, "gemini").unwrap().unwrap();
+        let loaded = load(&vault, Kind::Chat, "custom-test").unwrap().unwrap();
         assert_eq!(loaded.api_key, "sk-test-123");
         assert_eq!(loaded.model, "gpt-4o");
     }
@@ -240,7 +249,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("nixarchy-meetingai-cred2-{}", uuid::Uuid::new_v4()));
         let vault = Vault::open(&dir).unwrap();
-        save(&vault, &Credential::chat("gemini", "sk-secret-value")).unwrap();
+        save(&vault, &keyed("sk-secret-value")).unwrap();
         let bytes = std::fs::read(dir.join("vault.bin")).unwrap();
         assert!(
             !bytes.windows(16).any(|w| w == b"sk-secret-value"),
@@ -250,7 +259,7 @@ mod tests {
 
     #[test]
     fn empty_key_is_rejected_for_hosted_providers() {
-        let credential = Credential::chat("gemini", "");
+        let credential = keyed("");
         assert!(credential.validate().unwrap_err().contains("API key"));
     }
 
@@ -267,7 +276,7 @@ mod tests {
 
     #[test]
     fn custom_endpoint_must_be_http() {
-        let mut credential = Credential::chat("gemini", "k");
+        let mut credential = keyed("k");
         credential.base_url = "ftp://nope".into();
         assert!(credential.validate().unwrap_err().contains("http"));
         credential.base_url = "http://localhost:1234/v1".into();
@@ -288,23 +297,23 @@ mod tests {
     #[test]
     fn listing_filters_by_kind() {
         let vault = vault();
-        save(&vault, &Credential::chat("gemini", "a")).unwrap();
+        save(&vault, &keyed("a")).unwrap();
         save(&vault, &Credential::speech("deepgram-stt", "b")).unwrap();
         let chats = list(&vault, Kind::Chat).unwrap();
         let speech = list(&vault, Kind::Speech).unwrap();
         assert_eq!(chats.len(), 1);
         assert_eq!(speech.len(), 1);
-        assert_eq!(chats[0].provider, "gemini");
+        assert_eq!(chats[0].provider, "custom-test");
         assert_eq!(speech[0].provider, "deepgram-stt");
     }
 
     #[test]
     fn removing_clears_only_that_provider() {
         let vault = vault();
-        save(&vault, &Credential::chat("gemini", "a")).unwrap();
+        save(&vault, &keyed("a")).unwrap();
         save(&vault, &Credential::chat("ollama", "b")).unwrap();
-        remove(&vault, Kind::Chat, "gemini").unwrap();
-        assert!(load(&vault, Kind::Chat, "gemini").unwrap().is_none());
+        remove(&vault, Kind::Chat, "custom-test").unwrap();
+        assert!(load(&vault, Kind::Chat, "custom-test").unwrap().is_none());
         assert!(load(&vault, Kind::Chat, "ollama").unwrap().is_some());
     }
 
@@ -341,8 +350,8 @@ mod tests {
 
     #[test]
     fn masked_keys_show_only_the_tail() {
-        let credential = Credential::chat("gemini", "sk-abcdefgh1234");
+        let credential = keyed("sk-abcdefgh1234");
         assert_eq!(credential.masked_key(), "••••1234");
-        assert_eq!(Credential::chat("gemini", "").masked_key(), "Not set");
+        assert_eq!(keyed("").masked_key(), "Not set");
     }
 }

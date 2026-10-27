@@ -174,3 +174,16 @@ None yet.
   by provider id, so a non-loopback custom `base_url` isn't excluded there
   (the timeout itself is exact). The `setsid` test can't reproduce a
   controlling terminal under the test runner.
+- **Antigravity unit (done before steps 2–3):** `gemini` removed;
+  `agy-sub` ("Antigravity (subscription)", CLI, no key, no images,
+  default `gemini-3.8-flash-low`, models from `agy models`) runs with the
+  private no-MCP `HOME` overlay. Measured first token 3.5–5.8 s (median
+  4.6 s), so it is in the typed chain (claude-sub → agy-sub → codex-sub →
+  ollama) but not the live chain. agy reads no prompt from stdin, so the
+  prompt goes in argv (visible in `/proc/*/cmdline` to other local users;
+  acceptable on a single-user desktop, and local-only interviews never use
+  agy); prompts over 100 KB fail over to the next provider. Stored
+  `gemini` settings migrate to `agy-sub` and a stored key is deleted at
+  daemon start (logged, not shown in the UI yet). Tests that used `gemini`
+  as a keyed provider now use `ollama` with a mock base URL or a
+  `custom-test` id; no built-in provider requires a key any more.

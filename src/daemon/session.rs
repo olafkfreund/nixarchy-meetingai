@@ -417,7 +417,8 @@ fn visible_follow_ups(generated: &[String]) -> Vec<String> {
 }
 
 /// Provider ids to try, best first, with the model to use ("" = provider default).
-/// Typed: claude-sub, codex-sub, gemini, ollama. Live skips codex (no streaming).
+/// Typed: claude-sub, agy-sub, codex-sub, ollama. Live skips codex (no streaming) and agy-sub
+/// (first token measured too slow for live answers; see the plan deviations log).
 /// The chosen provider leads when usable, so an explicit ollama is kept.
 fn plan_chain(
     chosen: &str,
@@ -429,7 +430,10 @@ fn plan_chain(
     let candidates = CHAT_PROVIDERS.iter().map(|p| p.id);
     let first = CHAT_PROVIDERS.iter().find(|p| p.id == chosen).map(|p| p.id);
     for id in first.into_iter().chain(candidates) {
-        if (live && id == "codex-sub") || out.iter().any(|(i, _)| *i == id) || !usable(id) {
+        if (live && matches!(id, "codex-sub" | "agy-sub"))
+            || out.iter().any(|(i, _)| *i == id)
+            || !usable(id)
+        {
             continue;
         }
         let m = if Some(id) == first { model } else { "" };
@@ -457,6 +461,30 @@ fn stays_local(config: &ProviderConfig) -> bool {
 /// Loopback ollama: the one provider that may sit silent while a cold model loads.
 fn loopback_ollama(config: &ProviderConfig) -> bool {
     config.id == "ollama" && stays_local(config)
+}
+
+/// The Gemini API provider was replaced by `agy-sub`: move the settings over and delete its key.
+fn migrate_gemini(db: &Database, vault: &Vault) {
+    for key in ["chat_provider", "live_provider"] {
+        if crate::db::settings::get(db.connection(), key)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("gemini")
+        {
+            let _ = crate::db::settings::set(db.connection(), key, "agy-sub");
+        }
+    }
+    if credentials::load(vault, Kind::Chat, "gemini")
+        .ok()
+        .flatten()
+        .is_some()
+        && credentials::remove(vault, Kind::Chat, "gemini").is_ok()
+    {
+        tracing::warn!(
+            "removed the stored Gemini API key; Gemini now runs through Antigravity (agy-sub)"
+        );
+    }
 }
 
 /// Lowercase with whitespace runs as one space; a soft hyphen (and the line break after it) vanishes.
@@ -501,6 +529,7 @@ fn cli_binary(id: &str) -> Option<&'static str> {
     match id {
         "claude-sub" => Some("claude"),
         "codex-sub" => Some("codex"),
+        "agy-sub" => Some("agy"),
         _ => None,
     }
 }
@@ -544,6 +573,7 @@ impl Daemon {
         crate::core::install_tls_provider();
         let vault = Vault::open(&options.vault_dir).map_err(|e| e.to_string())?;
         let db = Database::open(&options.db_path).map_err(|e| e.to_string())?;
+        migrate_gemini(&db, &vault);
         let settings = Settings::load(&db).unwrap_or_default();
         let active_profile_id = profiles::selected(db.connection())
             .ok()
@@ -956,7 +986,7 @@ impl Daemon {
             && !config.chat_definition().is_some_and(|p| p.supports_images)
         {
             return Err(
-                "Choose an image-capable model such as Gemini, or remove the image attachments."
+                "Choose an image-capable model such as Claude, or remove the image attachments."
                     .into(),
             );
         }
@@ -3200,7 +3230,7 @@ mod routing_tests {
         let plan = plan_chain("claude-sub", "sonnet", false, |_| true);
         assert_eq!(
             ids(plan.clone()),
-            ["claude-sub", "codex-sub", "gemini", "ollama"]
+            ["claude-sub", "agy-sub", "codex-sub", "ollama"]
         );
         assert_eq!(plan[0].1, "sonnet");
         assert_eq!(plan[1].1, "");
@@ -3388,9 +3418,9 @@ mod routing_tests {
     }
 
     #[test]
-    fn live_never_uses_codex() {
+    fn live_never_uses_codex_or_agy() {
         let plan = plan_chain("claude-sub", "haiku", true, |_| true);
-        assert_eq!(ids(plan.clone()), ["claude-sub", "gemini", "ollama"]);
+        assert_eq!(ids(plan.clone()), ["claude-sub", "ollama"]);
         assert_eq!(plan[0].1, "haiku");
         // Even when codex is chosen for live, it is skipped.
         assert!(!ids(plan_chain("codex-sub", "", true, |_| true)).contains(&"codex-sub"));
@@ -3399,7 +3429,7 @@ mod routing_tests {
     #[test]
     fn missing_binary_falls_through_and_ollama_stays_last_automatically() {
         let plan = plan_chain("claude-sub", "sonnet", false, |id| id != "claude-sub");
-        assert_eq!(ids(plan), ["codex-sub", "gemini", "ollama"]);
+        assert_eq!(ids(plan), ["agy-sub", "codex-sub", "ollama"]);
         let plan = plan_chain("claude-sub", "", false, |id| id == "ollama");
         assert_eq!(ids(plan), ["ollama"]);
         // An explicit ollama is kept first.
@@ -3467,6 +3497,37 @@ mod command_tests {
             capture: false,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn stored_gemini_settings_move_to_agy_and_its_key_is_deleted() {
+        let root = std::env::temp_dir().join(format!("nm-mig-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let vault = Vault::open(&root).unwrap();
+        vault
+            .set(
+                "provider:chat:gemini",
+                json!({"kind": "chat", "provider": "gemini", "api_key": "sk-fake"}),
+            )
+            .unwrap();
+        let db = Database::open(root.join("t.db")).unwrap();
+        for key in ["chat_provider", "live_provider"] {
+            crate::db::settings::set(db.connection(), key, "gemini").unwrap();
+        }
+        drop(db);
+        let d = Daemon::new(Options {
+            db_path: root.join("t.db"),
+            vault_dir: root.clone(),
+            capture: false,
+        })
+        .unwrap();
+        let s = d.inner.lock().settings.clone();
+        assert_eq!(
+            (s.chat_provider.as_str(), s.live_provider.as_str()),
+            ("agy-sub", "agy-sub")
+        );
+        assert!(vault.get("provider:chat:gemini").unwrap().is_none());
+        std::fs::remove_dir_all(root).ok();
     }
 
     fn line(text: &str, start: f64) -> LiveEvent {

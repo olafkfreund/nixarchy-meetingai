@@ -351,7 +351,7 @@ async fn meeting_recap_uses_final_persisted_words_and_survives_reopen() {
 
 #[tokio::test]
 async fn speech_to_streamed_answer_and_finished_meeting_for_both_ai_services() {
-    for provider in ["gemini", "ollama"] {
+    for provider in ["ollama"] {
         let dir =
             std::env::temp_dir().join(format!("nixarchy-meetingai-flow-{}", uuid::Uuid::new_v4()));
         let vault = Vault::open(&dir).unwrap();
@@ -461,7 +461,7 @@ async fn auth_errors_empty_streams_and_trailing_errors_are_visible() {
         ),
     ] {
         let (url, request) = server(status, "text/event-stream", payload.into());
-        let mut config = ProviderConfig::new("gemini", "test-key", "chat-test-model");
+        let mut config = ProviderConfig::new("ollama", "test-key", "chat-test-model");
         config.base_url = url;
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let error = engine::stream_chat(
@@ -482,7 +482,7 @@ async fn auth_errors_empty_streams_and_trailing_errors_are_visible() {
 #[tokio::test]
 async fn cancelling_a_silent_provider_does_not_wait_for_another_delta() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut config = ProviderConfig::new("gemini", "test-key", "m");
+    let mut config = ProviderConfig::new("ollama", "test-key", "m");
     config.base_url = format!("http://{}", listener.local_addr().unwrap());
     let (tx, rx) = tokio::sync::watch::channel(false);
     let cancel = async move {
@@ -504,7 +504,7 @@ async fn cancelling_a_silent_provider_does_not_wait_for_another_delta() {
 #[tokio::test]
 async fn markdown_code_deltas_arrive_before_the_provider_finishes() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut config = ProviderConfig::new("gemini", "test-key", "chat-test-model");
+    let mut config = ProviderConfig::new("ollama", "test-key", "chat-test-model");
     config.base_url = format!("http://{}", listener.local_addr().unwrap());
     let (ack_tx, ack_rx) = std::sync::mpsc::channel();
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -559,7 +559,7 @@ async fn markdown_code_deltas_arrive_before_the_provider_finishes() {
 #[tokio::test]
 async fn selecting_a_live_model_sends_that_model_without_pinned_model_options() {
     let (url, request) = server(200, "text/event-stream", "data: {\"choices\":[{\"delta\":{\"content\":\"Selected model works\"}}]}\n\ndata: [DONE]\n\n".into());
-    let mut config = ProviderConfig::new("gemini", "test-key", "vendor/live-model");
+    let mut config = ProviderConfig::new("ollama", "test-key", "vendor/live-model");
     config.base_url = url;
     let answer = engine::stream_chat(
         &engine::http_client(),

@@ -1,7 +1,7 @@
 //! Provider catalog.
 //!
 //! Bring-your-own-key chat and speech-to-text providers. Endpoints, auth headers
-//! and request shapes for Gemini, Ollama, the subscription CLIs and Deepgram. Removed providers
+//! and request shapes for Ollama, the subscription CLIs and Deepgram. Removed providers
 //! are deliberately absent so old vault records cannot become active.
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ pub enum ChatWire {
     OpenAi,
     /// Native Anthropic Messages API.
     Anthropic,
-    /// A subscription CLI (`claude` / `codex`) driven as a subprocess.
+    /// A subscription CLI (`claude` / `codex` / `agy`) driven as a subprocess.
     Cli,
 }
 
@@ -39,20 +39,20 @@ pub const CHAT_PROVIDERS: &[ChatProvider] = &[
         requires_key: false,
     },
     ChatProvider {
+        id: "agy-sub",
+        name: "Antigravity (subscription)",
+        endpoint: "",
+        wire: ChatWire::Cli,
+        supports_images: false,
+        requires_key: false,
+    },
+    ChatProvider {
         id: "codex-sub",
         name: "ChatGPT / Codex (subscription)",
         endpoint: "",
         wire: ChatWire::Cli,
         supports_images: true,
         requires_key: false,
-    },
-    ChatProvider {
-        id: "gemini",
-        name: "Google Gemini",
-        endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        wire: ChatWire::OpenAi,
-        supports_images: true,
-        requires_key: true,
     },
     ChatProvider {
         id: "ollama",
@@ -260,8 +260,12 @@ mod tests {
 
     #[test]
     fn lookup_is_exact() {
-        assert_eq!(ChatProvider::by_id("gemini").unwrap().name, "Google Gemini");
-        assert!(ChatProvider::by_id("gemini ").is_none());
+        assert_eq!(
+            ChatProvider::by_id("agy-sub").unwrap().name,
+            "Antigravity (subscription)"
+        );
+        assert!(ChatProvider::by_id("agy-sub ").is_none());
+        assert!(ChatProvider::by_id("gemini").is_none());
         assert!(ChatProvider::by_id("nope").is_none());
     }
 
@@ -269,7 +273,7 @@ mod tests {
     fn only_current_providers_are_available() {
         assert_eq!(
             CHAT_PROVIDERS.iter().map(|p| p.id).collect::<Vec<_>>(),
-            ["claude-sub", "codex-sub", "gemini", "ollama"]
+            ["claude-sub", "agy-sub", "codex-sub", "ollama"]
         );
         assert_eq!(STT_PROVIDERS.len(), 2);
         let retired = ProviderConfig::new("openai", "k", "m");
@@ -279,18 +283,16 @@ mod tests {
     }
 
     #[test]
-    fn hosted_providers_require_a_key_and_model() {
-        let blank = ProviderConfig::new("gemini", "", "gpt-4o");
-        assert!(!blank.is_usable());
-        let complete = ProviderConfig::new("gemini", "sk-test", "gpt-4o");
-        assert!(complete.is_usable());
-        let no_model = ProviderConfig::new("gemini", "sk-test", "  ");
-        assert!(!no_model.is_usable());
+    fn providers_require_a_model() {
+        assert!(ProviderConfig::new("ollama", "", "gpt-4o").is_usable());
+        assert!(!ProviderConfig::new("ollama", "", "  ").is_usable());
+        // An unknown id has no endpoint.
+        assert!(!ProviderConfig::new("unknown", "", "m").is_usable());
     }
 
     #[test]
     fn base_url_override_wins() {
-        let mut config = ProviderConfig::new("gemini", "k", "m");
+        let mut config = ProviderConfig::new("ollama", "k", "m");
         config.base_url = "http://127.0.0.1:8080/v1/chat/completions".into();
         assert_eq!(
             config.endpoint().unwrap(),
@@ -300,7 +302,7 @@ mod tests {
 
     #[test]
     fn keyless_providers_only_need_a_model() {
-        for id in ["ollama", "claude-sub", "codex-sub"] {
+        for id in ["ollama", "claude-sub", "codex-sub", "agy-sub"] {
             assert!(ProviderConfig::new(id, "", "m").is_usable(), "{id}");
         }
     }
@@ -323,7 +325,7 @@ mod tests {
         ] {
             assert!(!endpoint_allowed(bad), "{bad}");
         }
-        let mut config = ProviderConfig::new("gemini", "k", "m");
+        let mut config = ProviderConfig::new("ollama", "k", "m");
         config.base_url = "http://evil.example/v1/chat/completions".into();
         assert!(config.endpoint().is_none());
         assert!(!config.is_usable());

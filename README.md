@@ -42,7 +42,7 @@ Options:
 | --- | --- |
 | Claude (subscription) | run `claude` once and log in; the daemon spawns the CLI |
 | ChatGPT / Codex (subscription) | run `codex login` and choose ChatGPT; the daemon spawns the CLI |
-| Gemini | API key, set in the Library, Providers tab |
+| Antigravity (subscription) | run `agy` once and sign in with your Google account; the daemon spawns the CLI |
 | Ollama | none; uses `http://127.0.0.1:11434` |
 
 API keys live in the encrypted local vault and never cross the daemon socket.

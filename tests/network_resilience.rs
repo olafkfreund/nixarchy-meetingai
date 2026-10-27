@@ -38,7 +38,7 @@ async fn read_request(socket: &mut TcpStream) {
 
 async fn response(status: u16, body: String) -> (ProviderConfig, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut config = ProviderConfig::new("gemini", "private-test-key", "model");
+    let mut config = ProviderConfig::new("ollama", "private-test-key", "model");
     config.base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
@@ -80,7 +80,7 @@ async fn two_workers_allow_twelve_requests_to_wait_concurrently() {
     });
     let tasks: Vec<_> = (0..REQUESTS)
         .map(|_| {
-            let mut config = ProviderConfig::new("gemini", "test-key", "model");
+            let mut config = ProviderConfig::new("ollama", "test-key", "model");
             config.base_url = url.clone();
             tokio::spawn(async move {
                 engine::stream_chat(
@@ -112,7 +112,7 @@ async fn two_workers_allow_twelve_requests_to_wait_concurrently() {
 #[tokio::test]
 async fn stop_cancels_a_stalled_error_body() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut config = ProviderConfig::new("gemini", "test-key", "model");
+    let mut config = ProviderConfig::new("ollama", "test-key", "model");
     config.base_url = format!("http://{}", listener.local_addr().unwrap());
     let (headers, ready) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
@@ -226,7 +226,7 @@ async fn errors_redact_credentials_and_abrupt_eof_does_not_claim_completion() {
 #[tokio::test]
 async fn inactive_response_body_times_out() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut config = ProviderConfig::new("gemini", "test-key", "model");
+    let mut config = ProviderConfig::new("ollama", "test-key", "model");
     config.base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();

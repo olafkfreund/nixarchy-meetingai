@@ -449,8 +449,8 @@ mod tests {
 
     #[test]
     fn openai_body_puts_system_first_and_streams() {
-        let provider = ChatProvider::by_id("gemini").unwrap();
-        let config = ProviderConfig::new("gemini", "k", "gpt-4o");
+        let provider = ChatProvider::by_id("ollama").unwrap();
+        let config = ProviderConfig::new("ollama", "k", "gpt-4o");
         let history = [Message::user("hi"), Message::assistant("hello")];
         let body = build_body(provider, &config, &history, &context("be brief"));
         assert_eq!(body["messages"][0]["role"], "system");
@@ -461,8 +461,8 @@ mod tests {
 
     #[test]
     fn image_attaches_to_openai_content_array() {
-        let provider = ChatProvider::by_id("gemini").unwrap();
-        let config = ProviderConfig::new("gemini", "k", "gpt-4o");
+        let provider = ChatProvider::by_id("ollama").unwrap();
+        let config = ProviderConfig::new("ollama", "k", "gpt-4o");
         let history = [Message::user("what is this")];
         let context = TurnContext {
             system: None,
@@ -477,8 +477,8 @@ mod tests {
 
     #[test]
     fn attachments_only_belong_to_the_current_user_turn() {
-        let provider = ChatProvider::by_id("gemini").unwrap();
-        let config = ProviderConfig::new("gemini", "k", "m");
+        let provider = ChatProvider::by_id("ollama").unwrap();
+        let config = ProviderConfig::new("ollama", "k", "m");
         let body = build_body(
             provider,
             &config,
@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn sse_parses_supported_streams_and_done() {
-        let openai = ChatProvider::by_id("gemini").unwrap();
+        let openai = ChatProvider::by_id("ollama").unwrap();
         assert_eq!(
             parse_sse_line(openai, br#"data: {"choices":[{"delta":{"content":"hi"}}]}"#).unwrap(),
             Some(ChatEvent::Delta("hi".into()))
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn sse_surfaces_provider_errors() {
-        let openai = ChatProvider::by_id("gemini").unwrap();
+        let openai = ChatProvider::by_id("ollama").unwrap();
         assert!(matches!(
             parse_sse_line(openai, br#"data: {"error":"quota"}"#),
             Err(ChatError::Protocol(_))
@@ -549,7 +549,9 @@ mod tests {
 
     #[test]
     fn missing_key_is_reported_before_network() {
-        let config = ProviderConfig::new("gemini", "", "gpt-4o");
+        let mut config = ProviderConfig::new("custom-test", "", "gpt-4o");
+        config.custom = Some(Default::default());
+        config.base_url = "http://127.0.0.1:1/v1/chat/completions".into();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
