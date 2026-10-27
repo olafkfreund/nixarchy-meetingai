@@ -31,22 +31,6 @@ pub struct ChatProvider {
 /// Every bundled chat provider.
 pub const CHAT_PROVIDERS: &[ChatProvider] = &[
     ChatProvider {
-        id: "gemini",
-        name: "Google Gemini",
-        endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        wire: ChatWire::OpenAi,
-        supports_images: true,
-        requires_key: true,
-    },
-    ChatProvider {
-        id: "ollama",
-        name: "Ollama (local)",
-        endpoint: "http://127.0.0.1:11434/v1/chat/completions",
-        wire: ChatWire::OpenAi,
-        supports_images: true,
-        requires_key: false,
-    },
-    ChatProvider {
         id: "claude-sub",
         name: "Claude (subscription)",
         endpoint: "",
@@ -59,6 +43,22 @@ pub const CHAT_PROVIDERS: &[ChatProvider] = &[
         name: "ChatGPT / Codex (subscription)",
         endpoint: "",
         wire: ChatWire::Cli,
+        supports_images: true,
+        requires_key: false,
+    },
+    ChatProvider {
+        id: "gemini",
+        name: "Google Gemini",
+        endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        wire: ChatWire::OpenAi,
+        supports_images: true,
+        requires_key: true,
+    },
+    ChatProvider {
+        id: "ollama",
+        name: "Ollama (local)",
+        endpoint: "http://127.0.0.1:11434/v1/chat/completions",
+        wire: ChatWire::OpenAi,
         supports_images: true,
         requires_key: false,
     },
@@ -269,7 +269,7 @@ mod tests {
     fn only_current_providers_are_available() {
         assert_eq!(
             CHAT_PROVIDERS.iter().map(|p| p.id).collect::<Vec<_>>(),
-            ["gemini", "ollama", "claude-sub", "codex-sub"]
+            ["claude-sub", "codex-sub", "gemini", "ollama"]
         );
         assert_eq!(STT_PROVIDERS.len(), 2);
         let retired = ProviderConfig::new("openai", "k", "m");

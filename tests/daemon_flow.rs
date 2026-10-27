@@ -159,6 +159,7 @@ async fn daemon_flow_scripted_session() {
     assert_eq!(client.call("bogus.command", json!({})).await["ok"], false);
     for (key, value) in [
         ("chat_provider", json!("gemini")),
+        ("chat_model", json!("")),
         ("auto_response", json!("off")),
     ] {
         let reply = client
@@ -182,8 +183,19 @@ async fn daemon_flow_scripted_session() {
         .call("chat.send", json!({"text": "Summarise the plan."}))
         .await;
     assert_eq!(sent["ok"], true, "{sent}");
+    let started = client.event("answer.started").await;
+    assert_eq!(started["question"], "Summarise the plan.");
+    assert_eq!(started["automatic"], false);
+    assert_eq!(started["provider"], "gemini");
     let delta = client.event("answer.delta").await;
     assert_eq!(delta["text"], "Mock answer.");
+    assert_eq!(delta["provider"], "gemini");
+    assert_eq!(delta["model"], "mock");
+    let found = client
+        .call("settings.search", json!({"query": "provider"}))
+        .await;
+    assert!(!found.to_string().contains("chat_provider"), "{found}");
+    assert!(!found.to_string().contains("live_provider"), "{found}");
     assert_eq!(client.event("answer.done").await["turn"], delta["turn"]);
 
     // A second client sees events too, and the secret never crosses the socket.

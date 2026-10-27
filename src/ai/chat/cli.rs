@@ -224,6 +224,17 @@ fn check_model(model: &str) -> Result<(), ChatError> {
     Ok(())
 }
 
+/// Whether `program` is an executable file on `PATH`.
+pub fn on_path(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| {
+            std::fs::metadata(dir.join(program))
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+    })
+}
+
 /// Stream one turn through the subscription CLI named by `config.id`.
 pub async fn stream<F: Future<Output = ()>>(
     config: &ProviderConfig,
@@ -513,6 +524,12 @@ mod tests {
         assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         drop(dir);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn on_path_finds_real_binaries_only() {
+        assert!(on_path("sh"));
+        assert!(!on_path("definitely-not-a-real-binary-xyz"));
     }
 
     #[test]

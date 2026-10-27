@@ -23,6 +23,7 @@ use super::protocol::{self, event, parse};
 use crate::ai::providers::{CHAT_PROVIDERS, ChatProvider, ProviderConfig, SttProvider};
 use crate::{
     ai::{
+        cli,
         conversation::Conversation,
         engine::{self, TurnContext},
         models, recap,
@@ -44,8 +45,22 @@ use crate::{
     },
 };
 
-/// Quick actions that stay first among the follow-up suggestions.
+/// Quick actions the shell offers itself; generated suggestions never repeat them.
 const FIXED_FOLLOW_UPS: [&str; 3] = ["What should I say?", "Follow-up questions", "Fact check"];
+/// Settings with their own controls elsewhere; `settings.search` hides them.
+const MANAGED_SETTINGS: [&str; 11] = [
+    "chat_provider",
+    "chat_model",
+    "live_provider",
+    "live_model",
+    "response_pace",
+    "meeting_mode",
+    "recap_prompt_general",
+    "recap_prompt_interview",
+    "smart_follow_ups_prompt",
+    "personal_context",
+    "meeting_context",
+];
 /// Settings the shell shows as numbers rather than strings.
 const NUMERIC_SETTINGS: [&str; 1] = ["capture_delay_seconds"];
 
@@ -99,6 +114,8 @@ struct Inner {
     conversation: Conversation,
     chat: ChatSession,
     turn: u64,
+    /// Provider and model answering the current turn.
+    effective: (String, String),
     cancel: Option<watch::Sender<bool>>,
     request: Option<JoinHandle<()>>,
     follow_up_task: Option<JoinHandle<()>>,
@@ -286,7 +303,7 @@ fn parse_follow_ups(text: &str) -> Vec<String> {
     questions
 }
 
-/// Fixed actions stay first; generated suggestions follow without duplicates.
+/// Generated suggestions only: no duplicates, never a fixed label, at most three.
 fn visible_follow_ups(generated: &[String]) -> Vec<String> {
     let normalized = |text: &str| {
         text.chars()
@@ -294,13 +311,47 @@ fn visible_follow_ups(generated: &[String]) -> Vec<String> {
             .flat_map(char::to_lowercase)
             .collect::<String>()
     };
-    let mut labels: Vec<String> = FIXED_FOLLOW_UPS.iter().map(|t| (*t).to_owned()).collect();
+    let mut seen: Vec<String> = FIXED_FOLLOW_UPS.iter().map(|t| normalized(t)).collect();
+    let mut out = Vec::new();
     for question in generated {
-        if !labels.iter().any(|l| normalized(l) == normalized(question)) {
-            labels.push(question.clone());
+        let key = normalized(question);
+        if !key.is_empty() && !seen.contains(&key) && out.len() < 3 {
+            seen.push(key);
+            out.push(question.clone());
         }
     }
-    labels
+    out
+}
+
+/// Provider ids to try, best first, with the model to use ("" = provider default).
+/// Typed: claude-sub, codex-sub, gemini, ollama. Live skips codex (no streaming).
+/// The chosen provider leads when usable, so an explicit ollama is kept.
+fn plan_chain(
+    chosen: &str,
+    model: &str,
+    live: bool,
+    usable: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let candidates = CHAT_PROVIDERS.iter().map(|p| p.id);
+    let first = CHAT_PROVIDERS.iter().find(|p| p.id == chosen).map(|p| p.id);
+    for id in first.into_iter().chain(candidates) {
+        if (live && id == "codex-sub") || out.iter().any(|(i, _)| *i == id) || !usable(id) {
+            continue;
+        }
+        let m = if Some(id) == first { model } else { "" };
+        out.push((id, m.to_owned()));
+    }
+    out
+}
+
+/// The executable behind a subscription provider, if it is one.
+fn cli_binary(id: &str) -> Option<&'static str> {
+    match id {
+        "claude-sub" => Some("claude"),
+        "codex-sub" => Some("codex"),
+        _ => None,
+    }
 }
 
 /// An encoded image ready to attach to a message.
@@ -372,6 +423,7 @@ impl Daemon {
                 pending_capture: None,
                 recording: None,
                 meeting_id: None,
+                effective: (String::new(), String::new()),
                 finishing_meeting: None,
                 resume_meeting: None,
                 meeting_offset: 0.0,
@@ -442,29 +494,42 @@ impl Daemon {
 
     // ----- configuration -------------------------------------------------
 
-    fn chat_config(&self, s: &Settings) -> Option<ProviderConfig> {
-        let from = |id: &str| -> Option<ProviderConfig> {
-            match credentials::load(&self.vault, Kind::Chat, id) {
-                Ok(Some(c)) => Some(c.to_config()),
-                _ => ChatProvider::by_id(id)
-                    .filter(|p| !p.requires_key)
-                    .map(|_| {
-                        ProviderConfig::new(id, "", models::default_for(id).unwrap_or_default())
-                    }),
-            }
+    /// Exact configuration for one provider, with `model` when given.
+    fn provider_config(&self, id: &str, model: &str) -> Option<ProviderConfig> {
+        let mut config = match credentials::load(&self.vault, Kind::Chat, id) {
+            Ok(Some(c)) => c.to_config(),
+            _ => ChatProvider::by_id(id)
+                .filter(|p| !p.requires_key)
+                .map(|_| {
+                    ProviderConfig::new(id, "", models::default_for(id).unwrap_or_default())
+                })?,
         };
-        let mut config = if s.chat_provider.is_empty() {
-            CHAT_PROVIDERS
-                .iter()
-                .filter_map(|p| from(p.id))
-                .find(ProviderConfig::is_usable)?
-        } else {
-            from(&s.chat_provider)?
-        };
-        if !s.chat_model.is_empty() {
-            config.model.clone_from(&s.chat_model);
+        if !model.is_empty() {
+            config.model = model.to_owned();
         }
         config.is_usable().then_some(config)
+    }
+
+    /// Usable providers for a turn, best first. `live` selects the automatic-answer
+    /// settings and the no-codex order; subscription CLIs must be on PATH.
+    fn chain(&self, s: &Settings, live: bool) -> Vec<ProviderConfig> {
+        let (chosen, model) = if live {
+            (&s.live_provider, &s.live_model)
+        } else {
+            (&s.chat_provider, &s.chat_model)
+        };
+        let usable = |id: &str| {
+            cli_binary(id).is_none_or(cli::on_path) && self.provider_config(id, "").is_some()
+        };
+        plan_chain(chosen, model, live, usable)
+            .into_iter()
+            .filter_map(|(id, m)| self.provider_config(id, &m))
+            .collect()
+    }
+
+    /// The configuration non-turn work (titles, notes, follow-ups) uses.
+    fn chat_config(&self, s: &Settings) -> Option<ProviderConfig> {
+        self.chain(s, false).into_iter().next()
     }
 
     fn speech_config(&self, s: &Settings) -> Option<ProviderConfig> {
@@ -564,7 +629,10 @@ impl Daemon {
             if !text.is_empty() {
                 g.conversation.push(Message::assistant(text));
             }
-            self.emit("answer.done", json!({"turn": g.turn}));
+            self.emit(
+                "answer.done",
+                json!({"turn": g.turn, "provider": g.effective.0, "model": g.effective.1}),
+            );
         }
         g.pending_question = None;
         g.pending_created = None;
@@ -631,9 +699,11 @@ impl Daemon {
         if g.dictation.is_some() {
             return Err("Finish dictation before sending your message.".into());
         }
-        let Some(config) = self.chat_config(&g.settings) else {
+        let mut chain = self.chain(&g.settings, automatic);
+        if chain.is_empty() {
             return Err(SendError::NoKey.message());
-        };
+        }
+        let config = chain[0].clone();
         if g.sources.iter().any(|s| s.image.is_some())
             && !config.chat_definition().is_some_and(|p| p.supports_images)
         {
@@ -679,6 +749,7 @@ impl Daemon {
                 tracing::warn!(%error, "could not save restoration context");
             }
         }
+        let question_text = question.clone();
         g.conversation.push(Message::user(question));
         let mut images: Vec<String> = image.map(|i| vec![i.base64]).unwrap_or_default();
         images.extend(g.sources.iter().filter_map(|s| s.image.clone()));
@@ -688,28 +759,51 @@ impl Daemon {
         };
         g.turn += 1;
         let turn = g.turn;
+        g.effective = (config.id.clone(), config.model.clone());
+        self.emit(
+            "answer.started",
+            json!({"turn": turn, "question": question_text, "automatic": automatic,
+                   "provider": config.id, "model": config.model}),
+        );
         let (cancel_tx, cancel_rx) = watch::channel(false);
         g.cancel = Some(cancel_tx);
         g.automatic_inflight = automatic;
         let me = self.clone();
+        let cancel = Arc::new(cancel_rx);
         g.request = Some(tokio::spawn(async move {
             let mut last = Instant::now();
-            let result = engine::stream_chat_bounded(
-                &engine::http_client(),
-                &config,
-                &history,
-                &context,
-                Arc::new(cancel_rx),
-                |delta| {
-                    let checkpoint = last.elapsed() >= Duration::from_millis(150);
-                    if checkpoint {
-                        last = Instant::now();
-                    }
-                    let me = me.clone();
-                    async move { me.on_delta(turn, &delta, checkpoint) }
-                },
-            )
-            .await;
+            let streamed = Arc::new(AtomicBool::new(false));
+            let client = engine::http_client();
+            // A provider that cannot even start is replaced once, before any text.
+            chain.truncate(2);
+            let mut result = Ok(String::new());
+            for (attempt, config) in chain.iter().enumerate() {
+                if attempt > 0 {
+                    me.inner.lock().effective = (config.id.clone(), config.model.clone());
+                }
+                result = engine::stream_chat_bounded(
+                    &client,
+                    config,
+                    &history,
+                    &context,
+                    cancel.clone(),
+                    |delta| {
+                        let checkpoint = last.elapsed() >= Duration::from_millis(150);
+                        if checkpoint {
+                            last = Instant::now();
+                        }
+                        streamed.store(true, Ordering::Relaxed);
+                        let me = me.clone();
+                        async move { me.on_delta(turn, &delta, checkpoint) }
+                    },
+                )
+                .await;
+                let spawn_failed = matches!(result, Err(engine::ChatError::Cli(_)))
+                    && !streamed.load(Ordering::Relaxed);
+                if !spawn_failed {
+                    break;
+                }
+            }
             me.finish_turn(
                 turn,
                 result.map(|_| ()).map_err(|e| e.to_string()),
@@ -726,7 +820,10 @@ impl Daemon {
         if checkpoint {
             g.chat.checkpoint(Some(&g.db));
         }
-        self.emit("answer.delta", json!({"turn": turn, "text": delta}));
+        self.emit(
+            "answer.delta",
+            json!({"turn": turn, "text": delta, "provider": g.effective.0, "model": g.effective.1}),
+        );
     }
 
     fn finish_turn(self: &Arc<Self>, turn: u64, result: Result<(), String>, automatic: bool) {
@@ -746,7 +843,10 @@ impl Daemon {
                 if !text.is_empty() {
                     g.conversation.push(Message::assistant(text));
                 }
-                self.emit("answer.done", json!({"turn": turn}));
+                self.emit(
+                    "answer.done",
+                    json!({"turn": turn, "provider": g.effective.0, "model": g.effective.1}),
+                );
                 if !automatic {
                     drop(guard);
                     self.spawn_follow_ups();
@@ -924,7 +1024,7 @@ impl Daemon {
                 || g.pending_since
                     .is_none_or(|at| at.elapsed() < g.settings.response_pace.delay())
                 || g.chat.is_streaming()
-                || self.chat_config(&g.settings).is_none()
+                || self.chain(&g.settings, true).is_empty()
             {
                 return;
             }
@@ -1741,6 +1841,7 @@ impl Daemon {
         Ok(self
             .settings_map(&g)?
             .into_iter()
+            .filter(|(key, _)| !MANAGED_SETTINGS.contains(&key.as_str()))
             .map(|(key, value)| {
                 let label = key.replace('_', " ");
                 let label = label[..1].to_uppercase() + &label[1..];
@@ -1767,13 +1868,7 @@ impl Daemon {
     }
 
     async fn models_list(&self, provider: &str) -> Result<Value, String> {
-        let config = {
-            let g = self.inner.lock();
-            let mut s = g.settings.clone();
-            s.chat_provider = provider.to_owned();
-            s.chat_model = String::new();
-            self.chat_config(&s)
-        };
+        let config = self.provider_config(provider, "");
         let config =
             config.ok_or("No usable configuration for this provider; set its API key first.")?;
         let models = models::discover(Some(self.db_path.clone()), config, false).await?;
@@ -2002,5 +2097,74 @@ mod levels_tests {
         assert_eq!(v["mic"], 1.0);
         assert_eq!(v["system"], 0.0);
         assert!(l.feed(&loud, t0 + Duration::from_millis(300)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+
+    fn ids(v: Vec<(&'static str, String)>) -> Vec<&'static str> {
+        v.into_iter().map(|(i, _)| i).collect()
+    }
+
+    #[test]
+    fn typed_order_and_model_apply_to_the_chosen_provider_only() {
+        let plan = plan_chain("claude-sub", "sonnet", false, |_| true);
+        assert_eq!(
+            ids(plan.clone()),
+            ["claude-sub", "codex-sub", "gemini", "ollama"]
+        );
+        assert_eq!(plan[0].1, "sonnet");
+        assert_eq!(plan[1].1, "");
+    }
+
+    #[test]
+    fn live_never_uses_codex() {
+        let plan = plan_chain("claude-sub", "haiku", true, |_| true);
+        assert_eq!(ids(plan.clone()), ["claude-sub", "gemini", "ollama"]);
+        assert_eq!(plan[0].1, "haiku");
+        // Even when codex is chosen for live, it is skipped.
+        assert!(!ids(plan_chain("codex-sub", "", true, |_| true)).contains(&"codex-sub"));
+    }
+
+    #[test]
+    fn missing_binary_falls_through_and_ollama_stays_last_automatically() {
+        let plan = plan_chain("claude-sub", "sonnet", false, |id| id != "claude-sub");
+        assert_eq!(ids(plan), ["codex-sub", "gemini", "ollama"]);
+        let plan = plan_chain("claude-sub", "", false, |id| id == "ollama");
+        assert_eq!(ids(plan), ["ollama"]);
+        // An explicit ollama is kept first.
+        assert_eq!(plan_chain("ollama", "q", false, |_| true)[0].0, "ollama");
+    }
+
+    #[test]
+    fn suggestions_are_generated_only_capped_and_never_fixed_labels() {
+        let generated: Vec<String> = [
+            "Fact check",
+            "What should I say?",
+            "Who owns the rollout?",
+            "who owns the rollout",
+            "When is the deadline?",
+            "What is the budget?",
+            "Any risks?",
+        ]
+        .map(String::from)
+        .into();
+        assert_eq!(
+            visible_follow_ups(&generated),
+            [
+                "Who owns the rollout?",
+                "When is the deadline?",
+                "What is the budget?"
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_settings_are_not_searchable() {
+        for key in ["chat_provider", "live_model", "recap_prompt_general"] {
+            assert!(MANAGED_SETTINGS.contains(&key));
+        }
     }
 }

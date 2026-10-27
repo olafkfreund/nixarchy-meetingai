@@ -188,6 +188,9 @@ pub struct Settings {
     /// Start recording straight away when a call begins.
     pub auto_record_on_call: bool,
     pub chat_model: String,
+    /// Provider and model for automatic live answers.
+    pub live_provider: String,
+    pub live_model: String,
     /// `general` or `interview`.
     pub meeting_mode: String,
 }
@@ -195,7 +198,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            chat_provider: String::new(),
+            chat_provider: "claude-sub".into(),
             reduce_motion: false,
             capture_delay_seconds: 0,
             use_image_on_send: false,
@@ -215,7 +218,9 @@ impl Default for Settings {
             recap_prompt_general: RECAP_PROMPT_GENERAL.to_owned(),
             recap_prompt_interview: RECAP_PROMPT_INTERVIEW.to_owned(),
             auto_record_on_call: false,
-            chat_model: String::new(),
+            chat_model: "sonnet".into(),
+            live_provider: "claude-sub".into(),
+            live_model: "haiku".into(),
             meeting_mode: "general".into(),
         }
     }
@@ -303,6 +308,8 @@ impl Settings {
             ),
             auto_record_on_call: flag(keys::AUTO_RECORD_ON_CALL, defaults.auto_record_on_call),
             chat_model: text(keys::CHAT_MODEL, &defaults.chat_model),
+            live_provider: text("live_provider", &defaults.live_provider),
+            live_model: text("live_model", &defaults.live_model),
             meeting_mode: match get(keys::MEETING_MODE) {
                 Some("interview") => "interview".into(),
                 _ => defaults.meeting_mode,
@@ -383,6 +390,8 @@ impl Settings {
                 self.auto_record_on_call.to_string(),
             ),
             (keys::CHAT_MODEL, self.chat_model.clone()),
+            ("live_provider", self.live_provider.clone()),
+            ("live_model", self.live_model.clone()),
             (keys::MEETING_MODE, self.meeting_mode.clone()),
         ]
     }
@@ -446,6 +455,20 @@ mod tests {
         assert!(!settings.auto_record_on_call);
         assert_eq!(settings.recap_prompt_general, RECAP_PROMPT_GENERAL);
         assert_eq!(settings.meeting_mode, "general");
+        assert_eq!(
+            (
+                settings.chat_provider.as_str(),
+                settings.chat_model.as_str()
+            ),
+            ("claude-sub", "sonnet")
+        );
+        assert_eq!(
+            (
+                settings.live_provider.as_str(),
+                settings.live_model.as_str()
+            ),
+            ("claude-sub", "haiku")
+        );
     }
 
     #[test]
@@ -473,6 +496,8 @@ mod tests {
             recap_prompt_interview: "my interview".into(),
             auto_record_on_call: true,
             chat_model: "opus".into(),
+            live_provider: "gemini".into(),
+            live_model: "flash".into(),
             meeting_mode: "interview".into(),
         };
         settings.save(&database).unwrap();
