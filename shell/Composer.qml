@@ -80,7 +80,7 @@ Item {
                     background: BorderSurface {
                         color: Style.controlFill(input.activeFocus, input.hovered, Commons.Color.foreground, Commons.Color.accent)
                         borderSpec: Border.controlSpec(input.activeFocus ? "focus" : (input.hovered ? "hover-cursor" : "normal"), Commons.Color.foreground, Commons.Color.accent)
-                        radius: Style.cornerRadius
+                        radius: Math.max(Style.cornerRadius, 12)
                     }
                     Keys.onPressed: function(e) {
                         if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && !(e.modifiers & Qt.ShiftModifier)) {

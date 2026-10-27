@@ -4,13 +4,14 @@
 usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live]
 
 --live plays a paced meeting instead: recording on, words arriving as
-partials, a question from the other side, a streamed answer, suggestions.
+partials, a question from the other side, a streamed answer (with a link), suggestions, and levels events.
 
 Speaks the newline-delimited JSON protocol: replies to every request with
 {"id","ok":true,"data":...}, appends each received cmd to LOG_PATH, and
 streams a fake transcript and answer to each client once it asks state.get.
 """
 import json
+import math
 import os
 import socketserver
 import sys
@@ -78,15 +79,23 @@ class Handler(socketserver.StreamRequestHandler):
             time.sleep(pace)
         self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": t0, "t1": t0 + len(words) * 0.4})
 
+    def levels(self):
+        n = 0
+        while state["recording"]:
+            n += 1
+            self.send({"event": "levels", "mic": abs(math.sin(n * 0.7)) * 0.8, "system": abs(math.sin(n * 0.3 + 1)) * 0.6})
+            time.sleep(0.2)
+
     def stream_live(self):
         time.sleep(0.3)
         self.send({"event": "settings", "settings": settings})
         self.send({"event": "state", **state})
+        threading.Thread(target=self.levels, daemon=True).start()
         self.say("system", "Priya", "Thanks for joining. Can you walk us through how you would design the ingestion pipeline?", 740, 0.05)
         self.say("mic", "", "Sure. I would start with an event queue in front of the workers so producers never block.", 748, 0.05)
         self.say("system", "Priya", "Okay. And how would you handle a consumer that falls behind for an hour?", 756)
         time.sleep(0.6)  # Balanced pacing: answer after the question settles
-        answer = ["**Talking points**\n\n", "- Lag is visible: alert on ", "consumer lag, not CPU.\n", "- Scale out consumers ", "per partition; ", "the queue keeps ", "ordering per key.\n", "- If it is a poison message, ", "park it in a ", "dead-letter queue and move on.\n\n", "*Mention:* you did this at your last job ", "with Kafka lag alerts."]
+        answer = ["**Talking points**\n\n", "- Lag is visible: alert on ", "consumer lag, not CPU.\n", "- Scale out consumers ", "per partition; ", "the queue keeps ", "ordering per key.\n", "- If it is a poison message, ", "park it in a ", "dead-letter queue and move on.\n\n", "*Mention:* you did this at your last job ", "with Kafka lag alerts. See the ", "[Kafka docs](https://kafka.apache.org/documentation/)."]
         for chunk in answer:
             self.send({"event": "answer.delta", "turn": 1, "text": chunk})
             time.sleep(0.25)

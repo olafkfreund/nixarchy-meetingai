@@ -8,6 +8,7 @@ ShellRoot {
         id: overlay
         Component.onCompleted: overlay.open("{}")
     }
+    Timer { interval: 12000; running: true; onTriggered: overlay.showLibrary("settings") }
     QtObject {   // stand-in for the shell's Bar host
         id: barStub
         property string position: "top"

@@ -144,6 +144,36 @@ pub struct Daemon {
     inner: Mutex<Inner>,
 }
 
+/// Mic and system loudness from interleaved stereo (L = mic, R = system),
+/// emitted at most every 200 ms (5 Hz) as RMS scaled so speech reaches ~1.
+#[derive(Default)]
+struct Levels {
+    sum: [f32; 2],
+    n: usize,
+    last: Option<Instant>,
+}
+
+impl Levels {
+    fn feed(&mut self, samples: &[f32], now: Instant) -> Option<Value> {
+        for f in samples.as_chunks::<2>().0 {
+            self.sum[0] += f[0] * f[0];
+            self.sum[1] += f[1] * f[1];
+            self.n += 1;
+        }
+        let first = *self.last.get_or_insert(now);
+        if self.n == 0 || now.duration_since(first) < Duration::from_millis(200) {
+            return None;
+        }
+        let rms = |s: f32| ((s / self.n as f32).sqrt() * 4.0).min(1.0);
+        let v = json!({"mic": rms(self.sum[0]), "system": rms(self.sum[1])});
+        *self = Self {
+            last: Some(now),
+            ..Self::default()
+        };
+        Some(v)
+    }
+}
+
 fn now_ms() -> i64 {
     crate::ai::session::now_millis()
 }
@@ -1212,6 +1242,7 @@ impl Daemon {
         }
         let (mut closing, mut done, mut deadline) = (false, false, None);
         let mut system_on = true;
+        let mut levels = Levels::default();
         while !done {
             let mut events = Vec::new();
             let stopping = stop.load(Ordering::Relaxed);
@@ -1233,6 +1264,9 @@ impl Daemon {
                 match event {
                     SessionEvent::Audio(mut samples) => {
                         self.route_audio(&mut samples);
+                        if let Some(v) = levels.feed(&samples, Instant::now()) {
+                            self.emit("levels", v);
+                        }
                         if let Some(l) = &live
                             && let Err(error) = l.push(&samples).await
                         {
@@ -1950,5 +1984,23 @@ impl Daemon {
             }
             other => Err(format!("unknown command '{other}'")),
         }
+    }
+}
+
+#[cfg(test)]
+mod levels_tests {
+    use super::*;
+
+    #[test]
+    fn levels_throttle_and_normalize() {
+        let t0 = Instant::now();
+        let mut l = Levels::default();
+        let loud = [0.5f32, 0.0].repeat(100); // mic loud, system silent
+        assert!(l.feed(&loud, t0).is_none());
+        assert!(l.feed(&loud, t0 + Duration::from_millis(100)).is_none());
+        let v = l.feed(&loud, t0 + Duration::from_millis(250)).unwrap();
+        assert_eq!(v["mic"], 1.0);
+        assert_eq!(v["system"], 0.0);
+        assert!(l.feed(&loud, t0 + Duration::from_millis(300)).is_none());
     }
 }

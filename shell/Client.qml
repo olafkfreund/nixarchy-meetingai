@@ -19,6 +19,8 @@ Item {
     property bool answering: false
     property var suggestions: []
     property string lastError: ""
+    property real micLevel: 0     // 0..1, from the daemon's levels events
+    property real systemLevel: 0
     signal notesUpdated(var meeting)
 
     readonly property int maxLines: 500
@@ -82,7 +84,8 @@ Item {
         case "history":
             for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(String(ev.rows[h].who), "", String(ev.rows[h].text), false);
             break;
-        case "state": root.state = Object.assign({}, root.state, ev); break;
+        case "state": root.state = Object.assign({}, root.state, ev); if (ev.recording === false) { root.micLevel = 0; root.systemLevel = 0; } break;
+        case "levels": root.micLevel = Number(ev.mic) || 0; root.systemLevel = Number(ev.system) || 0; break;
         case "transcript.partial": root.pushLine(ev, true); break;
         case "transcript.final": root.pushLine(ev, false); break;
         case "answer.delta":

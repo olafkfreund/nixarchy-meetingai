@@ -22,6 +22,7 @@ Item {
     property string promptMode: "general"
     property string notes: ""
     property string modelsText: ""
+    property Component settingsHeader: null   // controls shown above the Settings list
 
     readonly property var tabs: ["restore", "profiles", "prompts", "providers", "settings"]
     readonly property var promptKinds: ["answer", "follow_up", "recap"]
@@ -222,6 +223,7 @@ Item {
             width: parent.width; height: parent.height - y
             clip: true
             model: root.found
+            header: root.settingsHeader
             delegate: Item {   // label left, control right, both centred on the row
                 id: srow
                 required property var modelData
