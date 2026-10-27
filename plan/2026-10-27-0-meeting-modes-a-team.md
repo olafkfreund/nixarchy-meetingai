@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: none (issues are disabled on olafkfreund/mixarchy-meetingai)
 spec: spec/2026-10-27-0-meeting-modes.md
 reviewers:   # the owner wants agy and Codex as team mates; both read-only, after the Opus review
