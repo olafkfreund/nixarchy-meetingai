@@ -29,9 +29,14 @@ Item {
     property var items: []         // items.list rows of the current meeting (team mode)
     property var series: []        // series.list rows
     property var earlierItem: null // { item, quote, line, meeting } while the "Earlier task?" callout shows
+    property var candidates: []    // candidates.list rows (interviewer mode)
+    property var cand: null        // candidate.get of the current candidate: { candidate, documents, questions }
+    property string consentPrompt: ""   // set while the daemon asks for "recording is announced"
     signal notesUpdated(var meeting)
     readonly property string currentMeeting: String(state.meeting || "")
     onCurrentMeetingChanged: { if (currentMeeting === "") root.items = []; else root.refreshItems(currentMeeting); }
+    readonly property string currentCandidate: String(state.candidate || "")
+    onCurrentCandidateChanged: root.refreshCand()
 
     readonly property int maxLines: 500
     property int seq: 0
@@ -58,10 +63,37 @@ Item {
         root.send("settings.get", {}, function(r) { if (r.ok) root.settings = r.data || {}; });
         root.refreshProfiles();
         root.refreshSeries();
+        root.refreshCandidates();
     }
 
     function refreshSeries() {
         root.send("series.list", {}, function(r) { if (r.ok) root.series = r.data || []; });
+    }
+
+    function refreshCandidates() {
+        root.send("candidates.list", {}, function(r) { if (r.ok) root.candidates = r.data || []; });
+    }
+
+    function refreshCand() {
+        if (root.currentCandidate === "") { root.cand = null; return; }
+        root.send("candidate.get", { id: root.currentCandidate }, function(r) { if (r.ok) root.cand = r.data; });
+    }
+
+    // Optimistic: the daemon's questions.updated refetch settles it.
+    function updateQuestion(id, fields) {
+        if (root.cand) root.cand = Object.assign({}, root.cand, { questions: root.cand.questions.map(function(q) { return q.id === id ? Object.assign({}, q, fields) : q; }) });
+        root.send("questions.update", Object.assign({ id: id }, fields));
+    }
+
+    // consent_required opens the banner; local_only goes to lastError.
+    function startRecording(consent) {
+        root.send("record.start", consent ? { consent: true } : {}, function(r) {
+            var e = String(r.error || "");
+            if (r.ok) root.consentPrompt = "";
+            else if (e.indexOf("consent_required: ") === 0) root.consentPrompt = e.slice(18);
+            else if (e.indexOf("local_only: ") === 0) { root.consentPrompt = ""; root.lastError = e.slice(12); }
+            else root.failed(r);
+        });
     }
 
     function refreshItems(meeting) {
@@ -115,7 +147,7 @@ Item {
     function onEvent(ev) {
         switch (ev.event) {
         case "settings": root.settings = ev.settings || ({}); break;
-        case "session.reset": lines.clear(); root.answering = false; root.suggestions = []; root.items = []; root.earlierItem = null; root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" }); break;
+        case "session.reset": lines.clear(); root.answering = false; root.suggestions = []; root.items = []; root.earlierItem = null; root.consentPrompt = ""; root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" }); break;
         case "history":
             for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(ev.rows[h].who === "question" ? "asked" : String(ev.rows[h].who), "", String(ev.rows[h].text), false);
             break;
@@ -141,6 +173,7 @@ Item {
         case "notice": root.addRow("notice", "", String(ev.text || ""), false); break;
         case "items.updated": if (ev.meeting === root.state.meeting) root.refreshItems(ev.meeting); break;
         case "earlier_item": root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
+        case "questions.updated": if (ev.candidate === root.currentCandidate) root.refreshCand(); break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
         case "error": root.lastError = String(ev.message || ""); break;
         }

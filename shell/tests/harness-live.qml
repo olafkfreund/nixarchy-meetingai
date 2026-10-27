@@ -9,7 +9,9 @@ ShellRoot {
         Component.onCompleted: overlay.open("{}")
     }
     Timer { interval: 10000; running: true; onTriggered: overlay.lastOpen = true }   // team scenario: Last time drawer
-    Timer { interval: 16000; running: true; onTriggered: overlay.showLibrary("settings") }
+    Timer { interval: 2000; running: overlay.iv; onTriggered: overlay.recordHook(false) }   // interviewer: the consent banner
+    Timer { interval: 6000; running: overlay.iv; onTriggered: overlay.recordHook(true) }
+    Timer { interval: 16000; running: true; onTriggered: overlay.showLibrary(overlay.iv ? "candidate" : "settings") }
     QtObject {   // stand-in for the shell's Bar host
         id: barStub
         property string position: "top"
