@@ -1,0 +1,446 @@
+---
+status: draft
+issue: none (issues are disabled on olafkfreund/mixarchy-meetingai)
+spec: spec/2026-10-27-0-omarchy-retarget.md
+reviewers:   # extra read-only reviews on top of the Opus review; the owner asked for both as team mates
+  - codex
+  - agy
+---
+
+# Plan: Retarget lennette to nixarchy-meetingai (Rust daemon + Quickshell UI)
+
+## Approved decisions (copied from the spec, so no other file is needed)
+
+- **Shape:** the Rust crate becomes a headless daemon, `nixarchy-meetingai`,
+  run as a systemd user service. All GPUI UI is deleted. The UI is a
+  Quickshell (omarchy-shell) plugin, `nixarchy.meetingai`, in `shell/`.
+- **IPC:** a unix socket at
+  `$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock` (directory `0700`),
+  newline-delimited JSON.
+  - A request is `{"id":n,"cmd":"…","args":{…}}`; its reply is
+    `{"id":n,"ok":true,"data":…}` or `{"id":n,"ok":false,"error":"…"}`.
+  - Events go to every client as `{"event":"…",…}`.
+  - Lines are capped at 1 MiB, attachments are passed as paths, unknown
+    commands are rejected, and keys never cross the socket (`has_key: bool`
+    only).
+- **Commands:** `session.new|restore|list|delete`, `quit`, `record.start|stop`,
+  `record.toggle_mic|toggle_system`,
+  `chat.send{text,attachments,screenshot,no_context}`, `chat.cancel`,
+  `dictate.start|stop`, `screenshot.capture{region}`,
+  `attachment.preview{path}`, `settings.get|set|search`,
+  `profiles.list|save|delete`, `prompts.get|set{mode,kind}`, `providers.list`,
+  `models.list{provider}` (cached), `notes.get{meeting}`,
+  `notes.regenerate{meeting}`, `state.get`.
+- **Events:** `state`, `transcript.partial|final{who,speaker,text,t0,t1}`,
+  `answer.delta|done|error{turn}`, `suggestion{text}`,
+  `notes.updated{meeting}`, `error{message,range?}`.
+- **Providers:**
+  - `claude-sub` spawns `claude -p --input-format stream-json --output-format
+    stream-json --include-partial-messages --verbose --tools ""
+    --strict-mcp-config --no-session-persistence --settings
+    '{"disableAllHooks":true}' --system-prompt <ours> --model <m>`. Text comes
+    from `stream_event`/`content_block_delta`/`delta.text`; the end is the
+    `result` line.
+  - `codex-sub` spawns `codex exec --json -c forced_login_method=chatgpt -s
+    read-only --ephemeral --skip-git-repo-check -C <empty tmp> -m <m> [-i
+    img]… -`. The answer is the `item.completed` with `item.type ==
+    "agent_message"`, delivered as one delta.
+  - Both run with `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and
+    `OPENAI_API_KEY_FILE` removed from the environment, in an empty temp dir,
+    in their own process group (killed on cancel).
+  - `gemini` keeps the existing API-key path.
+  - `ollama` uses `http://127.0.0.1:11434/v1/chat/completions`, no key, with
+    models from `/api/tags`.
+  - Merge Gateway is removed. The native Anthropic wire sends `x-api-key`.
+    `http://` is allowed only for the loopback hosts `localhost`,
+    `127.0.0.1` and `::1`.
+- **STT:** `whisper-local` (the new default) does a multipart `POST
+  /inference` (`file`, `response_format=json`, `language`) to `whisper-server`
+  at `127.0.0.1:8178`, through the existing batch adapter. A loopback failure
+  is retried 3× with backoff, then emits `error` with the lost time range.
+  Deepgram stays. The model defaults to `ggml-small.en`. Server build:
+  `whisper-cpp-vulkan` (AMD RX 7900).
+- **Notes:**
+  - During recording, every 8k characters of new final lines, or every
+    5 min, summarise that slice into `meeting_note_chunks(meeting_id, t0, t1,
+    body)` and emit `notes.updated`.
+  - On stop, summarise the leftover slice, then consolidate **all chunks**
+    into Summary / Decisions / Action items.
+  - Interview mode consolidates as question → answer → notable signals, with
+    no verdict or score.
+  - Recap prompts are editable. The 120k-character excerpt recap is removed.
+- **Calls:** watch `$XDG_RUNTIME_DIR/meeting-mode.json`. When `active` turns
+  true, notify "Take notes / Not now". The setting `auto_record_on_call`
+  (default off) starts recording straight away instead. Recording is never
+  stopped automatically when the call ends; the notification only offers to
+  stop it.
+- **Removed:** GPUI UI, screen-share hiding, Windows, tray, autostart,
+  self-update, own shortcut code, `xcap` (use `grim` / `slurp`), `web/`,
+  release tooling, Merge Gateway, meeting tone (sentiment), and the UI-only
+  settings `theme`, `transparency`, `font_scale`, `show_borders`,
+  `always_on_top`, `autostart`, `overlay_size`, `startup_privacy` and
+  `hide_app_icon`.
+- **Rename:** crate, binary, socket, data dir and app id become
+  `nixarchy-meetingai` (Rust crate path `nixarchy_meetingai`).
+  `ProjectDirs::from("dev","nixarchy","nixarchy-meetingai")`. No data
+  migration (no lennette data exists on this machine).
+- **License:** `Cargo.toml` `license` is set to match `LICENSE` (AGPL-3.0).
+  README credits upstream lennette (parazeeknova).
+- **Theming:** QML uses the shell's `qs.Commons` `Color` singleton. Markdown
+  is rendered with `Text.MarkdownText`, with no syntax highlighting.
+
+## Repo traps (apply to every step)
+
+- `lefthook.yml` pre-commit runs `scripts/bump-version.sh` on **every
+  commit**. Commit with `SKIP_BUMP=1` until step 2 removes the bump hook.
+- Pre-commit runs `cargo clippy --workspace --all-targets --all-features -- -D
+  warnings`, so every step must be clippy-clean. Run inside `devenv shell`
+  (toolchain 1.99.1, runtime libraries via `LD_LIBRARY_PATH`).
+- The lefthook `web` command runs `bun` in `web/`. Remove it in the same
+  commit that deletes `web/`.
+- `src/features/mod.rs` re-exports modules (`features::listen`,
+  `features::chat_session`, …). Fix those paths when you delete or move a
+  module.
+- Each step leaves `cargo test` green. A step whose work needs more than one
+  commit keeps the tree building after each one.
+
+## Steps
+
+1. **Rename and license.**
+   - `Cargo.toml`: `name = "nixarchy-meetingai"`, `license = "AGPL-3.0-only"`
+     (check the `LICENSE` header for "or later" and match it),
+     `description`, `authors`.
+   - Replace `lennette::` with `nixarchy_meetingai::` in `src/main.rs` and
+     `tests/*.rs`.
+   - Set `ProjectDirs::from("dev","nixarchy","nixarchy-meetingai")` in
+     `src/app.rs:82`, `src/core/security/vault.rs:58` and `src/cli.rs:146`.
+   - App id `dev.nixarchy.meetingai` in `src/app.rs:180,277,367` and
+     `src/platform/shortcuts/wayland.rs:247`.
+   - Rename `packaging/dev.lennette.overlay.desktop` and
+     `LENNETTE_RUNTIME_LIBRARY_PATH` (rg it), and set `devenv.nix` `name`.
+   - User-visible strings "lennette" become "nixarchy-meetingai".
+   → verify by `cargo test && rg -il lennette src tests Cargo.toml devenv.nix`
+   (expect no hits outside asset filenames, which go in step 8).
+   Traps: SKIP_BUMP=1; `Cargo.lock` regenerates.
+
+2. **Delete what is not ours (non-UI).**
+   - Remove `web/`, `tools/` (and `members = ["tools"]` in `Cargo.toml`),
+     `packaging/hyprland/`, `packaging/windows/`, `docs/windows.md`,
+     `build.rs`, `.github/workflows/release.yml`, `scripts/*.ps1`,
+     `scripts/bump-version.sh`, `scripts/install-binary.sh`,
+     `tests/install-ps1.test.ps1` and `tests/install-sh.test.sh`.
+   - Remove the `*_windows.rs` files: `src/audio/capture/system_audio_windows.rs`,
+     `src/platform/shortcuts/{windows,control_windows}.rs` and
+     `src/platform/system/tray_windows.rs`.
+   - Remove every `#[cfg(windows)]` / `target_os = "windows"` branch. There
+     are 13 files: `rg -l 'cfg\((not\()?windows|target_os = "windows"' src`.
+     For `cfg(not(windows))`, keep the body and drop the attribute.
+   - Remove the Windows `[target]` deps (`windows-sys`, `embed-resource`,
+     the Windows `gpui` line).
+   - Remove privacy mode: `--privacy`/`--normal` (`src/cli.rs:23-24,48`),
+     the `privacy-mode`/`normal-mode` actions in `src/platform/shortcuts`,
+     the settings `startup_privacy` and `hide_app_icon`
+     (`src/core/models/settings.rs`: struct, defaults, keys, load, save,
+     test fixture at ~638), and their uses in `src/ui/views/overlay.rs` and
+     `src/ui/views/settings/{mod,search}.rs`. Delete only the code needed to
+     compile; that UI goes away in step 8.
+   - Remove the tray, startup and updates modules
+     (`src/platform/system/{tray,startup,updates}.rs`, the `ksni` dep) and
+     their call sites (`overlay.rs` `poll_tray` ~2070, settings).
+   - Remove the `bump-version` and `web` commands from `lefthook.yml`, and
+     the `just` recipes that call the deleted scripts or `web`.
+   → verify by `cargo test`, `cargo tree -i ksni` and `cargo tree -i
+   windows-sys` (both "not found"), and `rg -i
+   'privacy|stealth|exclude.?from.?capture|cfg\(windows' src` (no hits).
+   Traps: SKIP_BUMP=1 for this commit (the hook is still live until it
+   lands). `src/platform/display/window.rs` keeps compiling without its
+   Windows half; it is deleted in step 8.
+
+3. **Provider catalog.**
+   - `src/ai/catalog/providers.rs`: remove `merge-gateway` (line ~37) and
+     add `ollama` (OpenAI wire, `requires_key` false, endpoint as above).
+     Replace the test `only_current_providers_are_available` (~212) so it
+     asserts `["gemini","ollama","claude-sub","codex-sub"]`; the CLI entries
+     are added in step 4, so assert the step-3 subset here and extend it in
+     step 4.
+   - `src/ai/catalog/models.rs:17`: remove Merge. For Ollama, discover models
+     via `GET /api/tags` (`models[].name`).
+   - `src/ai/chat/engine.rs:279`: for `ChatWire::Anthropic` without a
+     custom auth, send `x-api-key: <key>` instead of `bearer_auth`. Add a
+     test that asserts the header.
+   - `src/core/security/credentials.rs:87`: accept `http` only when
+     `url.host_str()` is `localhost`, `127.0.0.1` or `[::1]`. Apply the same
+     rule to bundled endpoint overrides (`providers.rs` ~123). Add tests for
+     a loopback and a non-loopback URL.
+   - Remove Merge from the settings UI and `tests/provider_flow.rs`.
+   → verify by `cargo test` and `rg -i merge src tests` (no provider hits).
+
+4. **CLI subscription providers.**
+   - Add `ChatWire::Cli` and two catalog entries (`claude-sub` "Claude
+     (subscription)", `codex-sub` "ChatGPT / Codex (subscription)";
+     `requires_key` false; `supports_images` true).
+   - New `src/ai/chat/cli.rs`:
+     - Build the argv exactly as in the decisions.
+     - Spawn with `tokio::process::Command`: `env_remove` the three key
+       variables, `current_dir(tempdir)`, `process_group(0)`, stdin piped.
+     - Claude: write one stream-json user message
+       (`{"type":"user","message":{"role":"user","content":[…text,
+       image base64 blocks…]}}`), then close stdin. The history is
+       flattened into the system prompt as a quoted transcript.
+     - Codex: write the prompt text to stdin and pass images as `-i <tmp
+       file>`.
+     - Parse stdout lines into deltas. A non-zero exit, or no `result` /
+       `agent_message`, becomes `ChatError` carrying the stderr tail (≤2 KB).
+     - Cancel: `killpg` the group (`libc` is already a dep).
+   - `engine.rs` `stream_chat_inner` dispatches `ChatWire::Cli` to `cli.rs`.
+   - Model lists are static: claude `sonnet`, `opus`, `haiku`; codex the
+     CLI default plus free text.
+   - On first use, run `claude --version` / `codex --version`; a missing
+     binary becomes a clear error.
+   - Tests: parser unit tests against fixtures
+     `tests/fixtures/claude-stream.ndjson` and `codex-exec.ndjson`, recorded
+     with the commands in the decisions (prompt "Say: hi there"); and a
+     cancel test using a fake script that sleeps.
+   → verify by `cargo test cli` and one manual `cargo run -- ctl` call later
+   (step 7).
+   Traps: never pass `--dangerously-*` flags; codex sandbox stays
+   `read-only`.
+
+5. **whisper.cpp STT.**
+   - `src/ai/catalog/providers.rs`: add an `SttWire::WhisperServer` entry
+     `whisper-local` (endpoint `http://127.0.0.1:8178/inference`, no key) and
+     make it the default `speech_provider` in `settings.rs`.
+   - `src/speech/stt/transcription.rs`:
+     - `connect_config` (~474) routes `whisper-local` to `connect_batch`
+       (~519).
+     - `transcribe_samples` gains a multipart branch (`reqwest` `multipart`
+       feature; WAV from `audio::dsp::encode_wav`) that reads JSON `text`.
+     - In `connect_batch`, a request error for a loopback provider retries
+       3× (250 ms, 1 s, 3 s) before `LiveEvent::Failed`. The failure message
+       includes the chunk's `start..end`.
+   - Test: a mock `/inference` server (the pattern in
+     `tests/network_resilience.rs`) returns text; another mock fails twice
+     and then succeeds (expect one line, no failure); a third always fails
+     (expect `Failed` carrying the range).
+   → verify by `cargo test transcription network_resilience`.
+
+6. **Rolling notes; remove meeting tone.**
+   - New migration in `src/db/schema`: table `meeting_note_chunks(id,
+     meeting_id, t0, t1, body, created_at)` with an index on `meeting_id`.
+     Repo functions go in `src/db/repos/meetings.rs`.
+   - `src/ai/recap.rs`:
+     - `summarise_slice(lines) -> body` uses a decisions / actions / open
+       questions / key quotes prompt.
+     - `consolidate(chunks, mode)` uses the General or Interview prompt;
+       prompts are read from settings keys `recap_prompt_general` and
+       `recap_prompt_interview`, with the current text as default.
+     - `generate` = summarise any lines after the last chunk's `t1`, then
+       consolidate. Remove the use of `transcript_excerpt(…,120_000)`, and
+       the function itself if nothing else uses it (rg).
+   - A trigger function `maybe_chunk(meeting)` (characters since the last
+     chunk ≥ 8000 or ≥ 5 min) is called by the daemon in step 7.
+   - Delete `src/ai/sentiment.rs`, `src/db/repos/sentiment*`, the sentiment
+     schema (leave old tables in existing DBs alone; don't drop them), and
+     `src/ui/views/dashboard/meeting_tone.rs` plus its nav entry.
+   - Test: build a 3-hour synthetic meeting (≈ 400k characters) with a
+     marker decision "DECISION-MIDPOINT" at the midpoint. Use a fake
+     provider that echoes any `DECISION-*` it sees. Assert the consolidated
+     recap contains it.
+   → verify by `cargo test recap`.
+
+7. **Daemon + IPC (port the orchestration out of `overlay.rs`).**
+   - New `src/daemon/{mod.rs,protocol.rs,session.rs,server.rs}`.
+   - `protocol.rs`: serde types for every command and event in the
+     decisions.
+   - `server.rs`:
+     - Create the `0700` dir, bind the socket (remove a stale one), and
+       accept many clients.
+     - Per client: a `BufReader` line loop with a 1 MiB cap (oversize closes
+       the client).
+     - Events go out through a `tokio::sync::broadcast`.
+   - `session.rs` owns `ListenSession`, `ChatSession`, `Conversation`,
+     `Database` and `Vault`. Port the logic of these `src/ui/views/overlay.rs`
+     functions, keeping their behavior and tests:
+     - `prepare_recording_resume` 876, `spawn_transcription` 888,
+       `completed_turn` 997, `handle_live_event` 1022, `push_transcript` 1099
+     - `create_meeting` 1166, `begin_send` 1335, `interrupt_response` 1524
+     - `automatic_speech_active` 1595, `answer_pending_question` 1606
+       (pacing Fast / Balanced / Relaxed), `selected_system_prompt` 1655
+     - `handle_session_event` 1856, `cancel_follow_ups` 2697 /
+       `visible_follow_ups` 2897
+     - `generate_conversation_title` 2784, `generate_title` 2812,
+       `finish_session_title` 2867, `finish_meeting_artifacts` 2875 (calls
+       step 6 `generate`)
+     - `refresh_configuration` 2999, `speech_config` 3064,
+       `selected_chat_config` 3093, `select_profile` / `apply_profile`
+       3754-3771, `load_model_catalog` 3833 (cache)
+     - dictation 3900-3971, `effective_prompt_id` 4166
+   - Call `recap::maybe_chunk` after each final line, and emit
+     `notes.updated`.
+   - Screenshots: `screenshot.capture{region:false}` runs `grim -`;
+     `region:true` runs `grim -g "$(slurp)" -`. The PNG becomes the same
+     attachment type `attach_capture` (1793) produced.
+   - `src/main.rs`: no args runs the daemon (single instance via the
+     existing `cli::InstanceLock`). `ctl <cmd> [json]` connects, sends one
+     request, and prints the reply. Retire the old `--toggle-*` flags and
+     `control.rs` (replaced by the socket).
+   - Tests in `tests/daemon_flow.rs`:
+     - Start the server on a temp `XDG_RUNTIME_DIR` with fake STT and AI
+       (reuse the mocks from steps 4-5).
+     - Drive `session.new → record.start → (fake final lines) → chat.send →
+       answer.delta+ → answer.done → record.stop → notes.updated`.
+     - An oversize line closes the client.
+     - `settings.get` never contains a key.
+   → verify by `cargo test daemon_flow`, then manually run `cargo run &` and
+   `cargo run -- ctl state.get`.
+   Traps: GPUI still compiles in this step. Leave `overlay.rs` alone; its
+   copies of the logic die in step 8.
+
+8. **Delete the GPUI UI.**
+   - Remove `src/ui/`, `src/app.rs` (move `Services` construction into
+     `daemon::session` if anything still uses it), and
+     `src/platform/display/{window,capture,screen}.rs`.
+   - Remove `src/platform/system/gpu.rs`, and
+     `src/platform/shortcuts/{wayland,wayland_stub,hyprland,bindings,commands,control}.rs`,
+     keeping anything `ctl` needs.
+   - Remove `src/assets/` except the icon PNG used by the `.desktop` file
+     (rename it to `nixarchy-meetingai.png`), `src/features/mod.rs`
+     re-exports of deleted modules, and `pub mod ui; pub mod app;` in
+     `src/lib.rs`.
+   - Remove the deps `gpui`, `lucide-icons`, `two-face`, `pulldown-cmark`,
+     `raw-window-handle` and `xcap`.
+   - Remove the UI-only settings listed in the decisions (struct, defaults,
+     keys, load, save, tests).
+   - `tests/provider_flow.rs:531-535` uses `ui::markdown`: delete that
+     assertion block and keep the rest of the test.
+   - Trim `packaging/runtime-libraries.nix` to what cpal (alsa/pipewire) and
+     SQLCipher need.
+   → verify by `cargo test`; by `cargo tree -i gpui`, `cargo tree -i xcap`,
+   `cargo tree -i two-face` and `cargo tree -i ksni` (all "not found"); by
+   `rg -i 'lennette|merge-gateway|privacy|stealth' src tests` (no hits); and
+   by `cargo build --release` (note the binary size in the PR).
+
+9. **Quickshell plugin `shell/`.**
+   - `shell/manifest.json`: id `nixarchy.meetingai`, `kinds [service,
+     overlay, bar-widget]`, entry points as below. Copy the structure of
+     `~/.config/omarchy/plugins/nixarchy.meeting-mode/manifest.json`.
+   - `Service.qml`:
+     - One `Quickshell.Io` `Socket` with `SplitParser{splitMarker:"\n"}`
+       (pattern: `~/.config/omarchy/plugins/ronnie.worldradio/Panel.qml:1502`)
+       and reconnect backoff of 0.5 s → 5 s.
+     - `send(cmd,args)` returns a promise-like callback keyed by `id`.
+     - The model holds state, transcript (ListModel, capped at 500 lines)
+       and answers.
+   - `BarWidget.qml` (pattern: `meeting-mode/BarWidget.qml`): a dot and
+     timer while recording. Click opens a menu with New / Restore / Quit;
+     Quit asks for confirmation inline.
+   - `Overlay.qml`: the transcript list (mic and system visually distinct,
+     speaker label), the answer stream with `Text.MarkdownText`, follow-up
+     suggestions, and selectors (provider/model with a filter field,
+     General/Interview, pacing, "No context").
+   - `Composer.qml`:
+     - Grows to 5 lines, then scrolls; Enter sends, Shift+Enter adds a line.
+     - Code or pastes over 2000 characters become square chips with a
+       scrollable preview popup.
+     - Sent references can be reopened from the question bubble via
+       `attachment.preview`.
+     - The file picker is `QtQuick.Dialogs` `FileDialog`.
+   - `Library.qml`: tabs Restore (chats + meetings, with their notes),
+     Profiles, Prompts (answer, follow-up, recap General/Interview),
+     Providers (has-key state, set key, model list), Settings. One search
+     field calls `settings.search` and filters across tabs.
+   - Colors come only from `qs.Commons` `Color`. Respect the
+     `reduce_motion` setting (animations off when true).
+   - Smoke test: `shell/tests/fake-daemon.py` (stdlib only; answers
+     `state.get` and streams a fake transcript and answer) and
+     `shell/tests/smoke.sh`. The script starts the fake, runs `quickshell -p
+     shell/tests/harness.qml` (loads Service + Overlay) for 5 s, and fails on
+     any `qml:` error line on stderr.
+   → verify by `qmllint shell/*.qml` (clean) and `shell/tests/smoke.sh`
+   (exit 0).
+   Traps: Quickshell 0.3.2 API. Check each `Quickshell.Io` type in the
+   installed `quickshell-io.qmltypes` before use. Keep heavy work in the
+   daemon.
+
+10. **Call offer and auto-record.**
+    - `Service.qml`: a `FileView` on `$XDG_RUNTIME_DIR/meeting-mode.json`
+      (`watchChanges`, plus a 5 s reload timer, as meeting-mode does).
+    - When `active` goes false → true while not recording: if setting
+      `auto_record_on_call`, send `record.start` and notify "Taking notes";
+      otherwise run `notify-send -a nixarchy-meetingai -A take=Take\ notes -A
+      no=Not\ now`, and on `take` send `record.start`.
+    - When it goes true → false while recording: notify with a "Stop notes"
+      action. Never stop on its own.
+    - Add the `auto_record_on_call` bool (default false) to `settings.rs`
+      and the Library Settings tab.
+    → verify with the smoke harness: write `{"active":true}` to the fake
+    runtime dir and assert `record.start` reaches the fake daemon only when
+    the setting is on.
+
+11. **Nix packaging and docs.**
+    - `flake.nix` at the repo root:
+      - `packages.default`: `rustPlatform.buildRustPackage`, with
+        `runtime-libraries.nix` for the RPATH, and the `.desktop` and icon.
+      - `packages.whisper-model-small-en` (and `-small`): fixed-output
+        derivations, copying the approach of
+        `/mnt/code/Source-home/GitHub/nixarchy-voice/nix/whisper-model.nix`.
+      - `homeManagerModules.default`, with options
+        `programs.nixarchy-meetingai.{enable, package, whisper.model,
+        whisper.package (default pkgs.whisper-cpp-vulkan), whisper.port
+        (8178)}`:
+        - user services `nixarchy-meetingai.service` (the daemon) and
+          `nixarchy-meetingai-whisper.service` (`whisper-server -m <model>
+          --host 127.0.0.1 --port <port>`)
+        - `xdg.configFile."omarchy/plugins/nixarchy.meetingai".source =
+          ./shell`
+        - Hyprland binds: overlay toggle via the omarchy-shell IPC for the
+          plugin; record, mic, system and screenshot via
+          `nixarchy-meetingai ctl …`. Use the bind style the nixarchy skill
+          documents.
+    - `devenv.nix`: drop `rust-overlay` items that only GPUI needed (none
+      expected; check the build).
+    - `README.md`: what it is, install (flake input + HM module), the
+      providers and how each signs in, offline mode, keybinds, and credit to
+      upstream lennette (parazeeknova) under AGPL-3.0.
+    → verify by `nix flake check`, `nix build .#default`, and `nixfmt
+    --check flake.nix nix/*.nix`.
+
+12. **End-to-end on this machine (session model, not the coder).**
+    - Enable the HM module and switch.
+    - Run a real call with mic + system audio: whisper lines are labelled,
+      a Claude-sub answer streams, a Codex-sub answer arrives, and Ollama
+      answers with the network off.
+    - Stop: the notes cover the whole call. Restore → resume appends to the
+      same meeting.
+    - Run the meeting-mode offer both ways.
+    - Measure whisper lag on `small.en` (write it in the PR). If it is over
+      3 s per utterance, propose `base.en` as the default in the PR (a plan
+      deviation → update this file).
+    → verify by checking that each item in the spec's Verification §1-7 is
+    ticked in the PR description.
+
+## Tests
+
+- `devenv shell -- cargo test --workspace` is green after every step.
+- `devenv shell -- cargo clippy --workspace --all-targets -- -D warnings` is
+  clean.
+- `qmllint shell/*.qml` is clean, and `shell/tests/smoke.sh` exits 0.
+- `nix flake check` and `nix build .#default` succeed.
+- Guard greps (step 8) return nothing.
+
+## Rollback
+
+All work is on branch `refactor/omarchy-quickshell-rewrite`; `main` is
+untouched until the PR merges. Each step is its own commit, so `git revert
+<sha>` undoes one step. Before step 8, the GPUI app still builds and runs
+from any commit. After merge, `git revert -m 1 <merge>` restores lennette.
+There is no data migration, so there is nothing to undo on disk. Disabling
+`programs.nixarchy-meetingai.enable` removes the services, plugin and binds.
+
+## Implementation split (managed policy)
+
+Steps 1-11 go to one `coder` agent (Sonnet), started with this path and
+step 1, with later steps sent through `SendMessage`. Step 12 and all reviews
+stay with the session model. After step 11: a fresh Opus reviewer gets only
+this path and `git diff main...`. Codex `review --base main` and agy run as
+read-only reviewers, per `reviewers:`.
