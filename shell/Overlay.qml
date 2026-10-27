@@ -41,6 +41,11 @@ Item {
         return Math.floor(t / 3600) + ":" + p(Math.floor(t / 60) % 60) + ":" + p(t % 60);
     }
     readonly property real round: Math.max(Style.cornerRadius, 12)   // Hyprland rounding is 6
+    // Owner: roomier conversation. Bubble/card padding, gap between rows, reading line height.
+    readonly property real padX: Style.space(16)
+    readonly property real padY: Style.space(12)
+    readonly property real gap: Style.space(14)
+    readonly property real leading: 1.3
     readonly property var paces: ["Fast", "Balanced", "Relaxed"]
 
     Client { id: daemon }
@@ -242,7 +247,7 @@ Item {
                                 required property string modelData
                                 required property int index
                                 width: sugg.width
-                                height: Math.max(Style.spacing.controlHeight, stext.implicitHeight + Style.spacing.md * 2)
+                                height: Math.max(Style.spacing.controlHeight, stext.implicitHeight + root.padY * 2)
                                 radius: root.round
                                 color: sma.containsMouse ? Style.controlFill(false, true, Commons.Color.foreground, Commons.Color.accent) : "transparent"
                                 Rectangle {
@@ -288,15 +293,15 @@ Item {
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
                         height: root.transcriptOpen ? Math.min(nowWant, convo.avail * 0.55) : Math.max(nowWant, convo.avail)
-                        readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.implicitHeight + nowCol.spacing * 2 + Style.spacing.md * 2
+                        readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.implicitHeight + nowCol.spacing * 2 + root.padY * 2
                         radius: root.round
                         color: Qt.alpha(Commons.Color.accent, 0.12)
                         Rectangle { width: Style.space(4); height: parent.height - root.round; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
                         Column {
                             id: nowCol
-                            x: Style.spacing.lg; y: Style.spacing.md
-                            width: parent.width - Style.spacing.lg - Style.spacing.md
-                            spacing: Style.spacing.xs
+                            x: root.padX; y: root.padY
+                            width: parent.width - root.padX * 2
+                            spacing: Style.space(8)
                             Row {
                                 id: nowHead
                                 spacing: Style.spacing.md
@@ -338,6 +343,7 @@ Item {
                                     color: Commons.Color.popups.text
                                     linkColor: Commons.Color.accent
                                     font.pixelSize: Style.font.subtitle
+                                    lineHeight: root.leading
                                     onLinkActivated: function(link) { Qt.openUrlExternally(link); }
                                 }
                             }
@@ -359,10 +365,13 @@ Item {
                             anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
                             height: Math.min(contentHeight, parent.height)
                             clip: true
-                            spacing: Style.spacing.sm
+                            spacing: root.gap
                             model: daemon.transcript
                             property bool follow: true
-                            onContentHeightChanged: if (follow) Qt.callLater(positionViewAtEnd)
+                            // Exact bottom; positionViewAtEnd works from estimated delegate heights.
+                            function toEnd() { if (follow) contentY = originY + Math.max(0, contentHeight - height); }
+                            onContentHeightChanged: Qt.callLater(toEnd)
+                            onHeightChanged: Qt.callLater(toEnd)   // the NOW panel grows and shrinks the list
                             onMovementEnded: follow = atYEnd
                             delegate: Item {
                                 id: row
@@ -376,18 +385,21 @@ Item {
                                 readonly property string label: who === "asked" ? "You · Asked" : who === "mic" ? "You · Spoke" : (speaker !== "" ? speaker : "Them")
                                 width: ListView.view.width
                                 height: answer ? card2.height : bubble ? bub.height : err.implicitHeight
+                                // Markdown and line height settle after layout; keep the end pinned while following.
+                                onHeightChanged: Qt.callLater(tlist.toEnd)
                                 Rectangle {   // flat, borderless bubble
                                     id: bub
                                     visible: row.bubble
                                     x: row.mine ? row.width - width : 0
-                                    width: Math.min(row.width * 0.8, Math.max(btxt.implicitWidth, blabel.implicitWidth) + Style.spacing.lg * 2)
-                                    height: bcol.implicitHeight + Style.spacing.md * 2
+                                    width: Math.min(row.width * 0.8, Math.max(btxt.implicitWidth, blabel.implicitWidth) + root.padX * 2)
+                                    height: bcol.implicitHeight + root.padY * 2
                                     radius: root.round
                                     color: row.mine ? Qt.alpha(Commons.Color.accent, 0.22) : Qt.alpha(Commons.Color.foreground, 0.10)
                                     Column {
                                         id: bcol
-                                        x: Style.spacing.lg; y: Style.spacing.md
-                                        width: parent.width - Style.spacing.lg * 2
+                                        x: root.padX; y: root.padY
+                                        width: parent.width - root.padX * 2
+                                        spacing: Style.space(4)
                                         Text { id: blabel; textFormat: Text.PlainText; text: row.label; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption; font.bold: true }
                                         Text {
                                             id: btxt
@@ -397,7 +409,8 @@ Item {
                                             text: row.body
                                             color: Commons.Color.popups.text
                                             font.italic: row.partial
-                                            font.pixelSize: Style.font.bodySmall
+                                            font.pixelSize: Style.font.body
+                                            lineHeight: root.leading
                                         }
                                     }
                                 }
@@ -405,15 +418,15 @@ Item {
                                     id: card2
                                     visible: row.answer
                                     width: parent.width
-                                    height: ansCol.implicitHeight + Style.spacing.md * 2
+                                    height: ansCol.implicitHeight + root.padY * 2
                                     radius: root.round
                                     color: Qt.alpha(Commons.Color.accent, 0.12)
                                     Rectangle { width: Style.space(4); height: parent.height - root.round; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
                                     Column {
                                         id: ansCol
-                                        x: Style.spacing.lg; y: Style.spacing.md
-                                        width: parent.width - Style.spacing.lg - Style.spacing.md
-                                        spacing: Style.spacing.xs
+                                        x: root.padX; y: root.padY
+                                        width: parent.width - root.padX * 2
+                                        spacing: Style.space(6)
                                         Text { textFormat: Text.PlainText; text: "Suggested answer"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption; font.bold: true }
                                         Text {
                                             width: parent.width
@@ -422,7 +435,8 @@ Item {
                                             text: root.themedLinks(row.body)
                                             color: Commons.Color.popups.text
                                             linkColor: Commons.Color.accent
-                                            font.pixelSize: Style.font.bodySmall
+                                            font.pixelSize: Style.font.body
+                                            lineHeight: root.leading
                                             onLinkActivated: function(link) { Qt.openUrlExternally(link); }
                                         }
                                     }

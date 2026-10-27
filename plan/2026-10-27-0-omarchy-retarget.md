@@ -788,3 +788,13 @@ No colored icons or emoji anywhere in the UI.
 - The accent tint stays only on surfaces (the "you" bubbles, the answer
   stripe) and on links.
 - Error text keeps `urgent`.
+
+### Owner request: more space (2026-10-27)
+
+- Bubbles and cards are padded 16 × 12 px, with 14 px between rows.
+- Line height is 1.3×.
+- Bubble and earlier-answer text goes up from `bodySmall` to `body`.
+- Suggestion rows use the same vertical padding.
+- The transcript pins to its exact bottom (`contentY`, not the estimated
+  `positionViewAtEnd`) whenever content, an item, or the list itself
+  changes height, because the NOW panel resizes the list.
