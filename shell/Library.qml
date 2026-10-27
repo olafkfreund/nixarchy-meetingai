@@ -435,6 +435,13 @@ Item {
             footer: UiText { text: root.modelsText; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption }
         }
 
+        CallState { id: callState }
+        Hint {   // no state file 30 s after start: nothing detects calls
+            visible: root.tab === "settings" && callState.missing
+            height: visible ? implicitHeight : 0
+            text: "Call detection is off: enable the meeting-mode plugin (omarchy plugin enable nixarchy.meeting-mode --section center)."
+        }
+
         ListView {
             visible: root.tab === "settings"
             width: parent.width; height: parent.height - y

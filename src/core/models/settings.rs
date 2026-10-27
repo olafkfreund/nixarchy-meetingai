@@ -237,6 +237,8 @@ pub struct Settings {
     pub recap_prompt_interviewer: String,
     /// Start recording straight away when a call begins.
     pub auto_record_on_call: bool,
+    /// Name sessions from the calendar (read-only, through `gog`).
+    pub calendar_enabled: bool,
     pub chat_model: String,
     /// Provider and model for automatic live answers.
     pub live_provider: String,
@@ -278,6 +280,7 @@ impl Default for Settings {
             recap_prompt_team: RECAP_PROMPT_TEAM.to_owned(),
             recap_prompt_interviewer: RECAP_PROMPT_INTERVIEWER.to_owned(),
             auto_record_on_call: false,
+            calendar_enabled: false,
             chat_model: "sonnet".into(),
             live_provider: "claude-sub".into(),
             live_model: "haiku".into(),
@@ -308,6 +311,7 @@ mod keys {
     pub const RECAP_PROMPT_TEAM: &str = "recap_prompt_team";
     pub const RECAP_PROMPT_INTERVIEWER: &str = "recap_prompt_interviewer";
     pub const AUTO_RECORD_ON_CALL: &str = "auto_record_on_call";
+    pub const CALENDAR_ENABLED: &str = "calendar_enabled";
     pub const CHAT_MODEL: &str = "chat_model";
     pub const MEETING_MODE: &str = "meeting_mode";
     pub const TEXT_SCALE: &str = "text_scale";
@@ -387,6 +391,7 @@ impl Settings {
                 &defaults.recap_prompt_interviewer,
             ),
             auto_record_on_call: flag(keys::AUTO_RECORD_ON_CALL, defaults.auto_record_on_call),
+            calendar_enabled: flag(keys::CALENDAR_ENABLED, defaults.calendar_enabled),
             chat_model: text(keys::CHAT_MODEL, &defaults.chat_model),
             live_provider: text("live_provider", &defaults.live_provider),
             live_model: text("live_model", &defaults.live_model),
@@ -479,6 +484,7 @@ impl Settings {
                 keys::AUTO_RECORD_ON_CALL,
                 self.auto_record_on_call.to_string(),
             ),
+            (keys::CALENDAR_ENABLED, self.calendar_enabled.to_string()),
             (keys::CHAT_MODEL, self.chat_model.clone()),
             ("live_provider", self.live_provider.clone()),
             ("live_model", self.live_model.clone()),
@@ -630,6 +636,7 @@ mod tests {
             recap_prompt_team: "my team".into(),
             recap_prompt_interviewer: "my interviewer".into(),
             auto_record_on_call: true,
+            calendar_enabled: true,
             chat_model: "opus".into(),
             live_provider: "agy-sub".into(),
             live_model: "flash".into(),

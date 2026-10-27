@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Frames of a live meeting against fake-daemon.py --live: partial words, a
 # question from the other side, a streamed answer, then suggestions.
-# usage: [SCENARIO=live|k8s|team|interviewer|r5|first-run|no-daemon|error|providers] [SCALE=100] [MEETINGAI_GEOMETRY=1] live-shots.sh [OUT_DIR]   (needs a Wayland session and grim)
+# usage: [SCENARIO=live|k8s|team|interviewer|r5|first-run|no-daemon|error|providers|call] [SCALE=100] [MEETINGAI_GEOMETRY=1] live-shots.sh [OUT_DIR]   (needs a Wayland session and grim)
 # SCENARIO=k8s plays the captured real answer (fake-daemon.py --k8s); SCALE is the text_scale setting.
 # MEETINGAI_GEOMETRY=1 also runs tests/check-geometry.py on what the harness dumped. SCENARIO=providers switches through every
 # provider and asserts the model dropdowns (fake-daemon.py --providers). QML warnings (stdout or stderr) fail the run.
@@ -67,12 +67,21 @@ case $scenario in
     interviewer) frames="1-consent:0.1 2-bank:5.5 3-candidate:9.5 4-new:2 5-attach:2 6-delete:2" ;;   # banner at ~3.5 s, bank after consent at 6 s, Candidate tab after 16 s
     providers) frames="1-opencode-error:5.1 2-providers-tab:5.5" ;;   # opencode's list fails at ~8 s; the Providers tab opens at 13 s
     k8s) frames="1-answering:2 2-ready:9 3-settings:4 4-mode:2" ;;
+    call) frames="1-chip:0.3 2-maybe:0.6 3-recording:0.6" ;;   # a Zoom call (outlined dot + chip), then a maybe (dim dot), then recording (filled dot + timer)
     *) frames="1-question:1 2-answering:2.4 3-suggestions:3 4-you-speaking:2.2 5-asked:2.4 6-settings:4 7-mode:2 8-bar:0.3" ;;
 esac
 for f in $frames; do
     sleep "${f#*:}"
     region=$g
     case ${f%:*} in *-bar) read -r lx ly _ < "$work/layer"; region="$lx,$ly 160x36" ;; esac   # the bar widget pill, top left of the monitor
+    case ${f%:*} in 1-chip|2-maybe|3-recording) read -r lx ly _ < "$work/layer"; region="$lx,$ly 320x36" ;; esac
+    if [ "$scenario" = call ]; then   # the next state for the bar: maybe, then the recording (the fake daemon answers record.start)
+        case ${f%:*} in
+            2-maybe) python3 -c 'import sys; p = sys.argv[1]; s = open(p).read(); open(p, "w").write(s.replace("\"call\": \"call\"", "\"call\": \"maybe\""))' "$XDG_RUNTIME_DIR/meeting-mode.json" ;;   # in place: the watcher sees it
+            3-recording) python3 -c 'import socket,json,os,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(b"{\"id\":1,\"cmd\":\"record.start\",\"args\":{}}\n"); s.recv(4096)' "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" ;;
+        esac
+        sleep 0.5
+    fi
     grim -g "$region" "$out/crop-${f%:*}.png"
 done
 wait "$qs" || true

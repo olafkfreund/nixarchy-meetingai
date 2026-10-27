@@ -1,6 +1,7 @@
 //! The headless daemon: orchestration of capture, speech, chat and notes,
 //! driven over a unix socket by the Quickshell plugin and `ctl`.
 
+pub mod calendar;
 pub mod nix_settings;
 pub mod protocol;
 pub mod server;
@@ -58,6 +59,16 @@ pub fn run() -> Result<(), String> {
             }
         };
         tokio::spawn(signal);
+        {
+            // Every 5 minutes while idle; the shell also asks on each call change.
+            let daemon = daemon.clone();
+            tokio::spawn(async move {
+                loop {
+                    daemon.calendar_refresh(true).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                }
+            });
+        }
         let served = server::serve(&socket, daemon)
             .await
             .map_err(|error| error.to_string());

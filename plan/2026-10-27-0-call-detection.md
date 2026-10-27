@@ -104,3 +104,16 @@ step 6, and step 7 is done live with the owner.
 ## Deviations log (recorded with the implementation commit)
 
 None yet.
+- **Steps 1–3, 5 (#2):** step 4 was already delivered by the flake-options
+  plan. `shell/CallState.qml` reads `meeting-mode.json`; a dead `pid` reads
+  as "none", and the 10-minute `updated` staleness rule applies only when no
+  `pid` can be checked (meeting-mode writes `updated` only on change, so a
+  long call would otherwise expire). `record.start` takes an optional
+  `title` (falling back to `state.calendar_title`) and such meetings skip AI
+  re-titling. The calendar picks the timed, linked event in the ±10-minute
+  window that hasn't ended, closest start first (catches calls joined a few
+  minutes early). `calendar_enabled` also reached `nix_settings.rs`, the
+  flake example and the settings fixture. `gog` is called with RFC3339
+  `--from/--to` (`now-10m` is rejected). The bar chip and dot don't scale
+  with `text_scale`. Unverified: the Discord/Slack/Skype glyph codepoints and
+  the real `gog` JSON shape (no `gog` login on this machine).

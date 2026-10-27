@@ -6,8 +6,9 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 
-// Meeting AI bar indicator: a dot and timer while recording. Click opens a
-// small menu (New / Restore / Stop Meeting AI); stopping asks for confirmation.
+// Meeting AI bar indicator: a dot and timer while recording (dim dot = maybe a call, outlined dot =
+// a call nobody is recording, with a "Take notes?" chip). Click opens a small menu
+// (New / Restore / Stop Meeting AI); stopping asks for confirmation.
 BarWidget {
     id: root
     moduleName: "nixarchy.meetingai"
@@ -27,6 +28,21 @@ BarWidget {
     implicitHeight: button.implicitHeight
 
     Client { id: client }
+    CallState { id: calls }
+    property double dismissed: -1   // the call (its start) whose chip was dismissed
+    readonly property bool busy: client.recording || root.finishing
+    readonly property bool offering: calls.call === "call" && !root.busy && root.dismissed !== (calls.since || 1)
+    readonly property string callGlyph: {
+        var a = calls.app.toLowerCase();
+        return a.indexOf("discord") >= 0 || a.indexOf("vesktop") >= 0 ? "\u{F066F}" : a.indexOf("slack") >= 0 ? "\u{F04B1}" : a.indexOf("skype") >= 0 ? "\u{F036F}" : "\u{F0567}";
+    }
+    readonly property string callTip: (calls.call === "maybe" ? "Possible call" : "Call") + (calls.app ? " · " + calls.app : "") + (calls.title ? " · " + calls.title : "")
+
+    function takeNotes() {
+        client.send("record.start", calls.title ? { title: calls.title } : {}, function(r) {
+            if (!r.ok && String(r.error || "").indexOf("consent_required") === 0) root.run("omarchy-shell meetingai toggle");   // the consent banner is in the overlay
+        });
+    }
     Rec { id: rec; background: Commons.Color.bar.background }
     readonly property bool finishing: !client.recording && client.state.finishing === true
     property real pulse: 1
@@ -65,20 +81,22 @@ BarWidget {
             text: "\u{F0A2E}"   // nf-md-microphone_message
             active: client.recording
             dimmed: !client.connected
-            tooltipText: !client.connected ? "Meeting AI: daemon not running" : (client.recording ? "Taking notes · " + root.timer : root.finishing ? "Meeting AI: finishing the notes" : "Meeting AI")
+            tooltipText: !client.connected ? "Meeting AI: daemon not running" : (client.recording ? "Taking notes · " + root.timer : root.finishing ? "Meeting AI: finishing the notes" : calls.call !== "none" ? root.callTip : "Meeting AI")
             onPressed: function(b) {
                 if (b === Qt.RightButton) root.run("omarchy-shell meetingai toggle");
                 else { root.menuOpen = !root.menuOpen; root.confirmQuit = false; }
             }
         }
 
-        Rectangle {   // red and pulsing while recording; steady while the notes are finished
+        Rectangle {   // filled red and pulsing while recording (steady while the notes are finished); outlined = a call; dim = maybe
             id: dot
-            visible: client.recording || root.finishing
+            visible: root.busy || calls.call !== "none"
             width: Style.space(11); height: width; radius: width / 2
             anchors.verticalCenter: parent.verticalCenter
-            color: rec.red
-            opacity: root.pulsing ? root.pulse : 1
+            color: root.busy ? rec.red : calls.call === "maybe" ? Commons.Color.bar.text : "transparent"
+            border.width: !root.busy && calls.call === "call" ? Math.max(1, Math.round(Style.space(2))) : 0
+            border.color: rec.red
+            opacity: root.pulsing ? root.pulse : (!root.busy && calls.call === "maybe" ? 0.35 : 1)
         }
         Text {
             visible: client.recording
@@ -89,6 +107,50 @@ BarWidget {
             font.bold: true
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
+        }
+        Rectangle {   // click starts the notes, right-click dismisses it for this call
+            id: chip
+            objectName: "takeNotesChip"
+            visible: root.offering
+            anchors.verticalCenter: parent.verticalCenter
+            width: chipRow.implicitWidth + Style.spacing.sm * 2
+            height: chipRow.implicitHeight + Style.spacing.xs * 2
+            radius: height / 2
+            color: "transparent"
+            border.width: 1
+            border.color: Commons.Color.bar.text
+            Accessible.role: Accessible.Button
+            Accessible.name: "Take notes"
+            Row {
+                id: chipRow
+                anchors.centerIn: parent
+                spacing: Style.spacing.xs
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: root.callGlyph
+                    color: Commons.Color.bar.text
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: "Take notes?"
+                    color: Commons.Color.bar.text
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                }
+            }
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                cursorShape: Qt.PointingHandCursor
+                onClicked: function(m) {
+                    if (m.button === Qt.RightButton) root.dismissed = calls.since || 1;
+                    else root.takeNotes();
+                }
+            }
         }
     }
 

@@ -189,6 +189,7 @@
                 autoResponse = "pauses";
                 smartFollowUps = false;
                 autoRecordOnCall = true;
+                calendarEnabled = true;
                 speechProvider = "whisper-local";
                 speechModel = "ggml-large-v3-turbo";
                 speechLanguage = "en";

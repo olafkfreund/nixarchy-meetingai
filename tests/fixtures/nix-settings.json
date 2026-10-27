@@ -3,6 +3,7 @@
   "values": {
     "auto_record_on_call": "true",
     "auto_response": "pauses",
+    "calendar_enabled": "true",
     "chat_model": "opus",
     "chat_provider": "claude-sub",
     "live_model": "haiku",

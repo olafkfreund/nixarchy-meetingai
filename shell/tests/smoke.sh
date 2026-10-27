@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Smoke test: run the plugin against fake-daemon.py inside a real quickshell
-# for 5 s, fail on any QML error, and check the call-offer logic both ways.
+# for 9 s, fail on any QML error, and check the call-offer logic both ways.
 # Needs a running Wayland session (the overlay is a layer-shell window).
 set -euo pipefail
 # QML problems show as warnings on stdout or stderr: a binding loop, a TypeError, a ReferenceError, any file.qml:line
@@ -35,10 +35,11 @@ run() { # run <label> [--auto]
     python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/$label.log" $auto &
     local fake=$!
     sleep 0.5
-    timeout 5 quickshell -p "$work/cfg" > "$work/$label.out" 2> "$work/$label.err" || true &
+    timeout 9 quickshell -p "$work/cfg" > "$work/$label.out" 2> "$work/$label.err" || true &
     local qs=$!
     sleep 2.5
-    echo '{"active":true}' > "$XDG_RUNTIME_DIR/meeting-mode.json"
+    # a manual meeting mode (active, call none) is no call; a call is: the service reacts to `call`
+    echo "{\"active\":true,\"call\":\"call\",\"callApp\":\"Zoom\",\"callSince\":1,\"pid\":$$,\"updated\":$(date +%s%3N)}" > "$XDG_RUNTIME_DIR/meeting-mode.json"
     wait "$qs" || true
     kill "$fake" 2>/dev/null || true
     if grep -aE "$qml_bad" "$work/$label.err" "$work/$label.out"; then
