@@ -197,6 +197,11 @@ pub struct Settings {
     pub text_scale: u32,
     /// Whether MCP clients (AI agents) may start recording.
     pub mcp_allow_record: bool,
+    /// Overlay position and size in pixels; -1 means the default, centred.
+    pub overlay_x: i32,
+    pub overlay_y: i32,
+    pub overlay_w: i32,
+    pub overlay_h: i32,
 }
 
 impl Default for Settings {
@@ -228,6 +233,10 @@ impl Default for Settings {
             meeting_mode: "general".into(),
             text_scale: 100,
             mcp_allow_record: false,
+            overlay_x: -1,
+            overlay_y: -1,
+            overlay_w: -1,
+            overlay_h: -1,
         }
     }
 }
@@ -263,6 +272,11 @@ impl Settings {
             get(key)
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(fallback)
+        };
+        let int = |key: &str| {
+            get(key)
+                .and_then(|v| v.parse::<i32>().ok())
+                .map_or(-1, |v| v.max(-1))
         };
         let text = |key: &str, fallback: &str| {
             get(key)
@@ -324,6 +338,10 @@ impl Settings {
             },
             text_scale: number(keys::TEXT_SCALE, defaults.text_scale).clamp(80, 160),
             mcp_allow_record: flag(keys::MCP_ALLOW_RECORD, defaults.mcp_allow_record),
+            overlay_x: int("overlay_x"),
+            overlay_y: int("overlay_y"),
+            overlay_w: int("overlay_w"),
+            overlay_h: int("overlay_h"),
         })
     }
 
@@ -405,6 +423,10 @@ impl Settings {
             (keys::MEETING_MODE, self.meeting_mode.clone()),
             (keys::TEXT_SCALE, self.text_scale.clamp(80, 160).to_string()),
             (keys::MCP_ALLOW_RECORD, self.mcp_allow_record.to_string()),
+            ("overlay_x", self.overlay_x.max(-1).to_string()),
+            ("overlay_y", self.overlay_y.max(-1).to_string()),
+            ("overlay_w", self.overlay_w.max(-1).to_string()),
+            ("overlay_h", self.overlay_h.max(-1).to_string()),
         ]
     }
 
@@ -420,6 +442,19 @@ mod tests {
 
     fn database() -> Database {
         Database::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn overlay_geometry_defaults_to_minus_one_and_round_trips() {
+        let db = database();
+        assert_eq!(Settings::load(&db).unwrap().overlay_w, -1);
+        Settings::set(&db, "overlay_w", "700").unwrap();
+        Settings::set(&db, "overlay_x", "-40").unwrap();
+        let loaded = Settings::load(&db).unwrap();
+        assert_eq!((loaded.overlay_w, loaded.overlay_x), (700, -1));
+        let copy = Database::open_in_memory().unwrap();
+        loaded.save(&copy).unwrap();
+        assert_eq!(Settings::load(&copy).unwrap(), loaded);
     }
 
     #[test]
@@ -513,6 +548,10 @@ mod tests {
             meeting_mode: "interview".into(),
             text_scale: 130,
             mcp_allow_record: true,
+            overlay_x: 10,
+            overlay_y: 20,
+            overlay_w: 700,
+            overlay_h: 500,
         };
         settings.save(&database).unwrap();
         assert_eq!(Settings::load(&database).unwrap(), settings);

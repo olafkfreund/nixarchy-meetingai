@@ -99,6 +99,31 @@ pub struct NameArg {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ProfileSave {
+    pub name: String,
+    pub personal_context: Option<String>,
+    pub meeting_context: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProfileRename {
+    pub name: String,
+    pub new_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProfileAttach {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProfileDetach {
+    pub name: String,
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SettingSet {
     pub key: String,
     pub value: Value,

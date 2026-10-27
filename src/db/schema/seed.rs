@@ -18,6 +18,27 @@ pub const RESPONSE_STYLE: &str = "Help with the current turn of the conversation
 
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are nixarchy-meetingai, helping the user take part in a conversation. Respond to the latest question or request in the context of what has just been said. When the user needs words to say aloud, give a direct, connected reply in their voice, as part of that exchange. Do not explain to them how to answer. For a direct writing, research or coding request, produce the requested work instead of pretending it is a spoken reply. If a crucial fact is missing, give a brief clarification or a clearly conditional answer.";
 
+/// Default text of the `live_answer` prompt kind, used for automatic answers in every mode.
+pub const DEFAULT_LIVE_ANSWER: &str = "Write a reply the user can take in at a glance. Start with one bold sentence they can say first, then give 3 to 4 short bullet talking points. Use about 80 words or fewer, with no preamble and no closing remark. Ground every point in the supplied profile, documents and recent speech; never invent experience, numbers or commitments, and say so in a bullet when a needed fact is missing.";
+
+/// The setting that holds the editable `live_answer` prompt for a mode.
+pub fn live_answer_key(interview: bool) -> &'static str {
+    if interview {
+        "live_answer_prompt_interview"
+    } else {
+        "live_answer_prompt_general"
+    }
+}
+
+/// The current `live_answer` prompt; an empty stored text means the default.
+pub fn live_answer(connection: &rusqlite::Connection, interview: bool) -> String {
+    crate::db::settings::get(connection, live_answer_key(interview))
+        .ok()
+        .flatten()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_LIVE_ANSWER.to_owned())
+}
+
 /// The five default listen modes, in tab order.
 pub const DEFAULT_LISTEN_MODES: &[SeedPrompt] = &[
     SeedPrompt {
@@ -133,6 +154,19 @@ pub fn seed_listen_modes(connection: &rusqlite::Connection) -> Result<()> {
 mod tests {
     use super::*;
     use crate::db::{Database, settings};
+
+    #[test]
+    fn live_answer_defaults_per_mode_and_edits_survive() {
+        let database = Database::open_in_memory().unwrap();
+        let c = database.connection();
+        for interview in [false, true] {
+            assert_eq!(live_answer(c, interview), DEFAULT_LIVE_ANSWER);
+        }
+        settings::set(c, live_answer_key(true), "mine").unwrap();
+        assert_eq!(live_answer(c, true), "mine");
+        assert_eq!(live_answer(c, false), DEFAULT_LIVE_ANSWER);
+        assert!(DEFAULT_LIVE_ANSWER.contains("bold") && DEFAULT_LIVE_ANSWER.contains("80 words"));
+    }
 
     #[test]
     fn seeding_is_idempotent() {

@@ -173,6 +173,16 @@ CREATE TABLE IF NOT EXISTS context_profiles (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Reference text (CV, job description, runbooks) attached to a profile.
+CREATE TABLE IF NOT EXISTS profile_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile TEXT NOT NULL REFERENCES context_profiles(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_profile_documents_profile ON profile_documents (profile);
+
 CREATE TABLE IF NOT EXISTS conversation_state (
     conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
     context_json TEXT NOT NULL

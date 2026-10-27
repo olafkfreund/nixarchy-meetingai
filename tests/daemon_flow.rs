@@ -198,6 +198,36 @@ async fn daemon_flow_scripted_session() {
     assert!(!found.to_string().contains("live_provider"), "{found}");
     assert_eq!(client.event("answer.done").await["turn"], delta["turn"]);
 
+    // Round 5 protocol over the socket: profiles, prompt reset, overlay geometry.
+    let saved = client
+        .call(
+            "profiles.save",
+            json!({"name": "Role", "personal_context": "Rust"}),
+        )
+        .await;
+    assert_eq!(saved["ok"], true, "{saved}");
+    let listed = client.call("profiles.list", json!({})).await;
+    assert_eq!(listed["data"][0]["documents"], json!([]), "{listed}");
+    assert_eq!(listed["data"][0]["personal_context"], "Rust");
+    let reset = client
+        .call(
+            "prompts.reset",
+            json!({"mode": "interview", "kind": "live_answer"}),
+        )
+        .await;
+    assert!(
+        reset["data"]["text"].as_str().unwrap().contains("bold"),
+        "{reset}"
+    );
+    let geometry = client
+        .call("settings.set", json!({"key": "overlay_h", "value": 480}))
+        .await;
+    assert_eq!(geometry["ok"], true, "{geometry}");
+    assert_eq!(
+        client.call("settings.get", json!({})).await["data"]["overlay_h"],
+        480
+    );
+
     // A second client sees events too, and the secret never crosses the socket.
     let mut other = Client::connect(&socket).await;
     let settings = other.call("settings.get", json!({})).await;
