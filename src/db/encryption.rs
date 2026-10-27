@@ -50,6 +50,7 @@ fn key(path: &Path, encrypted_exists: bool) -> Result<String> {
 
 fn unlock(path: &Path, key: &str) -> Result<Connection> {
     let connection = Connection::open(path)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.pragma_update(None, "key", key)?;
     // Force authentication now; wrong keys/corruption must never trigger reinitialization.
     connection.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
