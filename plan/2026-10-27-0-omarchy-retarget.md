@@ -632,3 +632,29 @@ Verified, no change:
 Logged deviation (step 11): `nix/package.nix` uses `buildInputs` plus a
 PATH wrapper (`grim`, `slurp`, `libnotify`) instead of
 `runtime-libraries.nix` for the RPATH.
+
+## Owner requests, UI round 2 (2026-10-27)
+
+1. **Rounder corners.** Our own surfaces (the overlay card, answer cards,
+   suggestion chips, the composer) use `Math.max(Style.cornerRadius, 12)`
+   (Hyprland rounding here is 6). Where a `qs.Ui` component exposes a
+   radius, set it the same way; otherwise leave it, and note it.
+2. **Settings out of the main view.** The default overlay is the
+   conversation:
+   - a slim header: Record/Stop, the timer, mic and system levels, a
+     General/Interview switch, and a "Settings" tab button
+   - the transcript and answers
+   - the composer
+
+   Provider, model, pace and "No context" move into a Settings tab next to
+   Restore, Profiles, Prompts and Providers.
+3. **Answers stand out.** Each answer is its own block: a left accent
+   stripe (`Commons.Color.accent`), a small "Suggested answer" label, the
+   markdown body, and `onLinkActivated` → `Qt.openUrlExternally` so links
+   are clickable.
+4. **Recording indicators in the overlay.** A timer since `state.since`,
+   plus mic and system level dots. New daemon event: `levels{mic, system}`
+   (0..1 RMS), throttled to about 5 Hz, sent only while recording.
+5. **Theme audit.** No hard-coded colors, fonts or sizes in `shell/*.qml`
+   (tests excepted): everything comes from `Commons.Color`, `Style.font`
+   and `Style.spacing`, so theme switches apply live.
