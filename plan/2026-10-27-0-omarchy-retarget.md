@@ -777,3 +777,14 @@ Transcript quality:
 - Known limit: whisper has no diarization, so all remote speakers are
   "Them" unless Deepgram is chosen (shortcut, to be revisited with a local
   diarizer).
+
+### Owner request: monochrome icons (2026-10-27)
+
+No colored icons or emoji anywhere in the UI.
+- Icons are plain text labels (Settings, Screenshot).
+- Indicators use the theme text color, with brightness standing in for
+  color: the level dots, the outlined 1/2/3 badges, and the bar pill's
+  recording dot (formerly `urgent` red).
+- The accent tint stays only on surfaces (the "you" bubbles, the answer
+  stripe) and on links.
+- Error text keeps `urgent`.

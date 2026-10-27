@@ -43,7 +43,8 @@ def check(path):
         ("text on you bubble", fg, over(ac, YOU, bg)),
         ("text on NOW/answer card", fg, over(ac, CARD, bg)),
         ("text on suggestion hover", fg, over(fg, 0.08, bg)),
-        ("badge number on accent", max(bg, fg, (1, 1, 1), (0, 0, 0), key=lambda t: ratio(t, ac)), ac),   # Overlay.onAccent
+        ("badge outline/number (mono)", fg, bg),
+        ("level dot (mono, full level)", fg, bg),
         ("link (accent) on card", ac, over(ac, CARD, bg)),
     ]
     print(f"{path}  ({c.get('mode', '?')})")

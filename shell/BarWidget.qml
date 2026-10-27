@@ -66,7 +66,7 @@ BarWidget {
             visible: client.recording
             width: Style.space(8); height: width; radius: width / 2
             anchors.verticalCenter: parent.verticalCenter
-            color: Commons.Color.urgent
+            color: Commons.Color.bar.text   // monochrome; the timer beside it says it is recording
         }
         Text {
             visible: client.recording

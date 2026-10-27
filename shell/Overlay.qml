@@ -25,13 +25,6 @@ Item {
         var c = String(Commons.Color.accent);
         return String(md).replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2"><span style="color:' + c + '">$1</span></a>');
     }
-    // Number on an accent fill: the theme's background/text or white/black, whichever contrasts most (WCAG luminance).
-    function lum(c) {
-        var f = function(x) { return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
-        return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
-    }
-    function ratio(a, b) { var x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
-    readonly property color onAccent: [Commons.Color.popups.background, Commons.Color.popups.text, "#ffffff", "#000000"].reduce(function(best, c) { return root.ratio(c, Commons.Color.accent) > root.ratio(best, Commons.Color.accent) ? c : best; })
     property var providers: []
     property var models: []
     property bool noContext: false
@@ -166,7 +159,7 @@ Item {
                                     Rectangle {   // dot brightens with the level; dim when muted
                                         anchors.verticalCenter: parent.verticalCenter
                                         width: Style.space(10); height: width; radius: width / 2
-                                        color: Commons.Color.accent
+                                        color: Commons.Color.popups.text
                                         opacity: lvl.modelData.on ? 0.25 + 0.75 * lvl.modelData.level : 0.15
                                     }
                                     Text {
@@ -187,7 +180,7 @@ Item {
                         Button { text: "General"; active: daemon.settings.meeting_mode !== "interview"; onClicked: daemon.setSetting("meeting_mode", "general") }
                         Button { text: "Interview"; active: daemon.settings.meeting_mode === "interview"; onClicked: daemon.setSetting("meeting_mode", "interview") }
                     }
-                    Button { text: "⚙"; tooltipText: "Settings"; active: root.library; onClicked: { root.library = !root.library; lib.tab = "settings"; } }
+                    Button { text: "Settings"; tooltipText: "Settings"; active: root.library; onClicked: { root.library = !root.library; lib.tab = "settings"; } }
                 }
                 PanelSeparator {}
 
@@ -256,12 +249,14 @@ Item {
                                     id: badge
                                     x: Style.spacing.md; anchors.verticalCenter: parent.verticalCenter
                                     width: Style.space(20); height: width; radius: width / 2
-                                    color: Commons.Color.accent
+                                    color: "transparent"   // monochrome badge: outline + number, no fill
+                                    border.width: Style.normalBorderWidth
+                                    border.color: Commons.Color.popups.text
                                     Text {
                                         anchors.centerIn: parent
                                         textFormat: Text.PlainText
                                         text: String(srow.index + 1)
-                                        color: root.onAccent
+                                        color: Commons.Color.popups.text
                                         font.pixelSize: Style.font.body
                                         font.bold: true
                                     }

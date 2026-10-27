@@ -57,7 +57,6 @@ Item {
                     }
                     PanelActionButton {
                         iconText: "\u00d7"
-                        hoverColor: Commons.Color.urgent
                         onClicked: root.chips = root.chips.filter(function(c, i) { return i !== chip.index; })
                     }
                 }
@@ -110,7 +109,7 @@ Item {
         Row {
             spacing: Style.spacing.xs
             Button { text: "+"; bordered: true; onClicked: files.open() }
-            Button { text: "\ud83d\udcf7 Screenshot"; bordered: true; onClicked: root.screenshot() }
+            Button { text: "Screenshot"; bordered: true; onClicked: root.screenshot() }
             Button { text: "What should I say?"; bordered: true; onClicked: root.quick() }
         }
     }
