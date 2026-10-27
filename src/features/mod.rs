@@ -35,7 +35,6 @@ pub use crate::platform::control;
 pub use crate::platform::hyprland;
 pub use crate::platform::screen;
 pub use crate::platform::shortcuts;
-pub use crate::platform::tray;
 pub use crate::platform::wayland;
 pub use crate::platform::window;
 

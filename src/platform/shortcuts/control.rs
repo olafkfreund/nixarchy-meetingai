@@ -86,8 +86,6 @@ mod tests {
                 Action::SystemAudio => "toggle-system-audio",
                 Action::VoiceInput => "toggle-voice",
                 Action::Screenshot => "screenshot",
-                Action::PrivacyMode => "privacy-mode",
-                Action::NormalMode => "normal-mode",
             };
             assert_eq!(parse_command(flag), Some(action));
         }

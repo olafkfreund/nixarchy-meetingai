@@ -52,11 +52,7 @@ pub struct DashboardView {
     model_task: Option<gpui::Task<()>>,
     devices_task: Option<gpui::Task<()>>,
     capture_task: Option<gpui::Task<()>>,
-    native_icon_hidden: Option<bool>,
     native_always_on_top: Option<bool>,
-    update_task: Option<gpui::Task<()>>,
-    update_status: Option<String>,
-    update_available: bool,
     recap_task: Option<gpui::Task<()>>,
     tone_task: Option<gpui::Task<()>>,
     tone_report: Option<crate::ai::sentiment::Report>,
@@ -134,11 +130,7 @@ impl DashboardView {
             model_task: None,
             devices_task: None,
             capture_task: None,
-            native_icon_hidden: None,
             native_always_on_top: None,
-            update_task: None,
-            update_status: None,
-            update_available: false,
             recap_task: None,
             tone_task: None,
             tone_report: None,
@@ -300,43 +292,6 @@ impl DashboardView {
         self.theme = Theme::from_settings(&self.settings.settings);
     }
 
-    pub fn set_autostart(&mut self, enabled: bool) {
-        match crate::platform::system::startup::set_enabled(
-            enabled,
-            self.settings.settings.startup_privacy,
-        ) {
-            Ok(()) => {
-                self.settings.settings.autostart = enabled;
-                self.save_settings();
-                self.settings.notice = None;
-            }
-            Err(error) => self.settings.notice = Some(error),
-        }
-    }
-
-    fn check_updates(&mut self, cx: &mut Context<Self>) {
-        if self.update_task.is_some() {
-            return;
-        }
-        self.update_status = Some("Checking GitHub…".into());
-        self.update_available = false;
-        self.update_task = Some(cx.spawn(async move |this, cx| {
-            let result = crate::platform::system::updates::latest().await.and_then(|release| {
-                let newer = crate::platform::system::updates::newer(env!("CARGO_PKG_VERSION"), &release.tag_name)?;
-                Ok((newer, release.tag_name))
-            });
-            this.update(cx, |this, cx| {
-                this.update_task = None;
-                this.update_status = Some(match result {
-                    Ok((true, version)) => { this.update_available = true; format!("Update available: {version}. Open the release to download the installer for your system.") }
-                    Ok((false, _)) => "You're up to date with the latest stable GitHub release.".into(),
-                    Err(error) => error,
-                });
-                cx.notify();
-            }).ok();
-        }));
-    }
-
     fn request_recap(&mut self, cx: &mut Context<Self>) {
         if self.recap_task.is_some() {
             return;
@@ -373,17 +328,6 @@ impl DashboardView {
             })
             .ok();
         }));
-    }
-
-    pub fn set_startup_privacy(&mut self, private: bool) {
-        if self.settings.settings.autostart
-            && let Err(error) = crate::platform::system::startup::set_enabled(true, private)
-        {
-            self.settings.notice = Some(error);
-            return;
-        }
-        self.settings.settings.startup_privacy = private;
-        self.save_settings();
     }
 
     pub fn refresh_audio_devices(&mut self, cx: &mut Context<Self>) {
@@ -425,8 +369,8 @@ impl DashboardView {
                 crate::audio::Microphone::start((!device.is_empty()).then_some(device.as_str())).map(|mic| {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     let samples = mic.take(32_000); let name = mic.device_name().to_owned(); mic.stop();
-                    if samples.is_empty() { format!("{name} opened, but no samples arrived. Check the device and microphone privacy settings.") } else { format!("Microphone access works: {name}. Test audio was discarded.") }
-                }).map_err(|e| format!("Microphone access failed: {e}. Check your device and microphone privacy settings."))
+                    if samples.is_empty() { format!("{name} opened, but no samples arrived. Check the device and microphone permissions.") } else { format!("Microphone access works: {name}. Test audio was discarded.") }
+                }).map_err(|e| format!("Microphone access failed: {e}. Check your device and microphone permissions."))
             }
         });
         self.capture_task = Some(cx.spawn(async move |this, cx| {
@@ -1857,10 +1801,7 @@ impl DashboardView {
             .child(div().w_full().flex_shrink_0().child(identity))
             .child(div().w_full().flex_shrink_0().child(description))
             .child(div().flex().flex_wrap().gap(px(8.0)).justify_center()
-                .child(action_button("about-website", &theme, "Visit nixarchy-meetingai ↗", cx, |_, cx, _| cx.open_url("https://nixarchy-meetingai.itssingularity.com")))
-                .child(action_button("about-check-updates", &theme, if self.update_task.is_some() { "Checking…" } else { "Check for updates" }, cx, |this, cx, _| this.check_updates(cx)))
-                .children(self.update_available.then(|| action_button("about-open-update", &theme, "View update ↗", cx, |_, cx, _| cx.open_url("https://github.com/parazeeknova/nixarchy-meetingai/releases/latest")))))
-            .children(self.update_status.as_ref().map(|status| div().w_full().text_center().text_size(scaled(12.0)).text_color(theme.muted_foreground).whitespace_normal().child(status.clone())))
+                .child(action_button("about-website", &theme, "Visit nixarchy-meetingai ↗", cx, |_, cx, _| cx.open_url("https://nixarchy-meetingai.itssingularity.com"))))
             .child(
                 div()
                     .flex()
@@ -2515,27 +2456,15 @@ impl Render for DashboardView {
         if self.dashboard.route() == super::nav::Route::Prompts && self.prompt_search.is_none() {
             self.init_prompt_search(cx);
         }
-        if self.dashboard.route() == super::nav::Route::About && self.update_status.is_none() {
-            self.check_updates(cx);
-        }
         if self.dashboard.route() == super::nav::Route::Audio && self.devices_task.is_none() {
             self.refresh_audio_devices(cx);
         }
-        let hidden = self.settings.settings.hide_app_icon || crate::cli::private_overlay_enabled();
         if self.native_always_on_top != Some(self.settings.settings.always_on_top) {
             crate::platform::window::set_always_on_top(
                 window,
                 self.settings.settings.always_on_top,
             );
             self.native_always_on_top = Some(self.settings.settings.always_on_top);
-        }
-        if self.native_icon_hidden != Some(hidden) {
-            self.settings.notice = match crate::platform::window::set_icon_hidden(window, hidden) {
-                crate::platform::window::Applied::Unsupported if hidden => Some("This compositor controls dock visibility. Use its window rules to hide nixarchy-meetingai's app icon.".into()),
-                crate::platform::window::Applied::Failed => Some("The desktop could not update the app icon visibility.".into()),
-                _ => self.settings.notice.take(),
-            };
-            self.native_icon_hidden = Some(hidden);
         }
         // Text sizes are written in rems, so this one value scales the window.
         window.set_rem_size(crate::ui::theme::rem_size_for(

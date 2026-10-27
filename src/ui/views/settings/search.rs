@@ -26,12 +26,6 @@ const INDEX: &[(Route, &str, &str)] = &[
     ),
     (
         Route::Settings,
-        "Start at login",
-        "startup autostart launch windows linux",
-    ),
-    (Route::Settings, "Hide app icon", "tray taskbar privacy"),
-    (
-        Route::Settings,
         "Screen capture",
         "screenshots context image monitor automatic interval delay on send",
     ),
@@ -120,11 +114,6 @@ const INDEX: &[(Route, &str, &str)] = &[
         "System prompts",
         "instructions search interview meeting create edit delete",
     ),
-    (
-        Route::About,
-        "Check for updates",
-        "version github release website nixarchy-meetingai.itssingularity.com",
-    ),
 ];
 
 fn matches(query: &str, title: &str, keywords: &str) -> bool {
@@ -187,12 +176,12 @@ mod tests {
     use super::*;
     #[test]
     fn searches_multiple_words_across_labels_and_synonyms() {
-        assert!(matches("voice input", "Microphone", INDEX[15].2));
+        assert!(matches("voice input", "Microphone", INDEX[13].2));
         assert!(matches(
             "stt endpoint",
             "Custom speech providers",
-            INDEX[22].2
+            INDEX[20].2
         ));
-        assert!(!matches("speaker password", "System Audio", INDEX[16].2));
+        assert!(!matches("speaker password", "System Audio", INDEX[14].2));
     }
 }

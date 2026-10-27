@@ -3,10 +3,6 @@
 pub mod bindings;
 mod commands;
 pub use commands::parse_command;
-#[cfg(unix)]
-pub mod control;
-#[cfg(windows)]
-#[path = "control_windows.rs"]
 pub mod control;
 pub mod hyprland;
 #[cfg(target_os = "linux")]

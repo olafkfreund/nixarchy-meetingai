@@ -1,7 +1,6 @@
 # nixarchy-meetingai — development tasks
 
 devenv := if env_var_or_default("DEVENV_PROFILE", "") != "" { "" } else { "devenv shell -- " }
-web := "cd web && bun " 
 
 default:
     @just --list
@@ -36,15 +35,6 @@ build:
 run:
     {{devenv}}cargo run
 
-# Install/upgrade the released build with the one-line installer. No clone,
-# no toolchain: downloads the matching release and puts `lenny` on PATH.
-install-script:
-    bash web/public/install
-
-# Check native Linux setup and the lenny command against local release fixtures.
-test-install-script:
-    ./tests/install-sh.test.sh
-
 # Run the unit test suite.
 test:
     {{devenv}}cargo nextest run --workspace
@@ -55,33 +45,15 @@ pre-commit: fmt-check lint typecheck
 # Full pre-push check: pre-commit + all tests.
 pre-push: pre-commit test
 
-# Bump version (patch, minor, major, or auto).
-bump type="patch":
-    {{devenv}}./scripts/bump-version.sh {{type}}
-
 # Install repository git hooks into .git/hooks/
 install-hooks:
     lefthook install --force
-
-# Run the landing site dev server.
-web-dev:
-    cd web && bun run dev
-
-# Format, lint and type check the landing site.
-web-check:
-    cd web && bun run format
-    cd web && bun run lint
-    cd web && bun run typecheck
-
-# Run the landing site test suite.
-web-check-types:
-    cd web && bun run test
 
 # Validate lints, format, types, compile optimized release binary and install locally.
 install: fmt-check lint typecheck
     {{devenv}}cargo build --release
     mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/512x512/apps ~/.local/share/icons/hicolor/scalable/apps
-    {{devenv}}./scripts/install-binary.sh target/release/nixarchy-meetingai ~/.local/bin/nixarchy-meetingai
+    install -m755 target/release/nixarchy-meetingai ~/.local/bin/nixarchy-meetingai
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/dev.nixarchy.meetingai.png
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/lennette.png
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/dev.nixarchy.meetingai.png

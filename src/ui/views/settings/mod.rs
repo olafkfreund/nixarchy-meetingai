@@ -391,54 +391,6 @@ pub fn app_settings(
     )
     .child(row(
         theme,
-        "Launch on startup",
-        "Open nixarchy-meetingai when your system starts",
-        switch(
-            "autostart",
-            theme,
-            s.autostart,
-            cx,
-            |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                let enabled = !view.settings_mut().settings.autostart;
-                view.set_autostart(enabled);
-            },
-        ),
-    ))
-    .child(row(
-        theme,
-        "Startup mode",
-        "Choose which nixarchy-meetingai launch opens when you sign in",
-        segmented(
-            "startup-mode",
-            theme,
-            &[
-                ("Normal", !s.startup_privacy),
-                ("Privacy", s.startup_privacy),
-            ],
-            cx,
-            |view: &mut crate::ui::dashboard::view::DashboardView, index, _| {
-                view.set_startup_privacy(index == 1);
-            },
-        ),
-    ))
-    .child(row(
-        theme,
-        "Hide app icon",
-        "Hide the taskbar or dock icon. Privacy mode also removes the tray icon.",
-        switch(
-            "hide-app-icon",
-            theme,
-            s.hide_app_icon,
-            cx,
-            |view: &mut crate::ui::dashboard::view::DashboardView, _, _| {
-                let enabled = view.settings_mut().settings.hide_app_icon;
-                view.settings_mut().settings.hide_app_icon = !enabled;
-                view.save_settings();
-            },
-        ),
-    ))
-    .child(row(
-        theme,
         "Reduce motion",
         "Disable transitions and pulses",
         switch(
@@ -662,23 +614,6 @@ pub fn audio_settings(
             },
         ),
     ));
-    #[cfg(windows)]
-    {
-        access = access.child(row(
-            theme,
-            "Windows microphone privacy",
-            "Allow microphone access and let desktop apps access your microphone",
-            action(
-                "microphone-privacy",
-                theme,
-                "Open settings",
-                cx,
-                |_view: &mut crate::ui::dashboard::view::DashboardView, cx, _| {
-                    cx.open_url("ms-settings:privacy-microphone")
-                },
-            ),
-        ));
-    }
     #[cfg(target_os = "linux")]
     {
         access = access.child(help_text(theme, "Linux: allow access to the audio server. System audio requires pactl and parec with PulseAudio or PipeWire-Pulse. Wayland screen capture may request permission through your desktop portal; Hyprland uses grim."));

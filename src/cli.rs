@@ -20,8 +20,6 @@ pub fn handle_args() -> Option<String> {
         "--toggle-system-audio" => "toggle-system-audio",
         "--toggle-voice" => "toggle-voice",
         "--screenshot" => "screenshot",
-        "--privacy" => "privacy-mode",
-        "--normal" => "normal-mode",
         "--version" | "-V" => return Some(format!("nixarchy-meetingai {}", env!("CARGO_PKG_VERSION"))),
         "--help" | "-h" => {
             return Some(usage());
@@ -45,7 +43,7 @@ pub fn handle_args() -> Option<String> {
 fn launches_when_absent(command: &str) -> bool {
     matches!(
         command,
-        "toggle-window" | "toggle-dashboard" | "focus-input" | "privacy-mode" | "normal-mode"
+        "toggle-window" | "toggle-dashboard" | "focus-input"
     )
 }
 
@@ -65,45 +63,8 @@ fn usage() -> String {
         "  --help                  print this help",
         "",
         "Run without a flag to launch the app.",
-        "NIXARCHY_MEETINGAI_PRIVATE_OVERLAY=1 disables the desktop tray for protected launches.",
-        "  --privacy               launch without a tray or taskbar icon",
-        "  --normal                launch with a tray icon (default)",
     ]
     .join("\n")
-}
-
-/// Explorer owns tray pixels, so app-window capture exclusion cannot hide them.
-/// Privacy launches omit the tray; normal launches include it.
-pub fn private_overlay_enabled() -> bool {
-    MODE.get_or_init(|| std::sync::atomic::AtomicBool::new(launch_private()))
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
-
-static MODE: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
-pub fn set_private_mode(private: bool) {
-    MODE.get_or_init(|| std::sync::atomic::AtomicBool::new(launch_private()))
-        .store(private, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn launch_private() -> bool {
-    if std::env::args().any(|arg| arg == "--privacy") {
-        return true;
-    }
-    if std::env::args().any(|arg| arg == "--normal") {
-        return false;
-    }
-    private_overlay_for(
-        cfg!(windows),
-        std::env::var("NIXARCHY_MEETINGAI_PRIVATE_OVERLAY").ok().as_deref(),
-    )
-}
-
-fn private_overlay_for(_windows: bool, value: Option<&str>) -> bool {
-    match value {
-        Some("1") => true,
-        Some("0") => false,
-        _ => false,
-    }
 }
 
 /// If an instance is already running, activate its window and return true.
@@ -140,12 +101,7 @@ pub fn instance_lock_path() -> Option<std::path::PathBuf> {
 }
 
 fn runtime_path(name: &str) -> Option<std::path::PathBuf> {
-    #[cfg(unix)]
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)?;
-    #[cfg(windows)]
-    let runtime = directories::ProjectDirs::from("dev", "nixarchy", "nixarchy-meetingai")?
-        .data_local_dir()
-        .join("runtime");
     std::fs::create_dir_all(&runtime).ok()?;
     Some(runtime.join(name))
 }
@@ -188,7 +144,6 @@ impl InstanceLock {
     }
 }
 
-#[cfg(unix)]
 fn send(command: &str) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::net::UnixStream;
@@ -206,42 +161,9 @@ fn send(command: &str) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-#[cfg(windows)]
-fn send(command: &str) -> Result<(), String> {
-    use std::io::Write;
-    let name = crate::platform::control::pipe_name()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    let mut pipe = loop {
-        match std::fs::OpenOptions::new().write(true).open(&name) {
-            Ok(pipe) => break pipe,
-            Err(error)
-                if error.raw_os_error()
-                    == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32)
-                    && std::time::Instant::now() < deadline =>
-            {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(_) => return Err("no running nixarchy-meetingai instance was found".to_owned()),
-        }
-    };
-    writeln!(pipe, "{command}").map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normal_launch_has_a_tray_unless_privacy_is_requested() {
-        for value in [None, Some(""), Some("invalid")] {
-            assert!(!private_overlay_for(true, value));
-        }
-        assert!(private_overlay_for(true, Some("1")));
-        assert!(!private_overlay_for(true, Some("0")));
-        assert!(!private_overlay_for(false, None));
-        assert!(private_overlay_for(false, Some("1")));
-        assert!(!private_overlay_for(false, Some("0")));
-    }
 
     #[test]
     fn control_socket_lives_in_the_runtime_dir() {

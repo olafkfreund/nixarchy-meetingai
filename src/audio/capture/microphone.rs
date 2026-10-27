@@ -91,12 +91,6 @@ impl Microphone {
         Self::start_device(device, false)
     }
 
-    /// WASAPI treats an output endpoint opened for input as loopback capture.
-    #[cfg(windows)]
-    pub(super) fn start_loopback(device: Option<&str>) -> Result<Self, AudioError> {
-        Self::start_device(device, true)
-    }
-
     fn start_device(device: Option<&str>, loopback: bool) -> Result<Self, AudioError> {
         let requested = device
             .map(str::trim)

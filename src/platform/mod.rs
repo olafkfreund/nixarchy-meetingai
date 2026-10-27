@@ -13,4 +13,3 @@ pub use shortcuts::control;
 pub use shortcuts::hyprland;
 pub use shortcuts::wayland;
 
-pub use system::tray;

@@ -292,9 +292,7 @@ pub struct Settings {
     pub font_scale: u32,
     pub show_borders: bool,
     pub autostart: bool,
-    pub startup_privacy: bool,
     pub chat_provider: String,
-    pub hide_app_icon: bool,
     pub always_on_top: bool,
     pub reduce_motion: bool,
     pub overlay_size: String,
@@ -329,9 +327,7 @@ impl Default for Settings {
             font_scale: 100,
             show_borders: true,
             autostart: false,
-            startup_privacy: false,
             chat_provider: String::new(),
-            hide_app_icon: false,
             always_on_top: true,
             reduce_motion: false,
             overlay_size: "sm".to_owned(),
@@ -367,7 +363,6 @@ mod keys {
     pub const FONT_SCALE: &str = "font_scale";
     pub const SHOW_BORDERS: &str = "show_borders";
     pub const AUTOSTART: &str = "autostart";
-    pub const HIDE_APP_ICON: &str = "hide_app_icon";
     pub const ALWAYS_ON_TOP: &str = "always_on_top";
     pub const REDUCE_MOTION: &str = "reduce_motion";
     pub const OVERLAY_SIZE: &str = "overlay_size";
@@ -412,9 +407,7 @@ impl Settings {
             font_scale: number(keys::FONT_SCALE, defaults.font_scale).clamp(85, 140),
             show_borders: flag(keys::SHOW_BORDERS, defaults.show_borders),
             autostart: flag(keys::AUTOSTART, defaults.autostart),
-            startup_privacy: flag("startup_privacy", defaults.startup_privacy),
             chat_provider: text("chat_provider", &defaults.chat_provider),
-            hide_app_icon: flag(keys::HIDE_APP_ICON, defaults.hide_app_icon),
             always_on_top: flag(keys::ALWAYS_ON_TOP, defaults.always_on_top),
             reduce_motion: flag(keys::REDUCE_MOTION, defaults.reduce_motion),
             overlay_size: text(keys::OVERLAY_SIZE, &defaults.overlay_size),
@@ -495,9 +488,7 @@ impl Settings {
             (keys::FONT_SCALE, self.font_scale.to_string()),
             (keys::SHOW_BORDERS, self.show_borders.to_string()),
             (keys::AUTOSTART, self.autostart.to_string()),
-            ("startup_privacy", self.startup_privacy.to_string()),
             ("chat_provider", self.chat_provider.clone()),
-            (keys::HIDE_APP_ICON, self.hide_app_icon.to_string()),
             (keys::ALWAYS_ON_TOP, self.always_on_top.to_string()),
             (keys::REDUCE_MOTION, self.reduce_motion.to_string()),
             (keys::OVERLAY_SIZE, self.overlay_size.clone()),
@@ -613,9 +604,7 @@ mod tests {
             font_scale: 120,
             show_borders: false,
             autostart: true,
-            startup_privacy: true,
             chat_provider: "gemini".into(),
-            hide_app_icon: true,
             always_on_top: false,
             reduce_motion: true,
             overlay_size: "lg".into(),

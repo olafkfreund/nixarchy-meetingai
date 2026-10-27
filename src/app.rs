@@ -176,7 +176,7 @@ pub fn run() {
             let services_for_overlay = services.clone();
             let bounds = Bounds::centered(None, size(px(OVERLAY_WIDTH), px(OVERLAY_HEIGHT)), cx);
             let overlay_options = WindowOptions {
-                show: !cfg!(windows),
+                show: true,
                 app_id: Some("dev.nixarchy.meetingai".into()),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(680.0), px(420.0))),
@@ -190,25 +190,6 @@ pub fn run() {
                 }),
                 ..Default::default()
             };
-
-            // The tray appears without needing a window, so start it together with
-            // the shortcuts.
-            // A tray is drawn by the desktop shell, outside the protected window.
-            let tray_state = if crate::cli::private_overlay_enabled() {
-                tracing::info!("tray disabled for private overlay");
-                None
-            } else {
-                Some(crate::features::tray::Tray::start())
-            };
-            match tray_state.as_ref() {
-                Some(crate::features::tray::Tray::Live(_)) => {
-                    tracing::info!("tray icon available")
-                }
-                Some(crate::features::tray::Tray::Unavailable(reason)) => {
-                    tracing::warn!(%reason, "tray icon unavailable")
-                }
-                None => {}
-            }
 
             // Global shortcuts are grabbed once for the whole process.
             let mut shortcut_listener = None;
@@ -275,22 +256,11 @@ pub fn run() {
             cx.open_window(overlay_options, move |window, cx| {
                 window.set_window_title("nixarchy-meetingai");
                 window.set_app_id("dev.nixarchy.meetingai");
-                let protected = crate::platform::window::protect_from_capture(window);
-                #[cfg(windows)]
-                if protected.is_ok() {
-                    crate::platform::window::set_visible(window, true);
-                }
-                if let Err(error) = protected {
-                    tracing::error!(%error, "refusing to show an unprotected window");
-                    cx.quit();
-                } else {
-                    window.activate_window();
-                }
+                window.activate_window();
                 let overlay = cx.new(|_| {
                     Overlay::new(
                         services_for_overlay,
                         shortcut_listener.clone(),
-                        tray_state,
                         None,
                         control_handle,
                     )
@@ -298,11 +268,6 @@ pub fn run() {
                 if bind_portal {
                     overlay.update(cx, |_, cx| Overlay::bind_portal_shortcuts(cx));
                 }
-                let weak = overlay.downgrade();
-                window.on_window_should_close(cx, move |window, cx| {
-                    weak.update(cx, |overlay, cx| overlay.close_to_tray(window, cx))
-                        .unwrap_or(true)
-                });
                 overlay
             })
             .expect("failed to open the overlay window");
@@ -349,10 +314,6 @@ pub fn open_dashboard_at(
             && dashboard
                 .update(cx, |view, window, cx| {
                     view.navigate_to(route);
-                    #[cfg(windows)]
-                    if !crate::platform::window::set_visible(window, true).is_yes() {
-                        return;
-                    }
                     window.activate_window();
                     cx.notify();
                 })
@@ -363,7 +324,7 @@ pub fn open_dashboard_at(
     }
     let bounds = Bounds::centered(None, size(px(DASHBOARD_WIDTH), px(DASHBOARD_HEIGHT)), cx);
     let options = WindowOptions {
-        show: !cfg!(windows),
+        show: true,
         app_id: Some("dev.nixarchy.meetingai".into()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(960.0), px(540.0))),
@@ -378,16 +339,6 @@ pub fn open_dashboard_at(
 
     if let Err(error) = cx.open_window(options, move |window, cx| {
         window.set_window_title("nixarchy-meetingai dashboard");
-        let protected = crate::platform::window::protect_from_capture(window);
-        #[cfg(windows)]
-        if protected.is_ok() {
-            crate::platform::window::set_visible(window, true);
-            window.activate_window();
-        }
-        if let Err(error) = protected {
-            tracing::error!(%error, "refusing to show an unprotected dashboard");
-            cx.quit();
-        }
         // Each window gets its own connection so a slow page never blocks the
         // overlay's writes.
         let title_config = preferred_chat_config(&services);

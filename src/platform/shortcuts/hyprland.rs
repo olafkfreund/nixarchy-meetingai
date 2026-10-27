@@ -52,8 +52,6 @@ pub fn command(action: Action) -> &'static str {
         Action::SystemAudio => "nixarchy-meetingai --toggle-system-audio",
         Action::VoiceInput => "nixarchy-meetingai --toggle-voice",
         Action::Screenshot => "nixarchy-meetingai --screenshot",
-        Action::PrivacyMode => "nixarchy-meetingai --privacy",
-        Action::NormalMode => "nixarchy-meetingai --normal",
     }
 }
 

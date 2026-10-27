@@ -9,8 +9,6 @@ pub fn parse_command(command: &str) -> Option<Action> {
         "toggle-system-audio" => Some(Action::SystemAudio),
         "toggle-voice" => Some(Action::VoiceInput),
         "screenshot" => Some(Action::Screenshot),
-        "privacy-mode" => Some(Action::PrivacyMode),
-        "normal-mode" => Some(Action::NormalMode),
         _ => None,
     }
 }

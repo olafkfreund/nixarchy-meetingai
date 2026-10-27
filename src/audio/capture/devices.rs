@@ -92,9 +92,6 @@ pub fn mark_default(devices: &mut [Device], default_name: Option<&str>) {
 
 /// Enumerate devices on this machine.
 pub fn enumerate() -> Devices {
-    #[cfg(windows)]
-    let result = enumerate_windows();
-    #[cfg(not(windows))]
     let result = enumerate_linux();
     match result {
         Ok(devices) => devices,
@@ -105,7 +102,6 @@ pub fn enumerate() -> Devices {
     }
 }
 
-#[cfg(not(windows))]
 fn pactl(args: &[&str]) -> Result<String, String> {
     let output = std::process::Command::new("pactl")
         .args(args)
@@ -118,7 +114,6 @@ fn pactl(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-#[cfg(not(windows))]
 fn enumerate_linux() -> Result<Devices, String> {
     // Use the same backend and identifiers as Microphone::start. Pulse source
     // names cannot be passed to CPAL's ALSA device selector.
@@ -146,49 +141,6 @@ fn enumerate_linux() -> Result<Devices, String> {
         inputs,
         outputs,
         error,
-    })
-}
-
-#[cfg(windows)]
-fn enumerate_windows() -> Result<Devices, String> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-    let host = cpal::default_host();
-    let inputs = crate::audio::microphone::input_devices()
-        .into_iter()
-        .map(|d| Device {
-            id: d.id,
-            name: d.name,
-            is_default: d.is_default,
-        })
-        .collect();
-    let default = host
-        .default_output_device()
-        .and_then(|device| device.id().ok());
-    let devices = match host.output_devices() {
-        Ok(devices) => devices,
-        Err(error) => {
-            return Ok(Devices {
-                inputs,
-                outputs: Vec::new(),
-                error: Some(error.to_string()),
-            });
-        }
-    };
-    let outputs = devices
-        .filter_map(|device| {
-            let name = device.description().ok()?.name().to_owned();
-            let id = device.id().ok()?;
-            Some(Device {
-                id: format!("cpal:id:{id}"),
-                is_default: default.as_ref() == Some(&id),
-                name,
-            })
-        })
-        .collect();
-    Ok(Devices {
-        inputs,
-        outputs,
-        error: None,
     })
 }
 

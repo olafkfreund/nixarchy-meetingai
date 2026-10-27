@@ -340,7 +340,6 @@ pub struct Overlay {
     theme: Theme,
     /// Provider id backing the active credential.
     model_provider: Option<String>,
-    native_icon_hidden: Option<bool>,
     conversation_response: Option<(crate::core::settings::ResponseLength, String)>,
     finishing_meeting_id: Option<String>,
     finishing_meeting_offsets: (f64, i64),
@@ -497,8 +496,6 @@ pub struct Overlay {
     control: Option<std::sync::Arc<crate::features::control::ControlListener>>,
     /// Wayland portal shortcuts, polled alongside the X11 listener.
     portal: Option<std::sync::Arc<crate::features::wayland::PortalShortcuts>>,
-    /// System tray handle, polled alongside shortcuts.
-    tray: Option<crate::features::tray::Tray>,
     /// Overlay surface opacity, 0.0 (fully transparent) to 1.0.
     opacity: f32,
     /// UI text size as a percentage of the base scale.
@@ -527,7 +524,6 @@ impl Overlay {
     pub fn new(
         services: crate::app::Services,
         shortcuts: Option<std::rc::Rc<crate::features::shortcuts::ShortcutListener>>,
-        tray: Option<crate::features::tray::Tray>,
         portal: Option<std::sync::Arc<crate::features::wayland::PortalShortcuts>>,
         control: Option<std::sync::Arc<crate::features::control::ControlListener>>,
     ) -> Self {
@@ -718,7 +714,6 @@ impl Overlay {
             transcript_tail: (0, 0),
             window_visible: true,
             native_always_on_top: None,
-            native_icon_hidden: None,
             conversation_response: None,
             finishing_meeting_id: None,
             finishing_meeting_offsets: (0.0, 0),
@@ -733,7 +728,6 @@ impl Overlay {
             named_conversations: Vec::new(),
             focus_composer: false,
             system_audio: true,
-            tray,
             portal,
             control,
             shortcut_poll: None,
@@ -1952,7 +1946,6 @@ impl Overlay {
                         overlay.poll_shortcuts(cx);
                         overlay.poll_portal(cx);
                         overlay.poll_control(cx);
-                        overlay.poll_tray(cx);
                         if changed {
                             cx.notify();
                         }
@@ -2066,43 +2059,6 @@ impl Overlay {
         self.meeting_id = None;
     }
 
-    /// Act on tray clicks and menu choices.
-    fn poll_tray(&mut self, cx: &mut Context<Self>) {
-        use crate::features::tray::TrayAction;
-        let Some(tray) = self.tray.as_ref() else {
-            return;
-        };
-        tray.set_tooltip(if self.is_listening() {
-            "nixarchy-meetingai · listening"
-        } else {
-            "nixarchy-meetingai"
-        });
-        let actions = tray.poll();
-        for action in actions {
-            cx.notify();
-            match action {
-                TrayAction::ShowOverlay => self.show_window(cx),
-                TrayAction::OpenDashboard => {
-                    crate::app::open_dashboard(cx, self.services.clone());
-                }
-                TrayAction::ToggleListening => {
-                    if self.is_listening() {
-                        self.finish_session_title(cx);
-                    } else {
-                        self.begin_capture(cx);
-                    }
-                }
-                TrayAction::PrivacyMode => {
-                    self.handle_shortcut(crate::features::shortcuts::Action::PrivacyMode, cx);
-                }
-                TrayAction::Quit => {
-                    self.show_window(cx);
-                    self.show_dialog(session_menu::Dialog::Quit);
-                }
-            }
-        }
-    }
-
     fn shortcut_enabled(&self, action: crate::features::shortcuts::Action) -> bool {
         (self.window_visible && !self.dialog_open)
             || action == crate::features::shortcuts::Action::ToggleWindow
@@ -2114,18 +2070,6 @@ impl Overlay {
         cx: &mut Context<Self>,
     ) {
         use crate::features::shortcuts::Action;
-        if matches!(action, Action::PrivacyMode | Action::NormalMode) {
-            let private = action == Action::PrivacyMode;
-            crate::cli::set_private_mode(private);
-            self.tray = if private {
-                None
-            } else {
-                Some(crate::features::tray::Tray::start())
-            };
-            self.show_window(cx);
-            cx.refresh_windows();
-            return;
-        }
         // X11, the Wayland portal and compositor control commands all enter here.
         // While hidden, only the visibility shortcut may act on the app.
         if !self.shortcut_enabled(action) {
@@ -2133,7 +2077,6 @@ impl Overlay {
         }
         cx.notify();
         match action {
-            Action::PrivacyMode | Action::NormalMode => unreachable!(),
             Action::Screenshot => self.capture_screen(cx),
             Action::ToggleWindow => self.toggle_window(cx),
             Action::ToggleDashboard => {
@@ -2167,10 +2110,6 @@ impl Overlay {
     }
 
     fn show_window(&mut self, cx: &mut Context<Self>) {
-        #[cfg(windows)]
-        if !self.set_native_visibility(true, cx) {
-            return;
-        }
         if !self.window_visible
             && crate::features::hyprland::is_hyprland()
             && let Err(error) = crate::features::hyprland::set_overlay_visible(true)
@@ -2194,36 +2133,8 @@ impl Overlay {
                 || self.profile_menu_open)
     }
 
-    /// Keep the window entity, tray service and control listener alive on close.
-    pub(crate) fn close_to_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        #[cfg(not(windows))]
-        let _ = window;
-        if !matches!(self.tray, Some(crate::features::tray::Tray::Live(_))) {
-            return true;
-        }
-        if self.window_visible {
-            #[cfg(windows)]
-            {
-                // The close callback already borrows this window. Use that
-                // handle instead of trying to update the same window again.
-                if crate::platform::window::set_visible(window, false).is_yes() {
-                    self.window_visible = false;
-                    self.cancel_dictation();
-                    cx.notify();
-                }
-            }
-            #[cfg(not(windows))]
-            self.toggle_window(cx);
-        }
-        false
-    }
-
     fn toggle_window(&mut self, cx: &mut Context<Self>) {
         if self.window_visible {
-            #[cfg(windows)]
-            if !self.set_native_visibility(false, cx) {
-                return;
-            }
             if crate::features::hyprland::is_hyprland() {
                 if let Err(error) = crate::features::hyprland::set_overlay_visible(false) {
                     tracing::warn!(%error, "could not hide overlay");
@@ -2238,33 +2149,6 @@ impl Overlay {
             self.show_window(cx);
         }
         cx.notify();
-    }
-
-    #[cfg(windows)]
-    fn set_native_visibility(&self, visible: bool, cx: &mut Context<Self>) -> bool {
-        let mut found = false;
-        let mut applied = true;
-        for handle in cx.windows() {
-            let overlay = handle.downcast::<Self>().is_some();
-            if overlay
-                || handle
-                    .downcast::<crate::features::dashboard::view::DashboardView>()
-                    .is_some()
-            {
-                found |= overlay;
-                applied &= handle
-                    .update(cx, |_, window, _| {
-                        let applied =
-                            crate::platform::window::set_visible(window, visible).is_yes();
-                        if applied && visible && overlay {
-                            crate::platform::window::focus(window);
-                        }
-                        applied
-                    })
-                    .unwrap_or(false);
-            }
-        }
-        found && applied
     }
 
     fn begin_capture(&mut self, cx: &mut Context<Self>) {
@@ -4835,21 +4719,6 @@ fn chrono_like_now() -> String {
 }
 
 /// The system UTC offset in seconds, read once from `date`.
-#[cfg(windows)]
-fn local_offset_seconds() -> i64 {
-    use windows_sys::Win32::System::Time::*;
-    let mut zone = TIME_ZONE_INFORMATION::default();
-    // SAFETY: initialized structure with the exact Win32 layout.
-    let status = unsafe { GetTimeZoneInformation(&mut zone) };
-    let seasonal = match status {
-        1 => zone.StandardBias,
-        2 => zone.DaylightBias,
-        _ => 0,
-    };
-    -(zone.Bias as i64 + seasonal as i64) * 60
-}
-
-#[cfg(not(windows))]
 fn local_offset_seconds() -> i64 {
     static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *OFFSET.get_or_init(|| {
@@ -5334,11 +5203,6 @@ impl Render for Overlay {
             window.request_animation_frame();
         }
 
-        let hidden = self.runtime_settings.hide_app_icon || crate::cli::private_overlay_enabled();
-        if self.native_icon_hidden != Some(hidden) {
-            crate::platform::window::set_icon_hidden(window, hidden);
-            self.native_icon_hidden = Some(hidden);
-        }
         if self.native_always_on_top != Some(self.runtime_settings.always_on_top) {
             let above = self.runtime_settings.always_on_top;
             if !crate::platform::window::set_always_on_top(window, above).is_yes() {
@@ -5575,7 +5439,7 @@ mod tests {
             database_path: None,
             database_ready: false,
         };
-        (path, Overlay::new(services, None, None, None, None))
+        (path, Overlay::new(services, None, None, None))
     }
 
     #[test]
