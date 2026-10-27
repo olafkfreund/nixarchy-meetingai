@@ -30,7 +30,8 @@ Item {
 
     readonly property bool iv: client.settings.meeting_mode === "interviewer"
     readonly property var tabs: root.iv ? ["restore", "profiles", "candidate", "prompts", "providers", "settings"] : ["restore", "profiles", "prompts", "providers", "settings"]
-    readonly property var cand: client.cand   // candidate.get of the current candidate
+    readonly property var cand: client.cand   // candidate.get of the shown candidate
+    readonly property bool candLinked: root.cand !== null && !!root.cand.candidate.meeting_id   // already interviewed: read-only
     property string genNote: ""
     property bool confirmDelete: false
     readonly property var promptKinds: ["answer", "live_answer", "follow_up", "recap"]
@@ -74,7 +75,11 @@ Item {
         root.confirmDelete = false;
     }
     function fail(r) { if (!r.ok) root.client.lastError = String(r.error); }
-    function pickCandidate(id) { root.client.send("session.new", { candidate: id }, root.fail); }
+    // Any candidate can be opened to view or delete; only one without a meeting is chosen for a new interview.
+    function pickCandidate(id, unlinked) {
+        root.client.viewCandidate(id);
+        if (unlinked) root.client.send("session.new", { candidate: id }, root.fail);
+    }
     function moveQuestion(i, d) {
         var ids = root.cand.questions.map(function(q) { return q.id; }), t = ids[i + d];
         ids[i + d] = ids[i]; ids[i] = t;
@@ -278,17 +283,23 @@ Item {
                     spacing: Style.spacing.xs
                     Dropdown {
                         label: "Candidate"
-                        value: String(root.client.currentCandidate)
-                        options: root.client.candidates.map(function(c) { return { value: c.id, label: (c.name || "Unnamed") + (c.meeting_id ? "" : " (new)") }; })
-                        onChanged: function(v) { root.pickCandidate(v); }
+                        value: String(root.client.shownCandidate)
+                        options: root.client.candidates.map(function(c) { return { value: c.id, label: (c.name || "Unnamed") + (c.meeting_id ? " (interviewed)" : " (new)") }; })
+                        onChanged: function(v) { root.pickCandidate(v, root.client.candidates.some(function(c) { return c.id === v && !c.meeting_id; })); }
                     }
                     TextField { id: newCand; anchors.bottom: parent.bottom; width: Style.space(180); placeholderText: "Candidate name" }
                     IconButton { ts: root.ts; anchors.bottom: parent.bottom; text: "New"; bordered: true; enabled: newCand.text.trim() !== ""; opacity: enabled ? 1 : 0.5
-                        onClicked: root.client.send("candidate.create", { name: newCand.text.trim() }, function(r) { root.fail(r); if (!r.ok) return; newCand.text = ""; root.client.refreshCandidates(); root.pickCandidate(r.data.id); }) }
+                        onClicked: root.client.send("candidate.create", { name: newCand.text.trim() }, function(r) { root.fail(r); if (!r.ok) return; newCand.text = ""; root.client.refreshCandidates(); root.pickCandidate(r.data.id, true); }) }
                 }
                 Hint { visible: root.cand === null; text: "Pick or create a candidate to prepare the interview. Their data stays in this interview only." }
                 Column {
                     visible: root.cand !== null
+                    width: parent.width
+                    spacing: Style.spacing.xs
+                    Hint { visible: root.candLinked; text: "This interview has been recorded. Its data is read-only here; you can delete it." }
+                  Column {   // everything but Delete is locked once the interview has a meeting
+                    enabled: !root.candLinked
+                    opacity: enabled ? 1 : 0.6
                     width: parent.width
                     spacing: Style.spacing.xs
                     Row {
@@ -356,12 +367,13 @@ Item {
                         IconButton { id: addBtn; anchors.right: parent.right; ts: root.ts; text: "Add"; bordered: true; enabled: addQ.text.trim() !== ""; opacity: enabled ? 1 : 0.5
                             onClicked: root.client.send("questions.add", { candidate: root.cand.candidate.id, text: addQ.text.trim() }, function(r) { root.fail(r); if (r.ok) { addQ.text = ""; root.client.refreshCand(); } }) }
                     }
+                  }
                     IconButton { ts: root.ts; text: root.confirmDelete ? "Click again to delete" : "Delete candidate data"; bordered: true; active: root.confirmDelete
                         tooltipText: "Removes the candidate, documents, questions and the linked meeting"
                         onClicked: {
                             if (!root.confirmDelete) { root.confirmDelete = true; return; }
                             root.confirmDelete = false;
-                            root.client.send("candidates.delete", { id: root.cand.candidate.id }, function(r) { root.fail(r); root.client.send("session.new", {}, root.fail); root.client.refreshCandidates(); });
+                            root.client.send("candidates.delete", { id: root.cand.candidate.id }, function(r) { root.fail(r); root.client.viewId = ""; root.client.refreshCand(); root.client.refreshCandidates(); });
                         }
                     }
                 }

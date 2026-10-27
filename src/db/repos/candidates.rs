@@ -190,7 +190,7 @@ pub fn question(connection: &Connection, id: &str) -> Result<Option<Question>> {
 
 pub fn questions(connection: &Connection, candidate_id: &str) -> Result<Vec<Question>> {
     let mut statement = connection.prepare(&format!(
-        "SELECT {QUESTION_COLUMNS} FROM interview_questions WHERE candidate_id = ?1 ORDER BY position"
+        "SELECT {QUESTION_COLUMNS} FROM interview_questions WHERE candidate_id = ?1 ORDER BY position, rowid"
     ))?;
     let rows = statement.query_map(params![candidate_id], question_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -237,13 +237,26 @@ pub fn delete_question(connection: &Connection, id: &str) -> Result<bool> {
     Ok(connection.execute("DELETE FROM interview_questions WHERE id = ?1", params![id])? > 0)
 }
 
+/// Ids of local-only interviews' meetings and of the chats about them, so agents never list them.
+pub fn local_only_ids(connection: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut statement = connection.prepare(
+        "SELECT meeting_id FROM candidates WHERE local_only = 1 AND meeting_id IS NOT NULL
+         UNION SELECT mc.conversation_id FROM meeting_conversations mc
+           JOIN candidates c ON c.meeting_id = mc.meeting_id WHERE c.local_only = 1",
+    )?;
+    let rows = statement.query_map([], |row| row.get(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// Remove the candidate, their documents and questions, and the linked meeting with every
 /// row that hangs off it, in one transaction. Returns false when the candidate is unknown.
+/// Chats that were never linked to the meeting (started before recording, no meeting yet)
+/// cannot be found from here; `record_start` links the open chat when the meeting is made.
 pub fn delete_all(connection: &Connection, id: &str) -> Result<bool> {
-    let Some(candidate) = get(connection, id)? else {
+    let tx = connection.unchecked_transaction()?;
+    let Some(candidate) = get(&tx, id)? else {
         return Ok(false);
     };
-    let tx = connection.unchecked_transaction()?;
     if let Some(meeting) = candidate.meeting_id {
         // Chat about the interview is candidate data too; messages cascade from the conversation.
         tx.execute(
@@ -253,6 +266,10 @@ pub fn delete_all(connection: &Connection, id: &str) -> Result<bool> {
         tx.execute("DELETE FROM meetings WHERE id = ?1", params![meeting])?;
         tx.execute(
             "DELETE FROM notes_fts WHERE meeting_id = ?1",
+            params![meeting],
+        )?;
+        tx.execute(
+            "DELETE FROM meeting_speakers WHERE meeting_id = ?1",
             params![meeting],
         )?;
     }
@@ -383,6 +400,12 @@ mod tests {
             params![m],
         )
         .unwrap();
+        c.execute(
+            "INSERT INTO meeting_speakers VALUES (?1, '1', 'Ada')",
+            params![m],
+        )
+        .unwrap();
+        set_local_only(c, &a.id, true).unwrap();
         c.execute("INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('conv', 't', 0, 0)", []).unwrap();
         c.execute(
             "INSERT INTO meeting_conversations VALUES (?1, 'conv')",
@@ -390,6 +413,8 @@ mod tests {
         )
         .unwrap();
 
+        let hidden = local_only_ids(c).unwrap();
+        assert!(hidden.contains(&m) && hidden.contains("conv") && !hidden.contains(&other));
         assert!(delete_all(c, &a.id).unwrap());
         assert!(!delete_all(c, &a.id).unwrap());
         for table in [
@@ -400,6 +425,7 @@ mod tests {
             "meeting_conversations",
             "conversations",
             "notes_fts",
+            "meeting_speakers",
             "candidate_documents",
         ] {
             let left: i64 = match table {
@@ -407,6 +433,7 @@ mod tests {
                 | "meeting_note_chunks"
                 | "meeting_recaps"
                 | "meeting_items"
+                | "meeting_speakers"
                 | "notes_fts" => c
                     .query_row(
                         &format!("SELECT COUNT(*) FROM {table} WHERE meeting_id = ?1"),

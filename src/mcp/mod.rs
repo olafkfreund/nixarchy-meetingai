@@ -654,9 +654,10 @@ impl ServerHandler for Server {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         let mut resources = Vec::new();
+        // A refused probe (local-only interview) just leaves "current" out.
         let current = request("transcript.get", json!({"limit": 1}))
             .await
-            .map_err(internal)?;
+            .unwrap_or(json!({"meeting": null}));
         if !current["meeting"].is_null() {
             resources.push(
                 Resource::new("meeting://current/transcript", "Current meeting transcript")

@@ -32,8 +32,19 @@ Item {
         }
     }
 
+    // The overlay's consent banner lives in another Client, so a refused start (candidate not told,
+    // or local_only) is shown as a notification here; the interviewer then starts it from the overlay.
+    function startNotes(quiet) {
+        client.send("record.start", {}, function(r) {
+            var e = String(r.error || "");
+            if (r.ok) { if (!quiet) Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", "Taking notes"]); return; }
+            Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", e.replace(/^(consent_required|local_only): /, "") + (e.indexOf("consent_required: ") === 0 ? " Open the overlay and start recording." : "")]);
+        });
+    }
+
     function act(what) {
-        client.send(what === "start" ? "record.start" : "record.stop", {});
+        if (what === "start") root.startNotes(true);
+        else client.send("record.stop", {});
     }
 
     function offer(body, action, label) {
@@ -49,8 +60,7 @@ Item {
         if (!root.seen) return;
         if (root.callActive && !client.recording) {
             if (client.settings.auto_record_on_call === true) {
-                client.send("record.start", {});
-                Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", "Taking notes"]);
+                root.startNotes(false);
             } else {
                 root.offer("A call started", "take", "Take notes");
             }

@@ -36,7 +36,9 @@ Item {
     readonly property string currentMeeting: String(state.meeting || "")
     onCurrentMeetingChanged: { if (currentMeeting === "") root.items = []; else root.refreshItems(currentMeeting); }
     readonly property string currentCandidate: String(state.candidate || "")
-    onCurrentCandidateChanged: root.refreshCand()
+    property string viewId: ""      // a candidate opened in the Library for viewing or deletion, without selecting it
+    readonly property string shownCandidate: viewId !== "" ? viewId : currentCandidate
+    onCurrentCandidateChanged: { root.viewId = ""; root.refreshCand(); }
 
     readonly property int maxLines: 500
     property int seq: 0
@@ -75,9 +77,12 @@ Item {
     }
 
     function refreshCand() {
-        if (root.currentCandidate === "") { root.cand = null; return; }
-        root.send("candidate.get", { id: root.currentCandidate }, function(r) { if (r.ok) root.cand = r.data; });
+        var id = root.shownCandidate;
+        if (id === "") { root.cand = null; return; }
+        root.send("candidate.get", { id: id }, function(r) { if (r.ok) root.cand = r.data; else if (id === root.viewId) { root.viewId = ""; root.refreshCand(); } });
     }
+
+    function viewCandidate(id) { root.viewId = id; root.refreshCand(); }
 
     // Optimistic: the daemon's questions.updated refetch settles it.
     function updateQuestion(id, fields) {
@@ -173,7 +178,7 @@ Item {
         case "notice": root.addRow("notice", "", String(ev.text || ""), false); break;
         case "items.updated": if (ev.meeting === root.state.meeting) root.refreshItems(ev.meeting); break;
         case "earlier_item": root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
-        case "questions.updated": if (ev.candidate === root.currentCandidate) root.refreshCand(); break;
+        case "questions.updated": if (ev.candidate === root.shownCandidate) root.refreshCand(); break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
         case "error": root.lastError = String(ev.message || ""); break;
         }

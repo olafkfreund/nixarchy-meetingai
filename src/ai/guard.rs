@@ -10,7 +10,7 @@ pub const WITHHELD: &str = "The answer contained an assessment and was withheld.
 pub const REMINDER: &str = "Your previous answer contained an assessment of the candidate. Report only what was said and what is unverified: no score, rating, ranking, hiring recommendation, or inference about emotion, personality, confidence or honesty.";
 
 /// Whole words and phrases (compared case-insensitively on word boundaries).
-const PATTERNS: [&str; 18] = [
+const PATTERNS: &[&str] = &[
     "score",
     "scores",
     "rating",
@@ -25,19 +25,27 @@ const PATTERNS: [&str; 18] = [
     "weak candidate",
     "red flag",
     "culture fit",
+    "good fit",
+    "fit for",
     "nervous",
+    "anxious",
     "confident",
+    "confidence",
     "honest",
     "dishonest",
+    "trustworthy",
+    "personality",
+    "seemed anxious",
+    "seemed unsure",
 ];
-/// The same, kept apart only to stay under clippy's line width.
-const MORE: [&str; 3] = ["personality", "seemed anxious", "seemed unsure"];
 
 /// The pattern that makes `text` an assessment, if any. False positives ("hire date")
-/// only cost one retry, so the list stays strict.
+/// only cost one retry, so the list stays strict. Quoted speech is the candidate's own
+/// words, not the model's judgement, so it is ignored.
 pub fn assessment(text: &str) -> Option<&'static str> {
-    if has_out_of_ten(text) {
-        return Some("n/10");
+    let text = unquoted(text);
+    if has_ratio(&text) {
+        return Some("n/m");
     }
     let words: Vec<String> = text
         .split(|c: char| !c.is_alphanumeric())
@@ -46,20 +54,54 @@ pub fn assessment(text: &str) -> Option<&'static str> {
         .collect();
     let padded = format!(" {} ", words.join(" "));
     PATTERNS
-        .into_iter()
-        .chain(MORE)
+        .iter()
         .find(|p| padded.contains(&format!(" {p} ")))
+        .copied()
 }
 
-/// `\d+\s*/\s*10` not followed by another digit.
-fn has_out_of_ten(text: &str) -> bool {
-    let b = text.as_bytes();
-    (0..b.len()).filter(|&i| b[i] == b'/').any(|i| {
-        let before = text[..i].trim_end().as_bytes().last();
-        let after = text[i + 1..].trim_start();
-        before.is_some_and(u8::is_ascii_digit)
-            && after.starts_with("10")
-            && !after[2..].starts_with(|c: char| c.is_ascii_digit())
+/// `text` without anything inside "…", “…” or '…'. An apostrophe inside a word is not a quote,
+/// and a quote that never closes is kept (it must not hide what follows it).
+fn unquoted(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let close = match chars[i] {
+            '"' => Some('"'),
+            '“' => Some('”'),
+            '\'' if i == 0 || !chars[i - 1].is_alphanumeric() => Some('\''),
+            _ => None,
+        };
+        let end = close.and_then(|q| {
+            (i + 1..chars.len()).find(|&j| {
+                chars[j] == q
+                    && (q != '\'' || !chars.get(j + 1).is_some_and(|c| c.is_alphanumeric()))
+            })
+        });
+        match end {
+            Some(j) => {
+                out.push(' ');
+                i = j + 1;
+            }
+            None => {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// `\d+\s*(/|out of)\s*\d+`
+fn has_ratio(text: &str) -> bool {
+    let t = text.to_lowercase();
+    ["/", "out of"].into_iter().any(|sep| {
+        t.match_indices(sep).any(|(i, _)| {
+            t[..i].trim_end().ends_with(|c: char| c.is_ascii_digit())
+                && t[i + sep.len()..]
+                    .trim_start()
+                    .starts_with(|c: char| c.is_ascii_digit())
+        })
     })
 }
 
@@ -93,13 +135,25 @@ mod tests {
             "A Strong Candidate",
             "Recommend against.",
             "Clear red flag here",
+            "4 out of 5 on rust",
+            "She lacks confidence",
+            "Seemed anxious about it",
+            "A good fit for the team",
+            "Not trustworthy",
+            "He said \"fine\" but she is a strong candidate",
+            "It's a 'maybe' and I'd hire her",
+            "An unclosed \"quote then I'd hire her",
         ] {
             assert!(assessment(hit).is_some(), "{hit}");
         }
         for miss in [
             "What was your part in the migration?",
             "\"We moved 10 services\" - which ones?",
-            "Tell me about the 1/100 failure rate.",
+            "Tell me about the failure rate.",
+            "She said \"I got a 9/10 rating\" in the story, so ask about that",
+            "She said \u{201c}I was nervous and 7/10 confident\u{201d}, which part?",
+            "Quoted: 'I was anxious that day' - what changed?",
+            "Don't assume; it's the candidate's call",
             "Their hire date was in May",
         ] {
             // "hire date" is a known cheap false positive, asserted separately below.

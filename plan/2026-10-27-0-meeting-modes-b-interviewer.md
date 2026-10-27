@@ -223,3 +223,26 @@ step 8.
   screenshots; the client sends `session.new{}` after deleting a
   candidate. Auto-record in interviewer mode hits the consent gate and
   shows an error: consent stays a manual action.
+- **Review fixes (Opus):** local-only is decided per data: `chain`,
+  `chat_config` and `speech_config` take `local`, computed as the session
+  flag OR the meeting's candidate (`local_for`). "Local" also requires a
+  loopback endpoint and no `-cloud` model. Restoring an interview chat
+  re-selects its candidate. MCP `chat.send` is refused and local-only
+  meetings are left out of MCP `session.list`. The consent gate and meeting
+  link apply whenever a candidate is selected, whatever the mode. Turning
+  local-only on is refused while that candidate is recording.
+- **Guard (review):** text inside quotes is ignored, so the candidate's own
+  words pass; it also checks rolling chunks (redacted on a hit), titles
+  (fall back to "Interview") and chat whenever a candidate is selected.
+  A generic `n/m` ratio pattern now also hits dates like "3/4".
+- **Deletion (review):** also removes `meeting_speakers`; refused while
+  notes are being written; `session.delete` of an interview meeting deletes
+  the candidate; past candidates open read-only in the Candidate tab with
+  Delete available. A chat started before recording and never recorded has
+  no link to the candidate and is not deleted with it (documented).
+- **Coverage** divides by the question's word count (≥ 3 words) over the
+  last two mic lines; sources need ≥ 4 words and match after whitespace
+  and soft-hyphen normalisation; chat and probes see the question bank,
+  never the CV.
+- **Auto-record / IPC** in interviewer mode reports the consent refusal as
+  a desktop notification (the banner lives in the overlay).

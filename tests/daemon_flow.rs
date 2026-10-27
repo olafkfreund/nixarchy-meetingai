@@ -638,3 +638,123 @@ async fn interviewer_session_then_delete_leaves_nothing() {
     }
     assert_eq!(client.call("quit", json!({})).await["ok"], true);
 }
+
+static CLOUD_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts every request and answers with questions: a soft-hyphenated real quote, a 3-word quote
+/// (too short), and 11 more good ones so the bank overflows 12.
+fn counting_reply(_request: &str) -> String {
+    CLOUD_HITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut questions = vec![
+        json!({"text": "Q hyphen?", "source": "led the  infrastructure team", "competency": null}),
+        json!({"text": "Q short?", "source": "Ten years", "competency": null}),
+    ];
+    questions.extend((0..11).map(|i| json!({"text": format!("Q{i}?"), "source": "Led the infrastructure team", "competency": null})));
+    json!(questions).to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_only_data_never_reaches_a_cloud_model_even_without_the_session_flag() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let root = std::env::temp_dir().join(format!("nixarchy-lo-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let vault_dir = root.join("data");
+    {
+        let vault = Vault::open(&vault_dir).unwrap();
+        let mut credential = credentials::Credential::chat("gemini", SECRET);
+        credential.model = "mock".into();
+        credential.base_url = fake_provider_with(counting_reply).await;
+        credentials::save(&vault, &credential).unwrap();
+    }
+    let db_path = vault_dir.join("test.db");
+    let daemon = Daemon::new(Options {
+        db_path: db_path.clone(),
+        vault_dir,
+        capture: false,
+    })
+    .unwrap();
+    let socket = cli::socket_path_in(&root.join("run"));
+    {
+        let (socket, daemon) = (socket.clone(), daemon.clone());
+        tokio::spawn(async move { server::serve(&socket, daemon).await });
+    }
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut client = Client::connect(&socket).await;
+    for (key, value) in [
+        ("chat_provider", json!("gemini")),
+        ("chat_model", json!("")),
+    ] {
+        client
+            .call("settings.set", json!({"key": key, "value": value}))
+            .await;
+    }
+    let candidate = async |client: &mut Client, local: bool| -> String {
+        let id = client
+            .call("candidate.create", json!({"name": "Ada"}))
+            .await["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let path = root.join(format!("cv-{id}.txt"));
+        std::fs::write(&path, "Ada. Led the infra\u{ad}\nstructure team at Acme.").unwrap();
+        client
+            .call(
+                "candidate.attach",
+                json!({"id": id, "kind": "cv", "path": path}),
+            )
+            .await;
+        client
+            .call("candidate.local_only", json!({"id": id, "on": local}))
+            .await;
+        id
+    };
+
+    // C3: the session has no candidate, but the target is local-only: nothing goes to gemini.
+    let local = candidate(&mut client, true).await;
+    let refused = client
+        .call("questions.generate", json!({"candidate": local}))
+        .await;
+    assert_ne!(refused["ok"], true, "{refused}");
+    assert_eq!(
+        CLOUD_HITS.load(SeqCst),
+        0,
+        "a local-only CV reached the cloud"
+    );
+
+    // C1: regenerating the notes of a local-only interview does not call the cloud either.
+    {
+        let db = nixarchy_meetingai::db::Database::open(&db_path).unwrap();
+        let c = db.connection();
+        let m = nixarchy_meetingai::db::meetings::start(c, "T", "", "en", None, Default::default())
+            .unwrap();
+        nixarchy_meetingai::db::meetings::add_line(c, &m, "them", None, "I led it", 0.0, 1.0)
+            .unwrap();
+        nixarchy_meetingai::db::repos::candidates::link_meeting(c, &local, &m).unwrap();
+        client.call("notes.regenerate", json!({"meeting": m})).await;
+        // Ollama is not running here, so the local attempt fails; that is the point.
+        client.event("error").await;
+    }
+    assert_eq!(
+        CLOUD_HITS.load(SeqCst),
+        0,
+        "local-only notes reached the cloud"
+    );
+
+    // M2: a quote broken by a soft hyphen and extra spaces is found; a 3-word quote is not;
+    // 13 questions keep 12 at most and count the overflow as dropped.
+    let open = candidate(&mut client, false).await;
+    let generated = client
+        .call("questions.generate", json!({"candidate": open}))
+        .await;
+    assert_eq!(generated["ok"], true, "{generated}");
+    assert_eq!(generated["data"]["questions"].as_array().unwrap().len(), 11);
+    // 1 short quote + 1 beyond the first 12.
+    assert_eq!(generated["data"]["dropped"], 2);
+    assert_eq!(CLOUD_HITS.load(SeqCst), 1);
+    assert_eq!(client.call("quit", json!({})).await["ok"], true);
+}
