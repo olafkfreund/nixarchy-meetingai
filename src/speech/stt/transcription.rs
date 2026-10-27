@@ -45,6 +45,7 @@ fn client() -> reqwest::Client {
 /// Pull the transcript out of a provider response.
 pub fn extract_transcript(provider: &SttProvider, value: &Value) -> Option<String> {
     let text = match provider.wire {
+        SttWire::WhisperServer => value.get("text").and_then(Value::as_str).map(str::to_owned),
         SttWire::RawAudio => value
             .pointer("/results/channels/0/alternatives/0/transcript")
             .and_then(Value::as_str)
@@ -148,6 +149,38 @@ async fn transcribe_inner(
         return custom.text(&text).map_err(SttError::Protocol);
     }
     let provider = SttProvider::by_id(&config.id).ok_or(SttError::NotConfigured)?;
+    if provider.wire == SttWire::WhisperServer {
+        let endpoint = if config.base_url.is_empty() {
+            provider.endpoint
+        } else {
+            &config.base_url
+        };
+        let file = reqwest::multipart::Part::bytes(wav)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")?;
+        let mut form = reqwest::multipart::Form::new()
+            .part("file", file)
+            .text("response_format", "json");
+        if let Some(language) = language.filter(|v| !v.is_empty()) {
+            form = form.text("language", language.to_owned());
+        }
+        let response = client().post(endpoint).multipart(form).send().await?;
+        let status = response.status();
+        let bytes = crate::core::network::read_body(response, 4 * 1024 * 1024)
+            .await
+            .map_err(|e| SttError::Protocol(e.to_string()))?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        if !status.is_success() {
+            return Err(SttError::Status {
+                status: status.as_u16(),
+                message: text.chars().take(512).collect(),
+            });
+        }
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|_| SttError::Protocol("response was not JSON".into()))?;
+        return extract_transcript(provider, &value)
+            .ok_or_else(|| SttError::Protocol("no transcript in the response".into()));
+    }
     if config.api_key.trim().is_empty() {
         return Err(SttError::MissingKey);
     }
@@ -554,9 +587,9 @@ impl LiveTranscriber {
                     }
                     let config = config.clone();
                     requests.push_back(async move {
-                        let text = transcribe_samples(&config, &samples, None)
+                        let text = transcribe_with_retry(&config, &samples)
                             .await
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| format!("{e} (lost audio {start:.1}s..{end:.1}s)"))?;
                         Ok::<_, String>(TranscriptLine {
                             channel,
                             speaker: None,
@@ -817,6 +850,39 @@ impl Drop for LiveTranscriber {
     }
 }
 
+/// Loopback providers (whisper-server) may be restarting: retry transient failures.
+async fn transcribe_with_retry(
+    config: &ProviderConfig,
+    samples: &[f32],
+) -> Result<String, SttError> {
+    let loopback = SttProvider::by_id(&config.id).is_some_and(|p| p.wire == SttWire::WhisperServer)
+        && reqwest::Url::parse(if config.base_url.is_empty() {
+            "http://127.0.0.1"
+        } else {
+            &config.base_url
+        })
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| matches!(h, "localhost" | "127.0.0.1" | "[::1]"))
+        })
+        .unwrap_or(false);
+    let mut delays = [250u64, 1000, 3000].into_iter();
+    loop {
+        let result = transcribe_samples(config, samples, None).await;
+        let transient = matches!(
+            result,
+            Err(SttError::Request(_) | SttError::Status { status: 500.., .. })
+        );
+        match delays.next() {
+            Some(ms) if loopback && transient => {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await
+            }
+            _ => return result,
+        }
+    }
+}
+
 /// Encode samples as WAV, shared by batch transcription and local chunks.
 pub fn to_wav(samples: &[f32]) -> Result<Vec<u8>, SttError> {
     encode_wav(samples).map_err(|error| SttError::Encode(error.to_string()))
@@ -1021,7 +1087,7 @@ mod tests {
     fn every_stt_provider_has_defaults() {
         for provider in STT_PROVIDERS {
             assert!(!provider.name.is_empty());
-            assert!(provider.endpoint.starts_with("https://"));
+            assert!(provider.endpoint.starts_with("http"));
         }
     }
 }

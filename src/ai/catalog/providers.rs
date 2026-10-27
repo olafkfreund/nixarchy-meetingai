@@ -87,6 +87,8 @@ impl ChatProvider {
 pub enum SttWire {
     /// Raw `audio/wav` body for Deepgram.
     RawAudio,
+    /// Multipart `POST /inference` to a local `whisper-server`; no key.
+    WhisperServer,
 }
 
 /// A speech-to-text provider definition.
@@ -101,17 +103,30 @@ pub struct SttProvider {
 }
 
 /// Every bundled speech provider.
-pub const STT_PROVIDERS: &[SttProvider] = &[SttProvider {
-    id: "deepgram-stt",
-    name: "Deepgram",
-    endpoint: "https://api.deepgram.com/v1/listen",
-    wire: SttWire::RawAudio,
-    default_model: "nova-3",
-}];
+pub const STT_PROVIDERS: &[SttProvider] = &[
+    SttProvider {
+        id: "deepgram-stt",
+        name: "Deepgram",
+        endpoint: "https://api.deepgram.com/v1/listen",
+        wire: SttWire::RawAudio,
+        default_model: "nova-3",
+    },
+    SttProvider {
+        id: "whisper-local",
+        name: "whisper.cpp (local)",
+        endpoint: "http://127.0.0.1:8178/inference",
+        wire: SttWire::WhisperServer,
+        default_model: "ggml-small.en",
+    },
+];
 
 impl SttProvider {
     pub fn by_id(id: &str) -> Option<&'static SttProvider> {
         STT_PROVIDERS.iter().find(|provider| provider.id == id)
+    }
+
+    pub fn requires_key(&self) -> bool {
+        self.wire != SttWire::WhisperServer
     }
 }
 
@@ -186,12 +201,17 @@ impl ProviderConfig {
                 && (custom.auth == "none" || !self.api_key.trim().is_empty())
                 && custom.validate(true).is_ok()
         } else {
-            SttProvider::by_id(&self.id).is_some() && !self.api_key.trim().is_empty()
+            SttProvider::by_id(&self.id)
+                .is_some_and(|p| !p.requires_key() || !self.api_key.trim().is_empty())
         }
     }
 
     pub fn speech_streaming(&self) -> bool {
-        self.custom.as_ref().is_none_or(|custom| custom.streaming)
+        match &self.custom {
+            Some(custom) => custom.streaming,
+            // whisper-server is batch-only.
+            None => SttProvider::by_id(&self.id).is_none_or(|p| p.wire != SttWire::WhisperServer),
+        }
     }
 
     pub fn chat_definition(&self) -> Option<ChatProvider> {
@@ -251,7 +271,7 @@ mod tests {
             CHAT_PROVIDERS.iter().map(|p| p.id).collect::<Vec<_>>(),
             ["gemini", "ollama", "claude-sub", "codex-sub"]
         );
-        assert_eq!(STT_PROVIDERS.len(), 1);
+        assert_eq!(STT_PROVIDERS.len(), 2);
         let retired = ProviderConfig::new("openai", "k", "m");
         assert!(!retired.is_usable());
         assert!(retired.endpoint().is_none());
@@ -316,5 +336,7 @@ mod tests {
             "nova-3"
         );
         assert!(SttProvider::by_id("missing").is_none());
+        let local = ProviderConfig::new("whisper-local", "", "");
+        assert!(local.speech_usable() && !local.speech_streaming());
     }
 }
