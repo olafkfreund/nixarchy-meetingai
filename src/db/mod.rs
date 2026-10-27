@@ -142,7 +142,15 @@ mod tests {
                 .unwrap();
         }
         let db = Database::open(&path).unwrap();
-        meetings::start(db.connection(), "t", "", "en", Some("s"), Default::default()).unwrap();
+        meetings::start(
+            db.connection(),
+            "t",
+            "",
+            "en",
+            Some("s"),
+            Default::default(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -160,7 +168,12 @@ mod tests {
         c.execute_batch("PRAGMA user_version = 0").unwrap();
         drop(db);
         let db = Database::open(&path).unwrap();
-        assert_eq!(meetings::search(db.connection(), "quokka", 10).unwrap().len(), 1);
+        assert_eq!(
+            meetings::search(db.connection(), "quokka", 10)
+                .unwrap()
+                .len(),
+            1
+        );
         drop(db);
         // A second open does not duplicate the row.
         let db = Database::open(&path).unwrap();
@@ -170,10 +183,16 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1);
         // The backfill ran once: a row deleted now is not brought back by the next open.
-        db.connection().execute("DELETE FROM notes_fts", []).unwrap();
+        db.connection()
+            .execute("DELETE FROM notes_fts", [])
+            .unwrap();
         drop(db);
         let db = Database::open(&path).unwrap();
-        assert!(meetings::search(db.connection(), "quokka", 10).unwrap().is_empty());
+        assert!(
+            meetings::search(db.connection(), "quokka", 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

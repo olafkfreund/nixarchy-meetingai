@@ -11,7 +11,8 @@ import os
 import sys
 import tomllib
 
-TREE = "/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/themes"
+TREE = os.path.join(os.path.dirname(os.environ["OMARCHY_SHELL_TREE"]), "themes") if "OMARCHY_SHELL_TREE" in os.environ \
+    else "/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/themes"
 DEFAULT = [os.path.expanduser("~/.local/state/omarchy/current/theme/colors.toml"),
            f"{TREE}/flexoki-light/colors.toml", f"{TREE}/catppuccin-latte/colors.toml", f"{TREE}/white/colors.toml"]
 MEETING, YOU, CARD = 0.06, 0.14, 0.12   # Transcript.qml / NowCard.qml: bubbles and the NOW card (archived answers use 0.08)

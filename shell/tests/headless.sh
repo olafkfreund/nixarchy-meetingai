@@ -21,7 +21,8 @@ if [ "${MEETINGAI_ON_DESKTOP:-}" = 1 ]; then
 else
     # sway from the nixpkgs this repo's flake.lock pins, not whatever the registry says today
     repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-    sway_bin=$(nix build --no-link --print-out-paths --inputs-from "$repo" nixpkgs#sway | head -1)/bin/sway
+    # SWAY_BIN (the dev shell, the flake check) wins over building it.
+    sway_bin=${SWAY_BIN:-$(nix build --no-link --print-out-paths --inputs-from "$repo" nixpkgs#sway | head -1)/bin/sway}
     mkdir -m 700 "$work/sway"
     printf 'output HEADLESS-1 resolution 1920x1080 position 0 0\n' > "$work/sway.cfg"
     env -u WAYLAND_DISPLAY -u DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE -u SWAYSOCK \

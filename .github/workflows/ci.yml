@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    env:
+      CI: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      - name: Test
+        run: nix develop --command cargo test --workspace --no-fail-fast
+      - name: Clippy
+        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
+      - name: Format
+        run: nix develop --command cargo fmt --all -- --check
+
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      - name: Evaluate the flake
+        run: nix flake check -L --no-build
+      - name: Build every check except the shell suite (it has its own job)
+        run: |
+          nix eval --json .#checks.x86_64-linux --apply builtins.attrNames \
+            | jq -r '.[] | select(. != "shell") | ".#checks.x86_64-linux." + .' \
+            | xargs nix build -L --no-link
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      - name: Shell suite (headless sway)
+        run: nix build .#checks.x86_64-linux.shell -L --keep-failed
+      - name: Keep crops and logs of a failed run
+        if: failure()
+        run: |
+          mkdir -p shell-artifacts
+          sudo find /tmp -maxdepth 1 -name 'nix-build-*' -type d -exec cp -r {} shell-artifacts/ \; || true
+          sudo chown -R "$(id -u)" shell-artifacts || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: shell-artifacts
+          path: shell-artifacts
+          if-no-files-found: ignore
