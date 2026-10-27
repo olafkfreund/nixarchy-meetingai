@@ -361,6 +361,41 @@ reviewers:   # extra read-only reviews on top of the Opus review; the owner aske
    Traps: Quickshell 0.3.2 API. Check each `Quickshell.Io` type in the
    installed `quickshell-io.qmltypes` before use. Keep heavy work in the
    daemon.
+   **Look and feel (owner, 2026-10-27): flat, the same as other Omarchy
+   plugins.**
+   - Build only from the shell's `qs.Ui` components:
+     - `Dropdown`; `SearchableDropdown` for the model picker
+     - `TextField`, `FilterInput`
+     - `Button`, `PanelActionButton`, `ToggleSwitch`, `ButtonGroup`
+     - `PanelSectionHeader`, `PanelSeparator`, `PanelToolTip`
+     - `PopupCard` for the bar menu
+     - `ConfirmDialog` for Quit
+   - Do not use QtQuick.Controls `ComboBox`, `Button`, `TextField`, `Menu`
+     or `Popup`.
+   - Group content with section headers and separators, not bordered or
+     nested boxes. The only framed surface is the overlay window itself.
+   - Radius is always `Style.cornerRadius`; border width is
+     `Style.normalBorderWidth`. No hard-coded `1`, no shadows, no
+     gradients, no hard-coded colors.
+   - Hover and focus fills come from `Style.controlFill` /
+     `Style.controlBorder`; colors from `Commons.Color` roles (`popups.*`,
+     `menu.*`, `accent`).
+   - Copy the composition of a first-party panel, e.g.
+     `<omarchy-tree>/shell/panels/audio/Panel.qml`.
+   Deviation (coder D): each entry point (Service, Overlay, BarWidget) has
+   its own `Client.qml` socket, because plugin entry points cannot share one
+   instance, so the daemon must accept many clients (it already does,
+   step 7). The protocol details D assumed are binding for step 7:
+   - `state` is flat: `{recording, since(ms), mic, system}`.
+   - `settings.get` returns a flat key→value object; `settings.search`
+     returns `[{key, label, value}]`.
+   - `session.list` returns `[{id, kind:"meeting"|"chat", title}]`.
+   - `prompts.get` / `notes.get` return `{text}`.
+   - `providers.list` returns `[{id, name, requires_key, has_key}]`;
+     `models.list` returns `[string]`.
+   - Setting a key is `settings.set{key:"api_key", provider, value}`; the
+     daemon stores it in the vault and never echoes it.
+   - Setting keys `chat_model` and `meeting_mode` are new.
 
 10. **Call offer and auto-record.**
     - `Service.qml`: a `FileView` on `$XDG_RUNTIME_DIR/meeting-mode.json`

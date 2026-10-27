@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "nixarchy.meetingai",
+  "name": "Meeting AI",
+  "version": "0.1.0",
+  "author": "Olaf K. Freund",
+  "license": "AGPL-3.0-only",
+  "homepage": "https://github.com/olafkfreund/mixarchy-meetingai",
+  "description": "Live meeting transcript, AI answers and rolling notes. The UI for the nixarchy-meetingai daemon.",
+  "kinds": [
+    "service",
+    "overlay",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "overlay": "Overlay.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Meeting AI",
+    "description": "Dot and timer while notes are being taken. Click for New / Restore / Quit.",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}

@@ -35,3 +35,4 @@ ref/
 test-key*
 node_modules/
 .wrangler
+.claude/worktrees/
