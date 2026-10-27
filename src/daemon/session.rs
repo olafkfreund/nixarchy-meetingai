@@ -2403,7 +2403,7 @@ mod routing_tests {
         .unwrap();
         let call = |cmd: &'static str, args: Value| {
             let d = d.clone();
-            async move { d.handle(cmd, args).await }
+            async move { d.handle(cmd, args, None).await }
         };
         call("profiles.save", json!({"name": "Role", "personal_context": "I write Rust", "meeting_context": "Platform"}))
             .await
