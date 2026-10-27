@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: none (issues are disabled on olafkfreund/mixarchy-meetingai)
 author: olafkfreund
 ---
@@ -76,16 +76,11 @@ the flake and its Home Manager module cover only part of that:
   nixarchy and the owner's config keep those user-owned.
 - Existing installs keep working with no option set.
 
-## Open questions
+## Decisions (owner approved the proposals)
 
-1. **Nix settings vs the UI:** should Nix values be **defaults** (applied
-   once; you can still change them in the app), or **enforced** (re-applied
-   at every start, shown as locked in the app)? (Proposed: defaults, with
-   an opt-in `settings.enforce = true`.)
-2. **Profiles and prompts from Nix:** include them (profile text and
-   documents by path, prompt text per mode), or leave them to the app?
-   (Proposed: leave them to the app for now.)
-3. **A NixOS module** (system-level) as well as Home Manager? (Proposed: no.
-   Everything is a user service; Home Manager covers it.)
-4. **Order:** do this before the p620 install so #2504 uses it? (Proposed:
-   yes. It replaces install-plan step 1.)
+1. Nix settings are **defaults** applied once (still changeable in the
+   app), with an opt-in `settings.enforce = true` that re-applies them at
+   every start and shows them locked.
+2. Profiles and prompts stay in the app for now.
+3. No NixOS module; Home Manager only.
+4. This lands before the p620 install and replaces its step 1.
