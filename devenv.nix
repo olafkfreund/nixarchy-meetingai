@@ -39,32 +39,10 @@ in
     llvmPackages.clang
     llvmPackages.libclang
     openssl
-    vulkan-loader
-    vulkan-headers
-    mesa
-    libgbm
-    libGL.dev
-    libGLU
-    wayland
-    wayland-protocols
-    libxkbcommon
-    libx11
-    libxcb
-    libxcursor
-    libxrandr
-    libxi
-    fontconfig
-    freetype
     pipewire
     alsa-lib
     alsa-lib.dev
-    pulseaudio
-    libpulseaudio
-    xorg.xauth
-    xorg.xvfb
-    imagemagick
     grim
-    wlrctl
     sqlite
     zlib
     cacert
@@ -95,11 +73,10 @@ in
 
   env.LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
-  env.PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig:${pkgs.libGL.dev}/lib/pkgconfig";
+  env.PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig";
 
   env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   env.NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-  env.XDG_DATA_DIRS = "${pkgs.fontconfig}/share:$XDG_DATA_DIRS";
 
   tasks = {
     "nixarchy-meetingai:build" = {

@@ -24,7 +24,6 @@ rustPlatform.buildRustPackage {
       ../Cargo.toml
       ../Cargo.lock
       ../src
-      ../vendor
       ../packaging
     ];
   };
@@ -50,13 +49,8 @@ rustPlatform.buildRustPackage {
   postInstall = ''
     install -Dm644 packaging/dev.nixarchy.meetingai.desktop \
       $out/share/applications/dev.nixarchy.meetingai.desktop
-    # shortcut: the icon is renamed in plan step 8; accept either name until then.
-    for f in src/assets/nixarchy-meetingai.png src/assets/lennette.png; do
-      if [ -f "$f" ]; then
-        install -Dm644 "$f" $out/share/icons/hicolor/256x256/apps/dev.nixarchy.meetingai.png
-        break
-      fi
-    done
+    install -Dm644 src/assets/nixarchy-meetingai.png \
+      $out/share/icons/hicolor/256x256/apps/dev.nixarchy.meetingai.png
     wrapProgram $out/bin/nixarchy-meetingai \
       --prefix PATH : ${
         lib.makeBinPath [

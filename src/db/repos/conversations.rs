@@ -221,7 +221,7 @@ mod archive_search_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::db::Database;
+    use crate::db::Database;
 
     #[test]
     fn previews_use_the_latest_nonempty_message_in_the_right_conversation() {

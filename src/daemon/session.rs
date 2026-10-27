@@ -1,6 +1,6 @@
 //! Daemon state: recording, live transcript, chat turns, notes and settings.
 //!
-//! Ported from the GPUI overlay (`ui/views/overlay.rs`) without any UI state.
+//! Owns the session logic that the removed GPUI overlay used to hold.
 //! One mutex guards [`Inner`]; it is never held across an `.await`.
 
 use std::{
@@ -34,11 +34,10 @@ use crate::{
         context::{self, Attachment},
         credentials::{self, Credential, Kind},
         domain::{Message, Role},
-        settings::{AutoResponse, AutoScreenshot, ResponseLength, Settings, response_instruction},
+        settings::{AutoResponse, ResponseLength, Settings, response_instruction},
         vault::Vault,
     },
     db::{self, Database, conversations, meetings, profiles, sessions, settings as store},
-    platform::display::capture::CapturedImage,
     speech::{
         listen::{ListenSession, SessionConfig, SessionEvent},
         transcription::{self, LiveEvent, LiveTranscriber, LiveTurns},
@@ -48,12 +47,7 @@ use crate::{
 /// Quick actions that stay first among the follow-up suggestions.
 const FIXED_FOLLOW_UPS: [&str; 3] = ["What should I say?", "Follow-up questions", "Fact check"];
 /// Settings the shell shows as numbers rather than strings.
-const NUMERIC_SETTINGS: [&str; 4] = [
-    "transparency",
-    "font_scale",
-    "capture_delay_seconds",
-    "screenshot_interval",
-];
+const NUMERIC_SETTINGS: [&str; 1] = ["capture_delay_seconds"];
 
 /// Where the daemon keeps its data.
 pub struct Options {
@@ -273,6 +267,14 @@ fn visible_follow_ups(generated: &[String]) -> Vec<String> {
         }
     }
     labels
+}
+
+/// An encoded image ready to attach to a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedImage {
+    /// Raw base64 bytes without a data-URL prefix.
+    pub base64: String,
+    pub mime: &'static str,
 }
 
 /// Screenshots come from `grim` (and `slurp` for a region).
@@ -547,23 +549,17 @@ impl Daemon {
             question = "Use the attached references.".into();
         }
         // The screenshot is taken before the lock: grim/slurp can wait on the user.
-        let (want_capture, delay, once) = {
+        let (want_capture, delay) = {
             let mut g = self.inner.lock();
             self.sync_profile(&mut g);
             for item in imported {
                 context::add(&mut g.sources, item)?;
             }
             let s = &g.settings;
-            let fresh = args.screenshot
-                || s.use_image_on_send
-                || matches!(
-                    s.auto_screenshot,
-                    AutoScreenshot::EveryQuestion | AutoScreenshot::Once
-                );
+            let fresh = args.screenshot || s.use_image_on_send;
             (
                 fresh && g.pending_capture.is_none(),
                 s.capture_delay_seconds.min(60),
-                s.auto_screenshot == AutoScreenshot::Once,
             )
         };
         if want_capture {
@@ -575,10 +571,6 @@ impl Daemon {
             }
         }
         let image = self.inner.lock().pending_capture.take();
-        if image.is_some() && once {
-            let g = self.inner.lock();
-            let _ = Settings::set(&g.db, "auto_screenshot", "off");
-        }
         let turn = self.begin_send(question, image, false, args.no_context)?;
         Ok(json!({"turn": turn}))
     }

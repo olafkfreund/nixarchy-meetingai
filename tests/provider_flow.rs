@@ -528,22 +528,6 @@ async fn markdown_code_deltas_arrive_before_the_provider_finishes() {
         |delta| {
             partial.push_str(delta);
             snapshots += 1;
-            let blocks = nixarchy_meetingai::ui::markdown::parse(&partial);
-            let code = blocks
-                .iter()
-                .find_map(|block| match block {
-                    nixarchy_meetingai::ui::markdown::Block::Code { language, text } => {
-                        Some((language, text))
-                    }
-                    _ => None,
-                })
-                .unwrap();
-            let tokens = nixarchy_meetingai::ui::widgets::syntax::highlight(
-                code.0.as_deref(),
-                code.1,
-                false,
-            );
-            assert_eq!(tokens.last().unwrap().range.end, code.1.len());
             if snapshots == 1 {
                 assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
                 ack_tx.send(()).unwrap();

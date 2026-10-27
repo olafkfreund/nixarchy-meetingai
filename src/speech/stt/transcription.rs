@@ -909,7 +909,7 @@ pub fn local_chunk_payload(samples: &[f32], start: f64) -> Result<Value, SttErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::providers::STT_PROVIDERS;
+    use crate::ai::providers::STT_PROVIDERS;
 
     #[test]
     fn speaker_changes_preserve_word_identity_and_one_endpoint() {

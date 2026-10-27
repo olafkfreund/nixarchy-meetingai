@@ -456,7 +456,7 @@ mod archive_search_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::db::Database;
+    use crate::db::Database;
 
     fn database() -> Database {
         Database::open_in_memory().unwrap()
