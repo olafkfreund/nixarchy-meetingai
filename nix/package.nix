@@ -49,8 +49,8 @@ rustPlatform.buildRustPackage {
   postInstall = ''
     install -Dm644 packaging/dev.nixarchy.meetingai.desktop \
       $out/share/applications/dev.nixarchy.meetingai.desktop
-    install -Dm644 src/assets/nixarchy-meetingai.png \
-      $out/share/icons/hicolor/256x256/apps/dev.nixarchy.meetingai.png
+    install -Dm644 packaging/nixarchy-meetingai.svg \
+      $out/share/icons/hicolor/scalable/apps/dev.nixarchy.meetingai.svg
     wrapProgram $out/bin/nixarchy-meetingai \
       --prefix PATH : ${
         lib.makeBinPath [

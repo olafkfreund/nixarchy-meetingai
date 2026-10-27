@@ -13,8 +13,6 @@ or from local models.
   widget), built with Quickshell and following your Omarchy theme.
 - **Agents:** an MCP server, so Claude Code, Codex or agy can read and drive it.
 
-Derived from [lennette](https://github.com/parazeeknova/lennette) by
-parazeeknova. Licensed under AGPL-3.0 (see `LICENSE`).
 
 ## Getting started
 
@@ -292,3 +290,10 @@ The shell tests run in a private, invisible sway session, so they never open
 windows on your desktop; set `MEETINGAI_ON_DESKTOP=1` to watch one.
 `tools/provider-probe.py` asks every provider one question through a
 throwaway daemon. Design notes live in `intent/`, `spec/` and `plan/`.
+
+## License and history
+
+AGPL-3.0 while original code remains; MIT once the rewrite is complete (see
+`LICENSE`).
+
+Started from lennette (AGPL-3.0) by parazeeknova; being rewritten.

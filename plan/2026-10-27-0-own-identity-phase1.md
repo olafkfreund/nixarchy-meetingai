@@ -66,3 +66,9 @@ Small: the session model does both steps itself.
 ## Deviations log (recorded with the implementation commit)
 
 None yet.
+- **Step 1:** the icon uses a fixed neutral grey (`#9a9a9a`), not
+  `currentColor`: launchers draw `currentColor` icons black, which vanishes
+  on dark themes. `.cargo/config.toml` is deleted: its only content was an
+  `xtask` alias to a `lennette-tools` crate that no longer exists. The
+  plugin manifest has no icon field, so nothing changed there. The desktop
+  entry is named "Meeting AI".

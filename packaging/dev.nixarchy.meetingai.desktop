@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=nixarchy-meetingai
-GenericName=Ambient Real-Time Meeting Copilot
-Comment=An ambient real-time meeting and discussion copilot
+Name=Meeting AI
+GenericName=Meeting copilot
+Comment=Live transcripts, answers and notes for your calls
 Exec=nixarchy-meetingai
 Icon=dev.nixarchy.meetingai
 Terminal=false

@@ -52,9 +52,9 @@ install-hooks:
 # Validate lints, format, types, compile optimized release binary and install locally.
 install: fmt-check lint typecheck
     {{devenv}}cargo build --release
-    mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/512x512/apps ~/.local/share/icons/hicolor/scalable/apps
+    mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/scalable/apps
     install -m755 target/release/nixarchy-meetingai ~/.local/bin/nixarchy-meetingai
-    cp src/assets/nixarchy-meetingai.png ~/.local/share/icons/hicolor/512x512/apps/dev.nixarchy.meetingai.png
+    cp packaging/nixarchy-meetingai.svg ~/.local/share/icons/hicolor/scalable/apps/dev.nixarchy.meetingai.svg
     rm -f ~/.local/share/applications/nixarchy-meetingai.desktop
     cp -f packaging/dev.nixarchy.meetingai.desktop ~/.local/share/applications/dev.nixarchy.meetingai.desktop
     @command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database ~/.local/share/applications || true
