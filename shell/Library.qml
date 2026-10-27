@@ -59,6 +59,7 @@ Item {
         if (cur.selected) { root.client.setSetting("personal_context", a); root.client.setSetting("meeting_context", b); }
     }
     property string promptKind: "answer"
+    signal confirmRequested(string message, string label, var yes)
     function candidateHook(what) { candTab.hook(what); }
 
     function match(s) { return root.query === "" || String(s).toLowerCase().indexOf(root.query.toLowerCase()) >= 0; }
@@ -101,6 +102,7 @@ Item {
                 model: root.tabs
                 IconButton { ts: root.theme.ts;
                     required property string modelData
+                    objectName: "tab-" + modelData
                     text: modelData.charAt(0).toUpperCase() + modelData.slice(1)
                     active: root.tab === modelData
                     onClicked: root.tab = modelData
@@ -198,7 +200,10 @@ Item {
                         ts: root.theme.ts
                         leftAlign: true
                         width: ListView.view.width
-                        text: modelData.name + (modelData.selected ? "  (in use)" : "")
+                        elidable: true
+                        text: (modelData.selected ? "\u25cf  " : "") + modelData.name
+                        tooltipText: modelData.selected ? "In use" : ""
+                        Accessible.name: modelData.name + (modelData.selected ? ", in use" : "")
                         active: root.cur && root.cur.name === modelData.name
                         onClicked: { root.selName = modelData.name; root.client.send("profiles.select", { name: modelData.name }, root.reload); }
                     }
@@ -217,17 +222,17 @@ Item {
                     RowLayout {
                         width: parent.width
                         spacing: root.theme.gap
-                        Input { id: nameField; objectName: "profileName"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter }
+                        Input { id: nameField; objectName: "profileName"; accessibleName: "Profile name"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter }
                         IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Rename"; enabled: root.cur !== null && nameField.text.trim() !== "" && nameField.text !== root.cur.name; opacity: enabled ? 1 : 0.5
                             onClicked: { var n = nameField.text.trim(), o = root.cur.name; root.selName = n; root.client.send("profiles.rename", { name: o, new_name: n }, root.reload); } }
                         IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: { root.client.send("profiles.delete", { name: root.cur.name }, root.reload); root.selName = ""; } }
                     }
                     UiText { textFormat: Text.PlainText; text: "About me"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
                     Hint { text: "Your role and experience; used in every answer." }
-                    Field { id: aboutText; width: parent.width; height: Style.space(64) }
+                    Field { id: aboutText; Accessible.name: "About me"; width: parent.width; height: Style.space(64) }
                     UiText { textFormat: Text.PlainText; text: "Meeting brief"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
                     Hint { text: "What this meeting is about (role, company, agenda)." }
-                    Field { id: briefText; width: parent.width; height: Style.space(64) }
+                    Field { id: briefText; Accessible.name: "Meeting brief"; width: parent.width; height: Style.space(64) }
                     IconButton { ts: root.theme.ts; text: "Save"; onClicked: root.saveProfile() }
                     UiText { textFormat: Text.PlainText; text: "Documents"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body; topPadding: Style.spacing.xs }
                     Hint { text: "CV, job description, runbooks (PDF, text, markdown). Newest first in the prompt." }
@@ -268,6 +273,7 @@ Item {
             visible: root.tab === "candidate"
             client: root.client
             theme: root.theme
+            onConfirmRequested: function(message, label, yes) { root.confirmRequested(message, label, yes); }
             width: parent.width; height: parent.height - y
         }
 
@@ -292,6 +298,7 @@ Item {
                 width: parent.width; height: parent.height - y - promptBtns.height - parent.spacing
                 TextArea {
                     id: promptText
+                    Accessible.name: "Prompt text"
                     wrapMode: TextEdit.Wrap
                     color: Commons.Color.popups.text
                     font.family: Style.font.family
@@ -336,6 +343,7 @@ Item {
                 Input {
                     id: keyField
                     objectName: "apiKey"
+                    accessibleName: "API key for " + (prow.modelData.name || prow.modelData.id)
                     ts: root.theme.ts
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignVCenter
@@ -385,6 +393,7 @@ Item {
                     Layout.alignment: Qt.AlignVCenter
                     ToggleSwitch {
                         objectName: "settingToggle"
+                        Accessible.role: Accessible.CheckBox; Accessible.name: String(srow.modelData.label || srow.modelData.key); Accessible.checked: checked
                         visible: typeof srow.modelData.value === "boolean"
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
@@ -393,6 +402,7 @@ Item {
                     }
                     Input {
                         objectName: "settingField"
+                        accessibleName: String(srow.modelData.label || srow.modelData.key)
                         ts: root.theme.ts
                         visible: typeof srow.modelData.value !== "boolean"
                         anchors.fill: parent

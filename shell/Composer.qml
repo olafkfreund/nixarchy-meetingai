@@ -38,6 +38,8 @@ Item {
 
     function addChip(chip) { root.chips = root.chips.concat([chip]); }
 
+    function focusInput() { input.forceActiveFocus(); }
+
     function send() {
         var t = input.text.trim();
         if (t === "" && root.chips.length === 0) return;
@@ -136,6 +138,8 @@ Item {
 
                 TextArea {
                     id: input
+                    objectName: "composerInput"
+                    Accessible.name: "Ask about the meeting"
                     wrapMode: TextEdit.Wrap
                     placeholderText: "Ask about the meeting"
                     color: Commons.Color.popups.text

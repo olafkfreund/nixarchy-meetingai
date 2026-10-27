@@ -25,9 +25,10 @@ function walk(it, card, out, depth, vp) {
         if (ctl) {
             r.c = 1;
             r.fpx = it.fontPx !== undefined ? it.fontPx : it.fontSize !== undefined ? it.fontSize : (it.font ? it.font.pixelSize : 0);
+            r.acc = String(it.accName !== undefined ? it.accName : "");
             r.ui = it.rowHeight !== undefined && it.fontPx === undefined;
             r.label = String(it.text || it.placeholderText || it.iconText || "");
-            r.clip = it.iconText !== undefined && it.implicitWidth > it.width + 1;
+            r.clip = it.iconText !== undefined && !it.elidable && it.implicitWidth > it.width + 1;
             out.push(r);
         } else if (it.text !== "") {
             r.label = String(it.text).slice(0, 40);

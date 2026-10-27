@@ -7,6 +7,10 @@ import qs.Ui
 // qs.Ui TextField at the overlay's text size and the shared control height.
 TextField {
     property real ts: 1
+    property string accessibleName: ""   // for fields without a placeholder
+    Accessible.role: Accessible.EditableText
+    Accessible.name: accessibleName !== "" ? accessibleName : placeholderText
+    readonly property string accName: accessibleName !== "" ? accessibleName : placeholderText
     font.pixelSize: Style.font.body * ts
     verticalAlignment: TextInput.AlignVCenter
     implicitHeight: Math.round(Style.spacing.controlHeight * ts)   // = Theme.ctl

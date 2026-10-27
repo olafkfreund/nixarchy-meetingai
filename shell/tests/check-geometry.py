@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the "GEO {json}" lines tests/geometry.js logged (stdin or a file).
 
-Fails on: a qs.Ui dropdown (use Select); a control (button, field, dropdown) whose height is not the shared control height;
+Fails on: a control without an Accessible.name; a qs.Ui dropdown (use Select); a control (button, field, dropdown) whose height is not the shared control height;
 controls on one visual row whose tops or bottoms differ by more than 1 px; text or buttons
 wider than their box (clipped); anything sticking out of the card sideways.
 usage: check-geometry.py geometry.log
@@ -24,6 +24,8 @@ def check(snap):
         if abs(i["h"] - ctl) > TOL:
             fail(("h", i["t"], i["label"]), f"{i['t']} '{i['label']}' ({i['n']}) is {i['h']:.1f} px tall, control height is {ctl}")
     for i in cs:
+        if i.get("acc") == "":
+            fail(("acc", i["t"], i["label"], i["n"]), f"{i['t']} '{i['label']}' ({i['n']}) has no Accessible.name")
         if i.get("ui"):
             fail(("ui", i["t"], i["label"]), f"{i['t']} ({i['n']}) is a qs.Ui dropdown: its text ignores the text-size setting; use Select")
     for a in cs:

@@ -20,6 +20,8 @@ Item {
     property string triggerLabel: ""   // shown while `value` is empty
     property bool searchable: false
     property string query: ""
+    property string accessibleName: "Choice"
+    readonly property string accName: trigger.Accessible.name
     readonly property real fontPx: root.theme.body   // tests/geometry.js compares it with the fields in the same row
     readonly property bool popupOpen: popup.opened
     readonly property string iChevron: String.fromCodePoint(0xf0140)
@@ -58,7 +60,7 @@ Item {
         borderSpec: Border.controlSpec(trigger.activeFocus ? "focus" : (trigger.hot ? "hover-cursor" : "normal"), Commons.Color.popups.text, Commons.Color.accent)
         activeFocusOnTab: true
         Accessible.role: Accessible.ComboBox
-        Accessible.name: root.currentLabel()
+        Accessible.name: root.accessibleName + ": " + root.currentLabel()
         HoverHandler { id: hover }
         Keys.onPressed: function(e) {
             if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Space || e.key === Qt.Key_Down) { popup.open(); e.accepted = true; }

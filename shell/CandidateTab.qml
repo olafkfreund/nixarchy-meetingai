@@ -16,6 +16,8 @@ Item {
     required property var client
     required property var theme
 
+    signal confirmRequested(string message, string label, var yes)
+
     readonly property var cand: client.cand   // candidate.get of the shown candidate
     readonly property bool linked: root.cand !== null && !!root.cand.candidate.meeting_id
     property bool newOpen: false         // the inline "new candidate" name row
@@ -37,7 +39,14 @@ Item {
     function hook(what) {   // tests/harness-live.qml opens the inline rows and the dialog
         if (what === "new") root.newOpen = true;
         else if (what === "attach") root.attachKind = "cv";
-        else if (what === "delete") confirmDelete.opened = true;
+        else if (what === "delete") root.askDelete();
+    }
+    function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
+    function askDelete() {
+        var c = root.cand;
+        if (c === null) return;
+        root.confirmRequested("Delete " + (c.candidate.name || "this candidate") + "? This removes their " + root.plural(c.documents.length, "document") + " and " + root.plural(c.questions.length, "question") + (root.linked ? ", and the recorded interview with its notes and transcript" : "") + ". It cannot be undone.", "Delete",
+            function() { root.client.send("candidates.delete", { id: c.candidate.id }, function(r) { root.fail(r); root.client.viewId = ""; root.client.refreshCand(); root.client.refreshCandidates(); }); });
     }
     onCandChanged: { root.attachKind = ""; root.genNote = ""; }
 
@@ -82,6 +91,7 @@ Item {
                     spacing: root.theme.gap
                     Select {
                         objectName: "candidatePick"
+                        accessibleName: "Candidate"
                         theme: root.theme
                         Layout.fillWidth: true
                         value: String(root.client.shownCandidate)
@@ -127,7 +137,7 @@ Item {
                     opacity: enabled ? 1 : 0.6
                     width: parent.width
                     spacing: root.theme.gap
-                    ToggleSwitch { objectName: "localOnly"; Layout.alignment: Qt.AlignVCenter; checked: root.cand !== null && root.cand.candidate.local_only === true; onToggled: root.client.send("candidate.local_only", { id: root.cand.candidate.id, on: !checked }, function(r) { root.fail(r); root.client.refreshCand(); }) }
+                    ToggleSwitch { objectName: "localOnly"; Accessible.role: Accessible.CheckBox; Accessible.name: "Local-only"; Accessible.checked: checked; Layout.alignment: Qt.AlignVCenter; checked: root.cand !== null && root.cand.candidate.local_only === true; onToggled: root.client.send("candidate.local_only", { id: root.cand.candidate.id, on: !checked }, function(r) { root.fail(r); root.client.refreshCand(); }) }
                     UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; wrapMode: Text.Wrap; textFormat: Text.PlainText; text: "Local-only: speech-to-text and models stay on this machine"; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
                 }
                 RowLayout {
@@ -226,6 +236,7 @@ Item {
                                 spacing: root.theme.gap
                                 QField {
                                     objectName: "questionText"
+                    Accessible.name: "Question text"
                                     width: parent.width
                                     text: qc.modelData.text
                                     onActiveFocusChanged: { if (!activeFocus && text.trim() !== "" && text !== qc.modelData.text) root.client.send("questions.update", { id: qc.modelData.id, text: text.trim() }); }
@@ -272,26 +283,10 @@ Item {
                     Section { text: "Danger zone" }
                     Flow {
                         width: parent.width
-                        IconButton { objectName: "deleteCandidate"; ts: root.theme.ts; text: "Delete candidate…"; bordered: true; tooltipText: "Remove this candidate and everything linked to them"; onClicked: confirmDelete.opened = true }
+                        IconButton { objectName: "deleteCandidate"; ts: root.theme.ts; text: "Delete candidate…"; bordered: true; tooltipText: "Remove this candidate and everything linked to them"; onClicked: root.askDelete() }
                     }
                 }
             }
-        }
-    }
-
-    ConfirmDialog {
-        id: confirmDelete
-        anchors.fill: parent
-        focus: opened
-        confirmText: "Delete"
-        cancelText: "Keep"
-        message: root.cand ? "Delete " + (root.cand.candidate.name || "this candidate") + "? This removes their " + root.cand.documents.length + " document(s) and " + root.cand.questions.length + " question(s)" + (root.linked ? ", and the recorded interview with its notes and transcript" : "") + ". It cannot be undone." : ""
-        onOpenedChanged: { if (opened) forceActiveFocus(); }
-        Keys.onPressed: function(e) { e.accepted = confirmDelete.handleKey(e); }
-        onCanceled: opened = false
-        onConfirmed: {
-            opened = false;
-            root.client.send("candidates.delete", { id: root.cand.candidate.id }, function(r) { root.fail(r); root.client.viewId = ""; root.client.refreshCand(); root.client.refreshCandidates(); });
         }
     }
 }

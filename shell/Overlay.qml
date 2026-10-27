@@ -19,6 +19,7 @@ Item {
     property var manifest: null
     property bool opened: false
     property bool library: false
+    onLibraryChanged: { if (!root.library) Qt.callLater(function() { composer.focusInput(); }); }
     property string previewText: ""
 
     // MarkdownText ignores linkColor and paints links web-blue; inline HTML keeps the theme accent.
@@ -111,6 +112,7 @@ Item {
     function open(payloadJson) {
         root.opened = true;
         root.loadModels();
+        Qt.callLater(function() { composer.focusInput(); });
     }
 
     // Hooks for tests/shots.sh.
@@ -118,6 +120,15 @@ Item {
     function showLibrary(tab) { root.library = true; lib.tab = tab; }
     function recordHook(consent) { backend.startRecording(consent); }
     function candidateHook(what) { lib.candidateHook(what); }
+    function modeHook() { hdr.openPicker(); }   // tests/harness-live.qml opens the mode list for a crop
+    function ask(message, confirmText, yes) { confirm.ask(message, confirmText, yes); }   // the one confirmation dialog
+    function focusProbe(next) {   // tests/keys.sh: what has the keyboard focus; next = do what Tab does first
+        var w = card.Window.window;
+        if (!w) return "no-window";
+        if (next && w.activeFocusItem) { const n = w.activeFocusItem.nextItemInFocusChain(true); if (n) n.forceActiveFocus(Qt.TabFocusReason); }
+        return String(w.activeFocusItem);
+    }
+    function focusStart() { card.forceActiveFocus(); }   // tests/keys.sh: Tab from the card, so the first stop is the header
     function geometryRoot() { return card; }   // tests/geometry.js walks this item
     readonly property real ctl: metrics.ctl
 
@@ -189,7 +200,8 @@ Item {
             border.color: Commons.Color.popups.border
             border.width: Style.normalBorderWidth
             focus: true
-            Keys.onEscapePressed: root.close()
+            // Escape closes one thing: a dialog or list (they take it themselves), the preview, Settings, the Last time drawer, then the overlay
+            Keys.onEscapePressed: { if (root.previewText !== "") root.previewText = ""; else if (root.library) root.library = false; else if (root.lastOpen) root.lastOpen = false; else root.close(); }
             Keys.onPressed: function(e) {
                 if (e.modifiers & Qt.ControlModifier) {   // Ctrl+= / Ctrl+- / Ctrl+0: text size
                     if (e.key === Qt.Key_Equal || e.key === Qt.Key_Plus) { root.bumpScale(10); e.accepted = true; }
@@ -213,10 +225,9 @@ Item {
                 spacing: Style.spacing.md
 
                 Header {
+                    id: hdr
                     daemon: backend
                     theme: metrics
-                    team: root.team
-                    iv: root.iv
                     library: root.library
                     profileName: root.profileName
                     elapsed: root.elapsed
@@ -248,6 +259,7 @@ Item {
                 Library {
                     id: lib
                     settingsHeader: settingsControls
+                    onConfirmRequested: function(message, label, yes) { root.ask(message, label, yes); }
                     visible: root.library
                     client: backend
                     theme: metrics
@@ -303,10 +315,20 @@ Item {
                                 id: srow
                                 required property string modelData
                                 required property int index
+                                objectName: "suggestion"
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: srow.modelData
+                                Accessible.onPressAction: root.pickSuggestion(srow.index + 1)
+                                Keys.onReturnPressed: root.pickSuggestion(srow.index + 1)
+                                Keys.onEnterPressed: root.pickSuggestion(srow.index + 1)
+                                Keys.onSpacePressed: root.pickSuggestion(srow.index + 1)
+                                border.width: srow.activeFocus ? Style.normalBorderWidth : 0
+                                border.color: Commons.Color.accent
                                 width: sugg.width
                                 height: Math.max(metrics.ctl, stext.implicitHeight + metrics.padY * 2)
                                 radius: metrics.radius
-                                color: sma.containsMouse ? Style.controlFill(false, true, Commons.Color.foreground, Commons.Color.accent) : "transparent"
+                                color: sma.containsMouse || srow.activeFocus ? Style.controlFill(false, true, Commons.Color.foreground, Commons.Color.accent) : "transparent"
                                 Rectangle {
                                     id: badge
                                     x: Style.spacing.md; anchors.verticalCenter: parent.verticalCenter
@@ -401,6 +423,7 @@ Item {
                         theme: metrics; width: sflow.cellW; label: "Chat provider"
                         Select {
                             objectName: "chatProvider"
+                            accessibleName: "Chat provider"
                             theme: metrics; anchors.fill: parent
                             value: String(backend.settings.chat_provider || "")
                             options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
@@ -411,6 +434,7 @@ Item {
                         theme: metrics; width: sflow.cellW; label: "Chat model"
                         Select {   // typing filters the list
                             objectName: "chatModel"
+                            accessibleName: "Chat model"
                             searchable: true
                             theme: metrics; anchors.fill: parent
                             value: String(backend.settings.chat_model || "")
@@ -423,6 +447,7 @@ Item {
                         theme: metrics; width: sflow.cellW; label: "Other model id"
                         Input {   // a model id the list does not have
                             objectName: "customModel"
+                            accessibleName: "Other model id"
                             ts: metrics.ts
                             anchors.fill: parent
                             placeholderText: "or type a model id"
@@ -433,6 +458,7 @@ Item {
                         theme: metrics; width: sflow.cellW; label: "Live answers provider"
                         Select {
                             objectName: "liveProvider"
+                            accessibleName: "Live answers provider"
                             theme: metrics; anchors.fill: parent
                             value: String(backend.settings.live_provider || "")
                             options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
@@ -443,6 +469,7 @@ Item {
                         theme: metrics; width: sflow.cellW; label: "Live answers model"
                         Select {
                             objectName: "liveModel"
+                            accessibleName: "Live answers model"
                             searchable: true
                             theme: metrics; anchors.fill: parent
                             value: String(backend.settings.live_model || "")
@@ -455,6 +482,7 @@ Item {
                         theme: metrics; width: sflow.cellW; label: "Pace"
                         Select {
                             objectName: "pace"
+                            accessibleName: "Pace"
                             theme: metrics; anchors.fill: parent
                             value: String(backend.settings.response_pace || "Balanced")
                             options: root.paces
@@ -465,13 +493,14 @@ Item {
                         theme: metrics; width: sflow.cellW; label: "No context"
                         RowLayout {
                             anchors.fill: parent
-                            ToggleSwitch { objectName: "noContext"; Layout.alignment: Qt.AlignVCenter; checked: root.noContext; onToggled: root.noContext = !root.noContext }
+                            ToggleSwitch { objectName: "noContext"; Accessible.role: Accessible.CheckBox; Accessible.name: "No context"; Accessible.checked: checked; Layout.alignment: Qt.AlignVCenter; checked: root.noContext; onToggled: root.noContext = !root.noContext }
                         }
                     }
                     Cell {   // overlay text size, 80..160 % (Ctrl+= / Ctrl+- / Ctrl+0)
                         theme: metrics; width: sflow.cellW; label: "Text size " + Math.round(backend.textScale * 100) + "%"
                         PanelSlider {
                             objectName: "textSize"
+                            Accessible.role: Accessible.Slider; Accessible.name: "Text size"
                             anchors.verticalCenter: parent.verticalCenter
                             width: parent.width
                             minimum: 80; maximum: 160; step: 10; integer: true
@@ -524,6 +553,8 @@ Item {
             Grip { edges: "br"; cursorShape: Qt.SizeFDiagCursor; x: parent.width - 12; y: parent.height - 12; width: 12; height: 12 }
             Grip { edges: "tr"; cursorShape: Qt.SizeBDiagCursor; x: parent.width - 12; y: 0; width: 12; height: 12 }
             Grip { edges: "bl"; cursorShape: Qt.SizeBDiagCursor; x: 0; y: parent.height - 12; width: 12; height: 12 }
+
+            Confirm { id: confirm; theme: metrics; anchors.fill: parent }
         }
     }
 }
