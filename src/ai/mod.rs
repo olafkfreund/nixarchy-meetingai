@@ -3,7 +3,6 @@
 pub mod catalog;
 pub mod chat;
 pub mod recap;
-pub mod sentiment;
 pub mod titling;
 
 // Direct re-exports

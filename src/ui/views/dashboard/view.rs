@@ -21,8 +21,6 @@ enum EditTarget {
 
 #[path = "history.rs"]
 mod history;
-#[path = "meeting_tone.rs"]
-mod meeting_tone;
 #[path = "profiles.rs"]
 mod profiles;
 #[path = "prompts.rs"]
@@ -54,12 +52,6 @@ pub struct DashboardView {
     capture_task: Option<gpui::Task<()>>,
     native_always_on_top: Option<bool>,
     recap_task: Option<gpui::Task<()>>,
-    tone_task: Option<gpui::Task<()>>,
-    tone_report: Option<crate::ai::sentiment::Report>,
-    tone_saved: Option<crate::db::repos::sentiment::Saved>,
-    tone_revision: Option<crate::db::repos::sentiment::Revision>,
-    tone_error: Option<String>,
-    tone_segment: usize,
     prompt_edit: Option<prompts::PromptDraft>,
     prompt_search: Option<gpui::Entity<crate::ui::widgets::editor::Editor>>,
     prompt_observer: Option<gpui::Subscription>,
@@ -132,12 +124,6 @@ impl DashboardView {
             capture_task: None,
             native_always_on_top: None,
             recap_task: None,
-            tone_task: None,
-            tone_report: None,
-            tone_saved: None,
-            tone_revision: None,
-            tone_error: None,
-            tone_segment: 0,
             prompt_edit: None,
             prompt_search: None,
             prompt_observer: None,
@@ -1118,7 +1104,6 @@ impl DashboardView {
         self.page_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         self.open_meeting = Some(id.into());
         self.detail_lines = self.meeting_lines();
-        self.load_meeting_tone();
         self.history_queries[3].clear();
         self.history_search[3] = None;
         self.dashboard
@@ -1889,7 +1874,6 @@ impl DashboardView {
                     cx,
                     |this, cx, _| {
                         this.detail_lines = this.meeting_lines();
-                        this.load_meeting_tone();
                         cx.notify();
                     },
                 ))
@@ -2098,18 +2082,17 @@ impl DashboardView {
             cx,
             |this, cx, _| this.request_recap(cx),
         ));
-        list.child(self.meeting_tone_panel(cx))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .w(self.content_width)
-                    .min_w(px(0.0))
-                    .gap(column_gap)
-                    .child(transcript)
-                    .child(panel),
-            )
-            .into_any_element()
+        list.child(
+            div()
+                .flex()
+                .items_start()
+                .w(self.content_width)
+                .min_w(px(0.0))
+                .gap(column_gap)
+                .child(transcript)
+                .child(panel),
+        )
+        .into_any_element()
     }
 
     fn conversation_detail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {

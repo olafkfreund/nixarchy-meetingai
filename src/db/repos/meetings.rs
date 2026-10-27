@@ -256,6 +256,74 @@ pub fn recent_lines(
     Ok(rows)
 }
 
+/// One rolling-notes summary covering transcript time `t0..t1`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteChunk {
+    pub t0: f64,
+    pub t1: f64,
+    pub body: String,
+}
+
+/// Save a summary of a slice of final lines.
+pub fn add_chunk(connection: &Connection, meeting_id: &str, chunk: &NoteChunk) -> Result<()> {
+    connection.execute(
+        "INSERT INTO meeting_note_chunks (meeting_id, t0, t1, body) VALUES (?1, ?2, ?3, ?4)",
+        params![meeting_id, chunk.t0, chunk.t1, chunk.body],
+    )?;
+    Ok(())
+}
+
+/// Rolling-notes summaries in time order.
+pub fn chunks(connection: &Connection, meeting_id: &str) -> Result<Vec<NoteChunk>> {
+    let mut statement = connection.prepare(
+        "SELECT t0, t1, body FROM meeting_note_chunks WHERE meeting_id = ?1 ORDER BY t1, id",
+    )?;
+    let rows = statement.query_map(params![meeting_id], |r| {
+        Ok(NoteChunk {
+            t0: r.get(0)?,
+            t1: r.get(1)?,
+            body: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Lines that end after `t1`, in spoken order: what no chunk covers yet.
+pub fn lines_after(connection: &Connection, meeting_id: &str, t1: f64) -> Result<Vec<LineRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT id, who, speaker, text, start_time, end_time FROM meeting_lines
+         WHERE meeting_id = ?1 AND end_time > ?2
+         ORDER BY start_time ASC, rowid ASC",
+    )?;
+    let rows = statement.query_map(params![meeting_id, t1], |row| {
+        Ok(LineRecord {
+            id: row.get(0)?,
+            who: row.get(1)?,
+            speaker: row.get(2)?,
+            text: row.get(3)?,
+            start_time: row.get(4)?,
+            end_time: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// `Label: text` per line, the same labels as `transcript_excerpt`.
+pub fn format_lines(lines: &[LineRecord]) -> String {
+    lines
+        .iter()
+        .map(|l| {
+            let label = if l.who == "me" {
+                "You".into()
+            } else {
+                l.speaker
+                    .map_or("Them".into(), |s| format!("Speaker {}", s + 1))
+            };
+            format!("{label}: {}\n", l.text)
+        })
+        .collect()
+}
+
 /// Bounded prompt material read incrementally. Excerpts explicitly disclose any
 /// omitted middle; originals are never shortened in storage.
 pub fn transcript_excerpt(
@@ -489,5 +557,29 @@ mod tests {
         assert_eq!(format_duration(65), "01:05");
         assert_eq!(format_duration(3725), "62:05");
         assert_eq!(format_duration(-5), "00:00");
+    }
+
+    #[test]
+    fn chunks_cover_time_and_leave_the_rest() {
+        let db = database();
+        let c = db.connection();
+        let id = start(c, "M", "", "en").unwrap();
+        add_line(c, &id, "me", None, "one", 0.0, 1.0).unwrap();
+        add_line(c, &id, "them", None, "two", 1.0, 2.0).unwrap();
+        add_chunk(
+            c,
+            &id,
+            &NoteChunk {
+                t0: 0.0,
+                t1: 1.0,
+                body: "n".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(chunks(c, &id).unwrap().len(), 1);
+        let rest = lines_after(c, &id, 1.0).unwrap();
+        assert_eq!(format_lines(&rest), "Them: two\n");
+        delete(c, &id).unwrap();
+        assert!(chunks(c, &id).unwrap().is_empty());
     }
 }

@@ -95,29 +95,6 @@ impl DashboardView {
         editor
     }
 
-    /// Search the open transcript for `text`, so a tone citation lands on the
-    /// speaker's actual words.
-    pub(super) fn filter_meeting_transcript(&mut self, text: &str, cx: &mut Context<Self>) {
-        let editor = match self.history_search[3].clone() {
-            Some(editor) => editor,
-            None => {
-                let editor = cx.new(|cx| self.history_editor(3, "", cx));
-                self.history_search[3] = Some(editor.clone());
-                editor
-            }
-        };
-        self.history_queries[3] = text.to_owned();
-        editor.update(cx, |editor, cx| {
-            if editor.input.text() != text {
-                editor.input.set_text(text);
-            }
-            cx.notify();
-        });
-        // Ease the reader onto the filtered transcript instead of the diluted
-        // timeline above it.
-        self.page_scroll.set_offset(gpui::point(px(0.0), px(24.0)));
-    }
-
     pub(super) fn history_search_bar(
         &self,
         slot: usize,
