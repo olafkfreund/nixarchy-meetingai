@@ -80,6 +80,7 @@ class Handler(socketserver.StreamRequestHandler):
             ("mic", "", "Fine, let us say next Tuesday."),
         ]:
             self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": 3, "t1": 6})
+        self.send({"event": "notice", "text": "An agent started recording"})
         self.send({"event": "answer.started", "turn": 1, "question": "What is the plan?", "automatic": True, **PROVIDER})
         for word in ["Ship ", "it ", "**next Tuesday**.\n\n", "- QA sign-off first\n", "- Pad the migration by two days\n"]:
             self.send({"event": "answer.delta", "turn": 1, "text": word, **PROVIDER})
