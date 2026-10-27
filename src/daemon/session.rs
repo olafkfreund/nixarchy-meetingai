@@ -1822,9 +1822,18 @@ impl Daemon {
                 candidates::for_meeting(c, meeting).ok().flatten().is_some(),
             )
         };
+        // Merging duplicates needs no model, so every path ends here, and tells the shell once.
         let finalize = || {
-            let g = self.inner.lock();
-            let _ = items::finalize(g.db.connection(), meeting);
+            {
+                let g = self.inner.lock();
+                let c = g.db.connection();
+                let _ = if meetings::mode(c, meeting) == MeetingMode::TeamMeeting {
+                    recap::reconcile(c, meeting)
+                } else {
+                    items::finalize(c, meeting)
+                };
+            }
+            self.emit("items.updated", json!({"meeting": meeting}));
         };
         let Some(config) = config else {
             if local {
@@ -1845,12 +1854,10 @@ impl Daemon {
         match recap::generate(&self.db_path, meeting, Some(config), &language).await {
             Ok(()) => {
                 self.emit("notes.updated", json!({"meeting": meeting}));
-                self.emit("items.updated", json!({"meeting": meeting}));
             }
             Err(error) => self.error(format!("Could not write the meeting notes: {error}")),
         }
         finalize();
-        self.emit("items.updated", json!({"meeting": meeting}));
     }
 
     // ----- dictation ----------------------------------------------------
@@ -1970,6 +1977,7 @@ impl Daemon {
         g.suggestions.clear();
         g.shown_earlier.clear();
         g.candidate = None;
+        g.series = None;
         g.consent = false;
         self.local_only.store(false, Ordering::Relaxed);
     }
@@ -1988,7 +1996,7 @@ impl Daemon {
         Self::known_series(&g, series)?;
         let c = g.db.connection();
         let current = g.meeting_id.as_deref().or(g.resume_meeting.as_deref());
-        let open = items::open_for_series(c, series).map_err(|e| e.to_string())?;
+        let open = items::open_for_series(c, series, current).map_err(|e| e.to_string())?;
         let Some((id, title, started_at)) =
             items::latest_meeting(c, series, current).map_err(|e| e.to_string())?
         else {
@@ -2088,6 +2096,7 @@ impl Daemon {
         );
         context::add(&mut g.sources, source)?;
         g.resume_meeting = Some(id.to_owned());
+        g.series = items::meeting_series(g.db.connection(), id).ok().flatten();
         let candidate = candidates::for_meeting(g.db.connection(), id)
             .ok()
             .flatten()
@@ -3583,6 +3592,85 @@ mod command_tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn finishing_without_a_model_still_merges_items_and_announces_once() {
+        let d = daemon();
+        let mut events = d.subscribe();
+        let m = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let team = MeetingMode::TeamMeeting;
+            let m = meetings::start(c, "T", "", "en", None, team).unwrap();
+            for text in ["Send the budget", "Send the budget"] {
+                let item = items::NewItem {
+                    meeting_id: &m,
+                    kind: "action",
+                    text,
+                    ..Default::default()
+                };
+                items::insert(c, &item).unwrap();
+            }
+            m
+        };
+        d.finish_meeting_artifacts(&m).await;
+        let mut updated = 0;
+        while let Ok(e) = events.try_recv() {
+            updated += usize::from(e["event"] == "items.updated");
+        }
+        assert_eq!(updated, 1);
+        let g = d.inner.lock();
+        let left = items::list(g.db.connection(), items::Scope::Meeting(&m), None).unwrap();
+        assert!(left.len() == 1 && !left[0].draft);
+    }
+
+    #[tokio::test]
+    async fn restore_sets_the_series_and_last_time_looks_before_it() {
+        let d = daemon();
+        let s = d
+            .handle("series.create", json!({"name": "W"}), None)
+            .await
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (m1, m2) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let mode = Default::default();
+            let m1 = meetings::start(c, "One", "", "en", Some(&s), mode).unwrap();
+            let m2 = meetings::start(c, "Two", "", "en", Some(&s), mode).unwrap();
+            (m1, m2)
+        };
+        d.handle("session.new", json!({"series": s}), None)
+            .await
+            .unwrap();
+        d.handle("session.new", json!({}), None).await.unwrap();
+        assert_eq!(
+            d.handle("state.get", json!({}), None).await.unwrap()["series"],
+            Value::Null
+        );
+        d.handle("session.restore", json!({"id": m2}), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            d.handle("state.get", json!({}), None).await.unwrap()["series"],
+            s
+        );
+        let last = d
+            .handle("last_time.get", json!({"series": s}), None)
+            .await
+            .unwrap();
+        assert_eq!(last["meeting"], json!(m1));
+        d.handle("session.restore", json!({"id": m1}), None)
+            .await
+            .unwrap();
+        let last = d
+            .handle("last_time.get", json!({"series": s}), None)
+            .await
+            .unwrap();
+        assert_eq!(last["meeting"], Value::Null);
     }
 
     #[tokio::test]

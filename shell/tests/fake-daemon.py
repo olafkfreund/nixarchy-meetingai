@@ -138,7 +138,7 @@ if team:
     state["meeting"] = "m2"
     DATA["series.list"] = [{"id": "s1", "name": "Weekly platform sync", "created_at": "2026-10-01 09:00:00"}]
     ITEMS = [
-        {"id": "i1", "meeting_id": "m2", "series_id": "s1", "kind": "action", "text": "Pad the migration by two days", "owner": "Sam", "due": "Tuesday", "status": "open", "source_line": 3, "t0": 125.0, "origin_item": None, "draft": 1, "created_at": "2026-10-27 10:02:00"},
+        {"id": "i1", "meeting_id": "m2", "series_id": "s1", "kind": "action", "text": "Pad the migration by two days", "owner": "Sam", "due": "Tuesday", "status": "open", "source_line": 3, "t0": 125.0, "origin_item": "e1", "origin_text": "Write the migration runbook", "draft": 1, "created_at": "2026-10-27 10:02:00"},
         {"id": "i2", "meeting_id": "m2", "series_id": "s1", "kind": "decision", "text": "Ship next Tuesday if QA signs off", "owner": None, "due": None, "status": "open", "source_line": 2, "t0": 70.0, "origin_item": None, "draft": 1, "created_at": "2026-10-27 10:03:00"},
         {"id": "i3", "meeting_id": "m2", "series_id": "s1", "kind": "question", "text": "Who owns the lag alert?", "owner": None, "due": None, "status": "open", "source_line": 5, "t0": 190.5, "origin_item": None, "draft": 0, "created_at": "2026-10-27 10:04:00"},
         {"id": "i4", "meeting_id": "m2", "series_id": "s1", "kind": "action", "text": "Share the QA checklist", "owner": "Alex", "due": None, "status": "done", "source_line": 4, "t0": 160.0, "origin_item": None, "draft": 0, "created_at": "2026-10-27 10:05:00"},

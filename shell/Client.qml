@@ -34,7 +34,12 @@ Item {
     property string consentPrompt: ""   // set while the daemon asks for "recording is announced"
     signal notesUpdated(var meeting)
     readonly property string currentMeeting: String(state.meeting || "")
-    onCurrentMeetingChanged: { if (currentMeeting === "") root.items = []; else root.refreshItems(currentMeeting); }
+    // While an item's text is being edited a refresh waits, so typing is not lost.
+    property bool itemEditing: false
+    property var pendingItems: null
+    function setItems(list) { if (root.itemEditing) root.pendingItems = list; else root.items = list; }
+    onItemEditingChanged: { if (!itemEditing && pendingItems !== null) { root.items = pendingItems; pendingItems = null; } }
+    onCurrentMeetingChanged: { root.earlierItem = null; root.pendingItems = null; if (currentMeeting === "") root.items = []; else root.refreshItems(currentMeeting); }
     readonly property string currentCandidate: String(state.candidate || "")
     property string viewId: ""      // a candidate opened in the Library for viewing or deletion, without selecting it
     readonly property string shownCandidate: viewId !== "" ? viewId : currentCandidate
@@ -102,12 +107,12 @@ Item {
     }
 
     function refreshItems(meeting) {
-        root.send("items.list", { meeting: meeting }, function(r) { if (r.ok) root.items = r.data || []; });
+        root.send("items.list", { meeting: meeting }, function(r) { if (r.ok) root.setItems(r.data || []); });
     }
 
     // Optimistic: the daemon's items.updated refetch settles it.
     function updateItem(id, fields) {
-        root.items = root.items.map(function(i) { return i.id === id ? Object.assign({}, i, fields) : i; });
+        root.setItems((root.pendingItems || root.items).map(function(i) { return i.id === id ? Object.assign({}, i, fields) : i; }));
         root.send("items.update", Object.assign({ id: id }, fields));
     }
 
@@ -152,7 +157,7 @@ Item {
     function onEvent(ev) {
         switch (ev.event) {
         case "settings": root.settings = ev.settings || ({}); break;
-        case "session.reset": lines.clear(); root.answering = false; root.suggestions = []; root.items = []; root.earlierItem = null; root.consentPrompt = ""; root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" }); break;
+        case "session.reset": lines.clear(); root.answering = false; root.suggestions = []; root.itemEditing = false; root.pendingItems = null; root.items = []; root.earlierItem = null; root.consentPrompt = ""; root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" }); break;
         case "history":
             for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(ev.rows[h].who === "question" ? "asked" : String(ev.rows[h].who), "", String(ev.rows[h].text), false);
             break;
@@ -177,7 +182,7 @@ Item {
         case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
         case "notice": root.addRow("notice", "", String(ev.text || ""), false); break;
         case "items.updated": if (ev.meeting === root.state.meeting) root.refreshItems(ev.meeting); break;
-        case "earlier_item": root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
+        case "earlier_item": if (ev.meeting === root.state.meeting) root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
         case "questions.updated": if (ev.candidate === root.shownCandidate) root.refreshCand(); break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
         case "error": root.lastError = String(ev.message || ""); break;

@@ -605,7 +605,7 @@ Item {
                                         Row {
                                             spacing: Style.spacing.xs
                                             IconButton { ts: root.ts; text: "Discussed"; bordered: true; tooltipText: "It came up again; the link is already saved"; onClicked: callout.dismiss() }
-                                            IconButton { ts: root.ts; iconText: root.iCheck; text: "Done"; bordered: true; tooltipText: "Mark the earlier item done"; onClicked: { daemon.updateItem(callout.it.id, { status: "done" }); callout.dismiss(); } }
+                                            IconButton { ts: root.ts; iconText: root.iCheck; text: "Done"; bordered: true; tooltipText: "Mark the earlier item done"; onClicked: { daemon.send("items.update", { id: callout.it.id, status: "done" }, function() { root.loadLastTime(); }); callout.dismiss(); } }
                                             IconButton { ts: root.ts; text: "Not related"; bordered: true; tooltipText: "Remove the link to the earlier item"; onClicked: { if (daemon.earlierItem.new_item) daemon.updateItem(daemon.earlierItem.new_item, { origin_item: "" }); callout.dismiss(); } }
                                         }
                                     }
@@ -631,9 +631,13 @@ Item {
                                         Text { textFormat: Text.PlainText; text: grp.modelData.title; color: Commons.Color.popups.text; opacity: 0.7; font.pixelSize: Style.font.caption * root.ts; font.bold: true }
                                         Repeater {
                                             model: grp.rows
+                                            Column {
+                                              id: cell
+                                              required property var modelData
+                                              width: grp.width
                                             Item {
                                                 id: irow
-                                                required property var modelData
+                                                readonly property var modelData: cell.modelData
                                                 readonly property bool open: modelData.status === "open"
                                                 width: grp.width
                                                 height: Math.max(Style.spacing.controlHeight, itext.implicitHeight + Style.space(4))
@@ -667,7 +671,17 @@ Item {
                                                     font.italic: irow.modelData.draft === true || irow.modelData.draft === 1
                                                     font.strikeout: irow.modelData.status !== "open"
                                                     onEditingFinished: { if (text.trim() !== "" && text !== irow.modelData.text) daemon.updateItem(irow.modelData.id, { text: text.trim() }); }
+                                                    onActiveFocusChanged: daemon.itemEditing = activeFocus
+                                                    Keys.onEscapePressed: function(event) { text = irow.modelData.text; focus = false; event.accepted = true; }
                                                 }
+                                            }
+                                            Row {   // a continuation the callout did not show, or that was kept
+                                                visible: !!cell.modelData.origin_item
+                                                x: Style.spacing.md + root.iconPx
+                                                spacing: Style.spacing.xs
+                                                Text { width: Math.min(implicitWidth, grp.width - unlink.width - Style.spacing.md * 3 - root.iconPx); elide: Text.ElideRight; textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: "continues: " + String(cell.modelData.origin_text || "an earlier item"); color: Commons.Color.popups.text; opacity: 0.6; font.pixelSize: Style.font.caption * root.ts }
+                                                IconButton { id: unlink; ts: root.ts; iconText: root.iClose; tooltipText: "Unlink from the earlier item"; onClicked: daemon.updateItem(cell.modelData.id, { origin_item: "" }) }
+                                            }
                                             }
                                         }
                                     }

@@ -29,6 +29,8 @@ pub struct ItemRecord {
     pub created_at: String,
     /// Start time of the source line, if it is stored.
     pub t0: Option<f64>,
+    /// Text of the item `origin_item` names.
+    pub origin_text: Option<String>,
 }
 
 /// An item to store; it starts open and as a draft.
@@ -61,7 +63,8 @@ pub enum Scope<'a> {
 }
 
 const COLUMNS: &str = "id, meeting_id, series_id, kind, text, owner, due, status, source_line, origin_item, draft, created_at,
-    (SELECT start_time FROM meeting_lines WHERE meeting_lines.rowid = source_line) AS t0";
+    (SELECT start_time FROM meeting_lines WHERE meeting_lines.rowid = source_line) AS t0,
+    (SELECT o.text FROM meeting_items o WHERE o.id = meeting_items.origin_item) AS origin_text";
 
 pub fn series_create(connection: &Connection, name: &str) -> Result<String> {
     let id = Uuid::new_v4().to_string();
@@ -132,6 +135,7 @@ fn item_row(row: &rusqlite::Row) -> rusqlite::Result<ItemRecord> {
         draft: row.get::<_, i64>(10)? != 0,
         created_at: row.get(11)?,
         t0: row.get(12)?,
+        origin_text: row.get(13)?,
     })
 }
 
@@ -163,17 +167,19 @@ pub fn get(connection: &Connection, id: &str) -> Result<Option<ItemRecord>> {
         .optional()?)
 }
 
-/// The series' newest meeting as (id, title, started_at), leaving out the one in progress.
+/// The series' newest meeting as (id, title, started_at) that came before `before`, or the
+/// newest of all without it.
 pub fn latest_meeting(
     connection: &Connection,
     series_id: &str,
-    exclude: Option<&str>,
+    before: Option<&str>,
 ) -> Result<Option<(String, String, String)>> {
     Ok(connection
         .query_row(
-            "SELECT id, title, started_at FROM meetings WHERE series_id = ?1 AND id IS NOT ?2
+            "SELECT id, title, started_at FROM meetings WHERE series_id = ?1
+               AND rowid < COALESCE((SELECT rowid FROM meetings WHERE id = ?2), 9223372036854775807)
              ORDER BY rowid DESC LIMIT 1",
-            params![series_id, exclude],
+            params![series_id, before],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?)
@@ -202,12 +208,18 @@ pub fn touched(connection: &Connection, meeting_id: &str) -> Result<Vec<ItemReco
 }
 
 /// A series' open items from finished (non-draft) meetings: the "earlier task" candidates.
-pub fn open_for_series(connection: &Connection, series_id: &str) -> Result<Vec<ItemRecord>> {
+/// Items of `current` (the meeting being chunked or resumed) never point back at themselves.
+pub fn open_for_series(
+    connection: &Connection,
+    series_id: &str,
+    current: Option<&str>,
+) -> Result<Vec<ItemRecord>> {
     let mut statement = connection.prepare(&format!(
         "SELECT {COLUMNS} FROM meeting_items WHERE series_id = ?1 AND status = 'open' AND draft = 0
+           AND meeting_id IS NOT ?2
          ORDER BY created_at, rowid"
     ))?;
-    let rows = statement.query_map(params![series_id], item_row)?;
+    let rows = statement.query_map(params![series_id, current], item_row)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
@@ -244,23 +256,6 @@ pub fn delete(connection: &Connection, id: &str) -> Result<bool> {
     Ok(connection.execute("DELETE FROM meeting_items WHERE id = ?1", params![id])? > 0)
 }
 
-/// The latest meeting in the series that started before `before`, if any.
-pub fn previous_meeting(
-    connection: &Connection,
-    series_id: &str,
-    before: &str,
-) -> Result<Option<String>> {
-    Ok(connection
-        .query_row(
-            "SELECT id FROM meetings WHERE series_id = ?1 AND id != ?2
-               AND rowid < (SELECT rowid FROM meetings WHERE id = ?2)
-             ORDER BY rowid DESC LIMIT 1",
-            params![series_id, before],
-            |row| row.get(0),
-        )
-        .optional()?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,8 +273,13 @@ mod tests {
 
         let m1 = meetings::start(c, "One", "meeting", "en", Some(&s), Default::default()).unwrap();
         let m2 = meetings::start(c, "Two", "meeting", "en", Some(&s), Default::default()).unwrap();
-        assert_eq!(previous_meeting(c, &s, &m2).unwrap(), Some(m1.clone()));
-        assert_eq!(previous_meeting(c, &s, &m1).unwrap(), None);
+        let before = |m| latest_meeting(c, &s, Some(m)).unwrap().map(|r| r.0);
+        assert_eq!(before(&m2), Some(m1.clone()));
+        assert_eq!(before(&m1), None);
+        assert_eq!(
+            latest_meeting(c, &s, None).unwrap().map(|r| r.0),
+            Some(m2.clone())
+        );
 
         let item = NewItem {
             meeting_id: &m1,
@@ -302,9 +302,12 @@ mod tests {
         let got = &list(c, Scope::Meeting(&m1), None).unwrap()[0];
         assert!(got.draft && got.owner.is_none() && got.status == "open");
         // Drafts are not earlier-task candidates until the meeting is finished.
-        assert!(open_for_series(c, &s).unwrap().is_empty());
+        assert!(open_for_series(c, &s, None).unwrap().is_empty());
         c.execute("UPDATE meeting_items SET draft = 0", []).unwrap();
-        assert_eq!(open_for_series(c, &s).unwrap().len(), 1);
+        assert_eq!(open_for_series(c, &s, None).unwrap().len(), 1);
+        // The meeting being chunked or resumed never offers its own items.
+        assert!(open_for_series(c, &s, Some(&m1)).unwrap().is_empty());
+        assert_eq!(open_for_series(c, &s, Some(&m2)).unwrap().len(), 1);
 
         let patch = ItemPatch {
             owner: Some("Ann".into()),
@@ -365,6 +368,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(touched(c, &m2).unwrap()[0].id, old);
+        assert_eq!(
+            get(c, &new).unwrap().unwrap().origin_text.as_deref(),
+            Some("A")
+        );
         assert!(touched(c, &m1).unwrap().is_empty());
         assert_eq!(get(c, &new).unwrap().unwrap().t0, Some(7.5));
         let clear = ItemPatch {

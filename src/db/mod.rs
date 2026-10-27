@@ -94,13 +94,17 @@ impl Database {
                 "ALTER TABLE meetings ADD COLUMN mode TEXT NOT NULL DEFAULT 'general'",
             )?;
         }
-        // Recaps written before notes_fts existed become searchable.
-        connection.execute_batch(
-            "INSERT INTO notes_fts (meeting_id, body)
-             SELECT meeting_id, content FROM meeting_recaps r
-             WHERE status = 'ready' AND content != ''
-               AND NOT EXISTS (SELECT 1 FROM notes_fts f WHERE f.meeting_id = r.meeting_id)",
-        )?;
+        // Recaps written before notes_fts existed become searchable, once.
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 1 {
+            connection.execute_batch(
+                "INSERT INTO notes_fts (meeting_id, body)
+                 SELECT meeting_id, content FROM meeting_recaps r
+                 WHERE status = 'ready' AND content != ''
+                   AND NOT EXISTS (SELECT 1 FROM notes_fts f WHERE f.meeting_id = r.meeting_id);
+                 PRAGMA user_version = 1;",
+            )?;
+        }
         seed::seed_listen_modes(&connection)?;
         profiles::migrate_legacy(&connection)?;
         Ok(Self { connection })
@@ -152,6 +156,8 @@ mod tests {
         meetings::begin_recap(c, &id).unwrap();
         meetings::finish_recap(c, &id, Ok("ship the quokka release")).unwrap();
         assert!(meetings::search(c, "quokka", 10).unwrap().is_empty());
+        // Opened by a database from before the backfill marker existed.
+        c.execute_batch("PRAGMA user_version = 0").unwrap();
         drop(db);
         let db = Database::open(&path).unwrap();
         assert_eq!(meetings::search(db.connection(), "quokka", 10).unwrap().len(), 1);
@@ -163,6 +169,11 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM notes_fts", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+        // The backfill ran once: a row deleted now is not brought back by the next open.
+        db.connection().execute("DELETE FROM notes_fts", []).unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert!(meetings::search(db.connection(), "quokka", 10).unwrap().is_empty());
     }
 
     #[test]
