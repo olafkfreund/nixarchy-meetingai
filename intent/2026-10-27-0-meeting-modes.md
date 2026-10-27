@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: none (issues are disabled on olafkfreund/mixarchy-meetingai)
 author: olafkfreund
 reviews: Codex (gpt-6-sol) and agy, read-only, 2026-10-27; claims checked against the code by the session model
