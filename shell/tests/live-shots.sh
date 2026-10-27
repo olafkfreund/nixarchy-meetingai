@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Frames of a live meeting against fake-daemon.py --live: partial words, a
 # question from the other side, a streamed answer, then suggestions.
-# usage: [SCENARIO=live|k8s] [SCALE=100] live-shots.sh [OUT_DIR]   (needs a Wayland session and grim)
+# usage: [SCENARIO=live|k8s|team] [SCALE=100] live-shots.sh [OUT_DIR]   (needs a Wayland session and grim)
 # SCENARIO=k8s plays the captured real answer (fake-daemon.py --k8s); SCALE is the text_scale setting.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -46,6 +46,7 @@ sleep 3.4; g=$(geom)
 # name:seconds to wait before the crop (the harness opens Settings at 16 s)
 case $scenario in
     r5) frames="1-resized:1 2-profiles:4.5 3-prompts:4" ;;
+    team) frames="1-items:3 2-last-time:6 3-settings:4" ;;
     k8s) frames="1-answering:2 2-ready:9 3-settings:4" ;;
     *) frames="1-question:1 2-answering:2.4 3-suggestions:3 4-you-speaking:2.2 5-asked:2.4 6-settings:4" ;;
 esac

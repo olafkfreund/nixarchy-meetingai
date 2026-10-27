@@ -25,6 +25,11 @@ Item {
     signal preview(string text)
     signal screenshot()
     signal quick()
+    property bool team: false      // team meeting mode: show the series picker
+    property var seriesList: []    // series.list rows
+    property string seriesId: ""
+    signal seriesPicked(string id)         // "" = no series
+    signal seriesCreated(string name)
     signal pick(int n)   // 1..3 typed into an empty composer: choose that suggestion
     readonly property bool empty: input.text.trim() === "" && root.chips.length === 0
 
@@ -67,6 +72,26 @@ Item {
                         onClicked: root.chips = root.chips.filter(function(c, i) { return i !== chip.index; })
                     }
                 }
+            }
+        }
+
+        Row {   // series: only in team mode; "New series..." reveals a name field
+            visible: root.team
+            spacing: Style.spacing.md
+            Dropdown {
+                id: seriesBox
+                label: "Series"
+                value: root.seriesId
+                options: [{ value: "", label: "No series" }].concat(root.seriesList.map(function(s) { return { value: String(s.id), label: String(s.name) }; })).concat([{ value: "__new", label: "New series..." }])
+                onChanged: function(v) { if (v === "__new") newName.visible = true; else { newName.visible = false; root.seriesPicked(v); } }
+            }
+            TextField {
+                id: newName
+                visible: false
+                anchors.bottom: parent.bottom
+                width: Style.space(200)
+                placeholderText: "Series name"
+                onAccepted: { if (text.trim() !== "") root.seriesCreated(text.trim()); text = ""; visible = false; }
             }
         }
 
