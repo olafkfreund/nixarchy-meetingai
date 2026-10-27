@@ -113,12 +113,13 @@ if live:
     settings["meeting_mode"] = "team_meeting" if team else "interview"
 if team:
     state["series"] = "s1"
+    state["meeting"] = "m2"
     DATA["series.list"] = [{"id": "s1", "name": "Weekly platform sync", "created_at": "2026-10-01 09:00:00"}]
     ITEMS = [
-        {"id": "i1", "meeting_id": "m2", "series_id": "s1", "kind": "action", "text": "Pad the migration by two days", "owner": "Sam", "due": "Tuesday", "status": "open", "source_line": 3, "origin_item": None, "draft": 1, "created_at": "2026-10-27 10:02:00"},
-        {"id": "i2", "meeting_id": "m2", "series_id": "s1", "kind": "decision", "text": "Ship next Tuesday if QA signs off", "owner": None, "due": None, "status": "open", "source_line": 2, "origin_item": None, "draft": 1, "created_at": "2026-10-27 10:03:00"},
-        {"id": "i3", "meeting_id": "m2", "series_id": "s1", "kind": "question", "text": "Who owns the lag alert?", "owner": None, "due": None, "status": "open", "source_line": 5, "origin_item": None, "draft": 0, "created_at": "2026-10-27 10:04:00"},
-        {"id": "i4", "meeting_id": "m2", "series_id": "s1", "kind": "action", "text": "Share the QA checklist", "owner": "Alex", "due": None, "status": "done", "source_line": 4, "origin_item": None, "draft": 0, "created_at": "2026-10-27 10:05:00"},
+        {"id": "i1", "meeting_id": "m2", "series_id": "s1", "kind": "action", "text": "Pad the migration by two days", "owner": "Sam", "due": "Tuesday", "status": "open", "source_line": 3, "t0": 125.0, "origin_item": None, "draft": 1, "created_at": "2026-10-27 10:02:00"},
+        {"id": "i2", "meeting_id": "m2", "series_id": "s1", "kind": "decision", "text": "Ship next Tuesday if QA signs off", "owner": None, "due": None, "status": "open", "source_line": 2, "t0": 70.0, "origin_item": None, "draft": 1, "created_at": "2026-10-27 10:03:00"},
+        {"id": "i3", "meeting_id": "m2", "series_id": "s1", "kind": "question", "text": "Who owns the lag alert?", "owner": None, "due": None, "status": "open", "source_line": 5, "t0": 190.5, "origin_item": None, "draft": 0, "created_at": "2026-10-27 10:04:00"},
+        {"id": "i4", "meeting_id": "m2", "series_id": "s1", "kind": "action", "text": "Share the QA checklist", "owner": "Alex", "due": None, "status": "done", "source_line": 4, "t0": 160.0, "origin_item": None, "draft": 0, "created_at": "2026-10-27 10:05:00"},
     ]
     DATA["items.list"] = ITEMS
     DATA["last_time.get"] = {"meeting": "m1", "title": "Platform sync, 20 Oct", "started_at": "2026-10-20 10:00:00", "recap": "## Recap\nAgreed to **review the Kafka migration** this week.", "items": [{"id": "e1", "kind": "action", "text": "Write the migration runbook", "status": "open"}]}
@@ -203,7 +204,7 @@ class Handler(socketserver.StreamRequestHandler):
         self.say("system", "Priya", "Did anyone finish the migration runbook from last week?", 740, 0.05)
         self.say("mic", "", "Almost, I will send it today.", 748, 0.05)
         time.sleep(0.5)
-        self.send({"event": "earlier_item", "item": {"id": "e1", "kind": "action", "text": "Write the migration runbook", "created_at": "2026-10-20 10:00:00", "status": "open"}, "quote": "I will send it today.", "line": 2, "meeting": "m-team"})
+        self.send({"event": "earlier_item", "item": {"id": "e1", "kind": "action", "text": "Write the migration runbook", "created_at": "2026-10-20 10:00:00", "status": "open"}, "quote": "I will send it today.", "line": 2, "meeting": "m2", "new_item": "i1"})
 
     def stream_k8s(self):
         question = "Explain k8s and how it is working?"

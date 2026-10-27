@@ -258,8 +258,8 @@ Item {
             Row {
                 spacing: Style.spacing.xs
                 Repeater {
-                    model: ["general", "interview"]
-                    IconButton { ts: root.ts; required property string modelData; text: modelData; active: root.promptMode === modelData; onClicked: root.promptMode = modelData }
+                    model: ["general", "interview", "team_meeting"]
+                    IconButton { ts: root.ts; required property string modelData; text: modelData === "team_meeting" ? "Team" : modelData; active: root.promptMode === modelData; onClicked: root.promptMode = modelData }
                 }
                 Repeater {
                     model: root.promptKinds

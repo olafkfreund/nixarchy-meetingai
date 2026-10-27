@@ -84,6 +84,23 @@ impl Database {
         if !has_series {
             connection.execute_batch("ALTER TABLE meetings ADD COLUMN series_id TEXT")?;
         }
+        let has_mode: bool = connection.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('meetings') WHERE name = 'mode'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_mode {
+            connection.execute_batch(
+                "ALTER TABLE meetings ADD COLUMN mode TEXT NOT NULL DEFAULT 'general'",
+            )?;
+        }
+        // Recaps written before notes_fts existed become searchable.
+        connection.execute_batch(
+            "INSERT INTO notes_fts (meeting_id, body)
+             SELECT meeting_id, content FROM meeting_recaps r
+             WHERE status = 'ready' AND content != ''
+               AND NOT EXISTS (SELECT 1 FROM notes_fts f WHERE f.meeting_id = r.meeting_id)",
+        )?;
         seed::seed_listen_modes(&connection)?;
         profiles::migrate_legacy(&connection)?;
         Ok(Self { connection })
@@ -121,7 +138,31 @@ mod tests {
                 .unwrap();
         }
         let db = Database::open(&path).unwrap();
-        meetings::start(db.connection(), "t", "", "en", Some("s")).unwrap();
+        meetings::start(db.connection(), "t", "", "en", Some("s"), Default::default()).unwrap();
+    }
+
+    #[test]
+    fn old_recaps_are_indexed_on_open() {
+        let dir = std::env::temp_dir().join(format!("nm-bf-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("h.db");
+        let db = Database::open(&path).unwrap();
+        let c = db.connection();
+        let id = meetings::start(c, "t", "", "en", None, Default::default()).unwrap();
+        meetings::begin_recap(c, &id).unwrap();
+        meetings::finish_recap(c, &id, Ok("ship the quokka release")).unwrap();
+        assert!(meetings::search(c, "quokka", 10).unwrap().is_empty());
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(meetings::search(db.connection(), "quokka", 10).unwrap().len(), 1);
+        drop(db);
+        // A second open does not duplicate the row.
+        let db = Database::open(&path).unwrap();
+        let n: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM notes_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]
@@ -130,7 +171,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let db = Database::open(dir.join("h.db")).unwrap();
         let c = db.connection();
-        let id = meetings::start(c, "t", "", "en", None).unwrap();
+        let id = meetings::start(c, "t", "", "en", None, Default::default()).unwrap();
         meetings::index_notes(c, &id, "ship the zebra release").unwrap();
         assert_eq!(meetings::search(c, "zebra", 10).unwrap().len(), 1);
     }

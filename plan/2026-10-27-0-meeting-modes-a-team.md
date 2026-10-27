@@ -188,4 +188,36 @@ step 4. The session model merges, commits each step, and runs step 8.
 
 ## Deviations log (recorded with the implementation commit)
 
-None yet.
+- **Commits:** steps 1–5 and 7 landed as one commit and step 6 as another
+  (coders cannot commit), then one commit of review fixes.
+- **Enum name** `MeetingMode` (`Mode` was taken), as decided above.
+- `meeting_items.meeting_id` has `ON DELETE CASCADE`; `meetings::delete`
+  removes the meeting and its `notes_fts` row in one transaction.
+- **Mode is stored per meeting** (`meetings.mode`, guarded ALTER, set at
+  `meetings::start`). Recap, items and events use the meeting's mode, not
+  the current setting (Opus review).
+- **Drafts are finalized at every stop** (`items::finalize`), even when
+  the AI call fails or no provider is set; only finalized items are offered
+  as earlier tasks. Short team meetings always take the chunk path.
+- **Continuations:** a new item stores the earlier item's id in
+  `origin_item`; `earlier_item` carries `meeting` and `new_item`.
+  Discussed dismisses (the link is already stored), Done sets the earlier
+  item done, Not related clears the new item's `origin_item`. Each earlier
+  item is shown at most once per session, besides the 180 s gate. The
+  repeat suppression has no automated test.
+- **Source time, not line number:** items carry `t0` (the source line's
+  start time), shown as m:ss.
+- **Grounding:** owner and due are kept only if they appear in the
+  slice's spoken text; item text is stripped of `<`, `>` and newlines
+  before it goes back into a prompt.
+- **Fences:** ```json is matched case-insensitively, with a fallback to the
+  last bare fence that holds a list; prose after the fence stays.
+- **State reports the current meeting;** the shell refreshes items and
+  Last time when it changes, and ignores `items.updated` for other
+  meetings.
+- **Team mode shows typed answers** in a NOW panel above the items.
+- **Series picker** is disabled while recording and reports errors.
+- **Team prompts** are editable in the Prompts tab.
+- **Old recaps** are backfilled into `notes_fts` on open.
+- **No item delete in the UI:** dropping an item covers it.
+- **Series dropdown** doesn't scale with text size (shared component).

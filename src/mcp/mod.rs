@@ -321,7 +321,7 @@ struct ItemsArgs {
     meeting: Option<String>,
     /// Series id from series_list.
     series: Option<String>,
-    /// Only items with this status (open or done).
+    /// Only items with this status (open, done or dropped).
     status: Option<String>,
 }
 

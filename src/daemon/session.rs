@@ -4,6 +4,7 @@
 //! One mutex guards [`Inner`]; it is never held across an `.await`.
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -203,12 +204,18 @@ struct Inner {
     series: Option<String>,
     /// When `earlier_item` last fired; at most one per `EARLIER_GAP`.
     last_earlier: Option<Instant>,
+    /// Earlier items already offered this session, so the callout moves on to a new one.
+    shown_earlier: HashSet<String>,
 }
 
 /// Least time between two "Earlier task?" callouts.
 const EARLIER_GAP: Duration = Duration::from_secs(180);
 
 /// True at most once per `EARLIER_GAP`; records the time when it is.
+fn continued_mode_is_team(me: &Daemon, meeting: &str) -> bool {
+    meetings::mode(me.inner.lock().db.connection(), meeting) == MeetingMode::TeamMeeting
+}
+
 fn earlier_due(last: &mut Option<Instant>, now: Instant) -> bool {
     if last.is_some_and(|t| now.duration_since(t) < EARLIER_GAP) {
         return false;
@@ -518,6 +525,7 @@ impl Daemon {
                 suggestions: Vec::new(),
                 series: None,
                 last_earlier: None,
+                shown_earlier: HashSet::new(),
             }),
         }))
     }
@@ -541,6 +549,7 @@ impl Daemon {
             "mic": g.mic,
             "system": g.system,
             "series": g.series,
+            "meeting": g.meeting_id.as_ref().or(g.resume_meeting.as_ref()),
         })
     }
 
@@ -1292,19 +1301,31 @@ impl Daemon {
                 {
                     if made {
                         me.emit("notes.updated", json!({"meeting": meeting}));
-                        if me.inner.lock().settings.meeting_mode == MeetingMode::TeamMeeting {
+                        if continued_mode_is_team(&me, &meeting) {
                             me.emit("items.updated", json!({"meeting": meeting}));
                         }
                     }
-                    let show = !continued.is_empty()
-                        && earlier_due(&mut me.inner.lock().last_earlier, Instant::now());
-                    if let (true, Some(c)) = (show, continued.first()) {
+                    let pick = {
+                        let mut g = me.inner.lock();
+                        let next = continued
+                            .iter()
+                            .find(|c| !g.shown_earlier.contains(&c.item.id));
+                        match next {
+                            Some(c) if earlier_due(&mut g.last_earlier, Instant::now()) => {
+                                g.shown_earlier.insert(c.item.id.clone());
+                                Some(c.clone())
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(c) = pick {
                         let i = &c.item;
                         me.emit(
                             "earlier_item",
                             json!({"item": {"id": i.id, "kind": i.kind, "text": i.text,
                                 "created_at": i.created_at, "status": i.status},
-                                "quote": c.quote, "line": c.line, "meeting": meeting}),
+                                "quote": c.quote, "line": c.line, "meeting": meeting,
+                                "new_item": c.new_item}),
                         );
                     }
                 }
@@ -1412,6 +1433,7 @@ impl Daemon {
                     "meeting",
                     "en",
                     g.series.as_deref(),
+                    g.settings.meeting_mode,
                 )
                 .map_err(|e| e.to_string())
             };
@@ -1602,7 +1624,14 @@ impl Daemon {
                 meetings::transcript_excerpt(g.db.connection(), meeting, 6000).unwrap_or_default(),
             )
         };
-        let Some(config) = config else { return };
+        let finalize = || {
+            let g = self.inner.lock();
+            let _ = items::finalize(g.db.connection(), meeting);
+        };
+        let Some(config) = config else {
+            finalize();
+            return;
+        };
         let _serial = self.notes.lock().await;
         if !body.trim().is_empty()
             && let Some(title) =
@@ -1618,6 +1647,8 @@ impl Daemon {
             }
             Err(error) => self.error(format!("Could not write the meeting notes: {error}")),
         }
+        finalize();
+        self.emit("items.updated", json!({"meeting": meeting}));
     }
 
     // ----- dictation ----------------------------------------------------
@@ -1732,6 +1763,7 @@ impl Daemon {
         g.live_interim = Default::default();
         g.last_question.clear();
         g.suggestions.clear();
+        g.shown_earlier.clear();
     }
 
     fn known_series(g: &Inner, id: &str) -> Result<(), String> {

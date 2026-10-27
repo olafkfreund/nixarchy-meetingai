@@ -288,7 +288,15 @@ async fn meeting_recap_uses_final_persisted_words_and_survives_reopen() {
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("test.db");
     let db = Database::open(&path).unwrap();
-    let id = meetings::start(db.connection(), "Review", "", "en", None).unwrap();
+    let id = meetings::start(
+        db.connection(),
+        "Review",
+        "",
+        "en",
+        None,
+        Default::default(),
+    )
+    .unwrap();
     meetings::add_line(
         db.connection(),
         &id,
@@ -373,8 +381,15 @@ async fn speech_to_streamed_answer_and_finished_meeting_for_both_ai_services() {
         assert!(headers.contains("language=en-us"));
         assert!(request.windows(4).any(|b| b == b"RIFF"));
         let database = Database::open(dir.join("test.db")).unwrap();
-        let meeting =
-            meetings::start(database.connection(), "Test meeting", "meeting", "en", None).unwrap();
+        let meeting = meetings::start(
+            database.connection(),
+            "Test meeting",
+            "meeting",
+            "en",
+            None,
+            Default::default(),
+        )
+        .unwrap();
         meetings::add_line(
             database.connection(),
             &meeting,

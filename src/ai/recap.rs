@@ -72,16 +72,33 @@ pub struct Continuation {
     pub item: ItemRecord,
     pub quote: String,
     pub line: Option<i64>,
+    /// The item of this meeting that continues it.
+    pub new_item: String,
 }
 
-/// Split a team chunk reply into its Markdown and the last fenced json list. Invalid JSON
-/// keeps the Markdown and drops the items.
+/// Split a team chunk reply into its Markdown and the last fenced json list. A fence counts
+/// when it is tagged `json` (any case) or is bare and starts with `[`. Invalid JSON keeps the
+/// Markdown and drops the items; prose after the fence stays in the Markdown.
 pub fn parse_team_chunk(text: &str) -> (String, Vec<ExtractedItem>) {
-    let Some(start) = text.rfind("```json") else {
+    let marks: Vec<usize> = text.match_indices("```").map(|(i, _)| i).collect();
+    let fence = marks
+        .chunks(2)
+        .filter_map(|p| {
+            let body = &text[p[0] + 3..p.get(1).copied().unwrap_or(text.len())];
+            let tagged = body
+                .get(..4)
+                .is_some_and(|t| t.eq_ignore_ascii_case("json"));
+            let json = if tagged { &body[4..] } else { body };
+            (tagged || json.trim_start().starts_with('[')).then_some((p[0], p.get(1), json))
+        })
+        .next_back();
+    let Some((start, close, json)) = fence else {
         return (text.trim().to_owned(), Vec::new());
     };
-    let markdown = text[..start].trim().to_owned();
-    let json = text[start + 7..].split("```").next().unwrap_or_default();
+    let after = close.map_or("", |c| &text[c + 3..]);
+    let markdown = format!("{}\n{}", text[..start].trim(), after.trim())
+        .trim()
+        .to_owned();
     match serde_json::from_str(json.trim()) {
         Ok(items) => (markdown, items),
         Err(error) => {
@@ -89,6 +106,18 @@ pub fn parse_team_chunk(text: &str) -> (String, Vec<ExtractedItem>) {
             (markdown, Vec::new())
         }
     }
+}
+
+/// Item text goes into a prompt block: no tags, one line.
+fn plain(text: &str) -> String {
+    text.replace(['<', '>'], "").replace(['\n', '\r'], " ")
+}
+
+/// A spoken owner or due date, kept only when the slice's words contain it.
+fn grounded(value: &Option<String>, spoken: &str) -> Option<String> {
+    clean(value)
+        .filter(|v| spoken.contains(&v.to_lowercase()))
+        .map(str::to_owned)
 }
 
 /// Spoken owner or due date; blank means nobody said one.
@@ -103,7 +132,7 @@ fn open_items_text(open: &[ItemRecord]) -> String {
             "- id={} | {} | {} | {}\n",
             i.id,
             i.kind,
-            i.text,
+            plain(&i.text),
             i.created_at.get(..10).unwrap_or(&i.created_at)
         );
         if out.chars().count() + line.chars().count() > OPEN_ITEMS_CHARS {
@@ -119,25 +148,34 @@ fn continuation<'a>(open: &'a [ItemRecord], id: Option<&str>) -> Option<&'a Item
     open.iter().find(|o| Some(o.id.as_str()) == id)
 }
 
-/// Merge same-kind near-duplicates (the earlier wins), then finalize the meeting's items.
+/// Merge same-kind near-duplicates (the earlier wins, keeping what the removed one had that it
+/// lacked), then finalize the meeting's items.
 fn reconcile(connection: &Connection, meeting: &str) -> crate::db::Result<()> {
-    let mut kept: Vec<(String, Vec<String>)> = Vec::new();
+    let mut kept: Vec<(ItemRecord, Vec<String>)> = Vec::new();
     for item in items::list(connection, Scope::Meeting(meeting), None)? {
         let words = tokens(&item.text);
-        if kept
-            .iter()
-            .any(|(k, w)| *k == item.kind && similarity(&words, w) >= DUPLICATE_SIMILARITY)
+        if let Some((k, _)) = kept
+            .iter_mut()
+            .find(|(k, w)| k.kind == item.kind && similarity(&words, w) >= DUPLICATE_SIMILARITY)
         {
+            let patch = items::ItemPatch {
+                status: (k.status == "open" && item.status != "open").then(|| item.status.clone()),
+                owner: k.owner.is_none().then(|| item.owner.clone()).flatten(),
+                due: k.due.is_none().then(|| item.due.clone()).flatten(),
+                origin_item: k
+                    .origin_item
+                    .is_none()
+                    .then(|| item.origin_item.clone())
+                    .flatten(),
+                ..items::ItemPatch::default()
+            };
+            items::update(connection, &k.id, &patch)?;
             items::delete(connection, &item.id)?;
         } else {
-            kept.push((item.kind, words));
+            kept.push((item, words));
         }
     }
-    connection.execute(
-        "UPDATE meeting_items SET draft = 0 WHERE meeting_id = ?1",
-        [meeting],
-    )?;
-    Ok(())
+    items::finalize(connection, meeting)
 }
 
 async fn ask(config: &ProviderConfig, system: String, user: String) -> Result<String, String> {
@@ -306,7 +344,7 @@ async fn chunk_pending(
 ) -> Result<(usize, Vec<Continuation>), String> {
     let owned = id.to_owned();
     let (team, series, open) = db(path, move |db| {
-        let team = Settings::load(db).unwrap_or_default().meeting_mode == MeetingMode::TeamMeeting;
+        let team = meetings::mode(db.connection(), &owned) == MeetingMode::TeamMeeting;
         let series = items::meeting_series(db.connection(), &owned)?.filter(|_| team);
         let open = match &series {
             Some(s) => items::open_for_series(db.connection(), s)?,
@@ -346,6 +384,11 @@ async fn chunk_pending(
             body,
         };
         // `source_line` counts the numbered slice; store the line's rowid.
+        let spoken_text = slice
+            .iter()
+            .map(|l| l.text.to_lowercase())
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut stored = Vec::new();
         for item in extracted.into_iter().filter(|i| !i.text.trim().is_empty()) {
             let spoken_line = item
@@ -355,36 +398,50 @@ async fn chunk_pending(
             let line = spoken_line
                 .and_then(|s| lines[..n].iter().position(|l| l.id == s.id))
                 .map(|p| ids[p]);
-            if let Some(earlier) = continuation(&open, item.continues_item.as_deref()) {
-                continued.push(Continuation {
-                    item: earlier.clone(),
-                    quote: spoken_line.map_or(&item.text, |l| &l.text).clone(),
-                    line,
-                });
-            }
-            stored.push((item, line));
+            let earlier = continuation(&open, item.continues_item.as_deref()).map(|e| {
+                (
+                    e.clone(),
+                    spoken_line.map_or(&item.text, |l| &l.text).clone(),
+                )
+            });
+            let (owner, due) = (
+                grounded(&item.owner, &spoken_text),
+                grounded(&item.due, &spoken_text),
+            );
+            stored.push((item, line, owner, due, earlier));
         }
         let (owned, series) = (id.to_owned(), series.clone());
-        db(path, move |db| {
-            meetings::add_chunk(db.connection(), &owned, &chunk)?;
-            for (item, line) in &stored {
-                items::insert(
-                    db.connection(),
-                    &NewItem {
-                        meeting_id: &owned,
-                        series_id: series.as_deref(),
-                        kind: item.kind.as_str(),
-                        text: item.text.trim(),
-                        owner: clean(&item.owner),
-                        due: clean(&item.due),
-                        source_line: *line,
-                        origin_item: None,
-                    },
-                )?;
-            }
-            Ok(())
-        })
-        .await?;
+        continued.extend(
+            db(path, move |db| {
+                meetings::add_chunk(db.connection(), &owned, &chunk)?;
+                let mut continued = Vec::new();
+                for (item, line, owner, due, earlier) in &stored {
+                    let new_item = items::insert(
+                        db.connection(),
+                        &NewItem {
+                            meeting_id: &owned,
+                            series_id: series.as_deref(),
+                            kind: item.kind.as_str(),
+                            text: item.text.trim(),
+                            owner: owner.as_deref(),
+                            due: due.as_deref(),
+                            source_line: *line,
+                            origin_item: earlier.as_ref().map(|(e, _)| e.id.as_str()),
+                        },
+                    )?;
+                    if let Some((earlier, quote)) = earlier {
+                        continued.push(Continuation {
+                            item: earlier.clone(),
+                            quote: quote.clone(),
+                            line: *line,
+                            new_item,
+                        });
+                    }
+                }
+                Ok(continued)
+            })
+            .await?,
+        );
         made += 1;
     }
 }
@@ -418,12 +475,15 @@ pub async fn generate(
     language: &str,
 ) -> Result<(), String> {
     let owned = id.to_owned();
-    let settings = db(path, move |db| {
+    let (settings, mode) = db(path, move |db| {
         meetings::begin_recap(db.connection(), &owned)?;
-        Ok(Settings::load(db).unwrap_or_default())
+        Ok((
+            Settings::load(db).unwrap_or_default(),
+            meetings::mode(db.connection(), &owned),
+        ))
     })
     .await?;
-    let prompt = match settings.meeting_mode {
+    let prompt = match mode {
         MeetingMode::General => &settings.recap_prompt_general,
         MeetingMode::Interview => &settings.recap_prompt_interview,
         MeetingMode::TeamMeeting => &settings.recap_prompt_team,
@@ -431,7 +491,7 @@ pub async fn generate(
     let result = match config {
         None => Err("Choose a configured AI provider in Settings to generate the recap.".into()),
         Some(config) => {
-            let team = settings.meeting_mode == MeetingMode::TeamMeeting;
+            let team = mode == MeetingMode::TeamMeeting;
             notes(path, id, &config, prompt, language, team).await
         }
     };
@@ -499,7 +559,7 @@ async fn notes(
             if !touched.is_empty() {
                 let list: Vec<String> = touched
                     .iter()
-                    .map(|i| format!("- {} ({})", i.text, i.status))
+                    .map(|i| format!("- {} ({})", plain(&i.text), i.status))
                     .collect();
                 bodies.push(format!("Earlier items touched:\n{}", list.join("\n")));
             }
@@ -535,10 +595,31 @@ mod tests {
     }
 
     #[test]
+    fn fences_are_found_loosely_and_prose_after_stays() {
+        let (md, items) =
+            parse_team_chunk("A.\n```JSON\n[{\"kind\":\"action\",\"text\":\"x\"}]\n```\nThanks.");
+        assert_eq!((md.as_str(), items.len()), ("A.\nThanks.", 1));
+        let (md, items) =
+            parse_team_chunk("A.\n```\n[{\"kind\":\"decision\",\"text\":\"x\"}]\n```");
+        assert_eq!((md.as_str(), items.len()), ("A.", 1));
+        let (_, items) = parse_team_chunk("A.\n```\nnot a list\n```");
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn owner_and_due_need_spoken_grounds_and_text_is_plain() {
+        let said = "ann will send it by friday".to_owned();
+        assert_eq!(grounded(&Some("Ann".into()), &said).as_deref(), Some("Ann"));
+        assert_eq!(grounded(&Some("Bob".into()), &said), None);
+        assert_eq!(grounded(&Some(" ".into()), &said), None);
+        assert_eq!(plain("a <b>\nc"), "a b c");
+    }
+
+    #[test]
     fn bogus_continuation_is_dropped() {
         let db = Database::in_memory().unwrap();
         let c = db.connection();
-        let m = meetings::start(c, "M", "", "en", None).unwrap();
+        let m = meetings::start(c, "M", "", "en", None, Default::default()).unwrap();
         let id = items::insert(
             c,
             &NewItem {
@@ -559,7 +640,7 @@ mod tests {
     fn reconcile_merges_similar_actions_and_finalizes() {
         let db = Database::in_memory().unwrap();
         let c = db.connection();
-        let m = meetings::start(c, "M", "", "en", None).unwrap();
+        let m = meetings::start(c, "M", "", "en", None, Default::default()).unwrap();
         for (kind, text) in [
             ("action", "Send the budget to finance"),
             ("action", "Send the budget to finance team"),
@@ -577,10 +658,23 @@ mod tests {
             )
             .unwrap();
         }
+        let dup = items::list(c, Scope::Meeting(&m), None).unwrap()[1]
+            .id
+            .clone();
+        let patch = items::ItemPatch {
+            status: Some("done".into()),
+            owner: Some("Ann".into()),
+            ..items::ItemPatch::default()
+        };
+        items::update(c, &dup, &patch).unwrap();
         reconcile(c, &m).unwrap();
         let left = items::list(c, Scope::Meeting(&m), None).unwrap();
         assert_eq!(left.len(), 3);
         assert!(left.iter().all(|i| !i.draft));
         assert_eq!(left[0].text, "Send the budget to finance");
+        assert_eq!(
+            (left[0].status.as_str(), left[0].owner.as_deref()),
+            ("done", Some("Ann"))
+        );
     }
 }

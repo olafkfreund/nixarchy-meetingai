@@ -52,7 +52,8 @@ mod tests {
     fn restore_context_stays_with_its_thread_and_cascades_on_delete() {
         let db = crate::db::Database::in_memory().unwrap();
         let c = db.connection();
-        let meeting = crate::db::meetings::start(c, "Call", "", "en", None).unwrap();
+        let meeting =
+            crate::db::meetings::start(c, "Call", "", "en", None, Default::default()).unwrap();
         let chat = crate::db::conversations::create(c, "Chat", 1).unwrap();
         save(
             c,

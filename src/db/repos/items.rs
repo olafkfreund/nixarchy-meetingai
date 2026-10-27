@@ -27,6 +27,8 @@ pub struct ItemRecord {
     pub origin_item: Option<String>,
     pub draft: bool,
     pub created_at: String,
+    /// Start time of the source line, if it is stored.
+    pub t0: Option<f64>,
 }
 
 /// An item to store; it starts open and as a draft.
@@ -58,7 +60,8 @@ pub enum Scope<'a> {
     Series(&'a str),
 }
 
-const COLUMNS: &str = "id, meeting_id, series_id, kind, text, owner, due, status, source_line, origin_item, draft, created_at";
+const COLUMNS: &str = "id, meeting_id, series_id, kind, text, owner, due, status, source_line, origin_item, draft, created_at,
+    (SELECT start_time FROM meeting_lines WHERE meeting_lines.rowid = source_line) AS t0";
 
 pub fn series_create(connection: &Connection, name: &str) -> Result<String> {
     let id = Uuid::new_v4().to_string();
@@ -128,6 +131,7 @@ fn item_row(row: &rusqlite::Row) -> rusqlite::Result<ItemRecord> {
         origin_item: row.get(9)?,
         draft: row.get::<_, i64>(10)? != 0,
         created_at: row.get(11)?,
+        t0: row.get(12)?,
     })
 }
 
@@ -186,12 +190,11 @@ pub fn meeting_series(connection: &Connection, meeting_id: &str) -> Result<Optio
         .flatten())
 }
 
-/// Earlier items this meeting touched: ones linked through `origin_item`, in either direction
-/// (an earlier item pointing at this meeting's id, or this meeting's item pointing at it).
+/// Earlier items this meeting touched: the ones its own items continue (`origin_item`).
 pub fn touched(connection: &Connection, meeting_id: &str) -> Result<Vec<ItemRecord>> {
     let mut statement = connection.prepare(&format!(
         "SELECT {COLUMNS} FROM meeting_items WHERE meeting_id != ?1
-           AND (origin_item = ?1 OR id IN (SELECT origin_item FROM meeting_items WHERE meeting_id = ?1))
+           AND id IN (SELECT origin_item FROM meeting_items WHERE meeting_id = ?1)
          ORDER BY created_at, rowid"
     ))?;
     let rows = statement.query_map(params![meeting_id], item_row)?;
@@ -226,6 +229,15 @@ pub fn update(connection: &Connection, id: &str, patch: &ItemPatch) -> Result<bo
         ],
     )?;
     Ok(changed > 0)
+}
+
+/// Make a meeting's draft items final.
+pub fn finalize(connection: &Connection, meeting_id: &str) -> Result<()> {
+    connection.execute(
+        "UPDATE meeting_items SET draft = 0 WHERE meeting_id = ?1",
+        params![meeting_id],
+    )?;
+    Ok(())
 }
 
 pub fn delete(connection: &Connection, id: &str) -> Result<bool> {
@@ -264,8 +276,8 @@ mod tests {
         assert_eq!(series_list(c).unwrap().len(), 1);
         assert!(series_get(c, "nope").unwrap().is_none());
 
-        let m1 = meetings::start(c, "One", "meeting", "en", Some(&s)).unwrap();
-        let m2 = meetings::start(c, "Two", "meeting", "en", Some(&s)).unwrap();
+        let m1 = meetings::start(c, "One", "meeting", "en", Some(&s), Default::default()).unwrap();
+        let m2 = meetings::start(c, "Two", "meeting", "en", Some(&s), Default::default()).unwrap();
         assert_eq!(previous_meeting(c, &s, &m2).unwrap(), Some(m1.clone()));
         assert_eq!(previous_meeting(c, &s, &m1).unwrap(), None);
 
@@ -315,5 +327,51 @@ mod tests {
         assert!(update(c, &id, &bad).is_err());
         assert!(!update(c, "nope", &ItemPatch::default()).unwrap());
         assert!(delete(c, &id).unwrap() && !delete(c, &id).unwrap());
+    }
+
+    #[test]
+    fn touched_follows_new_items_and_lines_give_t0_and_mode_is_stored() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let team = crate::core::settings::MeetingMode::TeamMeeting;
+        let m1 = meetings::start(c, "One", "", "en", None, team).unwrap();
+        let m2 = meetings::start(c, "Two", "", "en", None, Default::default()).unwrap();
+        assert_eq!(meetings::mode(c, &m1), team);
+        assert_ne!(meetings::mode(c, &m2), team);
+        let old = insert(
+            c,
+            &NewItem {
+                meeting_id: &m1,
+                kind: "action",
+                text: "A",
+                ..NewItem::default()
+            },
+        )
+        .unwrap();
+        meetings::add_line(c, &m2, "me", None, "hi", 7.5, 8.0).unwrap();
+        let rowid: i64 = c
+            .query_row("SELECT rowid FROM meeting_lines", [], |r| r.get(0))
+            .unwrap();
+        let new = insert(
+            c,
+            &NewItem {
+                meeting_id: &m2,
+                kind: "action",
+                text: "A2",
+                source_line: Some(rowid),
+                origin_item: Some(&old),
+                ..NewItem::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(touched(c, &m2).unwrap()[0].id, old);
+        assert!(touched(c, &m1).unwrap().is_empty());
+        assert_eq!(get(c, &new).unwrap().unwrap().t0, Some(7.5));
+        let clear = ItemPatch {
+            origin_item: Some(String::new()),
+            ..ItemPatch::default()
+        };
+        update(c, &new, &clear).unwrap();
+        assert!(touched(c, &m2).unwrap().is_empty());
     }
 }

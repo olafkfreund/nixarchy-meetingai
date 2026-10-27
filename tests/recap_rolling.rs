@@ -74,7 +74,7 @@ async fn three_hour_meeting_keeps_its_midpoint_decision() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("test.db");
     let db = Database::open(&path).unwrap();
-    let id = meetings::start(db.connection(), "Long", "", "en", None).unwrap();
+    let id = meetings::start(db.connection(), "Long", "", "en", None, Default::default()).unwrap();
     let filler = "We went over the roadmap and the staffing plan in some detail. ".repeat(6);
     let mut total = 0;
     for i in 0..1080 {
@@ -124,7 +124,7 @@ async fn late_line_with_an_earlier_end_time_still_reaches_the_notes() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("test.db");
     let db = Database::open(&path).unwrap();
-    let id = meetings::start(db.connection(), "Late", "", "en", None).unwrap();
+    let id = meetings::start(db.connection(), "Late", "", "en", None, Default::default()).unwrap();
     meetings::add_line(
         db.connection(),
         &id,

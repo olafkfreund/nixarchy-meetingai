@@ -30,6 +30,8 @@ Item {
     property var series: []        // series.list rows
     property var earlierItem: null // { item, quote, line, meeting } while the "Earlier task?" callout shows
     signal notesUpdated(var meeting)
+    readonly property string currentMeeting: String(state.meeting || "")
+    onCurrentMeetingChanged: { if (currentMeeting === "") root.items = []; else root.refreshItems(currentMeeting); }
 
     readonly property int maxLines: 500
     property int seq: 0
@@ -137,8 +139,8 @@ Item {
         case "answer.error": root.answering = false; root.addRow("error", "", String(ev.message || ev.error || "answer failed"), false); break;
         case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
         case "notice": root.addRow("notice", "", String(ev.text || ""), false); break;
-        case "items.updated": root.refreshItems(ev.meeting); break;
-        case "earlier_item": root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting }; break;
+        case "items.updated": if (ev.meeting === root.state.meeting) root.refreshItems(ev.meeting); break;
+        case "earlier_item": root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
         case "error": root.lastError = String(ev.message || ""); break;
         }

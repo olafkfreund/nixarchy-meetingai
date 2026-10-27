@@ -147,7 +147,15 @@ mod tests {
         let secret = "private-history-unique-sentinel";
         let chat = conversations::create(db.connection(), secret, 1).unwrap();
         conversations::append_message(db.connection(), &chat, "user", secret, 2).unwrap();
-        let meeting = meetings::start(db.connection(), secret, "auto", "en", None).unwrap();
+        let meeting = meetings::start(
+            db.connection(),
+            secret,
+            "auto",
+            "en",
+            None,
+            Default::default(),
+        )
+        .unwrap();
         meetings::add_line(db.connection(), &meeting, "them", Some(2), secret, 0.0, 1.0).unwrap();
         for file in [&path, &sidecar(&path, "-wal")] {
             let bytes = fs::read(file).unwrap();

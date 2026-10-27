@@ -28,6 +28,7 @@ Item {
     property bool team: false      // team meeting mode: show the series picker
     property var seriesList: []    // series.list rows
     property string seriesId: ""
+    property bool seriesLocked: false
     signal seriesPicked(string id)         // "" = no series
     signal seriesCreated(string name)
     signal pick(int n)   // 1..3 typed into an empty composer: choose that suggestion
@@ -80,6 +81,7 @@ Item {
             spacing: Style.spacing.md
             Dropdown {
                 id: seriesBox
+                enabled: !root.seriesLocked
                 label: "Series"
                 value: root.seriesId
                 options: [{ value: "", label: "No series" }].concat(root.seriesList.map(function(s) { return { value: String(s.id), label: String(s.name) }; })).concat([{ value: "__new", label: "New series..." }])

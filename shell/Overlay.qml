@@ -66,6 +66,7 @@ Item {
     readonly property var kinds: [{ kind: "action", title: "Actions", glyph: root.iAction }, { kind: "decision", title: "Decisions", glyph: root.iDecision }, { kind: "question", title: "Questions", glyph: root.iQuestion }]
     readonly property bool team: daemon.settings.meeting_mode === "team_meeting"
     readonly property string seriesId: String(daemon.state.series || "")
+    readonly property string meetingId: String(daemon.state.meeting || "")
     property bool lastOpen: false
     property var lastTime: null   // last_time.get reply for the current series
     function loadLastTime() {
@@ -74,6 +75,7 @@ Item {
     }
     onTeamChanged: loadLastTime()
     onSeriesIdChanged: loadLastTime()
+    onMeetingIdChanged: loadLastTime()
     property var liveModels: []
     // Card geometry. Settings overlay_x/y/w/h (-1 = default, centred) persist it; `live` overrides while dragging.
     readonly property real minW: 520
@@ -320,8 +322,9 @@ Item {
                         team: root.team
                         seriesList: daemon.series
                         seriesId: root.seriesId
-                        onSeriesPicked: function(id) { daemon.send("session.new", id === "" ? {} : { series: id }); }
-                        onSeriesCreated: function(name) { daemon.send("series.create", { name: name }, function(r) { if (!r.ok) return; daemon.refreshSeries(); daemon.send("session.new", { series: r.data.id }); }); }
+                        seriesLocked: daemon.recording
+                        onSeriesPicked: function(id) { daemon.send("session.new", id === "" ? {} : { series: id }, function(r) { if (!r.ok) daemon.lastError = r.error; }); }
+                        onSeriesCreated: function(name) { daemon.send("series.create", { name: name }, function(r) { if (!r.ok) { daemon.lastError = r.error; return; } daemon.refreshSeries(); daemon.send("session.new", { series: r.data.id }, function(r2) { if (!r2.ok) daemon.lastError = r2.error; }); }); }
                         onSubmit: function(text, chips) { root.submit(text, chips); }
                         onPreview: function(text) { root.previewText = text; }
                         onScreenshot: daemon.send("screenshot.capture", { region: true })
@@ -394,11 +397,12 @@ Item {
                     readonly property real avail: height - below - tbar.height
                     Rectangle {
                         id: nowPanel
-                        visible: !root.team
+                        // Team mode: only for a typed question, above the items.
+                        visible: !root.team || (daemon.now.turn >= 0 && !daemon.now.automatic)
                         anchors.bottom: sugg.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
-                        height: root.transcriptOpen ? Math.min(nowWant, convo.avail * 0.7) : Math.max(nowWant, convo.avail)
+                        height: root.team ? Math.min(nowWant, convo.avail * 0.35) : root.transcriptOpen ? Math.min(nowWant, convo.avail * 0.7) : Math.max(nowWant, convo.avail)
                         readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.implicitHeight + nowCol.spacing * 2 + root.padY * 2
                         radius: root.round
                         color: Qt.alpha(Commons.Color.accent, 0.12)
@@ -462,10 +466,10 @@ Item {
                     Rectangle {
                         id: itemsPanel
                         visible: root.team
-                        anchors.bottom: sugg.top
+                        anchors.bottom: nowPanel.visible ? nowPanel.top : sugg.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
-                        height: root.transcriptOpen ? Math.min(want, convo.avail * 0.7) : Math.max(want, convo.avail)
+                        height: root.transcriptOpen ? Math.min(want, convo.avail * (nowPanel.visible ? 0.4 : 0.7)) : Math.max(want, convo.avail - (nowPanel.visible ? nowPanel.height + Style.spacing.md : 0))
                         readonly property real want: icol.implicitHeight + root.padY * 2
                         radius: root.round
                         color: Qt.alpha(Commons.Color.accent, 0.12)
@@ -483,7 +487,7 @@ Item {
                                 Row {
                                     spacing: Style.spacing.md
                                     Text { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "Items"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-                                    IconButton { ts: root.ts; visible: root.lastTime !== null && root.lastTime.meeting !== undefined; iconText: root.lastOpen ? root.iDown : root.iRight; text: "Last time"; tooltipText: "Recap and open items of the previous meeting in this series"; onClicked: root.lastOpen = !root.lastOpen }
+                                    IconButton { ts: root.ts; visible: root.lastTime && root.lastTime.meeting; iconText: root.lastOpen ? root.iDown : root.iRight; text: "Last time"; tooltipText: "Recap and open items of the previous meeting in this series"; onClicked: root.lastOpen = !root.lastOpen }
                                 }
                                 Column {   // Last time drawer
                                     visible: root.lastOpen && root.lastTime !== null
@@ -506,7 +510,7 @@ Item {
                                     border.width: Style.normalBorderWidth
                                     border.color: Commons.Color.popups.border
                                     readonly property var it: daemon.earlierItem ? daemon.earlierItem.item : ({})
-                                    function resolve(fields) { if (fields) daemon.updateItem(callout.it.id, fields); daemon.earlierItem = null; }
+                                    function dismiss() { daemon.earlierItem = null; }
                                     Column {
                                         id: ccol
                                         x: root.padX; y: root.padY
@@ -517,9 +521,9 @@ Item {
                                         Text { width: parent.width; visible: daemon.earlierItem !== null && daemon.earlierItem.quote !== ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: daemon.earlierItem ? "\u201c" + daemon.earlierItem.quote + "\u201d" : ""; color: Commons.Color.popups.text; opacity: 0.8; font.italic: true; font.pixelSize: Style.font.body * root.ts }
                                         Row {
                                             spacing: Style.spacing.xs
-                                            IconButton { ts: root.ts; text: "Discussed"; bordered: true; tooltipText: "It came up again; link it to this meeting"; onClicked: callout.resolve({ origin_item: daemon.earlierItem.meeting }) }
-                                            IconButton { ts: root.ts; iconText: root.iCheck; text: "Done"; bordered: true; tooltipText: "Mark the earlier item done"; onClicked: callout.resolve({ status: "done" }) }
-                                            IconButton { ts: root.ts; text: "Not related"; bordered: true; tooltipText: "Dismiss"; onClicked: callout.resolve(null) }
+                                            IconButton { ts: root.ts; text: "Discussed"; bordered: true; tooltipText: "It came up again; the link is already saved"; onClicked: callout.dismiss() }
+                                            IconButton { ts: root.ts; iconText: root.iCheck; text: "Done"; bordered: true; tooltipText: "Mark the earlier item done"; onClicked: { daemon.updateItem(callout.it.id, { status: "done" }); callout.dismiss(); } }
+                                            IconButton { ts: root.ts; text: "Not related"; bordered: true; tooltipText: "Remove the link to the earlier item"; onClicked: { if (daemon.earlierItem.new_item) daemon.updateItem(daemon.earlierItem.new_item, { origin_item: "" }); callout.dismiss(); } }
                                         }
                                     }
                                 }
@@ -562,7 +566,7 @@ Item {
                                                     id: meta
                                                     anchors.right: acts.left; anchors.rightMargin: Style.spacing.md; anchors.verticalCenter: parent.verticalCenter
                                                     textFormat: Text.PlainText
-                                                    text: [irow.modelData.owner, irow.modelData.due, irow.modelData.source_line ? "line " + irow.modelData.source_line : ""].filter(function(x) { return x; }).join(" · ")
+                                                    text: [irow.modelData.owner, irow.modelData.due, irow.modelData.t0 !== null && irow.modelData.t0 !== undefined ? Math.floor(irow.modelData.t0 / 60) + ":" + ("0" + Math.floor(irow.modelData.t0 % 60)).slice(-2) : ""].filter(function(x) { return x; }).join(" · ")
                                                     color: Commons.Color.popups.text
                                                     opacity: 0.7
                                                     font.pixelSize: Style.font.caption * root.ts
