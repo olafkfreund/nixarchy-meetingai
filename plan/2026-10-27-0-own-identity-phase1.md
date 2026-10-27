@@ -77,3 +77,5 @@ None yet.
   description already used the product name. The local checkout folder is
   still `mixarchy-meetingai` (renaming it would break the open worktrees and
   tooling paths; harmless).
+- **Follow-up:** `.github/FUNDING.yml` (lennette's sponsor link,
+  `github: parazeeknova`) was missed in step 1 and is now removed.
