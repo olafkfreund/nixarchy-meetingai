@@ -224,6 +224,15 @@ pub fn reorder(connection: &Connection, candidate_id: &str, ids: &[String]) -> R
     Ok(tx.commit()?)
 }
 
+/// Drop generated questions nobody has used yet (still planned, no note), so a regenerate replaces them.
+pub fn clear_unused_generated(connection: &Connection, candidate_id: &str) -> Result<usize> {
+    Ok(connection.execute(
+        "DELETE FROM interview_questions WHERE candidate_id = ?1 AND status = 'planned'
+           AND COALESCE(note, '') = '' AND source <> 'manual'",
+        params![candidate_id],
+    )?)
+}
+
 pub fn delete_question(connection: &Connection, id: &str) -> Result<bool> {
     Ok(connection.execute("DELETE FROM interview_questions WHERE id = ?1", params![id])? > 0)
 }
@@ -313,6 +322,32 @@ mod tests {
         assert!(update_question(c, &q1.id, &bad).is_err());
         assert!(!update_question(c, "nope", &QuestionPatch::default()).unwrap());
         assert!(delete_question(c, &q2.id).unwrap() && !delete_question(c, &q2.id).unwrap());
+    }
+
+    #[test]
+    fn regenerate_keeps_used_and_manual_questions() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let a = create(c, "Ada").unwrap();
+        let unused = add_question(c, &a.id, "Unused?", "Built Rust", None).unwrap();
+        let asked = add_question(c, &a.id, "Asked?", "Built Rust", None).unwrap();
+        let noted = add_question(c, &a.id, "Noted?", "Built Rust", None).unwrap();
+        let manual = add_question(c, &a.id, "Mine?", "manual", None).unwrap();
+        let patch = |status: Option<&str>, note: Option<&str>| QuestionPatch {
+            status: status.map(Into::into),
+            note: note.map(Into::into),
+            ..Default::default()
+        };
+        update_question(c, &asked.id, &patch(Some("asked"), None)).unwrap();
+        update_question(c, &noted.id, &patch(None, Some("said X"))).unwrap();
+        assert_eq!(clear_unused_generated(c, &a.id).unwrap(), 1);
+        let left: Vec<_> = questions(c, &a.id)
+            .unwrap()
+            .into_iter()
+            .map(|q| q.id)
+            .collect();
+        assert!(!left.contains(&unused.id));
+        assert_eq!(left, [asked.id, noted.id, manual.id]);
     }
 
     #[test]

@@ -2487,6 +2487,12 @@ impl Daemon {
         {
             let g = self.inner.lock();
             let c = g.db.connection();
+            if generated.iter().any(|q| {
+                let source = q.source.trim();
+                !source.is_empty() && documents.iter().any(|d| d.text.contains(source))
+            }) {
+                candidates::clear_unused_generated(c, candidate).map_err(|e| e.to_string())?;
+            }
             for q in generated.into_iter().take(12) {
                 let source = q.source.trim();
                 if q.text.trim().is_empty()

@@ -194,4 +194,32 @@ step 8.
 
 ## Deviations log (recorded with the implementation commit)
 
-None yet.
+- **Commits:** steps 1–5 and 7 landed as one commit, step 6 as another
+  (coders cannot commit).
+- **Prompts:** Interviewer gets a sixth seeded listen mode (slot 5) for its
+  editable answer prompt. Follow-ups keep the one global prompt; outputs
+  that hit the guard are dropped, not retried, since they are optional.
+- **Guard** is hand-written token matching (no regex dependency), with
+  exact words, so "scored" or "ranked" don't match.
+- **No streaming in Interviewer mode:** answers and probes are held until
+  the guard has checked the whole text, then sent as one delta. A withheld
+  answer arrives as `answer.error` with the exact withheld message.
+- **Local-only flag** is mirrored in an `AtomicBool` on the daemon (the
+  chain and STT builders run under the lock), synced on candidate select,
+  `candidate.local_only`, restore and reset. `record.start` refuses a
+  non-whisper STT; `questions.generate` refuses when no ollama is usable.
+- **MCP:** the local-only refusal covers `transcript.get`, `notes.get` and
+  `now.get`; MCP's `record.start` has any `consent` argument stripped.
+- **Candidates:** `session.new{candidate}` refuses a candidate that
+  already has a meeting; restoring a meeting selects its candidate.
+- **Deletion** also removes chat conversations linked to the interview,
+  and is refused while that meeting is recording or finishing.
+- **Coverage** marks only the best-matching planned question per mic line;
+  turns under five words get no probe (`meaningful_remark`).
+- **Regenerate** replaces generated questions that are still planned with
+  no note; asked, covered, skipped, noted and manual questions stay. An
+  edited question text that is otherwise untouched is replaced too.
+- **Shell:** test-only `recordHook` and timers drive the consent banner in
+  screenshots; the client sends `session.new{}` after deleting a
+  candidate. Auto-record in interviewer mode hits the consent gate and
+  shows an error: consent stays a manual action.
