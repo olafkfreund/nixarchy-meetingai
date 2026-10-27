@@ -112,6 +112,7 @@ Item {
         case "answer.done": root.answering = false; if (ev.provider) root.now = Object.assign({}, root.now, { provider: String(ev.provider), model: String(ev.model || root.now.model) }); break;
         case "answer.error": root.answering = false; root.addRow("error", "", String(ev.message || ev.error || "answer failed"), false); break;
         case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
+        case "notice": root.addRow("notice", "", String(ev.text || ""), false); break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
         case "error": root.lastError = String(ev.message || ""); break;
         }

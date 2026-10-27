@@ -467,7 +467,9 @@ Item {
                                     wrapMode: Text.Wrap
                                     text: row.body
                                     color: row.who === "error" ? Commons.Color.urgent : Commons.Color.popups.text
-                                    font.pixelSize: Style.font.bodySmall * root.ts
+                                    opacity: row.who === "notice" ? 0.6 : 1
+                                    font.italic: row.who === "notice"
+                                    font.pixelSize: (row.who === "notice" ? Style.font.caption : Style.font.bodySmall) * root.ts
                                 }
                             }
                         }

@@ -19,6 +19,7 @@ Item {
     property var sessions: []
     property var profiles: []
     property var providers: []
+    readonly property var labelOverrides: ({ "mcp_allow_record": "Let AI agents start recording" })   // the daemon derives labels from keys
     property var found: []        // settings.search results: { key, label, value }
     property string promptMode: "general"
     property string notes: ""
@@ -238,7 +239,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
-                    text: srow.modelData.label || srow.modelData.key
+                    text: root.labelOverrides[srow.modelData.key] || srow.modelData.label || srow.modelData.key
                     color: Commons.Color.popups.text
                     font.pixelSize: Style.font.body * root.ts
                 }
