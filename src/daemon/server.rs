@@ -87,11 +87,9 @@ async fn client(stream: UnixStream, daemon: Arc<Daemon>) {
                 continue;
             }
         };
-        let (daemon, out) = (daemon.clone(), out.clone());
-        tokio::spawn(async move {
-            let result = daemon.handle(&request.cmd, request.args).await;
-            let _ = out.send(protocol::reply(&request.id, result)).await;
-        });
+        // In order on this connection; events still stream through `forward`.
+        let result = daemon.handle(&request.cmd, request.args).await;
+        let _ = out.send(protocol::reply(&request.id, result)).await;
     }
     forward.abort();
     writer.abort();

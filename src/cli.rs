@@ -93,11 +93,6 @@ fn exchange(cmd: &str, args: serde_json::Value) -> Result<serde_json::Value, Str
     Err("the daemon closed the connection".into())
 }
 
-/// Path of the control socket shared with the running instance.
-pub fn control_socket() -> Option<std::path::PathBuf> {
-    runtime_path("nixarchy-meetingai-shortcut.sock")
-}
-
 /// Path of the exclusive launch lock held by the running instance.
 pub fn instance_lock_path() -> Option<std::path::PathBuf> {
     runtime_path("nixarchy-meetingai-instance.lock")
@@ -150,15 +145,6 @@ impl InstanceLock {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn control_socket_lives_in_the_runtime_dir() {
-        // The function reads the environment, so only assert its shape when set.
-        if control_socket().is_some() {
-            let path = control_socket().unwrap();
-            assert!(path.ends_with("nixarchy-meetingai-shortcut.sock"));
-        }
-    }
 
     #[test]
     fn instance_lock_exists_in_the_runtime_dir() {

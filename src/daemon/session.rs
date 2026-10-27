@@ -110,6 +110,8 @@ struct Inner {
     // Recording.
     recording: Option<Recording>,
     meeting_id: Option<String>,
+    /// Set from the moment recording ends until its notes are written.
+    finishing_meeting: Option<String>,
     resume_meeting: Option<String>,
     meeting_offset: f64,
     speaker_offset: i64,
@@ -137,6 +139,8 @@ pub struct Daemon {
     tx: broadcast::Sender<Value>,
     pub shutdown: Notify,
     chunking: AtomicBool,
+    /// Serializes rolling-notes chunking and recap generation (no duplicate chunks).
+    notes: tokio::sync::Mutex<()>,
     inner: Mutex<Inner>,
 }
 
@@ -321,6 +325,7 @@ impl Daemon {
             tx,
             shutdown: Notify::new(),
             chunking: AtomicBool::new(false),
+            notes: tokio::sync::Mutex::new(()),
             inner: Mutex::new(Inner {
                 db,
                 settings,
@@ -337,6 +342,7 @@ impl Daemon {
                 pending_capture: None,
                 recording: None,
                 meeting_id: None,
+                finishing_meeting: None,
                 resume_meeting: None,
                 meeting_offset: 0.0,
                 speaker_offset: 0,
@@ -390,8 +396,12 @@ impl Daemon {
             if let Some(r) = &me.inner.lock().recording {
                 r.stop.store(true, Ordering::Relaxed);
             }
-            for _ in 0..200 {
-                if me.inner.lock().recording.is_none() {
+            for _ in 0..1200 {
+                let done = {
+                    let g = me.inner.lock();
+                    g.recording.is_none() && g.finishing_meeting.is_none()
+                };
+                if done {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1036,11 +1046,13 @@ impl Daemon {
                     g.settings.response_language.clone(),
                 )
             };
-            if let Some(config) = config
-                && let Ok(true) =
+            if let Some(config) = config {
+                let _serial = me.notes.lock().await;
+                if let Ok(true) =
                     recap::maybe_chunk(&me.db_path, &meeting, &config, &language).await
-            {
-                me.emit("notes.updated", json!({"meeting": meeting}));
+                {
+                    me.emit("notes.updated", json!({"meeting": meeting}));
+                }
             }
             me.chunking.store(false, Ordering::Release);
         });
@@ -1052,6 +1064,9 @@ impl Daemon {
         let (stop, speech, device, output_device, system) = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
+            if g.finishing_meeting.is_some() && g.recording.is_none() {
+                return Err("Finishing the previous transcript. Try again shortly.".into());
+            }
             if let Some(r) = &g.recording {
                 return Err(if r.stop.load(Ordering::Relaxed) {
                     "Finishing the previous transcript. Try again shortly.".into()
@@ -1290,6 +1305,7 @@ impl Daemon {
         {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
+            g.finishing_meeting = Some(meeting.to_owned());
             if let Some(r) = g.recording.take() {
                 g.last_elapsed = g.meeting_offset + r.started.elapsed().as_secs_f64();
             }
@@ -1307,6 +1323,7 @@ impl Daemon {
             self.emit_state(g);
         }
         self.finish_meeting_artifacts(meeting).await;
+        self.inner.lock().finishing_meeting = None;
     }
 
     /// Name the meeting, then summarise what is left and consolidate every chunk.
@@ -1320,6 +1337,7 @@ impl Daemon {
             )
         };
         let Some(config) = config else { return };
+        let _serial = self.notes.lock().await;
         if !body.trim().is_empty()
             && let Some(title) =
                 titling::request_title(&engine::http_client(), &config, &body).await
@@ -1327,8 +1345,10 @@ impl Daemon {
             let g = self.inner.lock();
             let _ = meetings::rename(g.db.connection(), meeting, &title);
         }
-        let _ = recap::generate(&self.db_path, meeting, Some(config), &language).await;
-        self.emit("notes.updated", json!({"meeting": meeting}));
+        match recap::generate(&self.db_path, meeting, Some(config), &language).await {
+            Ok(()) => self.emit("notes.updated", json!({"meeting": meeting})),
+            Err(error) => self.error(format!("Could not write the meeting notes: {error}")),
+        }
     }
 
     // ----- dictation ----------------------------------------------------
@@ -1447,6 +1467,9 @@ impl Daemon {
         if g.recording.is_some() {
             return Err("Stop the current recording and wait for its final words before switching sessions.".into());
         }
+        if g.finishing_meeting.is_some() {
+            return Err("Finishing the previous transcript. Try again shortly.".into());
+        }
         Ok(())
     }
 
@@ -1456,6 +1479,7 @@ impl Daemon {
         Self::require_idle(g)?;
         if conversations::require_conversation(g.db.connection(), id).is_ok() {
             self.reset_session(g);
+            self.emit("session.reset", json!({}));
             self.restore_chat(g, id)?;
             return Ok(json!({"kind": "chat"}));
         }
@@ -1465,6 +1489,7 @@ impl Daemon {
             .find(|m| m.id == id)
             .ok_or("This session no longer exists.")?;
         self.reset_session(g);
+        self.emit("session.reset", json!({}));
         if let Some(chat) =
             sessions::meeting_chat(g.db.connection(), id).map_err(|e| e.to_string())?
         {
@@ -1553,6 +1578,18 @@ impl Daemon {
         {
             g.conversation.push(message);
         }
+        let rows: Vec<Value> = g
+            .conversation
+            .messages()
+            .iter()
+            .filter_map(|m| match m.role {
+                Role::User => Some(("question", &m.content)),
+                Role::Assistant => Some(("answer", &m.content)),
+                Role::System => None,
+            })
+            .map(|(who, text)| json!({"who": who, "text": text}))
+            .collect();
+        self.emit("history", json!({"rows": rows}));
         Ok(())
     }
 
@@ -1630,12 +1667,15 @@ impl Daemon {
         };
         Settings::set(&g.db, &args.key, &text).map_err(|e| e.to_string())?;
         g.settings = Settings::load(&g.db).unwrap_or_default();
+        let all = self.settings_map(g)?;
+        self.emit("settings", json!({"settings": all}));
         Ok(json!({}))
     }
 
     /// Store a key in the vault. It is never read back over the socket.
     fn set_api_key(&self, args: protocol::SettingSet) -> Result<Value, String> {
         let provider = args.provider.ok_or("provider is required")?;
+        let remove = args.value.is_null();
         let key = args.value.as_str().unwrap_or_default().trim().to_owned();
         let kind = if ChatProvider::by_id(&provider).is_some() {
             Kind::Chat
@@ -1644,9 +1684,12 @@ impl Daemon {
         } else {
             return Err(format!("unknown provider '{provider}'"));
         };
-        if key.is_empty() {
+        if remove {
             credentials::remove(&self.vault, kind, &provider)?;
             return Ok(json!({}));
+        }
+        if key.is_empty() {
+            return Err("The key is empty. Send null to remove it.".into());
         }
         let mut credential =
             credentials::load(&self.vault, kind, &provider)?.unwrap_or_else(|| match kind {
@@ -1836,6 +1879,7 @@ impl Daemon {
                 let mut g = self.inner.lock();
                 Self::require_idle(&g)?;
                 self.reset_session(&mut g);
+                self.emit("session.reset", json!({}));
                 self.emit_state(&g);
                 Ok(json!({}))
             }

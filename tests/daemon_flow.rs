@@ -167,6 +167,7 @@ async fn daemon_flow_scripted_session() {
         assert_eq!(reply["ok"], true, "{reply}");
     }
     assert_eq!(client.call("session.new", json!({})).await["ok"], true);
+    client.event("session.reset").await;
     assert_eq!(client.call("record.start", json!({})).await["ok"], true);
     let state = client.call("state.get", json!({})).await;
     assert_eq!(state["data"]["recording"], true);
@@ -193,8 +194,38 @@ async fn daemon_flow_scripted_session() {
     let providers = other.call("providers.list", json!({})).await;
     assert!(providers.to_string().contains("\"has_key\":true"));
     assert!(!providers.to_string().contains(SECRET));
+    // A settings change reaches the other clients too.
+    let set = client
+        .call(
+            "settings.set",
+            json!({"key": "auto_response", "value": "off"}),
+        )
+        .await;
+    assert_eq!(set["ok"], true, "{set}");
+    assert_eq!(
+        other.event("settings").await["settings"]["auto_response"],
+        "off"
+    );
+    // A key is removed only on null, never on an empty string.
+    let empty = client
+        .call(
+            "settings.set",
+            json!({"key": "api_key", "provider": "gemini", "value": ""}),
+        )
+        .await;
+    assert_eq!(empty["ok"], false, "{empty}");
+
+    // An oversize line closes the client.
+    let mut raw = UnixStream::connect(&socket).await.unwrap();
+    let _ = raw.write_all(&vec![b'a'; 1024 * 1024 + 2]).await;
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(10), raw.read_to_end(&mut rest)).await;
+    assert!(closed.is_ok(), "the daemon kept an oversize client open");
 
     assert_eq!(client.call("record.stop", json!({})).await["ok"], true);
+    // Finalization is under way: switching sessions is refused, and quit waits for it.
+    assert_eq!(client.call("session.new", json!({})).await["ok"], false);
+    assert_eq!(client.call("quit", json!({})).await["ok"], true);
     let notes = client.event("notes.updated").await;
     let meeting = notes["meeting"].as_str().unwrap().to_owned();
     let text = client.call("notes.get", json!({"meeting": meeting})).await;
@@ -214,14 +245,6 @@ async fn daemon_flow_scripted_session() {
             .any(|s| s["id"] == meeting.as_str())
     );
 
-    // An oversize line closes the client.
-    let mut raw = UnixStream::connect(&socket).await.unwrap();
-    let _ = raw.write_all(&vec![b'a'; 1024 * 1024 + 2]).await;
-    let mut rest = Vec::new();
-    let closed = tokio::time::timeout(Duration::from_secs(10), raw.read_to_end(&mut rest)).await;
-    assert!(closed.is_ok(), "the daemon kept an oversize client open");
-
-    assert_eq!(client.call("quit", json!({})).await["ok"], true);
     tokio::time::timeout(Duration::from_secs(10), server)
         .await
         .unwrap()
