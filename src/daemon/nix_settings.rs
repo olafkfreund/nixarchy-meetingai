@@ -14,6 +14,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
+    ai::providers::{ChatProvider, SttProvider},
     core::models::settings::{AutoResponse, MeetingMode, ResponseLength, ResponsePace, Settings},
     db::{Database, Result, settings as store},
 };
@@ -53,6 +54,10 @@ fn valid(key: &str, value: &str) -> bool {
             "smart_follow_ups" | "auto_record_on_call" | "reduce_motion" | "mcp_allow_record" => {
                 matches!(value, "true" | "false")
             }
+            "chat_provider" | "live_provider" => {
+                ChatProvider::by_id(value).is_some() || value.starts_with("custom-")
+            }
+            "speech_provider" => SttProvider::by_id(value).is_some(),
             "text_scale" => value.parse::<u32>().is_ok_and(|n| (80..=160).contains(&n)),
             _ => true,
         }
@@ -175,10 +180,14 @@ mod tests {
                 ("no_such_setting", "x"),
                 ("meeting_mode", "party"),
                 ("text_scale", "500"),
+                ("chat_provider", "nope"),
+                ("live_provider", "custom-abc"),
+                ("speech_provider", "nope"),
                 ("reduce_motion", "true"),
             ],
         );
-        assert_eq!(apply(&db, &n).unwrap(), ["reduce_motion"]);
+        assert_eq!(apply(&db, &n).unwrap(), ["live_provider", "reduce_motion"]);
+        assert_eq!(get(&db, "chat_provider"), None);
         assert_eq!(get(&db, "api_key"), None);
         assert_eq!(get(&db, "meeting_mode"), None);
     }

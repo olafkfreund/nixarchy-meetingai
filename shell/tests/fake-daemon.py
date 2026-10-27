@@ -45,7 +45,7 @@ first_run = "--first-run" in sys.argv   # no provider, speech not ready: the Set
 err = "--error" in sys.argv          # a typed question starts, waits, then fails (Writing bar, then Retry)
 drop = "--drop" in sys.argv          # the first connection is cut mid-answer; the client reconnects and asks transcript.get / now.get
 providers = "--providers" in sys.argv
-locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, chat_model, text_scale
+locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, meeting_mode, text_scale
 live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
@@ -96,7 +96,7 @@ DATA = {
     "notes.get": {"text": "## Summary\nfake"},
 }
 if locked:
-    settings["locked"] = ["chat_provider", "chat_model", "text_scale"]
+    settings["locked"] = ["chat_provider", "meeting_mode", "text_scale"]
 settings.update(overlay_x=-1, overlay_y=-1, overlay_w=-1, overlay_h=-1)
 size = next((a.split("=")[1] for a in sys.argv if a.startswith("--size=")), "")   # --size=WxH: start with a non-default card
 if size:

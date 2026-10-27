@@ -1,7 +1,7 @@
 import QtQuick
 import Quickshell
 
-// For tests/smoke.sh --locked: the daemon says chat_provider, chat_model and text_scale are set in Nix.
+// For tests/smoke.sh --locked: the daemon says chat_provider, meeting_mode and text_scale are set in Nix.
 // Pick a provider as the Settings dropdown does and open Settings; smoke.sh checks no settings.set for a locked key left.
 ShellRoot {
     Overlay {

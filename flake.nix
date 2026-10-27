@@ -154,8 +154,18 @@
             pkgs.writeText name (if cond then "ok" else throw "${name}: ${msg}");
           fullDaemon = (svc full).nixarchy-meetingai.Service;
           fullWhisper = (svc full).nixarchy-meetingai-whisper;
+          sysPkgs = self.packages.${pkgs.stdenv.hostPlatform.system};
+          ipv6 = evalHm {
+            programs.nixarchy-meetingai.whisper = {
+              host = "::";
+              extraArgs = [ "--prompt=100%$HOME" ];
+            };
+          };
         in
         {
+          # So `nix flake check` builds them.
+          package = sysPkgs.default;
+          plugin = sysPkgs.plugin;
           hm-module = pkgs.writeText "hm-module-check" (builtins.toJSON (builtins.attrNames (svc minimal)));
           hm-plugin-nixarchy = assertThat "hm-plugin-nixarchy" (
             withPlugins.programs.nixarchy.plugins."nixarchy.meetingai".src
@@ -186,6 +196,7 @@
                   };
                 }
                 { programs.nixarchy-meetingai.settings.extra.api_key = "fake-key"; }
+                { programs.nixarchy-meetingai.ollama.url = "http://10.0.0.5:11434"; }
                 {
                   programs.nixarchy-meetingai.ollamaCloud = {
                     keyFile = "/run/fake";
@@ -197,6 +208,8 @@
             assertThat "hm-assertions" (
               evaluates { }
               && lib.all (c: !evaluates c) wrong
+              && evaluates { programs.nixarchy-meetingai.ollama.url = "https://ollama.example.com"; }
+              && evaluates { programs.nixarchy-meetingai.ollama.url = "http://[::1]:11434"; }
               && evaluates {
                 programs.nixarchy-meetingai = {
                   whisper.enable = false;
@@ -229,7 +242,13 @@
             && builtins.elem "NIXARCHY_MEETINGAI_WHISPER_URL=http://127.0.0.1:9000" fullDaemon.Environment
             && builtins.elem "RUST_LOG=nixarchy_meetingai=debug" fullDaemon.Environment
             && builtins.elem "FOO=bar" fullDaemon.Environment
-            && fullDaemon.LoadCredential == [ "ollama:/run/agenix/ollama-cloud" ]
+            && builtins.elem "NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE=/run/agenix/ollama-cloud" fullDaemon.Environment
+            && !(fullDaemon ? LoadCredential)
+            && (svc full).nixarchy-meetingai.Unit.Wants == [ "nixarchy-meetingai-whisper.service" ]
+            && builtins.length (svc full).nixarchy-meetingai.Unit.X-Restart-Triggers == 2
+            && builtins.elem "NIXARCHY_MEETINGAI_WHISPER_URL=http://[::1]:8178" (svc ipv6).nixarchy-meetingai.Service.Environment
+            && lib.hasInfix "--host :: --port" (toString (svc ipv6).nixarchy-meetingai-whisper.Service.ExecStart)
+            && lib.hasInfix "'--prompt=100%%$$HOME'" (toString (svc ipv6).nixarchy-meetingai-whisper.Service.ExecStart)
             && builtins.elem "NIXARCHY_MEETINGAI_OLLAMA_URL=http://127.0.0.1:12345" fullDaemon.Environment
             && (svc full).nixarchy-meetingai.Install.WantedBy == [ ]
           ) "service options not applied";

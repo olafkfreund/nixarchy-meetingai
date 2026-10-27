@@ -31,7 +31,7 @@ Item {
     implicitWidth: btn.implicitWidth
     implicitHeight: btn.implicitHeight
 
-    function open() { popup.open(); }
+    function open() { if (!root.daemon.isLocked("meeting_mode")) popup.open(); }
 
     IconButton {
         id: btn
@@ -41,8 +41,9 @@ Item {
         text: root.cur.name
         iconText: String.fromCodePoint(0xf0140)
         bordered: true
-        tooltipText: "Meeting mode: " + root.cur.hint
-        Accessible.name: "Meeting mode: " + root.cur.name
+        enabled: !root.daemon.isLocked("meeting_mode")
+        tooltipText: root.daemon.lockedLabel("meeting_mode", "Meeting mode") + ": " + root.cur.hint
+        Accessible.name: root.daemon.lockedLabel("meeting_mode", "Meeting mode") + ": " + root.cur.name
         onClicked: { if (popup.opened) popup.close(); else popup.open(); }
     }
 

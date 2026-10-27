@@ -12,7 +12,22 @@ let
   sys = pkgs.stdenv.hostPlatform.system;
   modelFile = "${cfg.whisper.model}/ggml-${cfg.whisper.model.modelName}.bin";
   bin = lib.getExe cfg.package;
-  whisperAddr = "${cfg.whisper.host}:${toString cfg.whisper.port}";
+  # The daemon dials 127.0.0.1 (or ::1) when the server listens on every address; IPv6 gets brackets.
+  daemonHost =
+    {
+      "0.0.0.0" = "127.0.0.1";
+      "::" = "::1";
+    }
+    .${cfg.whisper.host} or cfg.whisper.host;
+  whisperAddr =
+    (if lib.hasInfix ":" daemonHost && !lib.hasPrefix "[" daemonHost then "[${daemonHost}]" else daemonHost)
+    + ":${toString cfg.whisper.port}";
+  # systemd expands % and $ in ExecStart words.
+  unitEscape = lib.replaceStrings [ "%" "$" ] [ "%%" "$$" ];
+  # The app only offers an Ollama at https, or http on loopback (see endpoint_allowed in the daemon).
+  ollamaUrlOk = lib.match "(https://.*|http://(localhost|127\\.0\\.0\\.1|[[]::1[]])(:[0-9]+)?(/.*)?)" (
+    lib.toLower cfg.ollama.url
+  ) != null;
 
   # nixarchy (when imported) installs plugins; without it the plugin goes to omarchy's folder.
   hasPlugins = lib.hasAttrByPath [ "programs" "nixarchy" "plugins" ] options;
@@ -60,6 +75,16 @@ let
     inherit (cfg.settings) enforce;
     values = settingValues;
   };
+  daemonEnv = [
+    "PATH=${config.home.profileDirectory}/bin:/etc/profiles/per-user/${config.home.username}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
+    "RUST_LOG=nixarchy_meetingai=${cfg.logLevel}"
+  ]
+  ++ [ "NIXARCHY_MEETINGAI_OLLAMA_URL=${cfg.ollama.url}" ]
+  ++ lib.optional cfg.whisper.enable "NIXARCHY_MEETINGAI_WHISPER_URL=http://${whisperAddr}"
+  ++ lib.optional (
+    cfg.ollamaCloud.keyFile != null
+  ) "NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE=${cfg.ollamaCloud.keyFile}"
+  ++ lib.mapAttrsToList (n: v: "${n}=${v}") cfg.extraEnvironment;
 
   # option name -> [ description command ]
   keys = {
@@ -143,7 +168,10 @@ in
       host = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1";
-        description = "Listen address of the whisper server (keep it on loopback).";
+        description = ''
+          Listen address of the whisper server (keep it on loopback). The daemon is told 127.0.0.1
+          when this is `0.0.0.0` and `::1` when it is `::`; an IPv6 address is bracketed in its URL.
+        '';
       };
       port = lib.mkOption {
         type = lib.types.port;
@@ -191,16 +219,22 @@ in
       default = null;
       example = "/run/agenix/ollama-cloud";
       description = ''
-        File holding only the Ollama Cloud key (for example an agenix secret). It is passed with
-        systemd `LoadCredential`, so the daemon reads it without the key entering the Nix store.
-        It wins over `environmentFile` and the key added in the app; do not set both options.
+        File holding only the Ollama Cloud key (for example an agenix secret). The daemon reads
+        this path itself (`NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE`), so the key never enters the Nix
+        store; a missing file just means no key (logged once at warn). It wins over `environmentFile`
+        and the key added in the app; do not set both options.
       '';
     };
 
     ollama.url = lib.mkOption {
       type = lib.types.str;
       default = "http://127.0.0.1:11434";
-      description = "Address of the local Ollama. Only a loopback address counts as local for local-only interviews.";
+      description = ''
+        Address of the Ollama server, `https://...` or `http://` on localhost, 127.0.0.1 or [::1]
+        (anything else is refused by an assertion, since the app would hide the provider). It wins
+        over a base URL stored in the app. Only a loopback address counts as local for
+        local-only interviews.
+      '';
     };
 
     settings = {
@@ -236,6 +270,10 @@ in
           Without this the values above are defaults: applied once, and the app wins afterwards
           (a changed Nix value is applied once more). With it they are written at every start and
           the app shows them locked with "Set in Nix".
+
+          A default that you remove and later add back with the same value is not applied again
+          (the app remembers a hash of each value it has applied). To force it, change the value
+          or set this option.
         '';
       };
     };
@@ -255,7 +293,7 @@ in
       default = true;
       description = ''
         Also install the nixarchy-meeting-mode plugin (call detection) through `programs.nixarchy.plugins`,
-        unless you already declare a `meeting-mode` entry there. Needs nixarchy; ignored without it.
+        unless you already declare a `nixarchy.meeting-mode` entry there. Needs nixarchy; ignored without it.
       '';
     };
 
@@ -286,6 +324,10 @@ in
       {
         assertion = !(cfg.settings.extra ? api_key);
         message = "programs.nixarchy-meetingai: settings.extra.api_key would put a secret in the Nix store; use ollamaCloud.keyFile or the app.";
+      }
+      {
+        assertion = ollamaUrlOk;
+        message = "programs.nixarchy-meetingai: ollama.url must be https, or http on localhost, 127.0.0.1 or [::1].";
       }
       {
         assertion = cfg.ollamaCloud.keyFile == null || cfg.ollamaCloud.environmentFile == null;
@@ -326,6 +368,13 @@ in
       nixarchy-meetingai = {
         Unit = {
           Description = "nixarchy-meetingai daemon";
+          # autostart = false must not leave speech-to-text off.
+          Wants = lib.optional cfg.whisper.enable "nixarchy-meetingai-whisper.service";
+          # A rebuild with other settings or environment restarts the daemon.
+          X-Restart-Triggers = [
+            (pkgs.writeText "nixarchy-meetingai-settings.json" settingsFile)
+            (builtins.toJSON daemonEnv)
+          ];
           After = [
             "graphical-session.target"
             "nixarchy-meetingai-whisper.service"
@@ -336,21 +385,12 @@ in
           ExecStart = bin;
           # The user service gets a bare PATH; the subscription CLIs (claude, codex, agy,
           # opencode) live in the user's Nix profile.
-          Environment = [
-            "PATH=${config.home.profileDirectory}/bin:/etc/profiles/per-user/${config.home.username}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
-            "RUST_LOG=nixarchy_meetingai=${cfg.logLevel}"
-          ]
-          ++ [ "NIXARCHY_MEETINGAI_OLLAMA_URL=${cfg.ollama.url}" ]
-          ++ lib.optional cfg.whisper.enable "NIXARCHY_MEETINGAI_WHISPER_URL=http://${whisperAddr}"
-          ++ lib.mapAttrsToList (n: v: "${n}=${v}") cfg.extraEnvironment;
+          Environment = daemonEnv;
           Restart = "on-failure";
           RestartSec = 2;
         }
         // lib.optionalAttrs (cfg.ollamaCloud.environmentFile != null) {
           EnvironmentFile = [ "-${cfg.ollamaCloud.environmentFile}" ];
-        }
-        // lib.optionalAttrs (cfg.ollamaCloud.keyFile != null) {
-          LoadCredential = [ "ollama:${cfg.ollamaCloud.keyFile}" ];
         };
         Install.WantedBy = lib.optional cfg.autostart "graphical-session.target";
       };
@@ -373,7 +413,7 @@ in
               "-t"
               (toString cfg.whisper.threads)
             ]
-            ++ cfg.whisper.extraArgs
+            ++ map unitEscape cfg.whisper.extraArgs
           );
           Restart = "on-failure";
           RestartSec = 2;

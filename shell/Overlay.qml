@@ -184,7 +184,7 @@ Item {
     }
     function fix(id) { var s = root.pstatus[id]; return s && s.state !== "ready" && s.login ? " Fix: " + s.login + "." : ""; }
     function setProvider(live, id) {   // the provider pickers, and tests/harness-providers.qml
-        if (id === (live ? root.liveProvider : root.chatProvider)) return;
+        if (backend.isLocked(live ? "live_provider" : "chat_provider") || id === (live ? root.liveProvider : root.chatProvider)) return;
         if (live) root.resetLive = id; else root.resetChat = id;
         backend.setSetting(live ? "live_provider" : "chat_provider", id);
         backend.setSetting(live ? "live_model" : "chat_model", "");
@@ -475,11 +475,12 @@ Item {
                     spacing: metrics.gap
                     bottomPadding: metrics.gap
                     Cell {
-                        theme: metrics; width: sflow.cellW; label: "Chat provider"
+                        theme: metrics; width: sflow.cellW; label: backend.lockedLabel("chat_provider", "Chat provider")
                         Select {
                             objectName: "chatProvider"
                             accessibleName: "Chat provider"
                             theme: metrics; anchors.fill: parent
+                            enabled: !backend.isLocked("chat_provider")
                             value: String(backend.settings.chat_provider || "")
                             options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
                             onChanged: function(v) { root.setProvider(false, v); }
@@ -511,11 +512,12 @@ Item {
                         }
                     }
                     Cell {   // automatic answers while a call is recorded
-                        theme: metrics; width: sflow.cellW; label: "Live answers provider"
+                        theme: metrics; width: sflow.cellW; label: backend.lockedLabel("live_provider", "Live answers provider")
                         Select {
                             objectName: "liveProvider"
                             accessibleName: "Live answers provider"
                             theme: metrics; anchors.fill: parent
+                            enabled: !backend.isLocked("live_provider")
                             value: String(backend.settings.live_provider || "")
                             options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
                             onChanged: function(v) { root.setProvider(true, v); }

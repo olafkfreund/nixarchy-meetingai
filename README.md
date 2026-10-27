@@ -32,6 +32,8 @@ or from local models.
   inputs.nixarchy-meetingai = {
     url = "github:olafkfreund/nixarchy-meetingai/refactor/omarchy-quickshell-rewrite";
     inputs.nixpkgs.follows = "nixpkgs";
+    # Optional: only if you already have this input, so both share one copy.
+    inputs.nixarchy-meeting-mode.follows = "nixarchy-meeting-mode";
   };
 }
 ```
@@ -314,7 +316,7 @@ true
 
 
 Also install the nixarchy-meeting-mode plugin (call detection) through ` programs.nixarchy.plugins `,
-unless you already declare a ` meeting-mode ` entry there\. Needs nixarchy; ignored without it\.
+unless you already declare a ` nixarchy.meeting-mode ` entry there\. Needs nixarchy; ignored without it\.
 
 
 
@@ -417,7 +419,10 @@ one of “error”, “warn”, “info”, “debug”, “trace”
 
 
 
-Address of the local Ollama\. Only a loopback address counts as local for local-only interviews\.
+Address of the Ollama server, ` https://... ` or ` http:// ` on localhost, 127\.0\.0\.1 or \[::1]
+(anything else is refused by an assertion, since the app would hide the provider)\. It wins
+over a base URL stored in the app\. Only a loopback address counts as local for
+local-only interviews\.
 
 
 
@@ -469,9 +474,10 @@ null
 
 
 
-File holding only the Ollama Cloud key (for example an agenix secret)\. It is passed with
-systemd ` LoadCredential `, so the daemon reads it without the key entering the Nix store\.
-It wins over ` environmentFile ` and the key added in the app; do not set both options\.
+File holding only the Ollama Cloud key (for example an agenix secret)\. The daemon reads
+this path itself (` NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE `), so the key never enters the Nix
+store; a missing file just means no key (logged once at warn)\. It wins over ` environmentFile `
+and the key added in the app; do not set both options\.
 
 
 
@@ -610,6 +616,10 @@ null
 Without this the values above are defaults: applied once, and the app wins afterwards
 (a changed Nix value is applied once more)\. With it they are written at every start and
 the app shows them locked with “Set in Nix”\.
+
+A default that you remove and later add back with the same value is not applied again
+(the app remembers a hash of each value it has applied)\. To force it, change the value
+or set this option\.
 
 
 
@@ -997,7 +1007,8 @@ list of string
 
 
 
-Listen address of the whisper server (keep it on loopback)\.
+Listen address of the whisper server (keep it on loopback)\. The daemon is told 127\.0\.0\.1
+when this is ` 0.0.0.0 ` and ` ::1 ` when it is ` :: `; an IPv6 address is bracketed in its URL\.
 
 
 

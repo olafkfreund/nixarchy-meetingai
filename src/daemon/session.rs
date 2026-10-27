@@ -470,7 +470,7 @@ fn stays_local(config: &ProviderConfig) -> bool {
 
 /// The Nix module tells the daemon where its whisper-server listens (`http://host:port`).
 fn apply_whisper_url(config: &mut ProviderConfig, url: Option<String>) {
-    if let Some(url) = url.filter(|u| !u.is_empty() && config.base_url.is_empty()) {
+    if let Some(url) = url.filter(|u| !u.is_empty()) {
         config.base_url = format!("{}/inference", url.trim_end_matches('/'));
     }
 }
@@ -482,20 +482,30 @@ fn apply_ollama_url(config: &mut ProviderConfig, url: Option<String>) {
     }
 }
 
-/// A key from a systemd credential file.
-fn read_credential(dir: Option<std::ffi::OsString>, name: &str) -> Option<String> {
-    let text = std::fs::read_to_string(std::path::Path::new(&dir?).join(name)).ok()?;
+/// A key from a file; a missing or unreadable file means no key (warned once, never the content).
+fn read_key_file(path: Option<std::ffi::OsString>) -> Option<String> {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let path = path?;
+    let text = std::fs::read_to_string(&path)
+        .inspect_err(|error| {
+            WARNED.call_once(|| tracing::warn!(%error, ?path, "cannot read the Ollama key file"));
+        })
+        .ok()?;
     Some(text.trim().to_owned()).filter(|k| !k.is_empty())
 }
 
-/// The Ollama Cloud key given outside the app: the `ollama` credential, then `OLLAMA_API_KEY`.
+/// The Ollama Cloud key given outside the app: the Nix key file, then `OLLAMA_API_KEY`.
 fn external_ollama_key() -> Option<String> {
-    read_credential(std::env::var_os("CREDENTIALS_DIRECTORY"), "ollama").or_else(|| {
+    read_key_file(std::env::var_os("NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE")).or_else(|| {
         std::env::var("OLLAMA_API_KEY")
             .ok()
             .map(|k| k.trim().to_owned())
             .filter(|k| !k.is_empty())
     })
+}
+
+fn locked_error(key: &str) -> String {
+    format!("Set in Nix: '{key}' is fixed by programs.nixarchy-meetingai.settings.")
 }
 
 /// Loopback ollama: the one provider that may sit silent while a cold model loads.
@@ -776,10 +786,10 @@ impl Daemon {
         if id == "ollama-cloud"
             && let Some(key) = external_ollama_key()
         {
-            // The Nix credential or service environment beats the vault; never logged.
+            // The Nix key file or service environment beats the vault; never logged.
             config.api_key = key;
         }
-        if id == "ollama" && config.base_url.is_empty() {
+        if id == "ollama" {
             apply_ollama_url(
                 &mut config,
                 std::env::var("NIXARCHY_MEETINGAI_OLLAMA_URL").ok(),
@@ -2420,10 +2430,7 @@ impl Daemon {
             return self.set_api_key(args);
         }
         if self.locked.lock().contains(&args.key) {
-            return Err(format!(
-                "Set in Nix: '{}' is fixed by programs.nixarchy-meetingai.settings.",
-                args.key
-            ));
+            return Err(locked_error(&args.key));
         }
         let mut guard = self.inner.lock();
         let g = &mut *guard;
@@ -2567,6 +2574,9 @@ impl Daemon {
         };
         match key {
             Some(key) => {
+                if self.locked.lock().contains(&key) {
+                    return Err(locked_error(&key));
+                }
                 Settings::set(&g.db, &key, &text).map_err(|e| e.to_string())?;
                 g.settings = Settings::load(&g.db).unwrap_or_default();
             }
@@ -3688,6 +3698,23 @@ mod command_tests {
         )
         .await
         .unwrap();
+        // Locked prompt keys are refused too.
+        let mut args = json!({"mode": "general", "kind": "follow_up", "text": "x"});
+        d.locked.lock().push("smart_follow_ups_prompt".into());
+        let refused = d
+            .handle("prompts.set", args.take(), None)
+            .await
+            .unwrap_err();
+        assert!(refused.contains("Set in Nix"), "{refused}");
+        let refused = d
+            .handle(
+                "prompts.reset",
+                json!({"mode": "general", "kind": "follow_up"}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.contains("Set in Nix"), "{refused}");
     }
 
     #[test]
@@ -4125,25 +4152,24 @@ mod command_tests {
         assert_eq!(c.base_url, "");
         apply_whisper_url(&mut c, Some("http://127.0.0.1:9000/".into()));
         assert_eq!(c.base_url, "http://127.0.0.1:9000/inference");
-        apply_whisper_url(&mut c, Some("http://127.0.0.1:1".into()));
-        assert_eq!(c.base_url, "http://127.0.0.1:9000/inference");
         assert!(stays_local(&c));
+        // The Nix address wins over a stored one.
+        c.base_url = "http://stored:1/inference".into();
+        apply_whisper_url(&mut c, Some("http://127.0.0.1:1".into()));
+        assert_eq!(c.base_url, "http://127.0.0.1:1/inference");
     }
 
     #[test]
-    fn credential_file_is_read_and_trimmed() {
+    fn key_file_is_read_trimmed_and_missing_means_no_key() {
         let dir = std::env::temp_dir().join(format!("nm-cred-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("ollama"), "fake-key-123\n").unwrap();
         std::fs::write(dir.join("empty"), "\n").unwrap();
-        let d = || Some(dir.clone().into_os_string());
-        assert_eq!(
-            read_credential(d(), "ollama").as_deref(),
-            Some("fake-key-123")
-        );
-        assert_eq!(read_credential(d(), "empty"), None);
-        assert_eq!(read_credential(d(), "missing"), None);
-        assert_eq!(read_credential(None, "ollama"), None);
+        let f = |n: &str| Some(dir.join(n).into_os_string());
+        assert_eq!(read_key_file(f("ollama")).as_deref(), Some("fake-key-123"));
+        assert_eq!(read_key_file(f("empty")), None);
+        assert_eq!(read_key_file(f("missing")), None);
+        assert_eq!(read_key_file(None), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -4161,6 +4187,10 @@ mod command_tests {
         let mut none = ProviderConfig::new("ollama", "", "llama3");
         apply_ollama_url(&mut none, None);
         assert_eq!(none.base_url, "");
+        // The Nix address wins over a stored one.
+        none.base_url = "http://stored:1/v1/chat/completions".into();
+        apply_ollama_url(&mut none, Some("http://127.0.0.1:2".into()));
+        assert_eq!(none.base_url, "http://127.0.0.1:2/v1/chat/completions");
     }
 
     #[test]

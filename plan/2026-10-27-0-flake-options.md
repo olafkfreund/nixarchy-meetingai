@@ -135,3 +135,24 @@ None yet.
   `meeting-mode`, but owners declare it by its manifest id
   `nixarchy.meeting-mode` (e.g. `omarchy-meeting-mode.nix`), so both would
   install. It now uses `nixarchy.meeting-mode`; the check matches.
+- **Review fixes:** `ollamaCloud.keyFile` is no longer `LoadCredential=` (a
+  missing source stops the user unit with 243/CREDENTIALS). The module sets
+  `NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE=<path>`; the daemon reads it (trimmed),
+  a missing or unreadable file means no key (warn once, never the content),
+  then `OLLAMA_API_KEY`, then the vault. The daemon unit has
+  `X-Restart-Triggers` (settings file, environment) and `Wants=` the whisper
+  unit. `ollama.url` is asserted https or http on localhost/127.0.0.1/[::1]
+  (exactly what the app's `endpoint_allowed` accepts, narrower than 127.0.0.0/8).
+  The Nix whisper/ollama address wins over a stored base URL. `prompts.set`,
+  `prompts.reset`, the mode and provider pickers honour `locked`. Provider
+  settings are validated. A removed-then-re-added identical default is not
+  re-applied (documented on `settings.enforce`).
+- **Review fixes (Opus + Codex, step 7):** restart triggers on settings
+  changes; the daemon `Wants=` whisper; `checks` build the package and the
+  plugin; `ollama.url` asserted https or exactly localhost/127.0.0.1/[::1]
+  (what `endpoint_allowed` accepts); IPv6 whisper hosts bracketed and
+  wildcard binds mapped to loopback for the daemon; `%`/`$` escaped in
+  whisper args; prompt Save/Reset refuse locked keys; locked mode and
+  provider pickers disabled, `setProvider` returns early; provider ids
+  validated; the Nix address beats a stored URL for whisper-local and
+  ollama; the seeded-hash behaviour is documented in `settings.enforce`.
