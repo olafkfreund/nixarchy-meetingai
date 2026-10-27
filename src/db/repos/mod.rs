@@ -1,6 +1,7 @@
 //! Database repositories for conversations, meetings, library files, and settings.
 
 pub mod conversations;
+pub mod items;
 pub mod library;
 pub mod meetings;
 pub mod profiles;

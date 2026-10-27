@@ -58,6 +58,32 @@ pub struct IdArg {
     pub id: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SessionNew {
+    pub series: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SeriesArg {
+    pub series: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ItemsList {
+    pub meeting: Option<String>,
+    pub series: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ItemsUpdate {
+    pub id: String,
+    #[serde(flatten)]
+    pub patch: crate::db::items::ItemPatch,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MeetingArg {
     pub meeting: String,

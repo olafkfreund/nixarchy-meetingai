@@ -76,6 +76,23 @@ Override with `programs.nixarchy-meetingai.keybindings.<name> = "…"`, or set
 one to `null` to drop it. The same actions are available from a shell:
 `nixarchy-meetingai ctl state.get`.
 
+## Team meetings
+
+Pick "Team" as the meeting mode to track work across meetings. Each team
+meeting belongs to a **series**; choose one (or create one) before you record.
+
+- **Items.** While you talk, the copilot pulls out actions, decisions and
+  questions. They start as drafts and are settled when you stop. Edit, mark
+  done or delete them from the overlay.
+- **Last time.** The previous meeting in the series, its recap and the items
+  still open, are one step away before you start.
+- **Earlier task?** When the talk returns to an open item from an earlier
+  meeting, a callout offers Discussed, Done or Not related (at most one every
+  three minutes).
+- **Search.** The final recap is searchable with the meeting titles.
+
+Agents read items with `meeting_items` and `series_list` (below).
+
 ## Use from AI agents
 
 `nixarchy-meetingai mcp` is an MCP server over stdio. It talks to the running
@@ -99,6 +116,8 @@ Tools:
 - `ask`: ask the copilot a question (up to 8k characters) and wait for the answer
 - `meetings_list`: list past meetings (`query`, `limit`)
 - `meeting_notes`: the notes of a meeting
+- `meeting_items`: the actions, decisions and questions of a `meeting` or `series` (`status`)
+- `series_list`: list the team-meeting series
 - `notes_regenerate`: regenerate the notes of a meeting
 - `session_new`: start a new session
 - `session_restore`: restore a past meeting

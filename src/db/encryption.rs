@@ -147,7 +147,7 @@ mod tests {
         let secret = "private-history-unique-sentinel";
         let chat = conversations::create(db.connection(), secret, 1).unwrap();
         conversations::append_message(db.connection(), &chat, "user", secret, 2).unwrap();
-        let meeting = meetings::start(db.connection(), secret, "auto", "en").unwrap();
+        let meeting = meetings::start(db.connection(), secret, "auto", "en", None).unwrap();
         meetings::add_line(db.connection(), &meeting, "them", Some(2), secret, 0.0, 1.0).unwrap();
         for file in [&path, &sidecar(&path, "-wal")] {
             let bytes = fs::read(file).unwrap();
@@ -181,7 +181,14 @@ mod tests {
         original.execute_batch("PRAGMA user_version=7").unwrap();
         let chat = conversations::create(&original, "Legacy", 1).unwrap();
         conversations::append_message(&original, &chat, "user", "Original question é", 2).unwrap();
-        let meeting = meetings::start(&original, "Legacy meeting", "context", "en").unwrap();
+        // A legacy database has no series_id column, so insert without it.
+        let meeting = "legacy-meeting".to_owned();
+        original
+            .execute(
+                "INSERT INTO meetings (id, title, context, language) VALUES (?1, 'Legacy meeting', 'context', 'en')",
+                [&meeting],
+            )
+            .unwrap();
         meetings::add_line(
             &original,
             &meeting,

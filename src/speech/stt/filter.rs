@@ -22,7 +22,7 @@ const ECHO_MIN_TOKENS: usize = 3;
 const PROMPT_PART: usize = 200;
 
 /// Lowercase alphanumeric words; punctuation, brackets and underscores split.
-fn tokens(text: &str) -> Vec<String> {
+pub(crate) fn tokens(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
         .map(str::to_lowercase)
@@ -30,7 +30,7 @@ fn tokens(text: &str) -> Vec<String> {
 }
 
 /// Share of the longer line's tokens that also occur in the other (multiset).
-fn similarity(a: &[String], b: &[String]) -> f64 {
+pub(crate) fn similarity(a: &[String], b: &[String]) -> f64 {
     let mut rest: Vec<&String> = b.iter().collect();
     let mut shared = 0usize;
     for word in a {

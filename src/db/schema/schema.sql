@@ -204,3 +204,30 @@ CREATE TABLE IF NOT EXISTS meeting_note_chunks (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_note_chunks_meeting ON meeting_note_chunks (meeting_id);
+
+-- Team meetings: hand-picked series, extracted items and recap search.
+-- meetings.series_id is added by a guarded ALTER in db/mod.rs.
+CREATE TABLE IF NOT EXISTS series (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS meeting_items (
+    id TEXT PRIMARY KEY,
+    meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    series_id TEXT,
+    kind TEXT NOT NULL CHECK (kind IN ('action','decision','question')),
+    text TEXT NOT NULL,
+    owner TEXT,
+    due TEXT,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','dropped')),
+    source_line INTEGER,
+    origin_item TEXT,
+    draft INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_items_meeting ON meeting_items (meeting_id);
+CREATE INDEX IF NOT EXISTS idx_meeting_items_series ON meeting_items (series_id, status);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(meeting_id UNINDEXED, body);

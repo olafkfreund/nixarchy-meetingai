@@ -224,7 +224,7 @@ async fn mcp_flow() {
 
     let mut mcp = Mcp::start(&root.join("run")).await;
     let tools = mcp.rpc("tools/list", json!({})).await;
-    assert_eq!(tools["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(tools["tools"].as_array().unwrap().len(), 14);
 
     let (is_error, _, data) = mcp.tool("meeting_status", json!({})).await;
     assert!(!is_error);
@@ -309,6 +309,15 @@ async fn mcp_flow() {
     let settings = socket_call(&socket, "settings.get", json!({})).await;
     assert_eq!(settings["data"]["text_scale"], 120);
     assert_eq!(settings["data"]["mcp_allow_record"], true);
+
+    let (is_error, text, data) = mcp.tool("series_list", json!({})).await;
+    assert!(!is_error, "{text}");
+    assert!(data["series"].is_array());
+    let (is_error, text, _) = mcp.tool("meeting_items", json!({})).await;
+    assert!(is_error, "{text}");
+    let (is_error, text, data) = mcp.tool("meeting_items", json!({"series": "none"})).await;
+    assert!(!is_error, "{text}");
+    assert_eq!(data["items"].as_array().unwrap().len(), 0);
 
     let (is_error, text, _) = mcp.tool("record_stop", json!({})).await;
     assert!(!is_error, "{text}");

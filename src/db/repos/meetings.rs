@@ -80,11 +80,12 @@ pub fn start(
     title: &str,
     context: &str,
     language: &str,
+    series_id: Option<&str>,
 ) -> Result<String> {
     let id = Uuid::new_v4().to_string();
     connection.execute(
-        "INSERT INTO meetings (id, title, context, language) VALUES (?1, ?2, ?3, ?4)",
-        params![id, title, context, language],
+        "INSERT INTO meetings (id, title, context, language, series_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, title, context, language, series_id],
     )?;
     Ok(id)
 }
@@ -172,6 +173,10 @@ pub fn untitled(connection: &Connection, limit: usize) -> Result<Vec<(String, St
 /// Delete a session; its lines go with it through the cascade.
 pub fn delete(connection: &Connection, meeting_id: &str) -> Result<()> {
     connection.execute("DELETE FROM meetings WHERE id = ?1", params![meeting_id])?;
+    connection.execute(
+        "DELETE FROM notes_fts WHERE meeting_id = ?1",
+        params![meeting_id],
+    )?;
     Ok(())
 }
 
@@ -191,11 +196,15 @@ pub fn search(connection: &Connection, query: &str, limit: usize) -> Result<Vec<
             OR instr(lower(m.context), lower(?2)) > 0
             OR EXISTS (SELECT 1 FROM meeting_lines s WHERE s.meeting_id=m.id
                        AND instr(lower(s.text), lower(?2)) > 0)
+            OR m.id IN (SELECT meeting_id FROM notes_fts WHERE notes_fts MATCH ?3)
          GROUP BY m.id
          ORDER BY m.started_at DESC, m.rowid DESC
          LIMIT ?1",
     )?;
-    let rows = statement.query_map(params![limit.min(500) as i64, query.trim()], |row| {
+    let query = query.trim();
+    // One quoted FTS5 string, so user text can never be FTS syntax.
+    let fts = format!("\"{}\"", query.replace('"', "\"\""));
+    let rows = statement.query_map(params![limit.min(500) as i64, query, fts], |row| {
         Ok(MeetingRecord {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -208,6 +217,16 @@ pub fn search(connection: &Connection, query: &str, limit: usize) -> Result<Vec<
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Make a meeting's recap searchable, replacing any earlier text.
+pub fn index_notes(connection: &Connection, id: &str, body: &str) -> Result<()> {
+    connection.execute("DELETE FROM notes_fts WHERE meeting_id = ?1", params![id])?;
+    connection.execute(
+        "INSERT INTO notes_fts (meeting_id, body) VALUES (?1, ?2)",
+        params![id, body],
+    )?;
+    Ok(())
 }
 
 /// Lines for one session, in spoken order.
@@ -441,15 +460,24 @@ mod archive_search_tests {
     fn search_matches_transcript_context_and_literal_query_characters() {
         let db = Database::in_memory().unwrap();
         let c = db.connection();
-        let id = start(c, "Design review", "Orion context", "en").unwrap();
+        let id = start(c, "Design review", "Orion context", "en", None).unwrap();
         add_line(c, &id, "them", Some(1), "A 50%_discount. 日本語", 0., 1.).unwrap();
-        start(c, "Other", "auto", "en").unwrap();
+        start(c, "Other", "auto", "en", None).unwrap();
         for query in ["DESIGN", "orion", "50%_", "日本語"] {
             let found = search(c, query, 200).unwrap();
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].id, id);
         }
         assert!(search(c, "%_not_present", 200).unwrap().is_empty());
+        // Recap text is searchable; quotes, wildcards and operators are literal.
+        index_notes(c, &id, "Decided to adopt \"Kubernetes\" - 50%_ faster").unwrap();
+        index_notes(c, &id, "We adopted Kubernetes").unwrap();
+        assert_eq!(search(c, "kubernetes", 200).unwrap()[0].id, id);
+        for query in ["\"", "50%_", "-", "a \"b\" - AND OR NOT *", "("] {
+            search(c, query, 200).unwrap();
+        }
+        delete(c, &id).unwrap();
+        assert!(search(c, "kubernetes", 200).unwrap().is_empty());
     }
 }
 
@@ -465,7 +493,7 @@ mod tests {
     #[test]
     fn recap_excerpts_bound_large_meetings_and_disclose_omitted_facts() {
         let db = database();
-        let id = start(db.connection(), "Long meeting", "auto", "en").unwrap();
+        let id = start(db.connection(), "Long meeting", "auto", "en", None).unwrap();
         for i in 0..1000 {
             add_line(
                 db.connection(),
@@ -494,7 +522,7 @@ mod tests {
     fn session_records_lines_incrementally() {
         let database = database();
         let connection = database.connection();
-        let id = start(connection, "Standup", "meeting", "en").unwrap();
+        let id = start(connection, "Standup", "meeting", "en", None).unwrap();
         add_line(connection, &id, "me", None, "Good morning", 0.0, 1.2).unwrap();
         add_line(connection, &id, "them", Some(0), "Morning all", 1.3, 2.4).unwrap();
 
@@ -509,7 +537,7 @@ mod tests {
     fn finishing_records_duration() {
         let database = database();
         let connection = database.connection();
-        let id = start(connection, "Call", "meeting", "en").unwrap();
+        let id = start(connection, "Call", "meeting", "en", None).unwrap();
         finish(connection, &id, 125).unwrap();
         let meeting = &list(connection, 10).unwrap()[0];
         assert_eq!(meeting.duration_seconds, 125);
@@ -520,7 +548,7 @@ mod tests {
     fn deleting_session_cascades_lines() {
         let database = database();
         let connection = database.connection();
-        let id = start(connection, "Call", "meeting", "en").unwrap();
+        let id = start(connection, "Call", "meeting", "en", None).unwrap();
         add_line(connection, &id, "me", None, "hello", 0.0, 1.0).unwrap();
         delete(connection, &id).unwrap();
         let remaining: i64 = connection
@@ -533,7 +561,7 @@ mod tests {
     fn lines_are_ordered_by_time() {
         let database = database();
         let connection = database.connection();
-        let id = start(connection, "Call", "meeting", "en").unwrap();
+        let id = start(connection, "Call", "meeting", "en", None).unwrap();
         add_line(connection, &id, "them", None, "second", 5.0, 6.0).unwrap();
         add_line(connection, &id, "me", None, "first", 1.0, 2.0).unwrap();
         let lines = lines(connection, &id).unwrap();
@@ -545,7 +573,7 @@ mod tests {
     fn speaker_names_upsert() {
         let database = database();
         let connection = database.connection();
-        let id = start(connection, "Call", "meeting", "en").unwrap();
+        let id = start(connection, "Call", "meeting", "en", None).unwrap();
         name_speaker(connection, &id, "them:0", "Sam").unwrap();
         name_speaker(connection, &id, "them:0", "Samantha").unwrap();
         let names = speaker_names(connection, &id).unwrap();
@@ -557,7 +585,7 @@ mod tests {
     fn rename_changes_title() {
         let database = database();
         let connection = database.connection();
-        let id = start(connection, "Untitled", "meeting", "en").unwrap();
+        let id = start(connection, "Untitled", "meeting", "en", None).unwrap();
         rename(connection, &id, "Weekly").unwrap();
         assert_eq!(list(connection, 10).unwrap()[0].title, "Weekly");
     }
@@ -574,7 +602,7 @@ mod tests {
     fn chunks_cover_lines_and_leave_the_rest() {
         let db = database();
         let c = db.connection();
-        let id = start(c, "M", "", "en").unwrap();
+        let id = start(c, "M", "", "en", None).unwrap();
         add_line(c, &id, "me", None, "one", 0.0, 1.0).unwrap();
         add_line(c, &id, "them", None, "two", 1.0, 2.0).unwrap();
         add_chunk(

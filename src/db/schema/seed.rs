@@ -4,7 +4,7 @@
 
 use rusqlite::params;
 
-use crate::db::Result;
+use crate::{core::settings::MeetingMode, db::Result};
 
 /// One seeded prompt.
 pub struct SeedPrompt {
@@ -22,17 +22,13 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are nixarchy-meetingai, helping the
 pub const DEFAULT_LIVE_ANSWER: &str = "Write a reply the user can take in at a glance. Start with one bold sentence they can say first, then give 3 to 4 short bullet talking points. Use about 80 words or fewer, with no preamble and no closing remark. Ground every point in the supplied profile, documents and recent speech; never invent experience, numbers or commitments, and say so in a bullet when a needed fact is missing.";
 
 /// The setting that holds the editable `live_answer` prompt for a mode.
-pub fn live_answer_key(interview: bool) -> &'static str {
-    if interview {
-        "live_answer_prompt_interview"
-    } else {
-        "live_answer_prompt_general"
-    }
+pub fn live_answer_key(mode: MeetingMode) -> String {
+    format!("live_answer_prompt_{}", mode.as_str())
 }
 
 /// The current `live_answer` prompt; an empty stored text means the default.
-pub fn live_answer(connection: &rusqlite::Connection, interview: bool) -> String {
-    crate::db::settings::get(connection, live_answer_key(interview))
+pub fn live_answer(connection: &rusqlite::Connection, mode: MeetingMode) -> String {
+    crate::db::settings::get(connection, &live_answer_key(mode))
         .ok()
         .flatten()
         .filter(|text| !text.trim().is_empty())
@@ -159,12 +155,16 @@ mod tests {
     fn live_answer_defaults_per_mode_and_edits_survive() {
         let database = Database::open_in_memory().unwrap();
         let c = database.connection();
-        for interview in [false, true] {
-            assert_eq!(live_answer(c, interview), DEFAULT_LIVE_ANSWER);
+        for mode in [
+            MeetingMode::General,
+            MeetingMode::Interview,
+            MeetingMode::TeamMeeting,
+        ] {
+            assert_eq!(live_answer(c, mode), DEFAULT_LIVE_ANSWER);
         }
-        settings::set(c, live_answer_key(true), "mine").unwrap();
-        assert_eq!(live_answer(c, true), "mine");
-        assert_eq!(live_answer(c, false), DEFAULT_LIVE_ANSWER);
+        settings::set(c, &live_answer_key(MeetingMode::Interview), "mine").unwrap();
+        assert_eq!(live_answer(c, MeetingMode::Interview), "mine");
+        assert_eq!(live_answer(c, MeetingMode::General), DEFAULT_LIVE_ANSWER);
         assert!(DEFAULT_LIVE_ANSWER.contains("bold") && DEFAULT_LIVE_ANSWER.contains("80 words"));
     }
 

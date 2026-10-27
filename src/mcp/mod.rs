@@ -316,6 +316,17 @@ struct MeetingArgs {
 
 #[derive(Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+struct ItemsArgs {
+    /// Meeting id from meetings_list. Give this or `series`.
+    meeting: Option<String>,
+    /// Series id from series_list.
+    series: Option<String>,
+    /// Only items with this status (open or done).
+    status: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 struct SettingArgs {
     /// One of meeting_mode, response_pace, chat_provider, chat_model, live_provider, live_model, text_scale.
     key: String,
@@ -469,6 +480,60 @@ impl Server {
                 .await
                 .map(|d| (d["text"].as_str().unwrap_or_default().to_owned(), d)),
         )
+    }
+
+    #[tool(
+        description = "List the actions, decisions and questions of a meeting or a series of team meetings.",
+        annotations(read_only_hint = true)
+    )]
+    async fn meeting_items(&self, Parameters(a): Parameters<ItemsArgs>) -> CallToolResult {
+        done(
+            request(
+                "items.list",
+                json!({"meeting": a.meeting, "series": a.series, "status": a.status}),
+            )
+            .await
+            .map(|items| {
+                let text = items
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|i| {
+                        format!(
+                            "[{}] {}: {}",
+                            i["status"].as_str().unwrap_or_default(),
+                            i["kind"].as_str().unwrap_or_default(),
+                            i["text"].as_str().unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (text, json!({"items": items}))
+            }),
+        )
+    }
+
+    #[tool(
+        description = "List the series of team meetings.",
+        annotations(read_only_hint = true)
+    )]
+    async fn series_list(&self) -> CallToolResult {
+        done(request("series.list", json!({})).await.map(|series| {
+            let text = series
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|s| {
+                    format!(
+                        "{}  {}",
+                        s["id"].as_str().unwrap_or_default(),
+                        s["name"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (text, json!({"series": series}))
+        }))
     }
 
     #[tool(

@@ -9,6 +9,7 @@ pub mod repos;
 pub mod schema;
 
 pub use repos::conversations;
+pub use repos::items;
 pub use repos::library;
 pub use repos::meetings;
 pub use repos::profiles;
@@ -75,6 +76,14 @@ impl Database {
                 "ALTER TABLE meeting_note_chunks ADD COLUMN last_line INTEGER NOT NULL DEFAULT 0",
             )?;
         }
+        let has_series: bool = connection.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('meetings') WHERE name = 'series_id'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_series {
+            connection.execute_batch("ALTER TABLE meetings ADD COLUMN series_id TEXT")?;
+        }
         seed::seed_listen_modes(&connection)?;
         profiles::migrate_legacy(&connection)?;
         Ok(Self { connection })
@@ -97,6 +106,33 @@ mod tests {
     fn schema_applies_and_is_idempotent() {
         let db = Database::in_memory().unwrap();
         db.connection().execute_batch(schema::SCHEMA).unwrap();
+    }
+
+    #[test]
+    fn series_column_is_added_to_an_old_database() {
+        let dir = std::env::temp_dir().join(format!("nm-old-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("h.db");
+        drop(Database::open(&path).unwrap());
+        {
+            let db = Database::open(&path).unwrap();
+            db.connection()
+                .execute_batch("ALTER TABLE meetings DROP COLUMN series_id")
+                .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        meetings::start(db.connection(), "t", "", "en", Some("s")).unwrap();
+    }
+
+    #[test]
+    fn fts5_works_in_the_encrypted_database() {
+        let dir = std::env::temp_dir().join(format!("nm-fts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let db = Database::open(dir.join("h.db")).unwrap();
+        let c = db.connection();
+        let id = meetings::start(c, "t", "", "en", None).unwrap();
+        meetings::index_notes(c, &id, "ship the zebra release").unwrap();
+        assert_eq!(meetings::search(c, "zebra", 10).unwrap().len(), 1);
     }
 
     #[test]

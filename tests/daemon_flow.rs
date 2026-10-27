@@ -17,6 +17,11 @@ const SECRET: &str = "sk-very-secret-key-123";
 
 /// Answers every request with one streamed completion.
 async fn fake_provider() -> String {
+    fake_provider_with(|_| "Mock answer.".into()).await
+}
+
+/// Like [`fake_provider`], but the reply is computed from the request text.
+async fn fake_provider_with(reply: fn(&str) -> String) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {
@@ -43,7 +48,11 @@ async fn fake_provider() -> String {
                         break;
                     }
                 }
-                let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Mock answer.\"}}]}\n\ndata: [DONE]\n";
+                let content = reply(&String::from_utf8_lossy(&bytes));
+                let body = format!(
+                    "data: {}\n\ndata: [DONE]\n",
+                    json!({"choices": [{"delta": {"content": content}}]})
+                );
                 let reply = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -293,4 +302,138 @@ async fn daemon_flow_scripted_session() {
         .unwrap()
         .unwrap();
     assert!(!socket.exists());
+}
+
+/// Chunk calls list one action; when earlier open items are offered, it continues the first.
+fn team_reply(request: &str) -> String {
+    if !request.contains("Summarise this slice") {
+        return "Team recap.".into();
+    }
+    let continues = request
+        .split("id=")
+        .nth(1)
+        .map(|rest| rest[..36].to_owned());
+    let items = json!([{"kind": "action", "text": "Send the budget to finance", "owner": null,
+        "due": null, "source_line": 1, "continues_item": continues}]);
+    format!("Notes.\n```json\n{items}\n```")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn team_series_carries_an_action_into_the_next_meeting() {
+    let root = std::env::temp_dir().join(format!("nixarchy-team-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let vault_dir = root.join("data");
+    {
+        let vault = Vault::open(&vault_dir).unwrap();
+        let mut credential = credentials::Credential::chat("gemini", SECRET);
+        credential.model = "mock".into();
+        credential.base_url = fake_provider_with(team_reply).await;
+        credentials::save(&vault, &credential).unwrap();
+    }
+    let daemon = Daemon::new(Options {
+        db_path: vault_dir.join("test.db"),
+        vault_dir,
+        capture: false,
+    })
+    .unwrap();
+    let socket = cli::socket_path_in(&root.join("run"));
+    {
+        let (socket, daemon) = (socket.clone(), daemon.clone());
+        tokio::spawn(async move { server::serve(&socket, daemon).await });
+    }
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut client = Client::connect(&socket).await;
+    for (key, value) in [
+        ("chat_provider", json!("gemini")),
+        ("chat_model", json!("")),
+        ("auto_response", json!("off")),
+        ("meeting_mode", json!("team_meeting")),
+    ] {
+        let set = client
+            .call("settings.set", json!({"key": key, "value": value}))
+            .await;
+        assert_eq!(set["ok"], true, "{set}");
+    }
+    let series = client
+        .call("series.create", json!({"name": "Weekly"}))
+        .await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Meeting 1: a chunk is due after 5 minutes of speech and yields one action.
+    let new = client.call("session.new", json!({"series": series})).await;
+    assert_eq!(new["ok"], true, "{new}");
+    assert_eq!(
+        client.call("state.get", json!({})).await["data"]["series"],
+        series
+    );
+    assert_eq!(client.call("record.start", json!({})).await["ok"], true);
+    daemon.inject_live(final_line(
+        1,
+        "Someone should send the budget to finance.",
+        0.0,
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    daemon.inject_live(final_line(1, "Yes, by Friday.", 400.0));
+    let first = client.event("items.updated").await["meeting"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(client.call("record.stop", json!({})).await["ok"], true);
+    client.event("notes.updated").await;
+    let listed = client.call("items.list", json!({"meeting": first})).await["data"].clone();
+    let item = &listed[0];
+    assert_eq!(
+        (listed.as_array().unwrap().len(), &item["kind"]),
+        (1, &json!("action"))
+    );
+    assert_eq!(
+        (&item["owner"], &item["status"], &item["series_id"]),
+        (&Value::Null, &json!("open"), &json!(series))
+    );
+    assert_eq!(item["source_line"], 1);
+    let id = item["id"].as_str().unwrap().to_owned();
+
+    // Meeting 2 sees it as last time's open item and is offered it as an earlier task.
+    let mut started = false;
+    for _ in 0..100 {
+        if client.call("session.new", json!({"series": series})).await["ok"] == true {
+            started = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(started, "the first meeting never finished");
+    let last = client
+        .call("last_time.get", json!({"series": series}))
+        .await["data"]
+        .clone();
+    assert_eq!(
+        (&last["meeting"], &last["items"][0]["id"]),
+        (&json!(first), &json!(id))
+    );
+    assert_eq!(client.call("record.start", json!({})).await["ok"], true);
+    daemon.inject_live(final_line(1, "About that budget for finance.", 0.0));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    daemon.inject_live(final_line(1, "Still pending.", 400.0));
+    let earlier = client.event("earlier_item").await;
+    assert_eq!(earlier["item"]["id"], id);
+    assert_eq!(earlier["quote"], "About that budget for finance.");
+    assert!(earlier["meeting"].is_string());
+    let done = client
+        .call("items.update", json!({"id": id, "status": "done"}))
+        .await;
+    assert_eq!(done["ok"], true, "{done}");
+    let done = client
+        .call("items.list", json!({"series": series, "status": "done"}))
+        .await;
+    assert_eq!(done["data"][0]["id"], id, "{done}");
+    assert_eq!(client.call("record.stop", json!({})).await["ok"], true);
+    assert_eq!(client.call("quit", json!({})).await["ok"], true);
 }

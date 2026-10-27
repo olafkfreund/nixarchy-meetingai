@@ -36,12 +36,13 @@ use crate::{
         credentials::{self, Credential, Kind},
         domain::{Message, Role},
         settings::{
-            AutoResponse, FOLLOW_UP_PROMPT, RECAP_PROMPT_GENERAL, RECAP_PROMPT_INTERVIEW,
-            ResponseLength, Settings, response_instruction,
+            AutoResponse, FOLLOW_UP_PROMPT, MeetingMode, RECAP_PROMPT_GENERAL,
+            RECAP_PROMPT_INTERVIEW, RECAP_PROMPT_TEAM, ResponseLength, Settings,
+            response_instruction,
         },
         vault::Vault,
     },
-    db::{self, Database, conversations, meetings, profiles, sessions, settings as store},
+    db::{self, Database, conversations, items, meetings, profiles, sessions, settings as store},
     speech::{
         listen::{ListenSession, SessionConfig, SessionEvent},
         transcription::{self, LiveEvent, LiveTranscriber, LiveTurns, SttHints},
@@ -76,10 +77,19 @@ fn glossary(personal: &str, meeting: &str) -> String {
     out
 }
 
+/// Suffix of a mode's `recap_prompt_*` setting key.
+fn recap_suffix(mode: MeetingMode) -> &'static str {
+    match mode {
+        MeetingMode::General => "general",
+        MeetingMode::Interview => "interview",
+        MeetingMode::TeamMeeting => "team",
+    }
+}
+
 /// Quick actions the shell offers itself; generated suggestions never repeat them.
 const FIXED_FOLLOW_UPS: [&str; 3] = ["What should I say?", "Follow-up questions", "Fact check"];
 /// Settings with their own controls elsewhere; `settings.search` hides them.
-const MANAGED_SETTINGS: [&str; 11] = [
+const MANAGED_SETTINGS: [&str; 12] = [
     "chat_provider",
     "chat_model",
     "live_provider",
@@ -88,6 +98,7 @@ const MANAGED_SETTINGS: [&str; 11] = [
     "meeting_mode",
     "recap_prompt_general",
     "recap_prompt_interview",
+    "recap_prompt_team",
     "smart_follow_ups_prompt",
     "personal_context",
     "meeting_context",
@@ -188,6 +199,22 @@ struct Inner {
     /// The last question asked and the follow-ups generated for it (for `now.get`).
     last_question: String,
     suggestions: Vec<String>,
+    /// Series chosen for the next meeting (team mode).
+    series: Option<String>,
+    /// When `earlier_item` last fired; at most one per `EARLIER_GAP`.
+    last_earlier: Option<Instant>,
+}
+
+/// Least time between two "Earlier task?" callouts.
+const EARLIER_GAP: Duration = Duration::from_secs(180);
+
+/// True at most once per `EARLIER_GAP`; records the time when it is.
+fn earlier_due(last: &mut Option<Instant>, now: Instant) -> bool {
+    if last.is_some_and(|t| now.duration_since(t) < EARLIER_GAP) {
+        return false;
+    }
+    *last = Some(now);
+    true
 }
 
 pub struct Daemon {
@@ -230,6 +257,10 @@ impl Levels {
         };
         Some(v)
     }
+}
+
+fn json_of<T: serde::Serialize>(result: crate::db::Result<T>) -> Result<Value, String> {
+    result.map(|v| json!(v)).map_err(|e| e.to_string())
 }
 
 fn now_ms() -> i64 {
@@ -485,6 +516,8 @@ impl Daemon {
                 dictation_seq: 0,
                 last_question: String::new(),
                 suggestions: Vec::new(),
+                series: None,
+                last_earlier: None,
             }),
         }))
     }
@@ -507,6 +540,7 @@ impl Daemon {
             "since": g.recording.as_ref().map_or(0, |r| r.since_ms),
             "mic": g.mic,
             "system": g.system,
+            "series": g.series,
         })
     }
 
@@ -596,11 +630,7 @@ impl Daemon {
 
     /// `live` builds the glanceable automatic-answer prompt: the `live_answer` text and Short length.
     fn system_prompt(&self, g: &Inner, no_context: bool, live: bool) -> String {
-        let want = if g.settings.meeting_mode == "interview" {
-            "Interview"
-        } else {
-            "General"
-        };
+        let want = g.settings.meeting_mode.listen_name();
         let modes = store::listen_modes(g.db.connection()).unwrap_or_default();
         let base = modes
             .iter()
@@ -608,7 +638,7 @@ impl Daemon {
             .or_else(|| modes.iter().find(|m| m.name == "General"))
             .map_or(db::seed::DEFAULT_SYSTEM_PROMPT, |m| m.prompt.as_str());
         let mut prompt = if live {
-            db::seed::live_answer(g.db.connection(), want == "Interview")
+            db::seed::live_answer(g.db.connection(), g.settings.meeting_mode)
         } else {
             format!("{base}\n\n{}", db::seed::RESPONSE_STYLE)
         };
@@ -1051,6 +1081,8 @@ impl Daemon {
             && channel == 1
         {
             let eligible = match g.settings.auto_response {
+                // Team meetings give no automatic answers.
+                _ if g.settings.meeting_mode == MeetingMode::TeamMeeting => false,
                 AutoResponse::Off => false,
                 AutoResponse::Questions => is_question(&text),
                 AutoResponse::Pauses => meaningful_remark(&text),
@@ -1255,10 +1287,26 @@ impl Daemon {
             };
             if let Some(config) = config {
                 let _serial = me.notes.lock().await;
-                if let Ok(true) =
-                    recap::maybe_chunk(&me.db_path, &meeting, &config, &language).await
+                if let Ok((made, continued)) =
+                    recap::maybe_chunk_items(&me.db_path, &meeting, &config, &language).await
                 {
-                    me.emit("notes.updated", json!({"meeting": meeting}));
+                    if made {
+                        me.emit("notes.updated", json!({"meeting": meeting}));
+                        if me.inner.lock().settings.meeting_mode == MeetingMode::TeamMeeting {
+                            me.emit("items.updated", json!({"meeting": meeting}));
+                        }
+                    }
+                    let show = !continued.is_empty()
+                        && earlier_due(&mut me.inner.lock().last_earlier, Instant::now());
+                    if let (true, Some(c)) = (show, continued.first()) {
+                        let i = &c.item;
+                        me.emit(
+                            "earlier_item",
+                            json!({"item": {"id": i.id, "kind": i.kind, "text": i.text,
+                                "created_at": i.created_at, "status": i.status},
+                                "quote": c.quote, "line": c.line, "meeting": meeting}),
+                        );
+                    }
                 }
             }
             me.chunking.store(false, Ordering::Release);
@@ -1363,6 +1411,7 @@ impl Daemon {
                     &format!("Session · {}", clock()),
                     "meeting",
                     "en",
+                    g.series.as_deref(),
                 )
                 .map_err(|e| e.to_string())
             };
@@ -1563,7 +1612,10 @@ impl Daemon {
             let _ = meetings::rename(g.db.connection(), meeting, &title);
         }
         match recap::generate(&self.db_path, meeting, Some(config), &language).await {
-            Ok(()) => self.emit("notes.updated", json!({"meeting": meeting})),
+            Ok(()) => {
+                self.emit("notes.updated", json!({"meeting": meeting}));
+                self.emit("items.updated", json!({"meeting": meeting}));
+            }
             Err(error) => self.error(format!("Could not write the meeting notes: {error}")),
         }
     }
@@ -1680,6 +1732,37 @@ impl Daemon {
         g.live_interim = Default::default();
         g.last_question.clear();
         g.suggestions.clear();
+    }
+
+    fn known_series(g: &Inner, id: &str) -> Result<(), String> {
+        match items::series_get(g.db.connection(), id) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err("Unknown series.".into()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The series' previous meeting (recap capped at 3k characters) and its open items.
+    fn last_time(&self, series: &str) -> Result<Value, String> {
+        let g = self.inner.lock();
+        Self::known_series(&g, series)?;
+        let c = g.db.connection();
+        let current = g.meeting_id.as_deref().or(g.resume_meeting.as_deref());
+        let open = items::open_for_series(c, series).map_err(|e| e.to_string())?;
+        let Some((id, title, started_at)) =
+            items::latest_meeting(c, series, current).map_err(|e| e.to_string())?
+        else {
+            return Ok(
+                json!({"meeting": null, "title": null, "started_at": null, "recap": "", "items": open}),
+            );
+        };
+        let recap = meetings::recap(c, &id)
+            .map_err(|e| e.to_string())?
+            .filter(|r| r.status == "ready")
+            .map_or_else(String::new, |r| r.content.chars().take(3000).collect());
+        Ok(
+            json!({"meeting": id, "title": title, "started_at": started_at, "recap": recap, "items": open}),
+        )
     }
 
     fn require_idle(g: &Inner) -> Result<(), String> {
@@ -1963,21 +2046,14 @@ impl Daemon {
     fn prompts(&self, args: protocol::PromptArg) -> Result<Value, String> {
         let mut guard = self.inner.lock();
         let g = &mut *guard;
-        let interview = match args.mode.as_str() {
-            "general" => false,
-            "interview" => true,
-            other => return Err(format!("unknown mode '{other}'")),
-        };
-        let name = if interview { "Interview" } else { "General" };
+        let mode = MeetingMode::parse(&args.mode)
+            .ok_or_else(|| format!("unknown mode '{}'", args.mode))?;
+        let name = mode.listen_name();
         let key = match args.kind.as_str() {
             "answer" => None,
-            "live_answer" => Some(db::seed::live_answer_key(interview)),
-            "follow_up" => Some("smart_follow_ups_prompt"),
-            "recap" => Some(if interview {
-                "recap_prompt_interview"
-            } else {
-                "recap_prompt_general"
-            }),
+            "live_answer" => Some(db::seed::live_answer_key(mode)),
+            "follow_up" => Some("smart_follow_ups_prompt".to_owned()),
+            "recap" => Some(format!("recap_prompt_{}", recap_suffix(mode))),
             other => return Err(format!("unknown prompt kind '{other}'")),
         };
         let Some(text) = args.text else {
@@ -1985,10 +2061,13 @@ impl Daemon {
                 Some(_) => {
                     let s = &g.settings;
                     match args.kind.as_str() {
-                        "live_answer" => db::seed::live_answer(g.db.connection(), interview),
+                        "live_answer" => db::seed::live_answer(g.db.connection(), mode),
                         "follow_up" => s.smart_follow_ups_prompt.clone(),
-                        _ if interview => s.recap_prompt_interview.clone(),
-                        _ => s.recap_prompt_general.clone(),
+                        _ => match mode {
+                            MeetingMode::General => s.recap_prompt_general.clone(),
+                            MeetingMode::Interview => s.recap_prompt_interview.clone(),
+                            MeetingMode::TeamMeeting => s.recap_prompt_team.clone(),
+                        },
                     }
                 }
                 None => store::listen_modes(g.db.connection())
@@ -2002,7 +2081,7 @@ impl Daemon {
         };
         match key {
             Some(key) => {
-                Settings::set(&g.db, key, &text).map_err(|e| e.to_string())?;
+                Settings::set(&g.db, &key, &text).map_err(|e| e.to_string())?;
                 g.settings = Settings::load(&g.db).unwrap_or_default();
             }
             None => {
@@ -2020,13 +2099,20 @@ impl Daemon {
 
     /// Restore a prompt to its built-in text.
     fn prompts_reset(&self, args: protocol::PromptArg) -> Result<Value, String> {
-        let interview = args.mode == "interview";
+        let mode = MeetingMode::parse(&args.mode)
+            .ok_or_else(|| format!("unknown mode '{}'", args.mode))?;
         let text = match args.kind.as_str() {
-            "answer" => db::seed::DEFAULT_LISTEN_MODES[usize::from(interview)].prompt,
+            "answer" => db::seed::DEFAULT_LISTEN_MODES
+                .iter()
+                .find(|m| m.name == mode.listen_name())
+                .map_or(db::seed::DEFAULT_SYSTEM_PROMPT, |m| m.prompt),
             "live_answer" => db::seed::DEFAULT_LIVE_ANSWER,
             "follow_up" => FOLLOW_UP_PROMPT,
-            "recap" if interview => RECAP_PROMPT_INTERVIEW,
-            "recap" => RECAP_PROMPT_GENERAL,
+            "recap" => match mode {
+                MeetingMode::General => RECAP_PROMPT_GENERAL,
+                MeetingMode::Interview => RECAP_PROMPT_INTERVIEW,
+                MeetingMode::TeamMeeting => RECAP_PROMPT_TEAM,
+            },
             other => return Err(format!("unknown prompt kind '{other}'")),
         };
         self.prompts(protocol::PromptArg {
@@ -2272,13 +2358,70 @@ impl Daemon {
                 Ok(json!({}))
             }
             "session.new" => {
+                let series = parse::<protocol::SessionNew>(args)?.series;
                 let mut g = self.inner.lock();
                 Self::require_idle(&g)?;
+                if let Some(id) = &series {
+                    Self::known_series(&g, id)?;
+                }
                 self.reset_session(&mut g);
+                g.series = series;
                 self.emit("session.reset", json!({}));
                 self.emit_state(&g);
                 Ok(json!({}))
             }
+            "series.list" => {
+                let g = self.inner.lock();
+                json_of(items::series_list(g.db.connection()))
+            }
+            "series.create" => {
+                let name = parse::<protocol::NameArg>(args)?.name;
+                if name.trim().is_empty() {
+                    return Err("Give the series a name.".into());
+                }
+                let g = self.inner.lock();
+                let c = g.db.connection();
+                let id = items::series_create(c, &name).map_err(|e| e.to_string())?;
+                json_of(items::series_get(c, &id))
+            }
+            "items.list" => {
+                let a = parse::<protocol::ItemsList>(args)?;
+                let scope = match (&a.meeting, &a.series) {
+                    (Some(m), _) => items::Scope::Meeting(m),
+                    (None, Some(s)) => items::Scope::Series(s),
+                    _ => return Err("Give a meeting or a series.".into()),
+                };
+                let g = self.inner.lock();
+                json_of(items::list(g.db.connection(), scope, a.status.as_deref()))
+            }
+            "items.update" => {
+                let a = parse::<protocol::ItemsUpdate>(args)?;
+                let item = {
+                    let g = self.inner.lock();
+                    let c = g.db.connection();
+                    if !items::update(c, &a.id, &a.patch).map_err(|e| e.to_string())? {
+                        return Err("No such item.".into());
+                    }
+                    items::get(c, &a.id).map_err(|e| e.to_string())?
+                };
+                if let Some(item) = &item {
+                    self.emit("items.updated", json!({"meeting": item.meeting_id}));
+                }
+                Ok(json!(item))
+            }
+            "items.delete" => {
+                let id = parse::<protocol::IdArg>(args)?.id;
+                let item = {
+                    let g = self.inner.lock();
+                    let c = g.db.connection();
+                    let item = items::get(c, &id).map_err(|e| e.to_string())?;
+                    items::delete(c, &id).map_err(|e| e.to_string())?;
+                    item.ok_or("No such item.")?
+                };
+                self.emit("items.updated", json!({"meeting": item.meeting_id}));
+                Ok(json!({}))
+            }
+            "last_time.get" => self.last_time(&parse::<protocol::SeriesArg>(args)?.series),
             "session.restore" => self.session_restore(&parse::<protocol::IdArg>(args)?.id),
             "session.list" => self.session_list(),
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
@@ -2460,12 +2603,28 @@ mod routing_tests {
                 .contains("jd.md")
         );
 
+        // Team meetings never queue an automatic answer, even for a question.
+        {
+            let mut g = d.inner.lock();
+            g.settings.meeting_mode = MeetingMode::TeamMeeting;
+            g.settings.auto_response = AutoResponse::Pauses;
+            Daemon::completed_turn(&mut g, 1, Some("What do you think about this?".into()));
+            assert!(g.pending_question.is_none());
+            g.settings.meeting_mode = MeetingMode::General;
+            Daemon::completed_turn(&mut g, 1, Some("What do you think about this?".into()));
+            assert!(g.pending_question.is_some());
+            g.pending_question = None;
+        }
+
         // Prompts: live_answer is editable per mode and resets to the default.
         for (kind, mode) in [
             ("live_answer", "interview"),
             ("answer", "general"),
             ("recap", "general"),
             ("follow_up", "general"),
+            ("answer", "team_meeting"),
+            ("recap", "team_meeting"),
+            ("live_answer", "team_meeting"),
         ] {
             let before = call("prompts.get", json!({"mode": mode, "kind": kind}))
                 .await
@@ -2733,6 +2892,65 @@ mod command_tests {
         assert_eq!(
             (&ready["status"], &ready["answer"]),
             (&json!("ready"), &json!("a!"))
+        );
+    }
+
+    #[test]
+    fn earlier_callouts_are_rate_limited() {
+        let (mut last, t0) = (None, Instant::now());
+        assert!(earlier_due(&mut last, t0));
+        assert!(!earlier_due(&mut last, t0 + Duration::from_secs(179)));
+        assert!(earlier_due(&mut last, t0 + Duration::from_secs(180)));
+    }
+
+    #[tokio::test]
+    async fn series_are_validated_and_last_time_starts_empty() {
+        let d = daemon();
+        let err = d
+            .handle("session.new", json!({"series": "nope"}), None)
+            .await;
+        assert!(err.unwrap_err().contains("Unknown series"));
+        assert!(
+            d.handle("series.create", json!({"name": " "}), None)
+                .await
+                .is_err()
+        );
+        let made = d
+            .handle("series.create", json!({"name": "Weekly"}), None)
+            .await
+            .unwrap();
+        let id = made["id"].as_str().unwrap().to_owned();
+        assert!(made["created_at"].is_string());
+        assert!(
+            d.handle("series.create", json!({"name": "Weekly"}), None)
+                .await
+                .is_err()
+        );
+        d.handle("session.new", json!({"series": id}), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            d.handle("state.get", json!({}), None).await.unwrap()["series"],
+            id
+        );
+        let last = d
+            .handle("last_time.get", json!({"series": id}), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            (&last["meeting"], &last["recap"], &last["items"]),
+            (&Value::Null, &json!(""), &json!([]))
+        );
+        assert!(
+            d.handle("last_time.get", json!({"series": "nope"}), None)
+                .await
+                .is_err()
+        );
+        assert!(d.handle("items.list", json!({}), None).await.is_err());
+        assert!(
+            d.handle("items.update", json!({"id": "nope"}), None)
+                .await
+                .is_err()
         );
     }
 }
