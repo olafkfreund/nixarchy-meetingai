@@ -27,16 +27,15 @@ Rectangle {
         x: root.theme.padX; y: root.theme.padY
         width: parent.width - root.theme.padX * 2
         spacing: Style.space(8)
-        Row {
+        Row {   // who and what, on one caption line: Now · Ready · provider model
             id: nowHead
-            spacing: Style.spacing.md
+            spacing: root.theme.gap
             UiText { textFormat: Text.PlainText; text: "Now"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-            UiText { textFormat: Text.PlainText; text: root.status; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption }
             UiText {
                 textFormat: Text.PlainText
-                visible: text !== ""
-                text: (root.daemon.now.provider + " " + root.daemon.now.model).trim()
+                text: [root.status, (root.daemon.now.provider + " " + root.daemon.now.model).trim()].filter(function(x) { return x !== ""; }).join("  \u00b7  ")
                 color: Commons.Color.popups.text
+                opacity: 0.8
                 font.pixelSize: root.theme.caption
             }
         }
@@ -94,7 +93,7 @@ Rectangle {
                 text: root.themedLinks(root.daemon.now.body)
                 color: Commons.Color.popups.text
                 linkColor: Commons.Color.accent
-                font.pixelSize: root.theme.subtitle
+                font.pixelSize: root.theme.nowBody
                 lineHeight: root.theme.leading
                 onLinkActivated: function(link) { Qt.openUrlExternally(link); }
             }

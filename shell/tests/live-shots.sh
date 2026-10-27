@@ -8,28 +8,34 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 out=${1:-/tmp/meetingai-live}
 scenario=${SCENARIO:-live}; [ "$scenario" = error ] && export MEETINGAI_ASK=1; scale=${SCALE:-100}; size=${SIZE:-}   # SCENARIO=r5 SIZE=700x520: resized card, Profiles and Prompts tabs
 tree=${OMARCHY_SHELL_TREE:-/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/shell}
-work=$(mktemp -d)
+work=$(mktemp -d /tmp/nm.XXXX)   # short: unix socket paths cap at 108 bytes
 trap 'kill $(jobs -p) 2>/dev/null || true; chmod -R u+w "$work"; rm -rf "$work"' EXIT
 mkdir -p "$out" "$work/cfg"
+# THEME=flexoki-light (any name under the omarchy themes dir): run with that theme instead of the current one
+if [ -n "${THEME:-}" ]; then
+    mkdir -p "$work/home/.local/state/omarchy/current"
+    ln -s "$(dirname "$tree")/themes/$THEME" "$work/home/.local/state/omarchy/current/theme"
+fi
 cp -rs "$tree"/* "$work/cfg/"
 rm -f "$work/cfg/shell.qml"
 for f in "$here"/*.qml; do ln -s "$f" "$work/cfg/$(basename "$f")"; done
 ln -s "$here/tests/geometry.js" "$work/cfg/geometry.js"
 ln -s "$here/tests/harness-$([ "$scenario" = r5 ] && echo r5 || echo live).qml" "$work/cfg/shell.qml"
 real_run=$XDG_RUNTIME_DIR
-export WAYLAND_DISPLAY=${XDG_RUNTIME_DIR:?}/${WAYLAND_DISPLAY:-wayland-1}
+. "$(dirname "$0")/headless.sh"
 export XDG_RUNTIME_DIR="$work/run"
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 if [ "$scenario" != no-daemon ]; then   # no-daemon: nothing listens, to see the Setup card
     python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/fake.log" $([ "$scenario" = r5 ] || echo --$scenario) --scale=$scale ${size:+--size=$size} &
 fi
 sleep 0.5
-timeout 30 quickshell -p "$work/cfg" 2> "$work/qs.err" | tee "$work/qs.out" | grep -av "GEO {" &   # quickshell logs (console.log too) to stdout
+env ${THEME:+HOME="$work/home"} timeout 30 quickshell -p "$work/cfg" 2> "$work/qs.err" | tee "$work/qs.out" | grep -av "GEO {" &   # quickshell logs (console.log too) to stdout
 qs=$!
 # Capture only the overlay card (it is centred on its full-screen layer on the
 # focused monitor): full-desktop frames would include whatever else is open.
 geom() {
     local sig layer
+    if [ "$HEADLESS" = 1 ]; then layer="0 0 1920 1080"; echo "$layer" > "$work/layer"; else
     sig=$(ls -t "$real_run"/hypr | head -1)
     layer=$(XDG_RUNTIME_DIR="$real_run" HYPRLAND_INSTANCE_SIGNATURE=$sig hyprctl -j layers | python3 -c '
 import json, sys
@@ -38,6 +44,8 @@ for mon in json.load(sys.stdin).values():
         for l in lv:
             if l["namespace"] == "nixarchy-meetingai":
                 print(l["x"], l["y"], l["w"], l["h"])')
+    echo "$layer" > "$work/layer"
+    fi
     python3 -c '
 import sys
 x, y, w, h = map(float, sys.argv[1:5])
@@ -56,11 +64,13 @@ case $scenario in
     team) frames="1-items:3 2-last-time:6 3-settings:4" ;;
     interviewer) frames="1-consent:0.1 2-bank:5.5 3-candidate:9.5 4-new:2 5-attach:2 6-delete:2" ;;   # banner at ~3.5 s, bank after consent at 6 s, Candidate tab after 16 s
     k8s) frames="1-answering:2 2-ready:9 3-settings:4 4-mode:2" ;;
-    *) frames="1-question:1 2-answering:2.4 3-suggestions:3 4-you-speaking:2.2 5-asked:2.4 6-settings:4 7-mode:2" ;;
+    *) frames="1-question:1 2-answering:2.4 3-suggestions:3 4-you-speaking:2.2 5-asked:2.4 6-settings:4 7-mode:2 8-bar:0.3" ;;
 esac
 for f in $frames; do
     sleep "${f#*:}"
-    grim -g "$g" "$out/crop-${f%:*}.png"
+    region=$g
+    case ${f%:*} in *-bar) read -r lx ly _ < "$work/layer"; region="$lx,$ly 160x36" ;; esac   # the bar widget pill, top left of the monitor
+    grim -g "$region" "$out/crop-${f%:*}.png"
 done
 wait "$qs" || true
 # MEETINGAI_GEOMETRY=1: keep the geometry dumps for tests/check-geometry.py

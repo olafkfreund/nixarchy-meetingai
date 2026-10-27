@@ -32,6 +32,16 @@ Item {
     readonly property int minutes: { var p = root.elapsed.split(":"); return Number(p[0]) * 60 + Number(p[1]); }
     readonly property string iCog: String.fromCodePoint(0xf0493)
 
+    readonly property bool finishing: !root.daemon.recording && root.daemon.state.finishing === true
+    readonly property bool live: root.daemon.recording || root.finishing
+    property real pulse: 1
+    Rec { id: rec }
+    SequentialAnimation on pulse {   // a gentle breath (Omarchy exposes no reduced-motion flag to honour)
+        loops: Animation.Infinite
+        running: root.daemon.recording
+        NumberAnimation { to: 0.6; duration: 900; easing.type: Easing.InOutSine }
+        NumberAnimation { to: 1; duration: 900; easing.type: Easing.InOutSine }
+    }
     function openPicker() { picker.open(); }
     height: Math.max(hdrLeft.height, hdrRight.height)   // the segmented box is taller than a button; both rows centre on it
     MouseArea {   // drag the header to move the card; double-click resets size and position
@@ -46,19 +56,36 @@ Item {
         id: hdrLeft
         anchors.verticalCenter: parent.verticalCenter
         spacing: Style.spacing.xs
-        IconButton { objectName: "record"; Accessible.name: root.daemon.recording ? "Stop recording, " + root.minutes + " minutes" : "Start recording"; ts: root.theme.ts; iconText: root.daemon.recording ? root.iStop : root.iRecord; active: root.daemon.recording; tooltipText: root.daemon.recording ? "Stop recording" : "Start recording"; onClicked: { if (root.daemon.recording) root.daemon.send("record.stop", {}); else root.daemon.startRecording(false); } }
+        IconButton {   // record / stop
+            id: recBtn
+            objectName: "record"
+            ts: root.theme.ts
+            iconText: root.live ? root.iStop : root.iRecord   // the red dot beside it shows the state
+            enabled: !root.finishing
+            Accessible.name: root.finishing ? "Finishing the recording" : root.daemon.recording ? "Stop recording, " + root.minutes + " minutes" : "Start recording"
+            tooltipText: root.finishing ? "Finishing: writing the notes" : root.daemon.recording ? "Stop recording" : "Start recording"
+            onClicked: { if (root.daemon.recording) root.daemon.send("record.stop", {}); else root.daemon.startRecording(false); }
+        }
+        Rectangle {   // the recording dot: red, pulsing while recording, steady while finishing
+            visible: root.live
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.round(Style.space(11) * root.theme.ts); height: width; radius: width / 2
+            color: rec.red
+            opacity: root.daemon.recording ? root.pulse : 1
+        }
         UiText {
             anchors.verticalCenter: parent.verticalCenter
-            visible: root.daemon.recording
+            visible: root.live
             textFormat: Text.PlainText
-            text: root.elapsed
-            color: Commons.Color.popups.text
+            text: root.finishing ? "Finishing" : "REC " + root.elapsed
+            color: Commons.Color.popups.text   // red text would need 4.5:1; the red stays on the dot
+            font.bold: true
             font.pixelSize: root.theme.body
             leftPadding: Style.spacing.xs; rightPadding: Style.spacing.xs
         }
         // Brightness follows the live level; a struck-out glyph means muted.
-        IconButton { objectName: "mic"; ts: root.theme.ts; visible: root.daemon.recording; iconText: root.daemon.state.mic !== false ? root.iMic : root.iMicOff; opacity: root.daemon.state.mic !== false ? 0.4 + 0.6 * root.daemon.micLevel : 0.5; tooltipText: root.daemon.state.mic !== false ? "Mute microphone" : "Unmute microphone"; onClicked: root.daemon.send("record.toggle_mic", {}) }
-        IconButton { objectName: "system"; ts: root.theme.ts; visible: root.daemon.recording; iconText: root.daemon.state.system !== false ? root.iVolume : root.iVolumeOff; opacity: root.daemon.state.system !== false ? 0.4 + 0.6 * root.daemon.systemLevel : 0.5; tooltipText: root.daemon.state.system !== false ? "Mute system audio" : "Unmute system audio"; onClicked: root.daemon.send("record.toggle_system", {}) }
+        IconButton { objectName: "mic"; ts: root.theme.ts; visible: root.live; iconText: root.daemon.state.mic !== false ? root.iMic : root.iMicOff; opacity: root.daemon.state.mic !== false ? 0.4 + 0.6 * root.daemon.micLevel : 0.5; tooltipText: root.daemon.state.mic !== false ? "Mute microphone" : "Unmute microphone"; onClicked: root.daemon.send("record.toggle_mic", {}) }
+        IconButton { objectName: "system"; ts: root.theme.ts; visible: root.live; iconText: root.daemon.state.system !== false ? root.iVolume : root.iVolumeOff; opacity: root.daemon.state.system !== false ? 0.4 + 0.6 * root.daemon.systemLevel : 0.5; tooltipText: root.daemon.state.system !== false ? "Mute system audio" : "Unmute system audio"; onClicked: root.daemon.send("record.toggle_system", {}) }
     }
     RowLayout {   // profile name (gives way first), mode picker, settings
         id: hdrRight

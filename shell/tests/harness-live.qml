@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Wayland
+import qs.Commons as Commons
 import "geometry.js" as Geo
 
 // Overlay plus bar pill for tests/live-shots.sh, against fake-daemon.py --live.
@@ -13,7 +14,7 @@ ShellRoot {
     Timer { interval: 21500; running: overlay.iv; onTriggered: overlay.candidateHook("attach") }
     Timer { interval: 23500; running: overlay.iv; onTriggered: overlay.candidateHook("delete") }
     Timer { interval: 13000; running: Quickshell.env("MEETINGAI_ASK") === "1"; onTriggered: overlay.submit("What should I say?", []) }   // SCENARIO=error: a question that fails
-    Timer { interval: 19000; running: !overlay.iv; onTriggered: overlay.modeHook() }
+    Timer { interval: 19000; running: !overlay.iv && Quickshell.env("MEETINGAI_ASK") !== "1"; onTriggered: overlay.modeHook() }
     Timer { interval: 1500; repeat: true; running: Quickshell.env("MEETINGAI_GEOMETRY") === "1"; onTriggered: Geo.dump(overlay.geometryRoot(), overlay.ctl, "") }   // tests/check-geometry.py
     Timer { interval: 10000; running: true; onTriggered: overlay.lastOpen = true }   // team scenario: Last time drawer
     Timer { interval: 2000; running: overlay.iv; onTriggered: overlay.recordHook(false) }   // interviewer: the consent banner
@@ -37,10 +38,11 @@ ShellRoot {
     }
     PanelWindow { // qmllint disable uncreatable-type
         anchors { top: true; left: true }
-        implicitWidth: 120; implicitHeight: 32
+        implicitWidth: 160; implicitHeight: 36
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
         color: "transparent"
+        Rectangle { anchors.fill: parent; color: Commons.Color.bar.background }
         BarWidget { bar: barStub; anchors.fill: parent }
     }
 }

@@ -18,6 +18,7 @@ Rectangle {
     required property var lastTime   // last_time.get reply for the current series, or null
 
     signal lastOpenToggled()
+    signal prepareRequested()   // the empty question bank: open the Candidate tab
     signal itemsChanged()   // an earlier item was marked done: reload last_time
 
     readonly property real iconPx: root.theme.title
@@ -44,6 +45,7 @@ Rectangle {
             id: qbank
             theme: root.theme
             daemon: root.daemon
+            onPrepareRequested: root.prepareRequested()
             visible: root.iv
             width: parent.width
         }

@@ -12,11 +12,18 @@ Column {
     required property var daemon
     required property var theme
 
+    signal prepareRequested()
+
     readonly property var qStatuses: [{ status: "asked", title: "Asked" }, { status: "covered", title: "Covered" }, { status: "skipped", title: "Skipped" }]
 
     spacing: Style.space(8)
     UiText { textFormat: Text.PlainText; text: "Question bank" + (qcol.daemon.cand ? "  " + qcol.daemon.cand.questions.filter(function(q) { return q.status !== "planned"; }).length + "/" + qcol.daemon.cand.questions.length : ""); color: Commons.Color.popups.text; font.pixelSize: qcol.theme.caption; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-    UiText { visible: !qcol.daemon.cand || qcol.daemon.cand.questions.length === 0; textFormat: Text.PlainText; text: "No questions: pick a candidate and generate a bank in Settings, Candidate"; color: Commons.Color.popups.text; opacity: 0.6; font.italic: true; font.pixelSize: qcol.theme.body }
+    Row {   // nothing to ask yet: one step
+        visible: !qcol.daemon.cand || qcol.daemon.cand.questions.length === 0
+        spacing: qcol.theme.gap
+        UiText { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "No questions yet."; color: Commons.Color.popups.text; opacity: 0.6; font.italic: true; font.pixelSize: qcol.theme.body }
+        IconButton { objectName: "prepareCandidate"; ts: qcol.theme.ts; text: "Prepare candidate"; bordered: true; tooltipText: "Pick a candidate, attach their CV and the job description, generate questions"; onClicked: qcol.prepareRequested() }
+    }
     Repeater {
         model: qcol.daemon.cand ? qcol.daemon.cand.questions : []
         Column {

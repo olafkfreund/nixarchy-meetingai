@@ -624,6 +624,7 @@ impl Daemon {
             "series": g.series,
             "candidate": g.candidate,
             "consent": g.consent,
+            "finishing": g.finishing_meeting.is_some(),   // stopped, notes still being written
             "meeting": g.meeting_id.as_ref().or(g.resume_meeting.as_ref()),
             "ready": {"chat": chat, "speech": speech},
             "hints": {

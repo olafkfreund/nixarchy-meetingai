@@ -27,6 +27,15 @@ BarWidget {
     implicitHeight: button.implicitHeight
 
     Client { id: client }
+    Rec { id: rec; background: Commons.Color.bar.background }
+    readonly property bool finishing: !client.recording && client.state.finishing === true
+    property real pulse: 1
+    SequentialAnimation on pulse {
+        loops: Animation.Infinite
+        running: client.recording
+        NumberAnimation { to: 0.6; duration: 900; easing.type: Easing.InOutSine }
+        NumberAnimation { to: 1; duration: 900; easing.type: Easing.InOutSine }
+    }
 
     Timer {
         interval: 1000; repeat: true; running: client.recording
@@ -55,18 +64,20 @@ BarWidget {
             text: "\u{F0A2E}"   // nf-md-microphone_message
             active: client.recording
             dimmed: !client.connected
-            tooltipText: !client.connected ? "Meeting AI: daemon not running" : (client.recording ? "Taking notes · " + root.timer : "Meeting AI")
+            tooltipText: !client.connected ? "Meeting AI: daemon not running" : (client.recording ? "Taking notes · " + root.timer : root.finishing ? "Meeting AI: finishing the notes" : "Meeting AI")
             onPressed: function(b) {
                 if (b === Qt.RightButton) root.run("omarchy-shell meetingai toggle");
                 else { root.menuOpen = !root.menuOpen; root.confirmQuit = false; }
             }
         }
 
-        Rectangle {
-            visible: client.recording
-            width: Style.space(8); height: width; radius: width / 2
+        Rectangle {   // red and pulsing while recording; steady while the notes are finished
+            id: dot
+            visible: client.recording || root.finishing
+            width: Style.space(11); height: width; radius: width / 2
             anchors.verticalCenter: parent.verticalCenter
-            color: Commons.Color.bar.text   // monochrome; the timer beside it says it is recording
+            color: rec.red
+            opacity: client.recording ? root.pulse : 1
         }
         Text {
             visible: client.recording
@@ -74,6 +85,7 @@ BarWidget {
             anchors.verticalCenter: parent.verticalCenter
             text: root.timer
             color: Commons.Color.bar.text
+            font.bold: true
             font.pixelSize: Style.font.caption
         }
     }

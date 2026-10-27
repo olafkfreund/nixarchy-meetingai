@@ -6,14 +6,14 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 tree=${OMARCHY_SHELL_TREE:-/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/shell}
-work=$(mktemp -d)
+work=$(mktemp -d /tmp/nm.XXXX)   # short: unix socket paths cap at 108 bytes
 trap 'kill $(jobs -p) 2>/dev/null || true; chmod -R u+w "$work"; rm -rf "$work"' EXIT
 mkdir "$work/cfg"
 cp -rs "$tree"/* "$work/cfg/"
 rm -f "$work/cfg/shell.qml"
 for f in "$here"/*.qml; do ln -s "$f" "$work/cfg/$(basename "$f")"; done
 ln -s "$here/tests/harness-keys.qml" "$work/cfg/shell.qml"
-export WAYLAND_DISPLAY=${XDG_RUNTIME_DIR:?}/${WAYLAND_DISPLAY:-wayland-1}
+. "$(dirname "$0")/headless.sh"
 export XDG_RUNTIME_DIR="$work/run"
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/fake.log" --interviewer &

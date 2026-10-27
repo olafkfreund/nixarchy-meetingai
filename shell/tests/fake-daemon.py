@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -22,6 +22,7 @@ streams a fake transcript and answer to each client once it asks state.get.
 import json
 import math
 import os
+import socket
 import socketserver
 import sys
 import threading
@@ -32,9 +33,11 @@ auto = "--auto" in sys.argv
 k8s = "--k8s" in sys.argv
 team = "--team" in sys.argv
 iv = "--interviewer" in sys.argv
+dropped = [False]
 first_run = "--first-run" in sys.argv   # no provider, speech not ready: the Setup card
 err = "--error" in sys.argv          # a typed question starts, waits, then fails (Writing bar, then Retry)
-live = "--live" in sys.argv or k8s or team or iv or err
+drop = "--drop" in sys.argv          # the first connection is cut mid-answer; the client reconnects and the daemon replays only the history
+live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 state = {"recording": live, "since": int(time.time() * 1000) - 754_000 if live else 0, "mic": True, "system": True}
@@ -265,15 +268,31 @@ class Handler(socketserver.StreamRequestHandler):
         time.sleep(0.6)  # Balanced pacing: answer after the question settles
         self.send({"event": "answer.started", "turn": 1, "question": "And how would you handle a consumer that falls behind for an hour?", "automatic": True, **PROVIDER})
         answer = ["**Talking points**\n\n", "- Lag is visible: alert on ", "consumer lag, not CPU.\n", "- Scale out consumers ", "per partition; ", "the queue keeps ", "ordering per key.\n", "- If it is a poison message, ", "park it in a ", "dead-letter queue and move on.\n\n", "*Mention:* you did this at your last job ", "with Kafka lag alerts. See the ", "[Kafka docs](https://kafka.apache.org/documentation/)."]
-        for chunk in answer:
+        for n, chunk in enumerate(answer):
             self.send({"event": "answer.delta", "turn": 1, "text": chunk, **PROVIDER})
             time.sleep(0.25)
+            if drop and not dropped[0] and n == 3:   # mid-answer: cut the connection
+                dropped[0] = True
+                self.request.shutdown(socket.SHUT_RDWR)
+                return
         self.send({"event": "answer.done", "turn": 1, **PROVIDER})
         for s in ["Give a concrete lag number", "Ask how they monitor today", "Explain back-pressure"]:
             self.send({"event": "suggestion", "text": s})
         self.say("mic", "", "Good question. First I would make the lag visible", 766, 0.3)
         time.sleep(1.2)
         self.typed("What should I say?")
+
+    def stream_resume(self):
+        """After a dropped connection: the daemon still has the session and sends no session.reset: history alone has to replace the transcript, then the answer finishes."""
+        time.sleep(0.3)
+        self.send({"event": "settings", "settings": settings})
+        self.send({"event": "state", **state})
+        self.send({"event": "history", "rows": [{"who": "question", "text": "And how would you handle a consumer that falls behind for an hour?"}]})
+        self.send({"event": "answer.started", "turn": 1, "question": "", "automatic": True, **PROVIDER})
+        for chunk in ["**Talking points**\n\n", "- Lag is visible: alert on consumer lag, not CPU.\n", "- Scale out consumers per partition.\n"]:
+            self.send({"event": "answer.delta", "turn": 1, "text": chunk, **PROVIDER})
+            time.sleep(0.1)
+        self.send({"event": "answer.done", "turn": 1, **PROVIDER})
 
     def stream_iv_call(self):
         """After record.start: the candidate answers, then one automatic probe grounded in a quote."""
@@ -364,7 +383,7 @@ class Handler(socketserver.StreamRequestHandler):
             if cmd == "chat.send":
                 threading.Thread(target=self.typed, args=(req["args"].get("text", ""),), daemon=True).start()
             if cmd == "state.get":
-                threading.Thread(target=self.stream_live if live else self.stream, daemon=True).start()
+                threading.Thread(target=self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

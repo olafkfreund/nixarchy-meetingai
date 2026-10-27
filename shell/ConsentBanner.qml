@@ -4,9 +4,10 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import qs.Commons
 import qs.Commons as Commons
+import qs.Ui
 
 // Consent: the daemon refused record.start until the candidate is told.
-Rectangle {
+BorderSurface {
     id: root
 
     required property var daemon
@@ -18,8 +19,7 @@ Rectangle {
     height: ccol2.implicitHeight + root.theme.padY * 2
     radius: root.theme.radius
     color: Qt.alpha(Commons.Color.foreground, 0.10)
-    border.width: Style.normalBorderWidth
-    border.color: Commons.Color.popups.border
+    borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
     Column {
         id: ccol2
         x: root.theme.padX; y: root.theme.padY

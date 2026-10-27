@@ -22,7 +22,7 @@ mkdir "$work/bin"
 printf '#!/bin/sh\n:\n' > "$work/bin/notify-send"
 chmod +x "$work/bin/notify-send"
 
-export WAYLAND_DISPLAY=${XDG_RUNTIME_DIR:?}/${WAYLAND_DISPLAY:-wayland-1}
+. "$(dirname "$0")/headless.sh"
 export PATH="$work/bin:$PATH"
 export XDG_RUNTIME_DIR="$work/run" XDG_DATA_HOME="$work/data" XDG_CONFIG_HOME="$work/conf"
 mkdir -m 700 "$XDG_RUNTIME_DIR"

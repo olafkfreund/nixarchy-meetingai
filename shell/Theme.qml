@@ -23,4 +23,5 @@ QtObject {
     readonly property real body: Style.font.body * ts
     readonly property real subtitle: Style.font.subtitle * ts
     readonly property real title: Style.font.title * ts
+    readonly property real nowBody: Style.font.body * 1.15 * ts   // the live answer: the biggest text on the card
 }

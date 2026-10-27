@@ -132,6 +132,11 @@ Item {
         return String(w.activeFocusItem);
     }
     function focusStart() { card.forceActiveFocus(); }   // tests/keys.sh: Tab from the card, so the first stop is the header
+    function dropDump() {   // tests/smoke.sh --drop: what the transcript holds after a reconnect
+        const rows = [];
+        for (let i = 0; i < backend.transcript.count; i++) rows.push(backend.transcript.get(i).who + "|" + backend.transcript.get(i).body);
+        return JSON.stringify({ rows: rows, now: backend.now.body, answering: backend.answering, connected: backend.connected });
+    }
     function geometryRoot() { return card; }   // tests/geometry.js walks this item
     readonly property real ctl: metrics.ctl
 
@@ -193,15 +198,14 @@ Item {
         Rectangle { visible: !backend.recording; anchors.fill: parent; color: Commons.Color.menu.scrim }
         MouseArea { enabled: !backend.recording; anchors.fill: parent; onClicked: root.close() }
 
-        Rectangle {
+        BorderSurface {
             id: card
             x: root.geom.x; y: root.geom.y
             width: root.geom.w
             height: root.geom.h
             radius: metrics.radius
             color: root.solid
-            border.color: Commons.Color.popups.border
-            border.width: Style.normalBorderWidth
+            borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
             focus: true
             // Escape closes one thing: a dialog or list (they take it themselves), the preview, Settings, the Last time drawer, then the overlay
             Keys.onEscapePressed: { if (root.previewText !== "") root.previewText = ""; else if (root.library) root.library = false; else if (root.lastOpen) root.lastOpen = false; else root.close(); }
@@ -404,6 +408,7 @@ Item {
                         lastTime: root.lastTime
                         onLastOpenToggled: root.lastOpen = !root.lastOpen
                         onItemsChanged: root.loadLastTime()
+                        onPrepareRequested: root.showLibrary("candidate")
                         visible: root.panel
                         anchors.bottom: nowPanel.visible ? nowPanel.top : sugg.top
                         anchors.bottomMargin: Style.spacing.md

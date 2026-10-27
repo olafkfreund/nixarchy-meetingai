@@ -146,6 +146,14 @@ Item {
         root.now = Object.assign({}, root.now, { error: message !== "" ? message : "The answer failed." });
     }
 
+    // Everything the daemon's current session owns; also what a lost connection leaves behind.
+    function resetSession() {
+        lines.clear();
+        root.answering = false; root.suggestions = []; root.itemEditing = false; root.pendingItems = null; root.items = []; root.earlierItem = null; root.consentPrompt = "";
+        root.micLevel = 0; root.systemLevel = 0;
+        root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "", error: "" });
+    }
+
     function archiveNow() {
         if (root.now.body !== "") root.addRow("answer", "", root.now.body, false, root.now.turn);
     }
@@ -170,8 +178,9 @@ Item {
     function onEvent(ev) {
         switch (ev.event) {
         case "settings": root.settings = ev.settings || ({}); break;
-        case "session.reset": lines.clear(); root.answering = false; root.suggestions = []; root.itemEditing = false; root.pendingItems = null; root.items = []; root.earlierItem = null; root.consentPrompt = ""; root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" }); break;
+        case "session.reset": root.resetSession(); break;
         case "history":
+            lines.clear();   // a reconnect replays the history: it replaces the transcript, it does not add to it
             for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(ev.rows[h].who === "question" ? "asked" : String(ev.rows[h].who), "", String(ev.rows[h].text), false);
             break;
         case "state": root.state = Object.assign({}, root.state, ev); if (ev.recording === false) { root.micLevel = 0; root.systemLevel = 0; } break;
@@ -234,8 +243,10 @@ Item {
             } else {
                 var p = root.pending;
                 root.pending = ({});
-                for (var id in p) p[id]({ ok: false, error: "disconnected" });
                 root.state = ({});
+                root.resetSession();
+                // after the reset, so an answer that was in flight leaves its error (and Retry) in NOW
+                for (var id in p) if (typeof p[id] === "function") p[id]({ ok: false, error: "disconnected" });
                 retry.interval = root.delay;
                 root.delay = Math.min(5000, root.delay * 2);
                 retry.restart();

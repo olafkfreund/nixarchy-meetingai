@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 // qmllint disable missing-property
 // ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
+import QtQuick.Layouts
 import qs.Commons
 import qs.Commons as Commons
 
@@ -25,6 +26,17 @@ Item {
         id: tbar
         anchors.top: parent.top
         IconButton { ts: root.theme.ts; iconText: root.open ? root.iDown : root.iRight; text: "Transcript"; tooltipText: root.open ? "Collapse the transcript" : "Expand the transcript"; onClicked: root.toggled() }
+    }
+
+    UiText {   // nothing yet: one line, not an empty box
+        visible: root.open && root.daemon.transcript.count === 0
+        anchors { left: parent.left; right: parent.right; bottom: parent.bottom; bottomMargin: Style.spacing.md }
+        textFormat: Text.PlainText
+        text: root.daemon.recording ? "Listening for speech\u2026" : "Press record to start"
+        color: Commons.Color.popups.text
+        opacity: 0.6
+        font.italic: true
+        font.pixelSize: root.theme.bodySmall
     }
 
     Item {
@@ -51,6 +63,7 @@ Item {
                 required property string speaker
                 required property string body
                 required property bool partial
+                property bool expanded: false
                 readonly property bool answer: who === "answer"
                 readonly property bool mine: who === "mic" || who === "asked"
                 readonly property bool bubble: who === "mic" || who === "system" || who === "asked"
@@ -63,16 +76,16 @@ Item {
                     id: bub
                     visible: row.bubble
                     x: row.mine ? row.width - width : 0
-                    width: Math.min(row.width * 0.8, Math.max(btxt.implicitWidth, blabel.implicitWidth) + root.theme.padX * 2)
-                    height: bcol.implicitHeight + root.theme.padY * 2
+                    width: Math.min(row.width * 0.8, Math.max(btxt.implicitWidth, blabel.implicitWidth) + root.theme.padX * 1.5)
+                    height: bcol.implicitHeight + root.theme.padY * 1.5
                     radius: root.theme.radius
-                    color: row.mine ? Qt.alpha(Commons.Color.accent, 0.22) : Qt.alpha(Commons.Color.foreground, 0.10)
+                    color: row.mine ? Qt.alpha(Commons.Color.accent, 0.14) : Qt.alpha(Commons.Color.foreground, 0.06)
                     Column {
                         id: bcol
-                        x: root.theme.padX; y: root.theme.padY
-                        width: parent.width - root.theme.padX * 2
-                        spacing: Style.space(4)
-                        UiText { id: blabel; textFormat: Text.PlainText; text: row.label; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true }
+                        x: root.theme.padX * 0.75; y: root.theme.padY * 0.75
+                        width: parent.width - root.theme.padX * 1.5
+                        spacing: Style.space(3)
+                        UiText { id: blabel; textFormat: Text.PlainText; text: row.label; color: Commons.Color.popups.text; opacity: 0.75; font.pixelSize: root.theme.caption; font.bold: true }
                         UiText {
                             id: btxt
                             width: parent.width
@@ -81,7 +94,7 @@ Item {
                             text: row.body
                             color: Commons.Color.popups.text
                             font.italic: row.partial
-                            font.pixelSize: root.theme.body
+                            font.pixelSize: root.theme.bodySmall
                             lineHeight: root.theme.leading
                         }
                     }
@@ -90,24 +103,32 @@ Item {
                     id: card2
                     visible: row.answer
                     width: parent.width
-                    height: ansCol.implicitHeight + root.theme.padY * 2
+                    height: ansCol.implicitHeight + root.theme.padY * 1.5
                     radius: root.theme.radius
-                    color: Qt.alpha(Commons.Color.accent, 0.12)
+                    color: Qt.alpha(Commons.Color.accent, 0.08)
                     Rectangle { width: Style.space(4); height: parent.height - root.theme.radius; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
                     Column {
                         id: ansCol
-                        x: root.theme.padX; y: root.theme.padY
+                        x: root.theme.padX; y: root.theme.padY * 0.75
                         width: parent.width - root.theme.padX * 2
-                        spacing: Style.space(6)
-                        UiText { textFormat: Text.PlainText; text: "Suggested answer"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-                        UiText {
+                        spacing: Style.space(4)
+                        RowLayout {
                             width: parent.width
-                            textFormat: Text.MarkdownText
+                            UiText { Layout.fillWidth: true; textFormat: Text.PlainText; text: "Suggested answer"; color: Commons.Color.popups.text; opacity: 0.75; font.pixelSize: root.theme.caption; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
+                            IconButton { objectName: "answerToggle"; ts: root.theme.ts; visible: row.expanded || ansText.truncated; text: row.expanded ? "Hide" : "Show"; tooltipText: row.expanded ? "Collapse the answer" : "Show the whole answer"; onClicked: row.expanded = !row.expanded }
+                        }
+                        UiText {
+                            id: ansText
+                            width: parent.width
+                            // earlier answers fold to two plain lines; Show brings the Markdown back
+                            textFormat: row.expanded ? Text.MarkdownText : Text.PlainText
                             wrapMode: Text.Wrap
-                            text: root.themedLinks(row.body)
+                            maximumLineCount: row.expanded ? 100000 : 2
+                            elide: row.expanded ? Text.ElideNone : Text.ElideRight
+                            text: row.expanded ? root.themedLinks(row.body) : String(row.body).replace(/\*+|__|`/g, "").replace(/^#+\s*/gm, "").replace(/^\s*[-*]\s+/gm, "\u2022 ").replace(/\s*\n+\s*/g, "  ")
                             color: Commons.Color.popups.text
                             linkColor: Commons.Color.accent
-                            font.pixelSize: root.theme.body
+                            font.pixelSize: root.theme.bodySmall
                             lineHeight: root.theme.leading
                             onLinkActivated: function(link) { Qt.openUrlExternally(link); }
                         }
