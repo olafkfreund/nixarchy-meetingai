@@ -19,7 +19,7 @@
   },
   "barWidget": {
     "displayName": "Meeting AI",
-    "description": "Dot and timer while notes are being taken. Click for New / Restore / Quit.",
+    "description": "Dot and timer while notes are being taken. Click for New / Restore / Stop Meeting AI.",
     "category": "Productivity",
     "allowMultiple": false,
     "defaultSection": "center"

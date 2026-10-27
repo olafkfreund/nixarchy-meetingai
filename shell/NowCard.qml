@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 // qmllint disable missing-property
 // ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
+import QtQuick.Layouts
 import qs.Commons
 import qs.Commons as Commons
 
@@ -15,7 +16,8 @@ Rectangle {
     required property string status
     required property var themedLinks
 
-    readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.implicitHeight + nowCol.spacing * 2 + root.theme.padY * 2
+    readonly property real extras: (nowWait.visible ? nowWait.height + nowCol.spacing : 0) + (nowErr.visible ? nowErr.implicitHeight + nowCol.spacing : 0)
+    readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.implicitHeight + nowCol.spacing * 2 + root.extras + root.theme.padY * 2
 
     radius: root.theme.radius
     color: Qt.alpha(Commons.Color.accent, 0.12)
@@ -51,10 +53,35 @@ Rectangle {
             font.pixelSize: root.theme.body
             font.bold: true
         }
+        Rectangle {   // "Writing…": between the question being sent and the first words of the answer
+            id: nowWait
+            visible: root.daemon.answering && root.daemon.now.body === "" && !root.daemon.now.error
+            width: parent.width
+            height: Style.space(3)
+            radius: height / 2
+            color: Qt.alpha(Commons.Color.accent, 0.25)
+            clip: true
+            Accessible.role: Accessible.ProgressBar
+            Accessible.name: "Writing the answer"
+            Rectangle {
+                id: sweep
+                width: parent.width * 0.3; height: parent.height; radius: height / 2
+                color: Commons.Color.accent
+                NumberAnimation on x { from: -sweep.width; to: nowWait.width; duration: 1200; loops: Animation.Infinite; running: nowWait.visible && !Style.reduceMotion }
+            }
+        }
+        RowLayout {   // a failed answer: the reason and Retry, where the answer would have been
+            id: nowErr
+            visible: !!root.daemon.now.error
+            width: parent.width
+            spacing: root.theme.gap
+            UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(root.daemon.now.error || ""); color: Commons.Color.urgent; font.pixelSize: root.theme.body }
+            IconButton { objectName: "retry"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; visible: root.daemon.lastAsk !== null && !root.daemon.now.automatic; text: "Retry"; bordered: true; tooltipText: "Ask the same question again"; onClicked: root.daemon.retry() }
+        }
         Flickable {
             id: nowFlick
             width: parent.width
-            height: Math.max(0, Math.min(answerText.implicitHeight, root.height - nowHead.height - (nowQ.visible ? nowQ.implicitHeight : 0) - nowCol.spacing * 2 - root.theme.padY * 2))
+            height: Math.max(0, Math.min(answerText.implicitHeight, root.height - nowHead.height - (nowQ.visible ? nowQ.implicitHeight : 0) - nowCol.spacing * 2 - root.extras - root.theme.padY * 2))
             contentHeight: answerText.implicitHeight
             clip: true
             // Follow the tail while streaming; a finished answer is read from its top.

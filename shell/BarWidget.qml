@@ -7,7 +7,7 @@ import qs.Commons as Commons
 import qs.Ui
 
 // Meeting AI bar indicator: a dot and timer while recording. Click opens a
-// small menu (New / Restore / Quit); Quit asks for confirmation.
+// small menu (New / Restore / Stop Meeting AI); stopping asks for confirmation.
 BarWidget {
     id: root
     moduleName: "nixarchy.meetingai"
@@ -93,7 +93,7 @@ BarWidget {
             spacing: Style.spacing.xs
 
             Repeater {
-                model: [{ label: "New", cmd: "session.new" }, { label: "Restore", cmd: "restore" }, { label: "Quit", cmd: "ask-quit" }]
+                model: [{ label: "New", cmd: "session.new" }, { label: "Restore", cmd: "restore" }, { label: "Stop Meeting AI\u2026", cmd: "ask-quit" }]
                 Button {
                     required property var modelData
                     width: col.width
@@ -111,8 +111,8 @@ BarWidget {
             anchors.fill: parent
             opened: root.confirmQuit
             z: 10
-            message: "Quit the daemon?"
-            confirmText: "Quit"
+            message: client.recording ? "Stop Meeting AI? The recording in progress is finished first and its notes are written." : "Stop Meeting AI? The daemon exits; nothing is recorded until it starts again."
+            confirmText: "Stop"
             background: Commons.Color.popups.background
             onCanceled: { root.confirmQuit = false; root.menuOpen = false; }
             onConfirmed: root.choose("quit")

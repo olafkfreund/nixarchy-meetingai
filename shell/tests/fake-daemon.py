@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -32,10 +32,14 @@ auto = "--auto" in sys.argv
 k8s = "--k8s" in sys.argv
 team = "--team" in sys.argv
 iv = "--interviewer" in sys.argv
-live = "--live" in sys.argv or k8s or team or iv
+first_run = "--first-run" in sys.argv   # no provider, speech not ready: the Setup card
+err = "--error" in sys.argv          # a typed question starts, waits, then fails (Writing bar, then Retry)
+live = "--live" in sys.argv or k8s or team or iv or err
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 state = {"recording": live, "since": int(time.time() * 1000) - 754_000 if live else 0, "mic": True, "system": True}
+if first_run:
+    state.update(ready={"chat": False, "speech": False}, hints={"chat": "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama.", "speech": "Speech-to-text is not ready. Check nixarchy-meetingai-whisper.service, or add a Deepgram key in Providers."})
 settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced", "text_scale": scale}
 DATA = {
     # Mirrors the real daemon's defaults: frontier first, local last.
@@ -309,6 +313,9 @@ class Handler(socketserver.StreamRequestHandler):
         time.sleep(0.2)
         typed_provider = {"provider": "claude-sub", "model": "sonnet"}
         self.send({"event": "answer.started", "turn": 2, "question": question, "automatic": False, **typed_provider})
+        if err:
+            time.sleep(4)
+            return self.send({"event": "answer.error", "turn": 2, "message": "claude: the provider did not answer within 30 s", **typed_provider})
         for chunk in ["Say the number first: ", "**under a minute of lag** ", "is fine, past ten minutes ", "you page someone."]:
             self.send({"event": "answer.delta", "turn": 2, "text": chunk, **typed_provider})
             time.sleep(0.25)

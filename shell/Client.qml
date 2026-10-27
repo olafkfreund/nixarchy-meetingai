@@ -23,7 +23,9 @@ Item {
     // The live answer (NOW panel). A finished one moves into the transcript when the next starts.
     property var now: ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" })
     property string lastSpeaker: ""   // last remote speaker, for "who asked"
-    property string lastError: ""
+    property var lastAsk: null           // the last typed question, for Retry
+    property bool libraryOpen: false     // set by the overlay: request failures then go to the Library, not the transcript
+    signal libraryError(string message)
     property real micLevel: 0     // 0..1, from the daemon's levels events
     property real systemLevel: 0
     property var items: []         // items.list rows of the current meeting (team mode)
@@ -96,13 +98,13 @@ Item {
         root.send("questions.update", Object.assign({ id: id }, fields));
     }
 
-    // consent_required opens the banner; local_only goes to lastError.
+    // consent_required opens the banner; local_only becomes an error row in the transcript.
     function startRecording(consent) {
         root.send("record.start", consent ? { consent: true } : {}, function(r) {
             var e = String(r.error || "");
             if (r.ok) root.consentPrompt = "";
             else if (e.indexOf("consent_required: ") === 0) root.consentPrompt = e.slice(18);
-            else if (e.indexOf("local_only: ") === 0) { root.consentPrompt = ""; root.lastError = e.slice(12); }
+            else if (e.indexOf("local_only: ") === 0) { root.consentPrompt = ""; root.addRow("error", "", e.slice(12), false); }
             else root.failed(r);
         });
     }
@@ -129,9 +131,19 @@ Item {
     }
 
     function ask(text, attachments, screenshot, noContext) {
+        root.lastAsk = { text: text, attachments: attachments || [], screenshot: screenshot === true, noContext: noContext === true };
+        root.archiveNow();
         root.answering = true;
         root.suggestions = [];
-        root.send("chat.send", { text: text, attachments: attachments || [], screenshot: screenshot === true, no_context: noContext === true });
+        // NOW shows the question and the waiting bar at once; answer.started fills in the rest
+        root.now = { turn: -1, question: text, automatic: false, asker: "You", provider: "", model: "", body: "", error: "" };
+        root.send("chat.send", { text: text, attachments: root.lastAsk.attachments, screenshot: root.lastAsk.screenshot, no_context: root.lastAsk.noContext }, function(r) { if (!r.ok) root.answerFailed(String(r.error || "request failed")); });
+    }
+    function retry() { if (root.lastAsk) root.ask(root.lastAsk.text, root.lastAsk.attachments, root.lastAsk.screenshot, root.lastAsk.noContext); }
+    // A failed answer stays in NOW, with Retry, instead of becoming a line in the transcript.
+    function answerFailed(message) {
+        root.answering = false;
+        root.now = Object.assign({}, root.now, { error: message !== "" ? message : "The answer failed." });
     }
 
     function archiveNow() {
@@ -179,20 +191,21 @@ Item {
             root.now = Object.assign({}, root.now, { body: root.now.body + (ev.text || ""), provider: String(ev.provider || root.now.provider), model: String(ev.model || root.now.model) });
             break;
         case "answer.done": root.answering = false; if (ev.provider) root.now = Object.assign({}, root.now, { provider: String(ev.provider), model: String(ev.model || root.now.model) }); break;
-        case "answer.error": root.answering = false; root.addRow("error", "", String(ev.message || ev.error || "answer failed"), false); break;
+        case "answer.error": root.answerFailed(String(ev.message || ev.error || "")); break;
         case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
         case "notice": root.addRow("notice", "", String(ev.text || ""), false); break;
         case "items.updated": if (ev.meeting === root.state.meeting) root.refreshItems(ev.meeting); break;
         case "earlier_item": if (ev.meeting === root.state.meeting) root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
         case "questions.updated": if (ev.candidate === root.shownCandidate) root.refreshCand(); break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
-        case "error": root.lastError = String(ev.message || ""); break;
+        case "error": root.addRow("error", "", String(ev.message || ""), false); break;
         }
     }
 
     function failed(msg) {
         root.answering = false;
-        root.addRow("error", "", String(msg.error || "request failed"), false);
+        if (root.libraryOpen) root.libraryError(String(msg.error || "request failed"));
+        else root.addRow("error", "", String(msg.error || "request failed"), false);
     }
 
     function onLine(data) {

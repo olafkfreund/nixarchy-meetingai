@@ -25,16 +25,17 @@ Item {
     property bool generating: false
     property string genNote: ""
 
-    function fail(r) { if (!r.ok) root.client.lastError = String(r.error); }
+    property var errors: ({})   // the last failed request per section, shown under that section's header
+    function fail(r, section) { var e = Object.assign({}, root.errors); e[section] = r.ok ? "" : String(r.error); root.errors = e; }
     // Any candidate can be opened to view or delete; only one without a meeting is chosen for a new interview.
     function pickCandidate(id, unlinked) {
         root.client.viewCandidate(id);
-        if (unlinked) root.client.send("session.new", { candidate: id }, root.fail);
+        if (unlinked) root.client.send("session.new", { candidate: id }, function(r) { root.fail(r, "candidate"); });
     }
     function moveQuestion(i, d) {
         var ids = root.cand.questions.map(function(q) { return q.id; }), t = ids[i + d];
         ids[i + d] = ids[i]; ids[i] = t;
-        root.client.send("questions.reorder", { candidate: root.cand.candidate.id, ids: ids }, function(r) { root.fail(r); root.client.refreshCand(); });
+        root.client.send("questions.reorder", { candidate: root.cand.candidate.id, ids: ids }, function(r) { root.fail(r, "questions"); root.client.refreshCand(); });
     }
     function hook(what) {   // tests/harness-live.qml opens the inline rows and the dialog
         if (what === "new") root.newOpen = true;
@@ -46,9 +47,9 @@ Item {
         var c = root.cand;
         if (c === null) return;
         root.confirmRequested("Delete " + (c.candidate.name || "this candidate") + "? This removes their " + root.plural(c.documents.length, "document") + " and " + root.plural(c.questions.length, "question") + (root.linked ? ", and the recorded interview with its notes and transcript" : "") + ". It cannot be undone.", "Delete",
-            function() { root.client.send("candidates.delete", { id: c.candidate.id }, function(r) { root.fail(r); root.client.viewId = ""; root.client.refreshCand(); root.client.refreshCandidates(); }); });
+            function() { root.client.send("candidates.delete", { id: c.candidate.id }, function(r) { root.fail(r, "danger"); root.client.viewId = ""; root.client.refreshCand(); root.client.refreshCandidates(); }); });
     }
-    onCandChanged: { root.attachKind = ""; root.genNote = ""; }
+    onCandChanged: { root.attachKind = ""; root.genNote = ""; root.errors = ({}); }
 
     component Section: PanelSectionHeader { fontSize: root.theme.caption }
     component Note: UiText {
@@ -57,6 +58,16 @@ Item {
         wrapMode: Text.Wrap
         color: Commons.Color.popups.text
         opacity: 0.7
+        font.pixelSize: root.theme.caption
+    }
+    component Err: UiText {   // the section's last failure
+        property string section
+        visible: !!root.errors[section]
+        width: parent.width
+        textFormat: Text.PlainText
+        wrapMode: Text.Wrap
+        text: String(root.errors[section] || "")
+        color: Commons.Color.urgent
         font.pixelSize: root.theme.caption
     }
     component QField: TextArea {   // wraps; the field grows with its text
@@ -86,6 +97,7 @@ Item {
                 width: parent.width
                 spacing: root.theme.gap
                 Section { text: "Candidate" }
+                    Err { section: "candidate" }
                 RowLayout {
                     width: parent.width
                     spacing: root.theme.gap
@@ -110,7 +122,7 @@ Item {
                         objectName: "candidateCreate"
                         ts: root.theme.ts; text: "Create"; bordered: true
                         enabled: newName.text.trim() !== ""; opacity: enabled ? 1 : 0.5
-                        onClicked: root.client.send("candidate.create", { name: newName.text.trim() }, function(r) { root.fail(r); if (!r.ok) return; newName.text = ""; root.newOpen = false; root.client.refreshCandidates(); root.pickCandidate(r.data.id, true); })
+                        onClicked: root.client.send("candidate.create", { name: newName.text.trim() }, function(r) { root.fail(r, "candidate"); if (!r.ok) return; newName.text = ""; root.newOpen = false; root.client.refreshCandidates(); root.pickCandidate(r.data.id, true); })
                     }
                     IconButton { ts: root.theme.ts; text: "Cancel"; onClicked: { newName.text = ""; root.newOpen = false; } }
                 }
@@ -137,7 +149,7 @@ Item {
                     opacity: enabled ? 1 : 0.6
                     width: parent.width
                     spacing: root.theme.gap
-                    ToggleSwitch { objectName: "localOnly"; Accessible.role: Accessible.CheckBox; Accessible.name: "Local-only"; Accessible.checked: checked; Layout.alignment: Qt.AlignVCenter; checked: root.cand !== null && root.cand.candidate.local_only === true; onToggled: root.client.send("candidate.local_only", { id: root.cand.candidate.id, on: !checked }, function(r) { root.fail(r); root.client.refreshCand(); }) }
+                    Check { objectName: "localOnly"; accessibleName: "Local-only"; Layout.alignment: Qt.AlignVCenter; checked: root.cand !== null && root.cand.candidate.local_only === true; onToggled: root.client.send("candidate.local_only", { id: root.cand.candidate.id, on: !checked }, function(r) { root.fail(r, "candidate"); root.client.refreshCand(); }) }
                     UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; wrapMode: Text.Wrap; textFormat: Text.PlainText; text: "Local-only: speech-to-text and models stay on this machine"; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
                 }
                 RowLayout {
@@ -158,6 +170,7 @@ Item {
                     width: parent.width
                     spacing: root.theme.gap
                     Section { text: "Documents" }
+                    Err { section: "documents" }
                     Repeater {
                         model: root.cand ? root.cand.documents : []
                         UiText {
@@ -189,7 +202,7 @@ Item {
                         IconButton {
                             ts: root.theme.ts; text: "Attach"; bordered: true
                             enabled: apath.text.trim() !== ""; opacity: enabled ? 1 : 0.5
-                            onClicked: root.client.send("candidate.attach", { id: root.cand.candidate.id, kind: root.attachKind, path: apath.text.trim() }, function(r) { root.fail(r); if (r.ok) { apath.text = ""; root.attachKind = ""; root.client.refreshCand(); } })
+                            onClicked: root.client.send("candidate.attach", { id: root.cand.candidate.id, kind: root.attachKind, path: apath.text.trim() }, function(r) { root.fail(r, "documents"); if (r.ok) { apath.text = ""; root.attachKind = ""; root.client.refreshCand(); } })
                         }
                         IconButton { ts: root.theme.ts; text: "Cancel"; onClicked: { apath.text = ""; root.attachKind = ""; } }
                     }
@@ -201,6 +214,7 @@ Item {
                     width: parent.width
                     spacing: root.theme.gap
                     Section { text: "Question bank" + (root.cand ? "  " + root.cand.questions.length : "") }
+                    Err { section: "questions" }
                     RowLayout {
                         width: parent.width
                         spacing: root.theme.gap
@@ -211,7 +225,7 @@ Item {
                             onClicked: {
                                 root.generating = true; root.genNote = "";
                                 root.client.send("questions.generate", { candidate: root.cand.candidate.id }, function(r) {
-                                    root.generating = false; root.fail(r);
+                                    root.generating = false; root.fail(r, "questions");
                                     root.genNote = r.ok && r.data.dropped > 0 ? r.data.dropped + " dropped (source not in documents)" : "";
                                     root.client.refreshCand();
                                 });
@@ -259,7 +273,7 @@ Item {
                                     Item { Layout.fillWidth: true }
                                     IconButton { ts: root.theme.ts; iconText: String.fromCodePoint(0xf0143); enabled: qc.index > 0; opacity: enabled ? 1 : 0.4; tooltipText: "Move up"; onClicked: root.moveQuestion(qc.index, -1) }
                                     IconButton { ts: root.theme.ts; iconText: String.fromCodePoint(0xf0140); enabled: qc.index < root.cand.questions.length - 1; opacity: enabled ? 1 : 0.4; tooltipText: "Move down"; onClicked: root.moveQuestion(qc.index, 1) }
-                                    IconButton { ts: root.theme.ts; iconText: String.fromCodePoint(0xf0156); tooltipText: "Delete question"; onClicked: root.client.send("questions.delete", { id: qc.modelData.id }, function(r) { root.fail(r); root.client.refreshCand(); }) }
+                                    IconButton { ts: root.theme.ts; iconText: String.fromCodePoint(0xf0156); tooltipText: "Delete question"; onClicked: root.client.send("questions.delete", { id: qc.modelData.id }, function(r) { root.fail(r, "questions"); root.client.refreshCand(); }) }
                                 }
                             }
                         }
@@ -272,7 +286,7 @@ Item {
                             id: addBtn
                             ts: root.theme.ts; text: "Add"; bordered: true
                             enabled: addQ.text.trim() !== ""; opacity: enabled ? 1 : 0.5
-                            onClicked: root.client.send("questions.add", { candidate: root.cand.candidate.id, text: addQ.text.trim() }, function(r) { root.fail(r); if (r.ok) { addQ.text = ""; root.client.refreshCand(); } })
+                            onClicked: root.client.send("questions.add", { candidate: root.cand.candidate.id, text: addQ.text.trim() }, function(r) { root.fail(r, "questions"); if (r.ok) { addQ.text = ""; root.client.refreshCand(); } })
                         }
                     }
                 }
@@ -281,6 +295,7 @@ Item {
                     width: parent.width
                     spacing: root.theme.gap
                     Section { text: "Danger zone" }
+                    Err { section: "danger" }
                     Flow {
                         width: parent.width
                         IconButton { objectName: "deleteCandidate"; ts: root.theme.ts; text: "Delete candidate…"; bordered: true; tooltipText: "Remove this candidate and everything linked to them"; onClicked: root.askDelete() }

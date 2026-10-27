@@ -82,13 +82,15 @@ Item {
         });
     }
 
-    onTabChanged: root.load()
+    property string error: ""   // the last failed request made from here, shown under the search field
+    onTabChanged: { root.error = ""; root.load(); }
     onPromptModeChanged: root.loadPrompt()
     onPromptKindChanged: root.loadPrompt()
     Component.onCompleted: root.load()
 
     Connections {
         target: root.client
+        function onLibraryError(message) { root.error = message; }
         function onNotesUpdated() { root.load(); }
     }
 
@@ -96,7 +98,8 @@ Item {
         anchors.fill: parent
         spacing: Style.spacing.md
 
-        Row {
+        Flow {   // wraps rather than running past the card edge on a narrow card
+            width: parent.width
             spacing: Style.spacing.xs
             Repeater {
                 model: root.tabs
@@ -118,6 +121,15 @@ Item {
             width: parent.width
             placeholderText: "Search settings, chats, profiles"
             onTextChanged: { root.query = text; root.search(); }
+        }
+        UiText {   // a failed request from the shown tab
+            visible: root.error !== ""
+            width: parent.width
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: root.error
+            color: Commons.Color.urgent
+            font.pixelSize: root.theme.caption
         }
 
         // Restore: chats and meetings with their notes.
@@ -147,7 +159,7 @@ Item {
                     visible: rrow.modelData.kind === "meeting"
                     onClicked: root.client.send("notes.get", { meeting: rrow.modelData.id }, function(r) { root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; })
                 }
-                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: { root.client.send("session.delete", { id: rrow.modelData.id }); root.load(); } }
+                IconButton { objectName: "deleteSession"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: root.confirmRequested("Delete \"" + rrow.modelData.title + "\"? " + (rrow.modelData.kind === "meeting" ? "The transcript, notes and items of this meeting are removed." : "This chat is removed."), "Delete", function() { root.client.send("session.delete", { id: rrow.modelData.id }); root.load(); }) }
             }
         }
         UiText {
@@ -225,7 +237,7 @@ Item {
                         Input { id: nameField; objectName: "profileName"; accessibleName: "Profile name"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter }
                         IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Rename"; enabled: root.cur !== null && nameField.text.trim() !== "" && nameField.text !== root.cur.name; opacity: enabled ? 1 : 0.5
                             onClicked: { var n = nameField.text.trim(), o = root.cur.name; root.selName = n; root.client.send("profiles.rename", { name: o, new_name: n }, root.reload); } }
-                        IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: { root.client.send("profiles.delete", { name: root.cur.name }, root.reload); root.selName = ""; } }
+                        IconButton { objectName: "deleteProfile"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: { var p = root.cur; root.confirmRequested("Delete the profile \"" + p.name + "\"? Its about-me, meeting brief and " + (p.documents || []).length + " attached document(s) are removed.", "Delete", function() { root.client.send("profiles.delete", { name: p.name }, root.reload); root.selName = ""; }); } }
                     }
                     UiText { textFormat: Text.PlainText; text: "About me"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
                     Hint { text: "Your role and experience; used in every answer." }
@@ -263,7 +275,7 @@ Item {
                 nameFilters: ["Documents (*.pdf *.txt *.md)"]
                 onAccepted: {
                     var p = decodeURIComponent(String(selectedFile).replace(/^file:\/\//, ""));
-                    root.client.send("profiles.attach", { name: root.cur.name, path: p }, function(r) { if (!r.ok) root.client.lastError = String(r.error); root.reload(); });
+                    root.client.send("profiles.attach", { name: root.cur.name, path: p }, function(r) { if (!r.ok) root.error = String(r.error); root.reload(); });
                 }
             }
         }
@@ -391,9 +403,9 @@ Item {
                     Layout.preferredWidth: Math.round(Style.space(220) * root.theme.ts)
                     Layout.preferredHeight: root.theme.ctl
                     Layout.alignment: Qt.AlignVCenter
-                    ToggleSwitch {
+                    Check {
                         objectName: "settingToggle"
-                        Accessible.role: Accessible.CheckBox; Accessible.name: String(srow.modelData.label || srow.modelData.key); Accessible.checked: checked
+                        accessibleName: String(srow.modelData.label || srow.modelData.key)
                         visible: typeof srow.modelData.value === "boolean"
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter

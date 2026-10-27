@@ -29,6 +29,7 @@ Item {
     property var seriesList: []    // series.list rows
     property string seriesId: ""
     property bool seriesLocked: false
+    property string seriesError: ""    // the last failed series change, shown under the picker
     signal seriesPicked(string id)         // "" = no series
     signal seriesCreated(string name)
     signal pick(int n)   // 1..3 typed into an empty composer: choose that suggestion
@@ -108,6 +109,8 @@ Item {
             }
             Item { Layout.fillWidth: !newName.visible }
         }
+
+        UiText { visible: root.team && root.seriesError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.seriesError; color: Commons.Color.urgent; font.pixelSize: root.theme.caption }
 
         IconButton {   // quick action, above the field
             ts: root.theme.ts

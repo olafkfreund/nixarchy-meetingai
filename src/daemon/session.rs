@@ -610,7 +610,12 @@ impl Daemon {
         self.emit("error", json!({"message": message.into()}));
     }
 
-    fn state_value(g: &Inner) -> Value {
+    /// The session state plus whether a question and speech-to-text can work at all (`ready`),
+    /// and what to do about it when not (`hints`): the shell's first-run card shows these.
+    fn state_value(&self, g: &Inner) -> Value {
+        let local = self.local_now(g);
+        let chat = self.chat_config(&g.settings, local).is_some();
+        let speech = self.speech_config(&g.settings, local).is_some();
         json!({
             "recording": g.recording.as_ref().is_some_and(|r| !r.stop.load(Ordering::Relaxed)),
             "since": g.recording.as_ref().map_or(0, |r| r.since_ms),
@@ -620,11 +625,24 @@ impl Daemon {
             "candidate": g.candidate,
             "consent": g.consent,
             "meeting": g.meeting_id.as_ref().or(g.resume_meeting.as_ref()),
+            "ready": {"chat": chat, "speech": speech},
+            "hints": {
+                "chat": (!chat).then_some(if local {
+                    "Local-only is on and no local model is available. Start Ollama, or turn Local-only off."
+                } else {
+                    "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama."
+                }),
+                "speech": (!speech).then_some(if local {
+                    "Local-only is on: speech-to-text must be whisper on this machine. Check nixarchy-meetingai-whisper.service."
+                } else {
+                    "Speech-to-text is not ready. Check nixarchy-meetingai-whisper.service, or add a Deepgram key in Providers."
+                }),
+            },
         })
     }
 
     fn emit_state(&self, g: &Inner) {
-        self.emit("state", Self::state_value(g));
+        self.emit("state", self.state_value(g));
     }
 
     /// Stop recording (finishing the meeting), then ask the server to exit.
@@ -2948,7 +2966,7 @@ impl Daemon {
 
     async fn dispatch(self: &Arc<Self>, cmd: &str, args: Value) -> Result<Value, String> {
         match cmd {
-            "state.get" => Ok(Self::state_value(&self.inner.lock())),
+            "state.get" => Ok(self.state_value(&self.inner.lock())),
             "quit" => {
                 self.quit();
                 Ok(json!({}))
@@ -3073,7 +3091,7 @@ impl Daemon {
                 };
                 *flag = !*flag;
                 self.emit_state(&g);
-                Ok(Self::state_value(&g))
+                Ok(self.state_value(&g))
             }
             "chat.send" => self.chat_send(parse(args)?).await,
             "chat.cancel" => {
@@ -3475,6 +3493,36 @@ mod command_tests {
             notices,
             ["An agent started recording", "An agent stopped recording"]
         );
+    }
+
+    #[tokio::test]
+    async fn state_says_what_is_missing_for_first_run() {
+        let d = daemon();
+        let set = |k: &'static str, v: &'static str| {
+            let d = d.clone();
+            async move {
+                d.handle("settings.set", json!({"key": k, "value": v}), None)
+                    .await
+                    .unwrap();
+            }
+        };
+        // Deepgram without a key: speech is not ready and the hint points at the unit and Providers.
+        set("speech_provider", "deepgram-stt").await;
+        set("chat_provider", "ollama").await;
+        let st = d.handle("state.get", json!({}), None).await.unwrap();
+        assert_eq!(st["ready"]["chat"], true);
+        assert_eq!(st["hints"]["chat"], Value::Null);
+        assert_eq!(st["ready"]["speech"], false);
+        let hint = st["hints"]["speech"].as_str().unwrap();
+        assert!(
+            hint.contains("nixarchy-meetingai-whisper.service"),
+            "{hint}"
+        );
+        // The default local whisper needs no key.
+        set("speech_provider", "whisper-local").await;
+        let st = d.handle("state.get", json!({}), None).await.unwrap();
+        assert_eq!(st["ready"]["speech"], true);
+        assert_eq!(st["hints"]["speech"], Value::Null);
     }
 
     #[tokio::test]

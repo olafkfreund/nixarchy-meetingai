@@ -19,7 +19,9 @@ Item {
     property var manifest: null
     property bool opened: false
     property bool library: false
-    onLibraryChanged: { if (!root.library) Qt.callLater(function() { composer.focusInput(); }); }
+    property bool setupDismissed: false
+    property string seriesError: ""
+    onLibraryChanged: { backend.libraryOpen = root.library; if (!root.library) Qt.callLater(function() { composer.focusInput(); }); }
     property string previewText: ""
 
     // MarkdownText ignores linkColor and paints links web-blue; inline HTML keeps the theme accent.
@@ -32,7 +34,7 @@ Item {
     property bool noContext: false
     property real now: Date.now()
     property bool transcriptOpen: true
-    readonly property string status: backend.answering ? "Writing" : backend.now.body !== "" ? "Ready" : "Listening"
+    readonly property string status: backend.answering ? "Writing" : backend.now.error ? "Failed" : backend.now.body !== "" ? "Ready" : "Listening"
 
     readonly property string pluginId: String((root.manifest && root.manifest.id) || "nixarchy.meetingai")
     // popups.background carries the theme alpha; the overlay must not show what is behind it.
@@ -111,6 +113,7 @@ Item {
 
     function open(payloadJson) {
         root.opened = true;
+        root.setupDismissed = false;
         root.loadModels();
         Qt.callLater(function() { composer.focusInput(); });
     }
@@ -240,14 +243,24 @@ Item {
                 }
                 Rectangle { width: parent.width; height: 1; color: Qt.alpha(Commons.Color.popups.border, 0.4) }
 
-                UiText {
-                    visible: !backend.connected || backend.lastError !== ""
+                UiText {   // only for a lost connection; every other failure shows where it happened
+                    visible: !backend.connected
                     width: parent.width
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
-                    text: backend.connected ? backend.lastError : "The nixarchy-meetingai backend is not running."
+                    text: "Not connected to the Meeting AI daemon. Retrying."
                     color: Commons.Color.urgent
                     font.pixelSize: metrics.caption
+                }
+
+                SetupCard {
+                    id: setup
+                    daemon: backend
+                    theme: metrics
+                    width: parent.width
+                    visible: needed && !root.setupDismissed && !root.library
+                    onOpenProviders: root.showLibrary("providers")
+                    onDismissed: root.setupDismissed = true
                 }
 
                 ConsentBanner {
@@ -284,8 +297,9 @@ Item {
                         seriesList: backend.series
                         seriesId: root.seriesId
                         seriesLocked: backend.recording
-                        onSeriesPicked: function(id) { backend.send("session.new", id === "" ? {} : { series: id }, function(r) { if (!r.ok) backend.lastError = r.error; }); }
-                        onSeriesCreated: function(name) { backend.send("series.create", { name: name }, function(r) { if (!r.ok) { backend.lastError = r.error; return; } backend.refreshSeries(); backend.send("session.new", { series: r.data.id }, function(r2) { if (!r2.ok) backend.lastError = r2.error; }); }); }
+                        seriesError: root.seriesError
+                        onSeriesPicked: function(id) { backend.send("session.new", id === "" ? {} : { series: id }, function(r) { root.seriesError = r.ok ? "" : String(r.error); }); }
+                        onSeriesCreated: function(name) { backend.send("series.create", { name: name }, function(r) { if (!r.ok) { root.seriesError = String(r.error); return; } backend.refreshSeries(); backend.send("session.new", { series: r.data.id }, function(r2) { root.seriesError = r2.ok ? "" : String(r2.error); }); }); }
                         onSubmit: function(text, chips) { root.submit(text, chips); }
                         onPreview: function(text) { root.previewText = text; }
                         onScreenshot: backend.send("screenshot.capture", { region: true })
@@ -493,7 +507,7 @@ Item {
                         theme: metrics; width: sflow.cellW; label: "No context"
                         RowLayout {
                             anchors.fill: parent
-                            ToggleSwitch { objectName: "noContext"; Accessible.role: Accessible.CheckBox; Accessible.name: "No context"; Accessible.checked: checked; Layout.alignment: Qt.AlignVCenter; checked: root.noContext; onToggled: root.noContext = !root.noContext }
+                            Check { objectName: "noContext"; accessibleName: "No context"; Layout.alignment: Qt.AlignVCenter; checked: root.noContext; onToggled: root.noContext = !root.noContext }
                         }
                     }
                     Cell {   // overlay text size, 80..160 % (Ctrl+= / Ctrl+- / Ctrl+0)

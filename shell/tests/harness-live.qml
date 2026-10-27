@@ -12,12 +12,13 @@ ShellRoot {
     Timer { interval: 19500; running: overlay.iv; onTriggered: overlay.candidateHook("new") }   // interviewer: inline rows, then the delete dialog
     Timer { interval: 21500; running: overlay.iv; onTriggered: overlay.candidateHook("attach") }
     Timer { interval: 23500; running: overlay.iv; onTriggered: overlay.candidateHook("delete") }
+    Timer { interval: 13000; running: Quickshell.env("MEETINGAI_ASK") === "1"; onTriggered: overlay.submit("What should I say?", []) }   // SCENARIO=error: a question that fails
     Timer { interval: 19000; running: !overlay.iv; onTriggered: overlay.modeHook() }
     Timer { interval: 1500; repeat: true; running: Quickshell.env("MEETINGAI_GEOMETRY") === "1"; onTriggered: Geo.dump(overlay.geometryRoot(), overlay.ctl, "") }   // tests/check-geometry.py
     Timer { interval: 10000; running: true; onTriggered: overlay.lastOpen = true }   // team scenario: Last time drawer
     Timer { interval: 2000; running: overlay.iv; onTriggered: overlay.recordHook(false) }   // interviewer: the consent banner
     Timer { interval: 6000; running: overlay.iv; onTriggered: overlay.recordHook(true) }
-    Timer { interval: 16000; running: true; onTriggered: overlay.showLibrary(overlay.iv ? "candidate" : "settings") }
+    Timer { interval: 16000; running: Quickshell.env("MEETINGAI_ASK") !== "1"; onTriggered: overlay.showLibrary(overlay.iv ? "candidate" : "settings") }
     QtObject {   // stand-in for the shell's Bar host
         id: barStub
         property string position: "top"
