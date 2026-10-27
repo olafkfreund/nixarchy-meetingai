@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Frames of a live meeting against fake-daemon.py --live: partial words, a
 # question from the other side, a streamed answer, then suggestions.
-# usage: live-shots.sh [OUT_DIR]   (needs a Wayland session and grim)
+# usage: [SCENARIO=live|k8s] [SCALE=100] live-shots.sh [OUT_DIR]   (needs a Wayland session and grim)
+# SCENARIO=k8s plays the captured real answer (fake-daemon.py --k8s); SCALE is the text_scale setting.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 out=${1:-/tmp/meetingai-live}
+scenario=${SCENARIO:-live}; scale=${SCALE:-100}
 tree=${OMARCHY_SHELL_TREE:-/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/shell}
 work=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null || true; chmod -R u+w "$work"; rm -rf "$work"' EXIT
@@ -17,9 +19,9 @@ real_run=$XDG_RUNTIME_DIR
 export WAYLAND_DISPLAY=${XDG_RUNTIME_DIR:?}/${WAYLAND_DISPLAY:-wayland-1}
 export XDG_RUNTIME_DIR="$work/run"
 mkdir -m 700 "$XDG_RUNTIME_DIR"
-python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/fake.log" --live &
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/fake.log" --$scenario --scale=$scale &
 sleep 0.5
-timeout 20 quickshell -p "$work/cfg" 2> "$work/qs.err" &
+timeout 30 quickshell -p "$work/cfg" 2> "$work/qs.err" &
 # Capture only the overlay card (it is centred on its full-screen layer on the
 # focused monitor): full-desktop frames would include whatever else is open.
 geom() {
@@ -39,9 +41,14 @@ cw, ch = min(w - 80, 900), min(h - 80, 760)   # Overlay.qml card size at scale 1
 print("%d,%d %dx%d" % (x + (w - cw) / 2, y + (h - ch) / 2, cw, ch))' $layer
 }
 sleep 3.4; g=$(geom)
-for t in 1-question 2-answering 3-suggestions 4-you-speaking 5-asked 6-settings; do
-    case $t in 1-*) sleep 1 ;; 2-*) sleep 2.4 ;; 3-*) sleep 3.0 ;; 4-*) sleep 2.2 ;; 5-*) sleep 2.4 ;; 6-*) sleep 4 ;; esac
-    grim -g "$g" "$out/crop-$t.png"
+# name:seconds to wait before the crop (the harness opens Settings at 16 s)
+case $scenario in
+    k8s) frames="1-answering:2 2-ready:9 3-settings:4" ;;
+    *) frames="1-question:1 2-answering:2.4 3-suggestions:3 4-you-speaking:2.2 5-asked:2.4 6-settings:4" ;;
+esac
+for f in $frames; do
+    sleep "${f#*:}"
+    grim -g "$g" "$out/crop-${f%:*}.png"
 done
 wait %2 || true
 if grep -E 'ERROR' "$work/qs.err"; then cat "$work/qs.err" >&2; exit 1; fi

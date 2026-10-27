@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--scale=PERCENT]
+
+--k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
+answer (fixtures/k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
 
 --live plays a paced meeting instead: recording on, words arriving as
 partials, a question from the other side, a streamed answer (with a link), 3 suggestions, levels events, and a
@@ -21,9 +24,12 @@ import time
 
 sock_path, log_path = sys.argv[1], sys.argv[2]
 auto = "--auto" in sys.argv
-live = "--live" in sys.argv
+k8s = "--k8s" in sys.argv
+live = "--live" in sys.argv or k8s
+scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 state = {"recording": live, "since": int(time.time() * 1000) - 754_000 if live else 0, "mic": True, "system": True}
-settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced"}
+settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced", "text_scale": scale}
 DATA = {
     # Mirrors the real daemon's defaults: frontier first, local last.
     "providers.list": [
@@ -99,6 +105,8 @@ class Handler(socketserver.StreamRequestHandler):
         self.send({"event": "settings", "settings": settings})
         self.send({"event": "state", **state})
         threading.Thread(target=self.levels, daemon=True).start()
+        if k8s:
+            return self.stream_k8s()
         self.say("system", "Priya", "Thanks for joining. Can you walk us through how you would design the ingestion pipeline?", 740, 0.05)
         self.say("mic", "", "Sure. I would start with an event queue in front of the workers so producers never block.", 748, 0.05)
         self.say("system", "Priya", "Okay. And how would you handle a consumer that falls behind for an hour?", 756)
@@ -114,6 +122,20 @@ class Handler(socketserver.StreamRequestHandler):
         self.say("mic", "", "Good question. First I would make the lag visible", 766, 0.3)
         time.sleep(1.2)
         self.typed("What should I say?")
+
+    def stream_k8s(self):
+        question = "Explain k8s and how it is working?"
+        self.say("system", "Priya", question, 740, 0.12)
+        time.sleep(0.6)
+        provider = {"provider": "claude-sub", "model": "haiku"}
+        self.send({"event": "answer.started", "turn": 1, "question": question, "automatic": True, **provider})
+        answer = open(os.path.join(FIXTURES, "k8s-answer.md")).read()
+        for i in range(0, len(answer), 24):   # about 8 s end to end, like a streaming model
+            self.send({"event": "answer.delta", "turn": 1, "text": answer[i:i + 24], **provider})
+            time.sleep(0.08)
+        self.send({"event": "answer.done", "turn": 1, **provider})
+        for text in json.load(open(os.path.join(FIXTURES, "k8s-suggestions.json"))):
+            self.send({"event": "suggestion", "text": text})
 
     def typed(self, question):
         """A typed question: started carries it, then deltas, done, and at most 3 follow-ups."""

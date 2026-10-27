@@ -13,6 +13,12 @@ import qs.Ui
 Item {
     id: root
 
+    property real ts: 1
+    // Nerd Font Material Design glyphs (nf-md-*)
+    readonly property string iBulb: String.fromCodePoint(0xf0336)
+    readonly property string iAttach: String.fromCodePoint(0xf03e2)
+    readonly property string iCamera: String.fromCodePoint(0xf0100)
+    readonly property string iSend: String.fromCodePoint(0xf048a)
     readonly property int bigPaste: 2000
     property var chips: []   // { kind: "text"|"file", label, text?, path? }
     signal submit(string text, var chips)
@@ -50,25 +56,44 @@ Item {
                     id: chip
                     required property var modelData
                     required property int index
-                    Button {
+                    IconButton { ts: root.ts;
                         text: chip.modelData.label
                         bordered: true
                         onClicked: if (chip.modelData.kind === "text") root.preview(chip.modelData.text)
                     }
                     PanelActionButton {
                         iconText: "\u00d7"
+                        fontSize: Style.font.icon * root.ts
                         onClicked: root.chips = root.chips.filter(function(c, i) { return i !== chip.index; })
                     }
                 }
             }
         }
 
-        Row {
+        IconButton {   // quick action, above the field
+            ts: root.ts
+            iconText: root.iBulb
+            text: "What should I say?"
+            tooltipText: "Ask for a suggested reply to the latest question"
+            onClicked: root.quick()
+        }
+
+        Rectangle {   // one rounded field: attach and screenshot on the left, send on the right
             width: parent.width
-            spacing: Style.spacing.xs
+            height: Math.max(field.height, Style.spacing.controlHeight) + Style.spacing.xs * 2
+            radius: Math.max(Style.cornerRadius, 12)
+            color: Style.controlFill(input.activeFocus, input.hovered, Commons.Color.foreground, Commons.Color.accent)
+            border.width: Style.normalBorderWidth
+            border.color: Qt.alpha(Commons.Color.popups.border, input.activeFocus ? 1 : 0.5)
+
+            IconButton { id: attach; ts: root.ts; x: Style.spacing.xs; anchors.bottom: parent.bottom; anchors.bottomMargin: Style.spacing.xs; iconText: root.iAttach; tooltipText: "Attach a file"; onClicked: files.open() }
+            IconButton { id: shot; ts: root.ts; anchors.left: attach.right; anchors.bottom: attach.bottom; iconText: root.iCamera; tooltipText: "Capture a screenshot region"; onClicked: root.screenshot() }
+            IconButton { id: send; ts: root.ts; anchors.right: parent.right; anchors.rightMargin: Style.spacing.xs; anchors.bottom: attach.bottom; iconText: root.iSend; active: !root.empty; tooltipText: "Send (Enter)"; onClicked: root.send() }
 
             ScrollView {
-                width: parent.width - Style.space(80)
+                id: field
+                anchors.left: shot.right; anchors.right: send.left
+                anchors.verticalCenter: parent.verticalCenter
                 height: Math.min(input.implicitHeight, fm.height * 5 + Style.spacing.md * 2)
 
                 TextArea {
@@ -77,12 +102,8 @@ Item {
                     placeholderText: "Ask about the meeting"
                     color: Commons.Color.popups.text
                     placeholderTextColor: Qt.alpha(Commons.Color.popups.text, 0.5)
-                    font.pixelSize: Style.font.body
-                    background: BorderSurface {
-                        color: Style.controlFill(input.activeFocus, input.hovered, Commons.Color.foreground, Commons.Color.accent)
-                        borderSpec: Border.controlSpec(input.activeFocus ? "focus" : (input.hovered ? "hover-cursor" : "normal"), Commons.Color.foreground, Commons.Color.accent)
-                        radius: Math.max(Style.cornerRadius, 12)
-                    }
+                    font.pixelSize: Style.font.body * root.ts
+                    background: null
                     Keys.onPressed: function(e) {
                         if (root.empty && e.key >= Qt.Key_1 && e.key <= Qt.Key_3 && !(e.modifiers & ~Qt.KeypadModifier)) {
                             root.pick(e.key - Qt.Key_0);
@@ -102,19 +123,10 @@ Item {
                     }
                 }
             }
-
-            Button { text: "Send"; active: !root.empty; bordered: true; onClicked: root.send() }
-        }
-
-        Row {
-            spacing: Style.spacing.xs
-            Button { text: "+"; bordered: true; onClicked: files.open() }
-            Button { text: "Screenshot"; bordered: true; onClicked: root.screenshot() }
-            Button { text: "What should I say?"; bordered: true; onClicked: root.quick() }
         }
     }
 
-    FontMetrics { id: fm; font.pixelSize: Style.font.body }
+    FontMetrics { id: fm; font.pixelSize: Style.font.body * root.ts }
 
     FileDialog {
         id: files

@@ -14,6 +14,7 @@ Item {
     property var state: ({})
     property var settings: ({})
     readonly property bool recording: state.recording === true
+    readonly property real textScale: Math.max(0.8, Math.min(1.6, (Number(settings.text_scale) || 100) / 100))   // overlay font multiplier
     readonly property bool reduceMotion: settings.reduce_motion === true
     property alias transcript: lines
     property bool answering: false

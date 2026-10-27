@@ -46,6 +46,19 @@ Item {
     readonly property real padY: Style.space(12)
     readonly property real gap: Style.space(14)
     readonly property real leading: 1.3
+    readonly property real ts: daemon.textScale   // every font below is Style.font.x * ts
+    readonly property real iconPx: Style.font.title * ts
+    // Nerd Font Material Design glyphs (nf-md-*), monochrome
+    readonly property string iRecord: String.fromCodePoint(0xf044b)
+    readonly property string iStop: String.fromCodePoint(0xf04db)
+    readonly property string iMic: String.fromCodePoint(0xf036c)
+    readonly property string iMicOff: String.fromCodePoint(0xf036d)
+    readonly property string iVolume: String.fromCodePoint(0xf057e)
+    readonly property string iVolumeOff: String.fromCodePoint(0xf0581)
+    readonly property string iCog: String.fromCodePoint(0xf0493)
+    readonly property string iDown: String.fromCodePoint(0xf0140)
+    readonly property string iRight: String.fromCodePoint(0xf0142)
+    property var liveModels: []
     readonly property var paces: ["Fast", "Balanced", "Relaxed"]
 
     Client { id: daemon }
@@ -53,7 +66,6 @@ Item {
 
     function open(payloadJson) {
         root.opened = true;
-        daemon.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
         root.loadModels();
     }
 
@@ -66,10 +78,17 @@ Item {
         if (root.shell && typeof root.shell.hide === "function") root.shell.hide(root.pluginId);
     }
 
+    function bumpScale(delta) {
+        var cur = Math.round(daemon.textScale * 100);
+        daemon.setSetting("text_scale", delta === 0 ? 100 : Math.max(80, Math.min(160, cur + delta)));
+    }
+
     function loadModels() {
+        daemon.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
         var p = daemon.settings.chat_provider;
-        if (!p) return;
-        daemon.send("models.list", { provider: p }, function(r) { if (r.ok) root.models = r.data || []; });
+        if (p) daemon.send("models.list", { provider: p }, function(r) { if (r.ok) root.models = r.data || []; });
+        var lp = daemon.settings.live_provider;
+        if (lp) daemon.send("models.list", { provider: lp }, function(r) { if (r.ok) root.liveModels = r.data || []; });
     }
 
     function submit(text, chips) {
@@ -91,7 +110,7 @@ Item {
     Connections {
         target: daemon
         function onConnectedChanged() { if (daemon.connected) root.loadModels(); }
-        function onSettingsChanged() { if (root.models.length === 0) root.loadModels(); }
+        function onSettingsChanged() { if (root.models.length === 0 || root.liveModels.length === 0) root.loadModels(); }
     }
 
     PanelWindow { // qmllint disable uncreatable-type
@@ -120,7 +139,14 @@ Item {
             border.width: Style.normalBorderWidth
             focus: true
             Keys.onEscapePressed: root.close()
-            Keys.onPressed: function(e) {   // 1/2/3 pick a suggestion only when nothing is being typed
+            Keys.onPressed: function(e) {
+                if (e.modifiers & Qt.ControlModifier) {   // Ctrl+= / Ctrl+- / Ctrl+0: text size
+                    if (e.key === Qt.Key_Equal || e.key === Qt.Key_Plus) { root.bumpScale(10); e.accepted = true; }
+                    else if (e.key === Qt.Key_Minus) { root.bumpScale(-10); e.accepted = true; }
+                    else if (e.key === Qt.Key_0) { root.bumpScale(0); e.accepted = true; }
+                    return;
+                }
+                // 1/2/3 pick a suggestion only when nothing is being typed
                 if (!root.library && composer.empty && e.key >= Qt.Key_1 && e.key <= Qt.Key_3 && !(e.modifiers & ~Qt.KeypadModifier)) {
                     root.pickSuggestion(e.key - Qt.Key_0);
                     e.accepted = true;
@@ -135,59 +161,45 @@ Item {
                 height: parent.height - Style.spacing.lg * 2
                 spacing: Style.spacing.md
 
-                // Header: record, timer, levels (click to mute), mode and Settings.
-                Row {
+                // Header: one quiet toolbar of icon buttons.
+                Item {
                     width: parent.width
-                    spacing: Style.spacing.md
-                    Button { text: daemon.recording ? "Stop" : "Record"; active: daemon.recording; onClicked: daemon.send(daemon.recording ? "record.stop" : "record.start", {}) }
-                    Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        visible: daemon.recording
-                        textFormat: Text.PlainText
-                        text: root.elapsed
-                        color: Commons.Color.popups.text
-                        font.pixelSize: Style.font.body
+                    height: hdrLeft.height
+                    Row {
+                        id: hdrLeft
+                        spacing: Style.spacing.xs
+                        IconButton { ts: root.ts; iconText: daemon.recording ? root.iStop : root.iRecord; active: daemon.recording; tooltipText: daemon.recording ? "Stop recording" : "Start recording"; onClicked: daemon.send(daemon.recording ? "record.stop" : "record.start", {}) }
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: daemon.recording
+                            textFormat: Text.PlainText
+                            text: root.elapsed
+                            color: Commons.Color.popups.text
+                            font.pixelSize: Style.font.body * root.ts
+                            leftPadding: Style.spacing.xs; rightPadding: Style.spacing.xs
+                        }
+                        // Brightness follows the live level; a struck-out glyph means muted.
+                        IconButton { ts: root.ts; visible: daemon.recording; iconText: daemon.state.mic !== false ? root.iMic : root.iMicOff; opacity: daemon.state.mic !== false ? 0.4 + 0.6 * daemon.micLevel : 0.5; tooltipText: daemon.state.mic !== false ? "Mute microphone" : "Unmute microphone"; onClicked: daemon.send("record.toggle_mic", {}) }
+                        IconButton { ts: root.ts; visible: daemon.recording; iconText: daemon.state.system !== false ? root.iVolume : root.iVolumeOff; opacity: daemon.state.system !== false ? 0.4 + 0.6 * daemon.systemLevel : 0.5; tooltipText: daemon.state.system !== false ? "Mute system audio" : "Unmute system audio"; onClicked: daemon.send("record.toggle_system", {}) }
                     }
                     Row {
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: Style.spacing.lg
-                        visible: daemon.recording
-                        Repeater {
-                            model: [{ label: "Mic", level: daemon.micLevel, on: daemon.state.mic !== false, cmd: "record.toggle_mic" }, { label: "System", level: daemon.systemLevel, on: daemon.state.system !== false, cmd: "record.toggle_system" }]
-                            Item {
-                                id: lvl
-                                required property var modelData
-                                width: lvlRow.width; height: lvlRow.height
-                                    Row {
-                                        id: lvlRow
-                                        spacing: Style.spacing.xxs
-                                    Rectangle {   // dot brightens with the level; dim when muted
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: Style.space(10); height: width; radius: width / 2
-                                        color: Commons.Color.popups.text
-                                        opacity: lvl.modelData.on ? 0.25 + 0.75 * lvl.modelData.level : 0.15
-                                    }
-                                    Text {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        textFormat: Text.PlainText
-                                        text: lvl.modelData.label
-                                        color: Commons.Color.popups.text
-                                        font.pixelSize: Style.font.caption
-                                font.strikeout: !lvl.modelData.on
-                                }
-                                }
-                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: daemon.send(lvl.modelData.cmd, {}) }
+                        anchors.right: parent.right
+                        spacing: Style.spacing.md
+                        Rectangle {   // segmented control
+                            width: seg.width + Style.space(4); height: seg.height + Style.space(4)
+                            radius: root.round
+                            color: Qt.alpha(Commons.Color.foreground, 0.08)
+                            Row {
+                                id: seg
+                                anchors.centerIn: parent
+                                IconButton { ts: root.ts; text: "General"; radius: root.round; active: daemon.settings.meeting_mode !== "interview"; tooltipText: "General meeting"; onClicked: daemon.setSetting("meeting_mode", "general") }
+                                IconButton { ts: root.ts; text: "Interview"; radius: root.round; active: daemon.settings.meeting_mode === "interview"; tooltipText: "Interview mode"; onClicked: daemon.setSetting("meeting_mode", "interview") }
                             }
                         }
+                        IconButton { ts: root.ts; iconText: root.iCog; active: root.library; tooltipText: "Settings"; onClicked: { root.library = !root.library; lib.tab = "settings"; } }
                     }
-                    Row {
-                        spacing: Style.spacing.xs
-                        Button { text: "General"; active: daemon.settings.meeting_mode !== "interview"; onClicked: daemon.setSetting("meeting_mode", "general") }
-                        Button { text: "Interview"; active: daemon.settings.meeting_mode === "interview"; onClicked: daemon.setSetting("meeting_mode", "interview") }
-                    }
-                    Button { text: "Settings"; tooltipText: "Settings"; active: root.library; onClicked: { root.library = !root.library; lib.tab = "settings"; } }
                 }
-                PanelSeparator {}
+                Rectangle { width: parent.width; height: 1; color: Qt.alpha(Commons.Color.popups.border, 0.4) }
 
                 Text {
                     visible: !daemon.connected || daemon.lastError !== ""
@@ -196,7 +208,7 @@ Item {
                     wrapMode: Text.Wrap
                     text: daemon.connected ? daemon.lastError : "The nixarchy-meetingai daemon is not running."
                     color: Commons.Color.urgent
-                    font.pixelSize: Style.font.caption
+                    font.pixelSize: Style.font.caption * root.ts
                 }
 
                 Library {
@@ -218,6 +230,7 @@ Item {
 
                     Composer {
                         id: composer
+                        ts: root.ts
                         anchors.bottom: parent.bottom
                         width: parent.width
                         onSubmit: function(text, chips) { root.submit(text, chips); }
@@ -235,10 +248,13 @@ Item {
                         Text {
                             visible: daemon.suggestions.length > 0
                             textFormat: Text.PlainText
-                            text: "ASK NEXT"
+                            text: "Ask next"
                             color: Commons.Color.popups.text
-                            font.pixelSize: Style.font.caption
+                            font.pixelSize: Style.font.caption * root.ts
                             font.bold: true
+                            font.capitalization: Font.SmallCaps
+                            font.letterSpacing: 1.5
+                            bottomPadding: Style.spacing.xs
                         }
                         Repeater {
                             model: daemon.suggestions
@@ -253,7 +269,7 @@ Item {
                                 Rectangle {
                                     id: badge
                                     x: Style.spacing.md; anchors.verticalCenter: parent.verticalCenter
-                                    width: Style.space(20); height: width; radius: width / 2
+                                    width: Math.round(Style.space(20) * root.ts); height: width; radius: width / 2
                                     color: "transparent"   // monochrome badge: outline + number, no fill
                                     border.width: Style.normalBorderWidth
                                     border.color: Commons.Color.popups.text
@@ -262,7 +278,7 @@ Item {
                                         textFormat: Text.PlainText
                                         text: String(srow.index + 1)
                                         color: Commons.Color.popups.text
-                                        font.pixelSize: Style.font.body
+                                        font.pixelSize: Style.font.body * root.ts
                                         font.bold: true
                                     }
                                 }
@@ -277,7 +293,7 @@ Item {
                                     elide: Text.ElideRight
                                     text: srow.modelData
                                     color: Commons.Color.popups.text
-                                    font.pixelSize: Style.font.subtitle
+                                    font.pixelSize: Style.font.subtitle * root.ts
                                 }
                                 MouseArea { id: sma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.pickSuggestion(srow.index + 1) }
                             }
@@ -292,7 +308,7 @@ Item {
                         anchors.bottom: sugg.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
-                        height: root.transcriptOpen ? Math.min(nowWant, convo.avail * 0.55) : Math.max(nowWant, convo.avail)
+                        height: root.transcriptOpen ? Math.min(nowWant, convo.avail * 0.7) : Math.max(nowWant, convo.avail)
                         readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.implicitHeight + nowCol.spacing * 2 + root.padY * 2
                         radius: root.round
                         color: Qt.alpha(Commons.Color.accent, 0.12)
@@ -305,14 +321,14 @@ Item {
                             Row {
                                 id: nowHead
                                 spacing: Style.spacing.md
-                                Text { textFormat: Text.PlainText; text: "NOW"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption; font.bold: true }
-                                Text { textFormat: Text.PlainText; text: root.status; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption }
+                                Text { textFormat: Text.PlainText; text: "Now"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
+                                Text { textFormat: Text.PlainText; text: root.status; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts }
                                 Text {
                                     textFormat: Text.PlainText
                                     visible: text !== ""
                                     text: (daemon.now.provider + " " + daemon.now.model).trim()
                                     color: Commons.Color.popups.text
-                                    font.pixelSize: Style.font.caption
+                                    font.pixelSize: Style.font.caption * root.ts
                                 }
                             }
                             Text {
@@ -325,15 +341,17 @@ Item {
                                 elide: Text.ElideRight
                                 text: daemon.now.asker + " asked: " + daemon.now.question
                                 color: Commons.Color.popups.text
-                                font.pixelSize: Style.font.body
+                                font.pixelSize: Style.font.body * root.ts
                                 font.bold: true
                             }
                             Flickable {
+                                id: nowFlick
                                 width: parent.width
-                                height: Math.max(0, Math.min(answerText.implicitHeight, nowPanel.height - nowHead.height - (nowQ.visible ? nowQ.implicitHeight : 0) - nowCol.spacing * 2 - Style.spacing.md * 2))
+                                height: Math.max(0, Math.min(answerText.implicitHeight, nowPanel.height - nowHead.height - (nowQ.visible ? nowQ.implicitHeight : 0) - nowCol.spacing * 2 - root.padY * 2))
                                 contentHeight: answerText.implicitHeight
                                 clip: true
-                                onContentHeightChanged: contentY = Math.max(0, contentHeight - height)
+                                // Follow the tail while streaming; a finished answer is read from its top.
+                                Binding { target: nowFlick; property: "contentY"; value: daemon.answering ? Math.max(0, nowFlick.contentHeight - nowFlick.height) : 0; restoreMode: Binding.RestoreNone }
                                 Text {
                                     id: answerText
                                     width: parent.width
@@ -342,7 +360,7 @@ Item {
                                     text: root.themedLinks(daemon.now.body)
                                     color: Commons.Color.popups.text
                                     linkColor: Commons.Color.accent
-                                    font.pixelSize: Style.font.subtitle
+                                    font.pixelSize: Style.font.subtitle * root.ts
                                     lineHeight: root.leading
                                     onLinkActivated: function(link) { Qt.openUrlExternally(link); }
                                 }
@@ -353,7 +371,7 @@ Item {
                     Row {   // transcript toggle
                         id: tbar
                         anchors.top: parent.top
-                        Button { text: (root.transcriptOpen ? "▾ " : "▸ ") + "Transcript"; onClicked: root.transcriptOpen = !root.transcriptOpen }
+                        IconButton { ts: root.ts; iconText: root.transcriptOpen ? root.iDown : root.iRight; text: "Transcript"; tooltipText: root.transcriptOpen ? "Collapse the transcript" : "Expand the transcript"; onClicked: root.transcriptOpen = !root.transcriptOpen }
                     }
 
                     // Transcript and archived answers in one virtualized list (capped at 500 rows by Client).
@@ -400,7 +418,7 @@ Item {
                                         x: root.padX; y: root.padY
                                         width: parent.width - root.padX * 2
                                         spacing: Style.space(4)
-                                        Text { id: blabel; textFormat: Text.PlainText; text: row.label; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption; font.bold: true }
+                                        Text { id: blabel; textFormat: Text.PlainText; text: row.label; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true }
                                         Text {
                                             id: btxt
                                             width: parent.width
@@ -409,7 +427,7 @@ Item {
                                             text: row.body
                                             color: Commons.Color.popups.text
                                             font.italic: row.partial
-                                            font.pixelSize: Style.font.body
+                                            font.pixelSize: Style.font.body * root.ts
                                             lineHeight: root.leading
                                         }
                                     }
@@ -427,7 +445,7 @@ Item {
                                         x: root.padX; y: root.padY
                                         width: parent.width - root.padX * 2
                                         spacing: Style.space(6)
-                                        Text { textFormat: Text.PlainText; text: "Suggested answer"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption; font.bold: true }
+                                        Text { textFormat: Text.PlainText; text: "Suggested answer"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
                                         Text {
                                             width: parent.width
                                             textFormat: Text.MarkdownText
@@ -435,7 +453,7 @@ Item {
                                             text: root.themedLinks(row.body)
                                             color: Commons.Color.popups.text
                                             linkColor: Commons.Color.accent
-                                            font.pixelSize: Style.font.body
+                                            font.pixelSize: Style.font.body * root.ts
                                             lineHeight: root.leading
                                             onLinkActivated: function(link) { Qt.openUrlExternally(link); }
                                         }
@@ -449,7 +467,7 @@ Item {
                                     wrapMode: Text.Wrap
                                     text: row.body
                                     color: row.who === "error" ? Commons.Color.urgent : Commons.Color.popups.text
-                                    font.pixelSize: Style.font.bodySmall
+                                    font.pixelSize: Style.font.bodySmall * root.ts
                                 }
                             }
                         }
@@ -464,14 +482,14 @@ Item {
                     spacing: Style.spacing.md
                     bottomPadding: Style.spacing.md
                     Dropdown {
-                        label: "Provider"
+                        label: "Chat provider"
                         value: String(daemon.settings.chat_provider || "")
                         options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
                         onChanged: function(v) { daemon.setSetting("chat_provider", v); daemon.setSetting("chat_model", ""); root.loadModels(); }
                     }
                     SearchableDropdown {   // typing filters the list
                         id: modelBox
-                        label: "Model"
+                        label: "Chat model"
                         value: String(daemon.settings.chat_model || "")
                         options: root.models.map(function(m) { return String(m); })
                         triggerLabel: "default"
@@ -486,6 +504,19 @@ Item {
                             placeholderText: "or type a model id"
                             onAccepted: { if (text.trim() !== "") daemon.setSetting("chat_model", text.trim()); text = ""; }
                         }
+                    }
+                    Dropdown {   // automatic answers while a call is recorded
+                        label: "Live answers provider"
+                        value: String(daemon.settings.live_provider || "")
+                        options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
+                        onChanged: function(v) { daemon.setSetting("live_provider", v); daemon.setSetting("live_model", ""); root.loadModels(); }
+                    }
+                    SearchableDropdown {
+                        label: "Live answers model"
+                        value: String(daemon.settings.live_model || "")
+                        options: root.liveModels.map(function(m) { return String(m); })
+                        triggerLabel: "default"
+                        onChanged: function(v) { daemon.setSetting("live_model", v); }
                     }
                     Dropdown {
                         label: "Pace"
@@ -506,8 +537,27 @@ Item {
                                 textFormat: Text.PlainText
                                 text: "No context"
                                 color: Commons.Color.popups.text
-                                font.pixelSize: Style.font.caption
+                                font.pixelSize: Style.font.caption * root.ts
                             }
+                        }
+                    }
+                    Item {   // overlay text size, 80..160 % (Ctrl+= / Ctrl+- / Ctrl+0)
+                        width: Style.space(260); height: modelBox.height
+                        Text {
+                            textFormat: Text.PlainText
+                            text: "Text size " + Math.round(daemon.textScale * 100) + "%"
+                            color: Commons.Color.popups.text
+                            font.pixelSize: Style.font.caption * root.ts
+                        }
+                        PanelSlider {
+                            anchors.bottom: parent.bottom
+                            width: parent.width
+                            minimum: 80; maximum: 160; step: 10; integer: true
+                            value: Math.round(daemon.textScale * 100)
+                            trackColor: Qt.alpha(Commons.Color.popups.text, 0.2)
+                            fillColor: Commons.Color.popups.text
+                            knobColor: Commons.Color.popups.text
+                            onMoved: function(v) { var n = Math.round(v / 10) * 10; if (n !== Math.round(daemon.textScale * 100)) daemon.setSetting("text_scale", n); }
                         }
                     }
                 }
@@ -531,10 +581,10 @@ Item {
                         wrapMode: Text.Wrap
                         text: root.previewText
                         color: Commons.Color.popups.text
-                        font.pixelSize: Style.font.body
+                        font.pixelSize: Style.font.body * root.ts
                     }
                 }
-                Button { anchors.top: parent.top; anchors.right: parent.right; text: "Close"; onClicked: root.previewText = "" }
+                IconButton { ts: root.ts; anchors.top: parent.top; anchors.right: parent.right; text: "Close"; tooltipText: "Close the preview"; onClicked: root.previewText = "" }
             }
         }
     }

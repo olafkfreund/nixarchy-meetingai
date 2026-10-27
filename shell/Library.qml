@@ -13,6 +13,7 @@ Item {
     id: root
 
     required property var client
+    readonly property real ts: client.textScale
     property string tab: "restore"
     property string query: ""
     property var sessions: []
@@ -66,7 +67,7 @@ Item {
             spacing: Style.spacing.xs
             Repeater {
                 model: root.tabs
-                Button {
+                IconButton { ts: root.ts;
                     required property string modelData
                     text: modelData.charAt(0).toUpperCase() + modelData.slice(1)
                     active: root.tab === modelData
@@ -99,15 +100,15 @@ Item {
                     elide: Text.ElideRight
                     text: (parent.modelData.kind === "meeting" ? "Meeting · " : "Chat · ") + parent.modelData.title
                     color: Commons.Color.popups.text
-                    font.pixelSize: Style.font.body
+                    font.pixelSize: Style.font.body * root.ts
                 }
-                Button { text: "Restore"; onClicked: root.client.send("session.restore", { id: parent.modelData.id }) }
-                Button {
+                IconButton { ts: root.ts; text: "Restore"; onClicked: root.client.send("session.restore", { id: parent.modelData.id }) }
+                IconButton { ts: root.ts;
                     text: "Notes"
                     visible: parent.modelData.kind === "meeting"
                     onClicked: root.client.send("notes.get", { meeting: parent.modelData.id }, function(r) { root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; })
                 }
-                Button { text: "Delete"; onClicked: { root.client.send("session.delete", { id: parent.modelData.id }); root.load(); } }
+                IconButton { ts: root.ts; text: "Delete"; onClicked: { root.client.send("session.delete", { id: parent.modelData.id }); root.load(); } }
             }
         }
         Text {
@@ -120,7 +121,7 @@ Item {
             clip: true
             text: root.notes
             color: Commons.Color.popups.text
-            font.pixelSize: Style.font.body
+            font.pixelSize: Style.font.body * root.ts
         }
 
         ListView {
@@ -137,14 +138,14 @@ Item {
                     textFormat: Text.PlainText
                     text: parent.modelData.name
                     color: Commons.Color.popups.text
-                    font.pixelSize: Style.font.body
+                    font.pixelSize: Style.font.body * root.ts
                 }
-                Button { text: "Delete"; onClicked: { root.client.send("profiles.delete", { name: parent.modelData.name }); root.load(); } }
+                IconButton { ts: root.ts; text: "Delete"; onClicked: { root.client.send("profiles.delete", { name: parent.modelData.name }); root.load(); } }
             }
             footer: Row {
                 spacing: Style.spacing.xs
                 TextField { id: profileName; placeholderText: "Profile name" }
-                Button { text: "Save current"; onClicked: { root.client.send("profiles.save", { name: profileName.text }); root.load(); } }
+                IconButton { ts: root.ts; text: "Save current"; onClicked: { root.client.send("profiles.save", { name: profileName.text }); root.load(); } }
             }
         }
 
@@ -156,11 +157,11 @@ Item {
                 spacing: Style.spacing.xs
                 Repeater {
                     model: ["general", "interview"]
-                    Button { required property string modelData; text: modelData; active: root.promptMode === modelData; onClicked: root.promptMode = modelData }
+                    IconButton { ts: root.ts; required property string modelData; text: modelData; active: root.promptMode === modelData; onClicked: root.promptMode = modelData }
                 }
                 Repeater {
                     model: root.promptKinds
-                    Button { required property string modelData; text: modelData; active: root.promptKind === modelData; onClicked: root.promptKind = modelData }
+                    IconButton { ts: root.ts; required property string modelData; text: modelData; active: root.promptKind === modelData; onClicked: root.promptKind = modelData }
                 }
             }
             ScrollView {
@@ -169,7 +170,7 @@ Item {
                     id: promptText
                     wrapMode: TextEdit.Wrap
                     color: Commons.Color.popups.text
-                    font.pixelSize: Style.font.body
+                    font.pixelSize: Style.font.body * root.ts
                     background: BorderSurface {
                         color: Style.controlFill(promptText.activeFocus, promptText.hovered, Commons.Color.foreground, Commons.Color.accent)
                         borderSpec: Border.controlSpec(promptText.activeFocus ? "focus" : (promptText.hovered ? "hover-cursor" : "normal"), Commons.Color.foreground, Commons.Color.accent)
@@ -177,7 +178,7 @@ Item {
                     }
                 }
             }
-            Button { text: "Save"; onClicked: root.client.send("prompts.set", { mode: root.promptMode, kind: root.promptKind, text: promptText.text }) }
+            IconButton { ts: root.ts; text: "Save"; onClicked: root.client.send("prompts.set", { mode: root.promptMode, kind: root.promptKind, text: promptText.text }) }
         }
 
         ListView {
@@ -195,7 +196,7 @@ Item {
                     textFormat: Text.PlainText
                     text: (prow.modelData.name || prow.modelData.id) + (prow.modelData.requires_key === false ? "" : (prow.modelData.has_key ? " · key set" : " · no key"))
                     color: Commons.Color.popups.text
-                    font.pixelSize: Style.font.body
+                    font.pixelSize: Style.font.body * root.ts
                 }
                 TextField {
                     id: keyField
@@ -203,19 +204,19 @@ Item {
                     echoMode: TextInput.Password
                     placeholderText: "API key"
                 }
-                Button {
+                IconButton { ts: root.ts;
                     text: "Set key"
                     visible: keyField.visible
                     enabled: keyField.text !== ""
                     opacity: enabled ? 1 : 0.5
                     onClicked: { root.client.send("settings.set", { key: "api_key", provider: prow.modelData.id, value: keyField.text }); keyField.text = ""; root.load(); }
                 }
-                Button {
+                IconButton { ts: root.ts;
                     text: "Models"
                     onClicked: root.client.send("models.list", { provider: prow.modelData.id }, function(r) { root.modelsText = r.ok ? (r.data || []).join(", ") : r.error; })
                 }
             }
-            footer: Text { text: root.modelsText; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption }
+            footer: Text { text: root.modelsText; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts }
         }
 
         ListView {
@@ -239,7 +240,7 @@ Item {
                     wrapMode: Text.Wrap
                     text: srow.modelData.label || srow.modelData.key
                     color: Commons.Color.popups.text
-                    font.pixelSize: Style.font.body
+                    font.pixelSize: Style.font.body * root.ts
                 }
                 Item {
                     id: ctl

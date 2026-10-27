@@ -193,6 +193,8 @@ pub struct Settings {
     pub live_model: String,
     /// `general` or `interview`.
     pub meeting_mode: String,
+    /// Overlay text size in percent, 80..=160.
+    pub text_scale: u32,
 }
 
 impl Default for Settings {
@@ -222,6 +224,7 @@ impl Default for Settings {
             live_provider: "claude-sub".into(),
             live_model: "haiku".into(),
             meeting_mode: "general".into(),
+            text_scale: 100,
         }
     }
 }
@@ -242,6 +245,7 @@ mod keys {
     pub const AUTO_RECORD_ON_CALL: &str = "auto_record_on_call";
     pub const CHAT_MODEL: &str = "chat_model";
     pub const MEETING_MODE: &str = "meeting_mode";
+    pub const TEXT_SCALE: &str = "text_scale";
 }
 
 impl Settings {
@@ -314,6 +318,7 @@ impl Settings {
                 Some("interview") => "interview".into(),
                 _ => defaults.meeting_mode,
             },
+            text_scale: number(keys::TEXT_SCALE, defaults.text_scale).clamp(80, 160),
         })
     }
 
@@ -393,6 +398,7 @@ impl Settings {
             ("live_provider", self.live_provider.clone()),
             ("live_model", self.live_model.clone()),
             (keys::MEETING_MODE, self.meeting_mode.clone()),
+            (keys::TEXT_SCALE, self.text_scale.clamp(80, 160).to_string()),
         ]
     }
 
@@ -499,9 +505,22 @@ mod tests {
             live_provider: "gemini".into(),
             live_model: "flash".into(),
             meeting_mode: "interview".into(),
+            text_scale: 130,
         };
         settings.save(&database).unwrap();
         assert_eq!(Settings::load(&database).unwrap(), settings);
+    }
+
+    #[test]
+    fn text_scale_defaults_and_clamps() {
+        let database = database();
+        assert_eq!(Settings::load(&database).unwrap().text_scale, 100);
+        Settings::set(&database, "text_scale", "300").unwrap();
+        assert_eq!(Settings::load(&database).unwrap().text_scale, 160);
+        Settings::set(&database, "text_scale", "10").unwrap();
+        assert_eq!(Settings::load(&database).unwrap().text_scale, 80);
+        Settings::set(&database, "text_scale", "banana").unwrap();
+        assert_eq!(Settings::load(&database).unwrap().text_scale, 100);
     }
 
     #[test]

@@ -90,7 +90,7 @@ const MANAGED_SETTINGS: [&str; 11] = [
     "meeting_context",
 ];
 /// Settings the shell shows as numbers rather than strings.
-const NUMERIC_SETTINGS: [&str; 1] = ["capture_delay_seconds"];
+const NUMERIC_SETTINGS: [&str; 2] = ["capture_delay_seconds", "text_scale"];
 
 /// Where the daemon keeps its data.
 pub struct Options {

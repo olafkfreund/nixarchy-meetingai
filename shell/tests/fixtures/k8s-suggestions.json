@@ -1,0 +1,5 @@
+[
+  "How does a Service differ from an Ingress for routing external traffic?",
+  "What happens to running workloads if the control plane goes down?",
+  "How do liveness and readiness probes fit into the reconciliation loop?"
+]
