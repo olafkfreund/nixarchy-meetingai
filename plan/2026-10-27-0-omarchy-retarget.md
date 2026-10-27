@@ -574,3 +574,61 @@ Step 8 follows once these are merged.
 - **Step 8 additions:** also remove settings nothing reads once GPUI is
   gone: `auto_recap`, `auto_screenshot`, `screenshot_interval`, and any
   other setting with no reader outside `src/ui` (list them in the PR).
+
+## Review fixes (Opus fresh review, Codex gpt-6-sol, agy; each verified by the session model)
+
+Shared protocol additions (daemon and client must agree):
+- event `settings{settings:{…flat key→value…}}`, sent to every client
+  after any successful `settings.set`
+- event `session.reset{}`, sent before `session.new` / `session.restore`
+  replay; the client clears its rows
+- event `history{rows:[{who:"question"|"answer", text}]}`, sent after a
+  chat restore (bounded to the restored messages)
+- requests on one connection run in order; events still stream
+
+Fixes:
+1. **(critical, agy)** An empty whisper result (a cough or a tap) became
+   "no transcript in the response" and stopped the recording. It is now
+   treated as silence and skipped. Only a chunk that fails all its retries
+   emits `error` with the lost time range.
+2. **(P1)** A `settings.set` change is broadcast to every client (the
+   Service's stale `auto_record_on_call` could record without asking).
+3. **(P1)** `quit` and SIGTERM wait for finalization: track
+   `finishing_meeting`; `record.start` and `session.new|restore` are
+   refused until it is done.
+4. **(P1)** CLI providers clean up on drop: a guard kills the process
+   group and removes the temp dir (`0700`, files `0600`).
+5. **(major)** `claude-sub` passes the system prompt with
+   `--system-prompt-file` in that temp dir, and earlier history goes in the
+   stdin user message, never in argv (E2BIG at 128 KiB, `/proc` exposure).
+   Model ids starting with `-` are rejected.
+6. **(major)** The client shows `{ok:false}` replies centrally as an error
+   row and resets `answering`.
+7. **(major)** Changing provider resets `chat_model` to "" (the provider
+   default).
+8. **(major)** Daemon SQLite connections set `busy_timeout` (5 s).
+9. `session.new` / `session.restore` emit `session.reset`; a chat restore
+   emits `history`.
+10. Chunking and `generate` are serialized per meeting (no duplicate
+    chunks); a `generate` failure emits `error`.
+11. The HM `whisper.port` option is removed; the daemon's endpoint is fixed
+    at 8178 (`shortcut: fixed port, add an option only if a clash appears`).
+12. HM installs `shell/` without `tests/`.
+13. "Set key" with an empty field no longer deletes the key: the UI
+    requires text, and the daemon removes a key only on `value: null`.
+14. Licenses agree on AGPL-3.0-or-later: manifest and Cargo.toml (nix
+    `agpl3Plus` already matches).
+15. The dead `cli::control_socket` is removed.
+
+Verified, no change:
+- **systemd PATH:** the user manager already imports the session PATH
+  (mise wrappers included), so `claude` and `codex` resolve. Re-check in
+  step 12.
+- **ToggleSwitch double-toggle:** refuted; the owner flips `checked` on
+  `toggled()` by design.
+- **Overlay bind:** `omarchy-shell shell toggle nixarchy.meetingai '{}'`
+  is a valid form.
+
+Logged deviation (step 11): `nix/package.nix` uses `buildInputs` plus a
+PATH wrapper (`grim`, `slurp`, `libnotify`) instead of
+`runtime-libraries.nix` for the RPATH.
