@@ -54,8 +54,10 @@ pub fn run() -> Result<(), String> {
             }
         };
         tokio::spawn(signal);
-        server::serve(&socket, daemon)
+        let served = server::serve(&socket, daemon)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string());
+        crate::ai::chat::opencode::shutdown().await;
+        served
     })
 }

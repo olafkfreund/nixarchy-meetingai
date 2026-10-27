@@ -47,6 +47,14 @@ pub const CHAT_PROVIDERS: &[ChatProvider] = &[
         requires_key: false,
     },
     ChatProvider {
+        id: "opencode",
+        name: "OpenCode",
+        endpoint: "",
+        wire: ChatWire::Cli,
+        supports_images: false,
+        requires_key: false,
+    },
+    ChatProvider {
         id: "codex-sub",
         name: "ChatGPT / Codex (subscription)",
         endpoint: "",
@@ -284,6 +292,7 @@ mod tests {
             [
                 "claude-sub",
                 "agy-sub",
+                "opencode",
                 "codex-sub",
                 "ollama-cloud",
                 "ollama"
@@ -316,7 +325,7 @@ mod tests {
 
     #[test]
     fn keyless_providers_only_need_a_model() {
-        for id in ["ollama", "claude-sub", "codex-sub", "agy-sub"] {
+        for id in ["ollama", "claude-sub", "codex-sub", "agy-sub", "opencode"] {
             assert!(ProviderConfig::new(id, "", "m").is_usable(), "{id}");
         }
     }

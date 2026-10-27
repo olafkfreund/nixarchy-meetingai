@@ -96,7 +96,7 @@ pub fn parse_line(kind: Kind, line: &str) -> Option<CliEvent> {
     }
 }
 
-fn quoted_transcript(history: &[Message]) -> String {
+pub(super) fn quoted_transcript(history: &[Message]) -> String {
     history
         .iter()
         .map(|m| {
@@ -295,7 +295,7 @@ fn claude_message(text: &str, images: &[String]) -> String {
     )
 }
 
-fn kill_group(pid: u32) {
+pub(super) fn kill_group(pid: u32) {
     // SAFETY: killpg only signals the process group (= session) we created with setsid.
     unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
 }
@@ -318,10 +318,10 @@ impl Drop for GroupGuard {
 }
 
 /// Private (0700) temp dir removed when dropped, also when the future is dropped.
-struct TempDir(std::path::PathBuf);
+pub(super) struct TempDir(pub(super) std::path::PathBuf);
 
 impl TempDir {
-    fn new() -> Result<Self, ChatError> {
+    pub(super) fn new() -> Result<Self, ChatError> {
         use std::os::unix::fs::DirBuilderExt;
         let path =
             std::env::temp_dir().join(format!("nixarchy-meetingai-cli-{}", uuid::Uuid::new_v4()));
@@ -381,6 +381,9 @@ pub async fn stream<F: Future<Output = ()>>(
     cancel: Arc<watch::Receiver<bool>>,
     on_text: impl FnMut(String) -> F,
 ) -> Result<String, ChatError> {
+    if config.id == "opencode" {
+        return super::opencode::stream(config, history, context, cancel, on_text).await;
+    }
     let kind = match config.id.as_str() {
         "codex-sub" => Kind::Codex,
         "agy-sub" => Kind::Agy,

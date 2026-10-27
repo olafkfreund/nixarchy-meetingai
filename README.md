@@ -43,6 +43,8 @@ Options:
 | Claude (subscription) | run `claude` once and log in; the daemon spawns the CLI |
 | ChatGPT / Codex (subscription) | run `codex login` and choose ChatGPT; the daemon spawns the CLI |
 | Antigravity (subscription) | run `agy` once and sign in with your Google account; the daemon spawns the CLI |
+| OpenCode | run `opencode auth login`; the daemon runs a private `opencode serve` (models as `provider/model`, tools denied, stopped after 10 min idle) |
+| Ollama Cloud | an `OLLAMA_API_KEY` in the service environment (Home Manager: `programs.nixarchy-meetingai.ollamaCloud.environmentFile`) or a key in the Providers tab |
 | Ollama | none; uses `http://127.0.0.1:11434` |
 
 API keys live in the encrypted local vault and never cross the daemon socket.

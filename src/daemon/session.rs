@@ -419,7 +419,7 @@ fn visible_follow_ups(generated: &[String]) -> Vec<String> {
 }
 
 /// Provider ids to try, best first, with the model to use ("" = provider default).
-/// Typed: claude-sub, agy-sub, codex-sub, ollama. Live skips codex (no streaming) and agy-sub
+/// Typed: claude-sub, agy-sub, opencode, codex-sub, ollama-cloud, ollama. Live skips codex (no streaming) and agy-sub
 /// (first token measured too slow for live answers; see the plan deviations log).
 /// The chosen provider leads when usable, so an explicit ollama is kept.
 fn plan_chain(
@@ -533,6 +533,7 @@ fn cli_binary(id: &str) -> Option<&'static str> {
         "claude-sub" => Some("claude"),
         "codex-sub" => Some("codex"),
         "agy-sub" => Some("agy"),
+        "opencode" => Some("opencode"),
         _ => None,
     }
 }
@@ -2393,6 +2394,19 @@ impl Daemon {
             .collect()
     }
 
+    /// Readiness of every chat provider with the fix for the ones that are not ready.
+    async fn providers_status(&self) -> Value {
+        let rows = CHAT_PROVIDERS.iter().map(|p| {
+            let has_key = credentials::load(&self.vault, Kind::Chat, p.id)
+                .ok()
+                .flatten()
+                .is_some_and(|c| !c.api_key.trim().is_empty())
+                || (p.id == "ollama-cloud" && std::env::var_os("OLLAMA_API_KEY").is_some());
+            crate::ai::chat::status::status(p.id, p.name, has_key)
+        });
+        json!(futures_util::future::join_all(rows).await)
+    }
+
     async fn models_list(&self, provider: &str) -> Result<Value, String> {
         let config = self.provider_config(provider, "");
         let config =
@@ -3194,6 +3208,7 @@ impl Daemon {
                 self.prompts(args)
             }
             "providers.list" => Ok(self.providers_list()),
+            "providers.status" => Ok(self.providers_status().await),
             "models.list" => {
                 self.models_list(&parse::<protocol::ProviderArg>(args)?.provider)
                     .await
@@ -3246,6 +3261,7 @@ mod routing_tests {
             [
                 "claude-sub",
                 "agy-sub",
+                "opencode",
                 "codex-sub",
                 "ollama-cloud",
                 "ollama"
@@ -3439,7 +3455,10 @@ mod routing_tests {
     #[test]
     fn live_never_uses_codex_or_agy() {
         let plan = plan_chain("claude-sub", "haiku", true, |_| true);
-        assert_eq!(ids(plan.clone()), ["claude-sub", "ollama-cloud", "ollama"]);
+        assert_eq!(
+            ids(plan.clone()),
+            ["claude-sub", "opencode", "ollama-cloud", "ollama"]
+        );
         assert_eq!(plan[0].1, "haiku");
         // Even when codex is chosen for live, it is skipped.
         assert!(!ids(plan_chain("codex-sub", "", true, |_| true)).contains(&"codex-sub"));
@@ -3450,7 +3469,7 @@ mod routing_tests {
         let plan = plan_chain("claude-sub", "sonnet", false, |id| id != "claude-sub");
         assert_eq!(
             ids(plan),
-            ["agy-sub", "codex-sub", "ollama-cloud", "ollama"]
+            ["agy-sub", "opencode", "codex-sub", "ollama-cloud", "ollama"]
         );
         let plan = plan_chain("claude-sub", "", false, |id| id == "ollama");
         assert_eq!(ids(plan), ["ollama"]);
@@ -3519,6 +3538,40 @@ mod command_tests {
             capture: false,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn local_only_chains_hold_loopback_ollama_whatever_is_chosen() {
+        let d = daemon();
+        let mut s = d.inner.lock().settings.clone();
+        for chosen in [
+            "ollama-cloud",
+            "claude-sub",
+            "opencode",
+            "agy-sub",
+            "ollama",
+        ] {
+            s.chat_provider = chosen.into();
+            s.live_provider = chosen.into();
+            for live in [false, true] {
+                let ids: Vec<_> = d.chain(&s, live, true).into_iter().map(|c| c.id).collect();
+                assert_eq!(ids, ["ollama"], "{chosen} live={live}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_status_lists_every_provider_with_a_login_command() {
+        let rows = daemon().providers_status().await;
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), CHAT_PROVIDERS.len());
+        for row in rows {
+            assert!(
+                ["ready", "not_installed", "not_logged_in", "no_key"]
+                    .contains(&row["state"].as_str().unwrap())
+            );
+            assert!(!row["login"].as_str().unwrap().is_empty());
+        }
     }
 
     #[test]

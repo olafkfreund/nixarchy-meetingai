@@ -40,6 +40,11 @@ pub const MODELS: &[ModelList] = &[
             "gpt-5.6-sol",
         ],
     },
+    // The real list comes from `opencode serve` (config/providers).
+    ModelList {
+        provider: "opencode",
+        models: &["opencode/big-pickle"],
+    },
     // The real list comes from ollama.com/api/tags.
     ModelList {
         provider: "ollama-cloud",
@@ -324,6 +329,11 @@ pub async fn discover(
     if super::providers::ChatProvider::by_id(&config.id)
         .is_some_and(|p| p.wire == super::providers::ChatWire::Cli)
     {
+        if config.id == "opencode"
+            && let Ok(models) = crate::ai::chat::opencode::models().await
+        {
+            return Ok(models);
+        }
         if config.id == "codex-sub"
             && let Ok(models) = crate::ai::chat::cli::codex_models().await
         {

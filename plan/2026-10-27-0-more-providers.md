@@ -199,3 +199,19 @@ None yet.
   Together, LM Studio and vLLM (OpenRouter, Mistral, Groq, DeepSeek
   existed); plain-http loopback presets use `auth: none`. The gemini-key
   deletion notice goes to the first event subscriber only.
+- **Steps 5, 6, 8:** `opencode` drives `opencode serve` 1.18.31 with a
+  random basic-auth password, in its own process group, with private
+  `XDG_CONFIG_HOME`/`XDG_DATA_HOME` holding only a symlink to `auth.json`
+  (no user MCP servers or plugins; the user's custom OpenCode providers are
+  therefore not listed). Per turn: a deny-all-tools session, `/event`
+  stream, `prompt_async`, then abort and delete. `--port 0` really binds
+  4096 (or a fallback); the daemon reads the printed port. Provider errors
+  and "retry" status fail at once. The server stops after 10 min idle and
+  on clean daemon exit; a SIGKILLed daemon leaves it running (no
+  parent-death signal yet). Measured 4.7 s including server start with
+  `ollama-cloud/gpt-oss:120b`; the owner's OpenAI login in OpenCode has
+  expired and `opencode/big-pickle` hit its free limit. `providers.status`
+  checks: `claude auth status`, `codex login status`, agy's
+  `oauth_creds.json` (heuristic), OpenCode `auth.json`, the cloud key, a
+  listener on 11434. The HM module sets the service PATH to the user and
+  system profiles and adds `ollamaCloud.environmentFile` (`-` prefixed).
