@@ -432,9 +432,30 @@ fn visible_follow_ups(generated: &[String]) -> Vec<String> {
     out
 }
 
+/// Try each provider in turn; only a CLI failure before any text was streamed moves on.
+async fn try_chain<'a, Fut>(
+    chain: &'a [ProviderConfig],
+    streamed: &AtomicBool,
+    mut attempt: impl FnMut(usize, &'a ProviderConfig) -> Fut,
+) -> Result<String, engine::ChatError>
+where
+    Fut: Future<Output = Result<String, engine::ChatError>>,
+{
+    let mut result = Ok(String::new());
+    for (i, config) in chain.iter().enumerate() {
+        result = attempt(i, config).await;
+        let spawn_failed =
+            matches!(result, Err(engine::ChatError::Cli(_))) && !streamed.load(Ordering::Relaxed);
+        if !spawn_failed {
+            break;
+        }
+    }
+    result
+}
+
 /// Provider ids to try, best first, with the model to use ("" = provider default).
-/// Typed: claude-sub, agy-sub, opencode, codex-sub, ollama-cloud, ollama. Live skips codex (no streaming) and agy-sub
-/// (first token measured too slow for live answers; see the plan deviations log).
+/// Typed: claude-sub, agy-sub, opencode, codex-sub, ollama-cloud, ollama. Live skips codex (no streaming), agy-sub
+/// (first token too slow) and opencode unless chosen (free models run out; no safe default).
 /// The chosen provider leads when usable, so an explicit ollama is kept.
 fn plan_chain(
     chosen: &str,
@@ -447,6 +468,7 @@ fn plan_chain(
     let first = CHAT_PROVIDERS.iter().find(|p| p.id == chosen).map(|p| p.id);
     for id in first.into_iter().chain(candidates) {
         if (live && matches!(id, "codex-sub" | "agy-sub"))
+            || (live && id == "opencode" && Some(id) != first)
             || out.iter().any(|(i, _)| *i == id)
             || !usable(id)
         {
@@ -521,14 +543,19 @@ fn loopback_ollama(config: &ProviderConfig) -> bool {
 
 /// The Gemini API provider was replaced by `agy-sub`: move the settings over and delete its key.
 fn migrate_gemini(db: &Database, vault: &Vault) -> Option<String> {
-    for key in ["chat_provider", "live_provider"] {
-        if crate::db::settings::get(db.connection(), key)
+    // The old model ids mean nothing to agy; live never uses agy, so it goes back to its default.
+    for (provider, model, to) in [
+        ("chat_provider", "chat_model", "agy-sub"),
+        ("live_provider", "live_model", "claude-sub"),
+    ] {
+        if crate::db::settings::get(db.connection(), provider)
             .ok()
             .flatten()
             .as_deref()
             == Some("gemini")
         {
-            let _ = crate::db::settings::set(db.connection(), key, "agy-sub");
+            let _ = crate::db::settings::set(db.connection(), provider, to);
+            let _ = crate::db::settings::set(db.connection(), model, "");
         }
     }
     if credentials::load(vault, Kind::Chat, "gemini")
@@ -708,11 +735,7 @@ impl Daemon {
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
-        let receiver = self.tx.subscribe();
-        if let Some(text) = self.startup_notice.lock().take() {
-            self.emit("notice", json!({"text": text, "kind": "providers"}));
-        }
-        receiver
+        self.tx.subscribe()
     }
 
     fn emit(&self, name: &str, fields: Value) {
@@ -859,6 +882,11 @@ impl Daemon {
         if !model.is_empty() {
             config.model = model.to_owned();
         }
+        // A model that cannot run on this provider (a stale choice) gives way to its default;
+        // OpenCode has none, so it then drops out of automatic chains.
+        if config.model.is_empty() || !models::valid_for(id, &config.model, &cli::agy_known()) {
+            config.model = models::default_for(id).unwrap_or_default().to_owned();
+        }
         config.is_usable().then_some(config)
     }
 
@@ -874,7 +902,9 @@ impl Daemon {
         let usable = |id: &str| {
             (!local || id == "ollama")
                 && cli_binary(id).is_none_or(cli::on_path)
-                && self.provider_config(id, "").is_some()
+                && self
+                    .provider_config(id, if id == chosen { model } else { "" })
+                    .is_some()
         };
         plan_chain(chosen, model, live, usable)
             .into_iter()
@@ -1252,7 +1282,7 @@ impl Daemon {
         Ok(turn)
     }
 
-    /// Stream one answer, replacing a provider that cannot even start once. `quiet` holds the text back.
+    /// Stream one answer, moving down the chain past every provider that cannot even start. `quiet` holds the text back.
     async fn run_chain(
         self: &Arc<Self>,
         chain: &[ProviderConfig],
@@ -1262,10 +1292,9 @@ impl Daemon {
         turn: u64,
         quiet: bool,
     ) -> Result<String, engine::ChatError> {
-        let mut last = Instant::now();
-        let streamed = Arc::new(AtomicBool::new(false));
-        let mut result = Ok(String::new());
-        for (attempt, config) in chain.iter().take(2).enumerate() {
+        let last = Mutex::new(Instant::now());
+        let streamed = AtomicBool::new(false);
+        try_chain(chain, &streamed, |attempt, config| {
             if attempt > 0 {
                 let mut g = self.inner.lock();
                 g.effective = (config.id.clone(), config.model.clone());
@@ -1276,16 +1305,12 @@ impl Daemon {
             } else {
                 engine::http_client()
             };
-            result = engine::stream_chat_bounded(
-                &client,
-                config,
-                history,
-                context,
-                cancel.clone(),
-                |delta| {
-                    let checkpoint = last.elapsed() >= Duration::from_millis(150);
+            let (last, streamed, cancel) = (&last, &streamed, cancel.clone());
+            async move {
+                engine::stream_chat_bounded(&client, config, history, context, cancel, |delta| {
+                    let checkpoint = last.lock().elapsed() >= Duration::from_millis(150);
                     if checkpoint {
-                        last = Instant::now();
+                        *last.lock() = Instant::now();
                     }
                     streamed.store(true, Ordering::Relaxed);
                     let me = self.clone();
@@ -1294,16 +1319,11 @@ impl Daemon {
                             me.on_delta(turn, &delta, checkpoint);
                         }
                     }
-                },
-            )
-            .await;
-            let spawn_failed = matches!(result, Err(engine::ChatError::Cli(_)))
-                && !streamed.load(Ordering::Relaxed);
-            if !spawn_failed {
-                break;
+                })
+                .await
             }
-        }
-        result
+        })
+        .await
     }
 
     fn on_delta(&self, turn: u64, delta: &str, checkpoint: bool) {
@@ -2625,7 +2645,10 @@ impl Daemon {
     }
 
     async fn models_list(&self, provider: &str) -> Result<Value, String> {
-        let config = self.provider_config(provider, "");
+        // OpenCode has no default model, yet its list is how one gets picked.
+        let config = self
+            .provider_config(provider, "")
+            .or_else(|| (provider == "opencode").then(|| ProviderConfig::new(provider, "", "")));
         let config =
             config.ok_or("No usable configuration for this provider; set its API key first.")?;
         let models = models::discover(Some(self.db_path.clone()), config, false).await?;
@@ -3444,6 +3467,8 @@ impl Daemon {
             }
             "providers.list" => Ok(self.providers_list()),
             "providers.status" => Ok(self.providers_status().await),
+            // The shell service asks once, so the notice reaches it and not the first socket.
+            "notice.take" => Ok(json!({"text": self.startup_notice.lock().take()})),
             "models.list" => {
                 self.models_list(&parse::<protocol::ProviderArg>(args)?.provider)
                     .await
@@ -3690,13 +3715,69 @@ mod routing_tests {
     #[test]
     fn live_never_uses_codex_or_agy() {
         let plan = plan_chain("claude-sub", "haiku", true, |_| true);
-        assert_eq!(
-            ids(plan.clone()),
-            ["claude-sub", "opencode", "ollama-cloud", "ollama"]
-        );
+        assert_eq!(ids(plan.clone()), ["claude-sub", "ollama-cloud", "ollama"]);
         assert_eq!(plan[0].1, "haiku");
         // Even when codex is chosen for live, it is skipped.
         assert!(!ids(plan_chain("codex-sub", "", true, |_| true)).contains(&"codex-sub"));
+        // OpenCode joins a live chain only when it is the chosen provider.
+        let chosen = plan_chain("opencode", "p/m", true, |_| true);
+        assert_eq!(chosen[0], ("opencode", "p/m".to_owned()));
+    }
+
+    fn cli_config(id: &str) -> ProviderConfig {
+        ProviderConfig::new(id, "", "m")
+    }
+
+    #[tokio::test]
+    async fn the_chain_moves_past_every_provider_that_cannot_start() {
+        let chain: Vec<_> = ["a", "b", "c", "d"].map(cli_config).to_vec();
+        let streamed = AtomicBool::new(false);
+        let tried = std::cell::RefCell::new(Vec::new());
+        let result = try_chain(&chain, &streamed, |i, config| {
+            tried.borrow_mut().push(config.id.clone());
+            async move {
+                if i < 3 {
+                    Err(engine::ChatError::Cli(format!("{i} down")))
+                } else {
+                    Ok("answer".to_owned())
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), "answer");
+        assert_eq!(*tried.borrow(), ["a", "b", "c", "d"]);
+    }
+
+    #[tokio::test]
+    async fn the_chain_stops_after_text_streamed_or_on_a_non_cli_error() {
+        let chain: Vec<_> = ["a", "b", "c"].map(cli_config).to_vec();
+        let streamed = AtomicBool::new(true);
+        let calls = std::cell::Cell::new(0);
+        let result = try_chain(&chain, &streamed, |_, _| {
+            calls.set(calls.get() + 1);
+            async { Err(engine::ChatError::Cli("died mid-answer".into())) }
+        })
+        .await;
+        assert!(result.is_err() && calls.get() == 1);
+        let streamed = AtomicBool::new(false);
+        calls.set(0);
+        let result = try_chain(&chain, &streamed, |_, _| {
+            calls.set(calls.get() + 1);
+            async { Err(engine::ChatError::Protocol("bad".into())) }
+        })
+        .await;
+        assert!(result.is_err() && calls.get() == 1);
+        // Every provider failing returns the last error.
+        calls.set(0);
+        let result = try_chain(&chain, &streamed, |i, _| {
+            calls.set(calls.get() + 1);
+            async move { Err(engine::ChatError::Cli(format!("down {i}"))) }
+        })
+        .await;
+        assert_eq!(
+            (calls.get(), result.unwrap_err().to_string()),
+            (3, "down 2".into())
+        );
     }
 
     #[test]
@@ -3846,6 +3927,23 @@ mod command_tests {
         }
     }
 
+    #[test]
+    fn stale_models_give_way_to_the_provider_default() {
+        let d = daemon();
+        // OpenCode ids need provider/model, and it has no default: it drops out.
+        assert!(d.provider_config("opencode", "").is_none());
+        assert!(d.provider_config("opencode", "big-pickle").is_none());
+        assert_eq!(
+            d.provider_config("opencode", "openai/gpt-a").unwrap().model,
+            "openai/gpt-a"
+        );
+        // A model from another provider's list is replaced by claude's default.
+        assert!(
+            d.provider_config("claude-sub", "gemini-2.5-flash")
+                .is_some()
+        );
+    }
+
     #[tokio::test]
     async fn provider_status_lists_every_provider_with_a_login_command() {
         let rows = daemon().providers_status().await;
@@ -3860,8 +3958,8 @@ mod command_tests {
         }
     }
 
-    #[test]
-    fn stored_gemini_settings_move_to_agy_and_its_key_is_deleted() {
+    #[tokio::test]
+    async fn stored_gemini_settings_move_to_agy_and_its_key_is_deleted() {
         let root = std::env::temp_dir().join(format!("nm-mig-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let vault = Vault::open(&root).unwrap();
@@ -3875,6 +3973,9 @@ mod command_tests {
         for key in ["chat_provider", "live_provider"] {
             crate::db::settings::set(db.connection(), key, "gemini").unwrap();
         }
+        for key in ["chat_model", "live_model"] {
+            crate::db::settings::set(db.connection(), key, "gemini-2.5-flash").unwrap();
+        }
         drop(db);
         let d = Daemon::new(Options {
             db_path: root.join("t.db"),
@@ -3885,14 +3986,17 @@ mod command_tests {
         let s = d.inner.lock().settings.clone();
         assert_eq!(
             (s.chat_provider.as_str(), s.live_provider.as_str()),
-            ("agy-sub", "agy-sub")
+            ("agy-sub", "claude-sub")
         );
+        assert_eq!((s.chat_model.as_str(), s.live_model.as_str()), ("", ""));
         assert!(vault.get("provider:chat:gemini").unwrap().is_none());
-        // The first subscriber is told once.
+        // A socket subscriber is told nothing; the shell service asks once.
         let mut first = d.subscribe();
-        assert_eq!(first.try_recv().unwrap()["event"], "notice");
-        let _second = d.subscribe();
         assert!(first.try_recv().is_err());
+        let notice = d.handle("notice.take", json!({}), None).await.unwrap();
+        assert!(notice["text"].as_str().unwrap().contains("Antigravity"));
+        let again = d.handle("notice.take", json!({}), None).await.unwrap();
+        assert!(again["text"].is_null());
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -40,11 +40,8 @@ pub const MODELS: &[ModelList] = &[
             "gpt-5.6-sol",
         ],
     },
-    // The real list comes from `opencode serve` (config/providers).
-    ModelList {
-        provider: "opencode",
-        models: &["opencode/big-pickle"],
-    },
+    // OpenCode has no static default: its free models run out and the real list comes from
+    // `opencode serve`, so it joins automatic chains only once a model was picked.
     // The real list comes from ollama.com/api/tags.
     ModelList {
         provider: "ollama-cloud",
@@ -64,6 +61,18 @@ pub fn for_provider(provider_id: &str) -> &'static [&'static str] {
 /// The default model for a provider: the first suggestion.
 pub fn default_for(provider_id: &str) -> Option<&'static str> {
     for_provider(provider_id).first().copied()
+}
+
+/// Whether `model` can run on `provider_id`: OpenCode ids are `provider/model`; agy ids must be
+/// one of `agy_known` (accepted while that list is not known yet).
+pub fn valid_for(provider_id: &str, model: &str, agy_known: &[String]) -> bool {
+    match provider_id {
+        "opencode" => model
+            .split_once('/')
+            .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty()),
+        "agy-sub" => agy_known.is_empty() || agy_known.iter().any(|k| k == model),
+        _ => true,
+    }
 }
 
 /// A display label for the overlay button.
@@ -91,11 +100,29 @@ pub fn is_known_provider(provider_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn models_are_checked_against_their_provider() {
+        use super::valid_for;
+        assert!(valid_for("opencode", "openai/gpt-a", &[]));
+        assert!(!valid_for("opencode", "gpt-a", &[]));
+        assert!(!valid_for("opencode", "/gpt-a", &[]));
+        let known = ["gemini-3.8-flash-low".to_owned()];
+        assert!(valid_for("agy-sub", "gemini-3.8-flash-low", &known));
+        assert!(!valid_for("agy-sub", "gemini-2.5-flash", &known));
+        assert!(valid_for("agy-sub", "anything", &[]));
+        assert!(valid_for("ollama", "llama3.2", &[]));
+        assert_eq!(default_for("opencode"), None);
+    }
+
     use super::*;
 
     #[test]
     fn every_provider_has_models() {
-        for provider in super::super::providers::CHAT_PROVIDERS {
+        // OpenCode has no static list on purpose (see MODELS).
+        for provider in super::super::providers::CHAT_PROVIDERS
+            .iter()
+            .filter(|p| p.id != "opencode")
+        {
             assert!(
                 !for_provider(provider.id).is_empty(),
                 "{} has no suggested models",

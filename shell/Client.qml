@@ -27,6 +27,7 @@ Item {
     property var now: ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" })
     property string lastSpeaker: ""   // last remote speaker, for "who asked"
     property var lastAsk: null           // the last typed question, for Retry
+    property int minTurn: -1             // the highest turn that has started: replies of earlier turns are dropped
     property int staleTurn: -1           // the turn that was streaming when a new question was asked: its late events are dropped
     property string providerNotice: ""   // the daemon's one-time provider notice (e.g. the removed Gemini key); Providers shows it, Service notifies
     property bool libraryOpen: false     // set by the overlay: request failures then go to the Library, not the transcript
@@ -166,6 +167,7 @@ Item {
     function resetSession() {
         lines.clear();
         root.staleTurn = -1;
+        root.minTurn = -1;
         root.answering = false; root.suggestions = []; root.itemEditing = false; root.pendingItems = null; root.items = []; root.earlierItem = null; root.consentPrompt = "";
         root.micLevel = 0; root.systemLevel = 0;
         root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "", error: "" });
@@ -222,6 +224,7 @@ Item {
     function onEvent(ev) {
         // the tail of a turn that was superseded by a new question must not touch the new one
         if (ev.turn !== undefined && ev.turn === root.staleTurn && (ev.event === "answer.delta" || ev.event === "answer.done" || ev.event === "answer.error")) return;
+        if (ev.turn !== undefined && ev.turn < root.minTurn && (ev.event === "answer.delta" || ev.event === "answer.done" || ev.event === "answer.error")) return;
         switch (ev.event) {
         case "settings": root.settings = ev.settings || ({}); root.settingsReady = true; break;
         case "session.reset": root.resetSession(); root.state = Object.assign({}, root.state, { capture: false }); break;
@@ -234,6 +237,7 @@ Item {
         case "transcript.partial": root.pushLine(ev, true); break;
         case "transcript.final": root.pushLine(ev, false); break;
         case "answer.started":
+            root.minTurn = Math.max(root.minTurn, ev.turn);
             root.archiveNow();
             if (ev.automatic !== true && String(ev.question || "") !== "") root.addRow("asked", "", String(ev.question), false);
             root.suggestions = [];

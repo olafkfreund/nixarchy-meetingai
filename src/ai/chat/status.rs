@@ -20,16 +20,36 @@ pub fn login_hint(id: &str) -> &'static str {
     }
 }
 
-/// True when `program args` exits 0 within a few seconds.
-async fn succeeds(program: &str, args: &[&str]) -> bool {
+/// Whether a login check output means signed in: claude prints `"loggedIn": false` and codex
+/// `Not logged in`, whatever the exit code; otherwise exit 0 means signed in.
+fn logged_in(output: &str, success: bool) -> bool {
+    let text = output.to_lowercase();
+    if text.contains("not logged in") || text.replace(' ', "").contains(r#""loggedin":false"#) {
+        return false;
+    }
+    success
+}
+
+/// Run `program args` for a few seconds at most and read its login state.
+async fn signed_in(program: &str, args: &[&str]) -> bool {
     let run = Command::new(program)
         .args(args)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
         .kill_on_drop(true)
-        .status();
-    matches!(tokio::time::timeout(Duration::from_secs(5), run).await, Ok(Ok(s)) if s.success())
+        .output();
+    match tokio::time::timeout(Duration::from_secs(5), run).await {
+        Ok(Ok(o)) => logged_in(
+            &format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            o.status.success(),
+        ),
+        _ => false,
+    }
 }
 
 fn home_file(relative: &str) -> Option<std::path::PathBuf> {
@@ -61,11 +81,11 @@ pub async fn status(id: &str, name: &str, has_key: bool) -> Value {
     } else {
         match id {
             "claude-sub" => ready(
-                succeeds("claude", &["auth", "status"]).await,
+                signed_in("claude", &["auth", "status"]).await,
                 "not_logged_in",
             ),
             "codex-sub" => ready(
-                succeeds("codex", &["login", "status"]).await,
+                signed_in("codex", &["login", "status"]).await,
                 "not_logged_in",
             ),
             "agy-sub" => ready(
@@ -115,6 +135,15 @@ mod tests {
             status("ollama-cloud", "Ollama Cloud", true).await["state"],
             "ready"
         );
+    }
+
+    #[test]
+    fn not_logged_in_output_wins_over_the_exit_code() {
+        assert!(!logged_in("Not logged in\n", true));
+        assert!(!logged_in("{\n  \"loggedIn\": false,\n}", true));
+        assert!(logged_in("Logged in using ChatGPT", true));
+        assert!(logged_in("{\"loggedIn\": true}", true));
+        assert!(!logged_in("", false));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--call] [--providers] [--locked] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--call] [--providers] [--locked] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -46,6 +46,7 @@ iv = "--interviewer" in sys.argv
 dropped = [False]
 first_run = "--first-run" in sys.argv   # no provider, speech not ready: the Setup card
 err = "--error" in sys.argv          # a typed question starts, waits, then fails (Writing bar, then Retry)
+stale = "--stale" in sys.argv        # turn 2 starts, then the late tail of turn 1 arrives: the client must drop it
 drop = "--drop" in sys.argv          # the first connection is cut mid-answer; the client reconnects and asks transcript.get / now.get
 providers = "--providers" in sys.argv
 call = "--call" in sys.argv
@@ -268,6 +269,15 @@ class Handler(socketserver.StreamRequestHandler):
         except OSError:
             pass
 
+    def stream_stale(self):
+        time.sleep(0.3)
+        self.send({"event": "answer.started", "turn": 1, "question": "old?", "automatic": False, **PROVIDER})
+        self.send({"event": "answer.started", "turn": 2, "question": "new?", "automatic": False, **PROVIDER})
+        self.send({"event": "answer.delta", "turn": 2, "text": "NEW", **PROVIDER})
+        self.send({"event": "answer.delta", "turn": 1, "text": "OLD", **PROVIDER})
+        self.send({"event": "answer.error", "turn": 1, "message": "late failure", **PROVIDER})
+        self.send({"event": "answer.done", "turn": 1, **PROVIDER})
+
     def stream(self):
         time.sleep(0.3)
         if not slow:
@@ -467,7 +477,7 @@ class Handler(socketserver.StreamRequestHandler):
             if cmd == "chat.send":
                 threading.Thread(target=self.typed, args=(req["args"].get("text", ""),), daemon=True).start()
             if cmd == "state.get":
-                threading.Thread(target=self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
+                threading.Thread(target=self.stream_stale if stale else self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
