@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: none (issues are disabled on olafkfreund/mixarchy-meetingai)
 author: olafkfreund
 ---
@@ -78,13 +78,10 @@ Largest remaining original files (original lines / total):
 - Work runs module by module behind the existing test suite; the UI, the
   providers work and the p620 install continue meanwhile.
 
-## Open questions
+## Decisions (owner approved the proposals)
 
-1. **Order:** branding removal and the repo rename now, the rewrite as its
-   own long-running plan afterwards (proposed), or all together?
-2. **Icon:** a simple monochrome glyph-style SVG drawn for us (proposed), or
-   will you supply one?
-3. **History note:** keep a one-line credit to lennette as the starting point
-   in the README (proposed; it is honest and costs nothing), or none?
-4. **Repo rename:** do it now with GitHub's redirect (proposed), or after the
-   p620 install is working?
+1. Branding removal and the repo rename first; the rewrite runs as its own
+   long plan afterwards.
+2. A simple monochrome SVG icon drawn for us.
+3. A one-line credit to lennette as the starting point stays in the README.
+4. Rename the repository now, relying on GitHub's redirect.
