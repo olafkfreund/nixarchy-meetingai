@@ -833,3 +833,33 @@ No colored icons or emoji anywhere in the UI.
    have it answer "Explain k8s and how it is working?", and save the real
    answer as `shell/tests/fixtures/k8s-answer.md`. The fake `--live`
    scenario uses it, so the screenshot shows a real model answer.
+
+### Owner request: round 5, resizable window and a usable profile editor (2026-10-27)
+
+1. **Resize and move.**
+   - The overlay card is resizable from its edges and corners (a hit zone
+     of about 6 px, with cursor shapes) and movable by dragging the header.
+   - Minimum 520 × 420; maximum the screen minus the gaps.
+   - The size and position persist as the daemon settings `overlay_w`,
+     `overlay_h`, `overlay_x`, `overlay_y`, saved on release, not on every
+     move.
+   - A double-click on the header resets to the default size, centred.
+   - The input mask follows the card while recording.
+   - Text scale (round 4) and window size are independent.
+2. **Profile editor** (fixes the gap: `personal_context` and
+   `meeting_context` had no editing UI).
+   - The Profiles tab gets the profile list (select, rename, delete,
+     "New"), plus two multi-line fields for the selected profile: "About me"
+     (personal_context) and "Meeting brief" (meeting_context), each with a
+     one-line hint. Edits are saved with `profiles.save` and `settings.set`.
+   - The selected profile shows in the header as a small label, so you can
+     see which context is in use.
+3. **Reference documents per profile.** Attach PDF, text or markdown files
+   (CV, job description, runbooks) to a profile. Their text goes into the
+   prompt for every answer while the profile is selected, within the
+   existing `MAX_TOTAL_CHARS` (64k) budget, with the most recently added
+   first. They are stored in the encrypted database, not as paths.
+   - Needs: a daemon `profiles.attach{name,path}` / `profiles.detach`, a
+     schema column or table, and tests for the budget and the ordering.
+4. **Prompts tab:** a one-line explanation under each kind (answer /
+   follow_up / recap) and a "Reset to default" button.
