@@ -59,6 +59,51 @@ Item {
     readonly property string iDown: String.fromCodePoint(0xf0140)
     readonly property string iRight: String.fromCodePoint(0xf0142)
     property var liveModels: []
+    // Card geometry. Settings overlay_x/y/w/h (-1 = default, centred) persist it; `live` overrides while dragging.
+    readonly property real minW: 520
+    readonly property real minH: 420
+    readonly property real edgeGap: Style.space(40)
+    property var live: null
+    property real winW: 1200
+    property real winH: 800
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+    readonly property var geom: {
+        var s = daemon.settings, r = root.live;
+        var mw = Math.max(root.minW, root.winW - root.edgeGap * 2), mh = Math.max(root.minH, root.winH - root.edgeGap * 2);
+        var w = r ? r.w : (Number(s.overlay_w) > 0 ? Number(s.overlay_w) : Math.min(mw, Style.space(900)));
+        var h = r ? r.h : (Number(s.overlay_h) > 0 ? Number(s.overlay_h) : Math.min(mh, Style.space(760)));
+        w = root.clamp(w, root.minW, mw); h = root.clamp(h, root.minH, mh);
+        var x = r ? r.x : (Number(s.overlay_x) >= 0 ? Number(s.overlay_x) : (root.winW - w) / 2);
+        var y = r ? r.y : (Number(s.overlay_y) >= 0 ? Number(s.overlay_y) : (root.winH - h) / 2);
+        return { x: root.clamp(x, 0, Math.max(0, root.winW - w)), y: root.clamp(y, 0, Math.max(0, root.winH - h)), w: w, h: h };
+    }
+    property var grab: null
+    function beginGrab(gx, gy) { root.grab = { gx: gx, gy: gy, r: root.geom }; }
+    // edges: any of "l" "r" "t" "b"; "m" moves
+    function dragTo(edges, gx, gy) {
+        var g = root.grab, o = g.r, dx = gx - g.gx, dy = gy - g.gy;
+        var mw = Math.max(root.minW, root.winW - root.edgeGap * 2), mh = Math.max(root.minH, root.winH - root.edgeGap * 2);
+        var n = { x: o.x, y: o.y, w: o.w, h: o.h };
+        if (edges === "m") { n.x = o.x + dx; n.y = o.y + dy; }
+        if (edges.indexOf("r") >= 0) n.w = root.clamp(o.w + dx, root.minW, mw);
+        if (edges.indexOf("b") >= 0) n.h = root.clamp(o.h + dy, root.minH, mh);
+        if (edges.indexOf("l") >= 0) { n.w = root.clamp(o.w - dx, root.minW, mw); n.x = o.x + o.w - n.w; }
+        if (edges.indexOf("t") >= 0) { n.h = root.clamp(o.h - dy, root.minH, mh); n.y = o.y + o.h - n.h; }
+        root.live = n;
+    }
+    function endGrab() {   // persist on release, not on every move
+        var g = root.live;
+        root.grab = null;
+        if (!g) return;
+        daemon.setSetting("overlay_x", Math.round(g.x)); daemon.setSetting("overlay_y", Math.round(g.y));
+        daemon.setSetting("overlay_w", Math.round(g.w)); daemon.setSetting("overlay_h", Math.round(g.h));
+        root.live = null;
+    }
+    function resetGeom() { ["overlay_x", "overlay_y", "overlay_w", "overlay_h"].forEach(function(k) { daemon.setSetting(k, -1); }); }
+    readonly property string profileName: {
+        var p = daemon.profiles.filter(function(q) { return q.selected; });
+        return p.length ? String(p[0].name) : "";
+    }
     readonly property var paces: ["Fast", "Balanced", "Relaxed"]
 
     Client { id: daemon }
@@ -114,6 +159,7 @@ Item {
     }
 
     PanelWindow { // qmllint disable uncreatable-type
+        id: win
         visible: root.opened
         anchors { top: true; bottom: true; left: true; right: true }
         color: "transparent"
@@ -123,6 +169,8 @@ Item {
         WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
 
         // While recording the window only takes input over the card; clicks elsewhere reach the apps below.
+        onWidthChanged: root.winW = width
+        onHeightChanged: root.winH = height
         mask: Region { item: daemon.recording ? card : full }
         Item { id: full; anchors.fill: parent }
         Rectangle { visible: !daemon.recording; anchors.fill: parent; color: Commons.Color.menu.scrim }
@@ -130,9 +178,9 @@ Item {
 
         Rectangle {
             id: card
-            anchors.centerIn: parent
-            width: Math.min(parent.width - Style.space(80), Style.space(900))
-            height: Math.min(parent.height - Style.space(80), Style.space(760))
+            x: root.geom.x; y: root.geom.y
+            width: root.geom.w
+            height: root.geom.h
             radius: root.round
             color: root.solid
             border.color: Commons.Color.popups.border
@@ -165,6 +213,14 @@ Item {
                 Item {
                     width: parent.width
                     height: hdrLeft.height
+                    MouseArea {   // drag the header to move the card; double-click resets size and position
+                        anchors.fill: parent
+                        cursorShape: pressed ? Qt.ClosedHandCursor : Qt.ArrowCursor
+                        onPressed: function(m) { var g = mapToItem(null, m.x, m.y); root.beginGrab(g.x, g.y); }
+                        onPositionChanged: function(m) { if (pressed) { const g = mapToItem(null, m.x, m.y); root.dragTo("m", g.x, g.y); } }
+                        onReleased: root.endGrab()
+                        onDoubleClicked: { root.live = null; root.resetGeom(); }
+                    }
                     Row {
                         id: hdrLeft
                         spacing: Style.spacing.xs
@@ -185,6 +241,17 @@ Item {
                     Row {
                         anchors.right: parent.right
                         spacing: Style.spacing.md
+                        Text {   // which profile's context is in use
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: root.profileName !== ""
+                            textFormat: Text.PlainText
+                            text: root.profileName
+                            elide: Text.ElideRight
+                            width: Math.min(implicitWidth, Style.space(160))
+                            color: Commons.Color.popups.text
+                            opacity: 0.7
+                            font.pixelSize: Style.font.caption * root.ts
+                        }
                         Rectangle {   // segmented control
                             width: seg.width + Style.space(4); height: seg.height + Style.space(4)
                             radius: root.round
@@ -588,6 +655,22 @@ Item {
                 }
                 IconButton { ts: root.ts; anchors.top: parent.top; anchors.right: parent.right; text: "Close"; tooltipText: "Close the preview"; onClicked: root.previewText = "" }
             }
+
+            // Resize zones on the edges (6 px) and corners (12 px).
+            component Grip: MouseArea {
+                property string edges: ""
+                onPressed: function(m) { var g = mapToItem(null, m.x, m.y); root.beginGrab(g.x, g.y); }
+                onPositionChanged: function(m) { if (pressed) { const g = mapToItem(null, m.x, m.y); root.dragTo(edges, g.x, g.y); } }
+                onReleased: root.endGrab()
+            }
+            Grip { edges: "l"; cursorShape: Qt.SizeHorCursor; x: 0; y: 12; width: 6; height: parent.height - 24 }
+            Grip { edges: "r"; cursorShape: Qt.SizeHorCursor; x: parent.width - 6; y: 12; width: 6; height: parent.height - 24 }
+            Grip { edges: "t"; cursorShape: Qt.SizeVerCursor; x: 12; y: 0; width: parent.width - 24; height: 6 }
+            Grip { edges: "b"; cursorShape: Qt.SizeVerCursor; x: 12; y: parent.height - 6; width: parent.width - 24; height: 6 }
+            Grip { edges: "tl"; cursorShape: Qt.SizeFDiagCursor; x: 0; y: 0; width: 12; height: 12 }
+            Grip { edges: "br"; cursorShape: Qt.SizeFDiagCursor; x: parent.width - 12; y: parent.height - 12; width: 12; height: 12 }
+            Grip { edges: "tr"; cursorShape: Qt.SizeBDiagCursor; x: parent.width - 12; y: 0; width: 12; height: 12 }
+            Grip { edges: "bl"; cursorShape: Qt.SizeBDiagCursor; x: 0; y: parent.height - 12; width: 12; height: 12 }
         }
     }
 }

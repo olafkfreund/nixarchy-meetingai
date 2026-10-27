@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--scale=PERCENT]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
-answer (fixtures/k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
+answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
 
 --live plays a paced meeting instead: recording on, words arriving as
 partials, a question from the other side, a streamed answer (with a link), 3 suggestions, levels events, and a
@@ -40,14 +40,70 @@ DATA = {
     ],
     "models.list": ["sonnet", "opus", "haiku"],
     "session.list": [{"id": 1, "kind": "meeting", "title": "Fake standup"}],
-    "profiles.list": [],
     "settings.search": [
+        {"key": "overlay_w", "label": "Overlay width", "value": -1},
         {"key": "auto_record_on_call", "label": "Take notes automatically when a call starts", "value": auto},
         {"key": "reduce_motion", "label": "Reduce motion", "value": False},
     ],
-    "prompts.get": {"text": "fake prompt"},
     "notes.get": {"text": "## Summary\nfake"},
 }
+settings.update(overlay_x=-1, overlay_y=-1, overlay_w=-1, overlay_h=-1)
+size = next((a.split("=")[1] for a in sys.argv if a.startswith("--size=")), "")   # --size=WxH: start with a non-default card
+if size:
+    settings.update(overlay_w=int(size.split("x")[0]), overlay_h=int(size.split("x")[1]))
+# Round 5 protocol: in-memory profiles with documents.
+profiles = [
+    {"name": "Backend interview", "selected": True, "personal_context": "Senior backend engineer, 8 years of Rust and Kafka.", "meeting_context": "Interview for a staff platform role at Acme; expect system design questions.",
+     "documents": [{"id": 1, "name": "cv.pdf", "chars": 5210}, {"id": 2, "name": "job-description.md", "chars": 2380}]},
+    {"name": "Weekly standup", "selected": False, "personal_context": "", "meeting_context": "", "documents": []},
+]
+next_doc = [3]
+DEFAULT_PROMPTS = {"answer": "default answer prompt", "live_answer": "default live answer prompt", "follow_up": "default follow-up prompt", "recap": "default recap prompt"}
+prompts = {}
+
+
+def profile(name):
+    return next((p for p in profiles if p["name"] == name), None)
+
+
+def profiles_cmd(cmd, a):
+    """Returns (ok, data_or_error) for profiles.* and prompts.* commands."""
+    if cmd == "profiles.list":
+        return True, profiles
+    if cmd == "prompts.get":
+        return True, {"text": prompts.get((a.get("mode"), a.get("kind")), DEFAULT_PROMPTS.get(a.get("kind"), ""))}
+    if cmd == "prompts.set":
+        prompts[(a.get("mode"), a.get("kind"))] = a.get("text", "")
+        return True, {}
+    if cmd == "prompts.reset":
+        prompts.pop((a.get("mode"), a.get("kind")), None)
+        return True, {}
+    p = profile(a.get("name"))
+    if cmd == "profiles.save":
+        if p is None:
+            p = {"name": a["name"], "selected": False, "personal_context": "", "meeting_context": "", "documents": []}
+            profiles.append(p)
+        for k in ("personal_context", "meeting_context"):
+            if k in a:
+                p[k] = a[k]
+        return True, {}
+    if p is None:
+        return False, "no such profile"
+    if cmd == "profiles.select":
+        for q in profiles:
+            q["selected"] = q is p
+    elif cmd == "profiles.rename":
+        p["name"] = a["new_name"]
+    elif cmd == "profiles.delete":
+        profiles.remove(p)
+    elif cmd == "profiles.attach":
+        p["documents"].insert(0, {"id": next_doc[0], "name": os.path.basename(a["path"]), "chars": 1000})
+        next_doc[0] += 1
+    elif cmd == "profiles.detach":
+        p["documents"] = [d for d in p["documents"] if d["id"] != a["id"]]
+    return True, {}
+
+
 if live:
     settings["meeting_mode"] = "interview"
 LOCK = threading.Lock()
@@ -130,7 +186,7 @@ class Handler(socketserver.StreamRequestHandler):
         time.sleep(0.6)
         provider = {"provider": "claude-sub", "model": "haiku"}
         self.send({"event": "answer.started", "turn": 1, "question": question, "automatic": True, **provider})
-        answer = open(os.path.join(FIXTURES, "k8s-answer.md")).read()
+        answer = open(next(f for f in (os.path.join(FIXTURES, n) for n in ("k8s-live-answer.md", "k8s-answer.md")) if os.path.exists(f))).read()
         for i in range(0, len(answer), 24):   # about 8 s end to end, like a streaming model
             self.send({"event": "answer.delta", "turn": 1, "text": answer[i:i + 24], **provider})
             time.sleep(0.08)
@@ -160,6 +216,10 @@ class Handler(socketserver.StreamRequestHandler):
             elif cmd == "record.stop":
                 state["recording"] = False
             data = state if cmd == "state.get" else settings if cmd == "settings.get" else DATA.get(cmd, {})
+            if cmd.startswith(("profiles.", "prompts.")):
+                ok, data = profiles_cmd(cmd, req.get("args", {}))
+                self.send({"id": req["id"], "ok": ok, **({"data": data} if ok else {"error": data})})
+                continue
             self.send({"id": req["id"], "ok": True, "data": data})
             if cmd == "settings.set":
                 settings[req["args"]["key"]] = req["args"]["value"]
