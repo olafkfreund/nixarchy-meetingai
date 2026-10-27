@@ -183,13 +183,13 @@ CREATE TABLE IF NOT EXISTS meeting_conversations (
     PRIMARY KEY (meeting_id, conversation_id)
 );
 
--- Model assessments stay inside SQLCipher alongside their source transcript.
-CREATE TABLE IF NOT EXISTS meeting_sentiment (
-    meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
-    content TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'pending',
-    error TEXT NOT NULL DEFAULT '',
-    source_lines INTEGER NOT NULL,
-    source_last_row INTEGER NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+-- Rolling notes: one summary per slice of final lines, consolidated on stop.
+CREATE TABLE IF NOT EXISTS meeting_note_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    t0 REAL NOT NULL,
+    t1 REAL NOT NULL,
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_note_chunks_meeting ON meeting_note_chunks (meeting_id);
