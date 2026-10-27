@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 // qmllint disable missing-property
 // ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
+import Quickshell
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -28,10 +29,9 @@ BarWidget {
     implicitHeight: button.implicitHeight
 
     Client { id: client }
-    CallState { id: calls }
-    property double dismissed: -1   // the call (its start) whose chip was dismissed
+    readonly property var calls: client.calls
     readonly property bool busy: client.recording || root.finishing
-    readonly property bool offering: calls.call === "call" && !root.busy && root.dismissed !== (calls.since || 1)
+    readonly property bool offering: client.connected && calls.call === "call" && !root.busy && CallOffer.dismissed !== (calls.since || 1)
     readonly property string callGlyph: {
         var a = calls.app.toLowerCase();
         return a.indexOf("discord") >= 0 || a.indexOf("vesktop") >= 0 ? "\u{F066F}" : a.indexOf("slack") >= 0 ? "\u{F04B1}" : a.indexOf("skype") >= 0 ? "\u{F036F}" : "\u{F0567}";
@@ -39,8 +39,11 @@ BarWidget {
     readonly property string callTip: (calls.call === "maybe" ? "Possible call" : "Call") + (calls.app ? " · " + calls.app : "") + (calls.title ? " · " + calls.title : "")
 
     function takeNotes() {
-        client.send("record.start", calls.title ? { title: calls.title } : {}, function(r) {
-            if (!r.ok && String(r.error || "").indexOf("consent_required") === 0) root.run("omarchy-shell meetingai toggle");   // the consent banner is in the overlay
+        client.send("record.start", calls.title ? { new: true, title: calls.title } : { new: true }, function(r) {
+            var e = String(r.error || "");
+            if (r.ok) return;
+            if (e.indexOf("consent_required") === 0) root.run("omarchy-shell meetingai show");   // the consent banner is in the overlay
+            else Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", e.replace(/^local_only: /, "")]);
         });
     }
     Rec { id: rec; background: Commons.Color.bar.background }
@@ -147,7 +150,7 @@ BarWidget {
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 cursorShape: Qt.PointingHandCursor
                 onClicked: function(m) {
-                    if (m.button === Qt.RightButton) root.dismissed = calls.since || 1;
+                    if (m.button === Qt.RightButton) CallOffer.dismissed = calls.since || 1;
                     else root.takeNotes();
                 }
             }
