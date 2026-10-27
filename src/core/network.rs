@@ -3,11 +3,11 @@
 use futures_util::StreamExt;
 use std::{sync::OnceLock, time::Duration};
 
-fn client(total: u64) -> reqwest::Client {
+fn client(total: u64, read: u64) -> reqwest::Client {
     super::install_tls_provider();
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .read_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(read))
         .timeout(Duration::from_secs(total))
         .pool_max_idle_per_host(2)
         .pool_idle_timeout(Duration::from_secs(90))
@@ -17,11 +17,16 @@ fn client(total: u64) -> reqwest::Client {
 
 pub(crate) fn chat_client() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| client(180)).clone()
+    CLIENT.get_or_init(|| client(180, 30)).clone()
+}
+/// Loopback Ollama may spend minutes loading a cold model before its first byte.
+pub(crate) fn loading_chat_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| client(600, 300)).clone()
 }
 pub(crate) fn speech_client() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| client(120)).clone()
+    CLIENT.get_or_init(|| client(120, 30)).clone()
 }
 
 #[derive(Debug, thiserror::Error)]

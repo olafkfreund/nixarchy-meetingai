@@ -164,3 +164,54 @@ None yet.
   `agy-sub`, shown as "Antigravity (subscription)", with no key field
   (status from install/login). Stored `gemini` settings migrate straight
   to `agy-sub`. This unit runs right after step 1, ahead of steps 2–3.
+- **Step 1 (correction):** the codex/claude "hang" measured before the
+  spec was mostly a probe artifact: the probe pointed `XDG_DATA_HOME` /
+  `XDG_CONFIG_HOME` at empty temp dirs, so the mise wrappers tried to
+  install the tools there. The real user service keeps the real XDG paths.
+  `setsid` stays as a cheap guard against a terminal stall. The probe now
+  passes `MISE_DATA_DIR`/`MISE_CONFIG_DIR` through. The 300 s client is
+  chosen per provider (loopback ollama only); `now.get` reports `loading`
+  by provider id, so a non-loopback custom `base_url` isn't excluded there
+  (the timeout itself is exact). The `setsid` test can't reproduce a
+  controlling terminal under the test runner.
+- **Antigravity unit (done before steps 2–3):** `gemini` removed;
+  `agy-sub` ("Antigravity (subscription)", CLI, no key, no images,
+  default `gemini-3.8-flash-low`, models from `agy models`) runs with the
+  private no-MCP `HOME` overlay. Measured first token 3.5–5.8 s (median
+  4.6 s), so it is in the typed chain (claude-sub → agy-sub → codex-sub →
+  ollama) but not the live chain. agy reads no prompt from stdin, so the
+  prompt goes in argv (visible in `/proc/*/cmdline` to other local users;
+  acceptable on a single-user desktop, and local-only interviews never use
+  agy); prompts over 100 KB fail over to the next provider. Stored
+  `gemini` settings migrate to `agy-sub` and a stored key is deleted at
+  daemon start (logged, not shown in the UI yet). Tests that used `gemini`
+  as a keyed provider now use `ollama` with a mock base URL or a
+  `custom-test` id; no built-in provider requires a key any more.
+- **Steps 2–3:** Ollama models are filtered by `/api/show` `completion`
+  (8 at a time, cached per run; models without capabilities or whose show
+  fails are kept); the catalog cache key is now `v3`. Codex models come from
+  `codex debug models` (visibility `list`), with a static fallback.
+  `models.list` replies echo `provider` next to `ok`/`data` (data stays a
+  plain list). `ollama-cloud` uses the OpenAI-compatible wire at
+  `https://ollama.com/v1/chat/completions` (key from the vault or the
+  daemon's `OLLAMA_API_KEY`), sits before `ollama` in the typed and live
+  chains, and is never local; measured 0.4 s first token. Presets add
+  Together, LM Studio and vLLM (OpenRouter, Mistral, Groq, DeepSeek
+  existed); plain-http loopback presets use `auth: none`. The gemini-key
+  deletion notice goes to the first event subscriber only.
+- **Steps 5, 6, 8:** `opencode` drives `opencode serve` 1.18.31 with a
+  random basic-auth password, in its own process group, with private
+  `XDG_CONFIG_HOME`/`XDG_DATA_HOME` holding only a symlink to `auth.json`
+  (no user MCP servers or plugins; the user's custom OpenCode providers are
+  therefore not listed). Per turn: a deny-all-tools session, `/event`
+  stream, `prompt_async`, then abort and delete. `--port 0` really binds
+  4096 (or a fallback); the daemon reads the printed port. Provider errors
+  and "retry" status fail at once. The server stops after 10 min idle and
+  on clean daemon exit; a SIGKILLed daemon leaves it running (no
+  parent-death signal yet). Measured 4.7 s including server start with
+  `ollama-cloud/gpt-oss:120b`; the owner's OpenAI login in OpenCode has
+  expired and `opencode/big-pickle` hit its free limit. `providers.status`
+  checks: `claude auth status`, `codex login status`, agy's
+  `oauth_creds.json` (heuristic), OpenCode `auth.json`, the cloud key, a
+  listener on 11434. The HM module sets the service PATH to the user and
+  system profiles and adds `ollamaCloud.environmentFile` (`-` prefixed).

@@ -71,6 +71,17 @@ in
       };
     };
 
+    ollamaCloud.environmentFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/run/secrets/ollama-cloud.env";
+      description = ''
+        File with `OLLAMA_API_KEY=...`, read by the daemon service (systemd `EnvironmentFile`).
+        Give a path outside the Nix store; the key is never copied into the store.
+        Without it, add the key in the Library, Providers tab.
+      '';
+    };
+
     keybindings = lib.mkOption {
       type = lib.types.attrsOf (lib.types.nullOr lib.types.str);
       default = {
@@ -123,8 +134,16 @@ in
         };
         Service = {
           ExecStart = bin;
+          # The user service gets a bare PATH; the subscription CLIs (claude, codex, agy,
+          # opencode) live in the user's Nix profile.
+          Environment = [
+            "PATH=${config.home.profileDirectory}/bin:/etc/profiles/per-user/${config.home.username}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
+          ];
           Restart = "on-failure";
           RestartSec = 2;
+        }
+        // lib.optionalAttrs (cfg.ollamaCloud.environmentFile != null) {
+          EnvironmentFile = [ "-${cfg.ollamaCloud.environmentFile}" ];
         };
         Install.WantedBy = [ "graphical-session.target" ];
       };

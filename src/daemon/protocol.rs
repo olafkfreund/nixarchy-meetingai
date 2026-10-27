@@ -24,10 +24,18 @@ pub struct Request {
 }
 
 pub fn reply(id: &Value, result: Result<Value, String>) -> String {
-    let value = match result {
+    reply_for(id, result, None)
+}
+
+/// Like [`reply`], echoing the request's `provider` so a client can drop a stale reply.
+pub fn reply_for(id: &Value, result: Result<Value, String>, provider: Option<Value>) -> String {
+    let mut value = match result {
         Ok(data) => json!({"id": id, "ok": true, "data": data}),
         Err(error) => json!({"id": id, "ok": false, "error": error}),
     };
+    if let (Some(provider), Some(map)) = (provider, value.as_object_mut()) {
+        map.insert("provider".into(), provider);
+    }
     format!("{value}\n")
 }
 
@@ -214,6 +222,15 @@ pub struct PromptArg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_list_replies_echo_the_provider_even_on_error() {
+        for result in [Ok(json!(["a"])), Err("down".to_owned())] {
+            let line = reply_for(&json!(1), result, Some(json!("ollama")));
+            let value: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(value["provider"], "ollama");
+        }
+    }
 
     #[test]
     fn replies_carry_the_request_id() {

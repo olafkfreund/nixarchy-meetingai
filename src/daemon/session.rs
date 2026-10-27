@@ -172,6 +172,8 @@ struct Inner {
     turn: u64,
     /// Provider and model answering the current turn.
     effective: (String, String),
+    /// Effective provider is loopback ollama, so a silent start means "loading".
+    loading: bool,
     cancel: Option<watch::Sender<bool>>,
     request: Option<JoinHandle<()>>,
     follow_up_task: Option<JoinHandle<()>>,
@@ -249,6 +251,8 @@ pub struct Daemon {
     chunking: AtomicBool,
     /// The session's candidate is local-only: only ollama and whisper-local may be used.
     local_only: AtomicBool,
+    /// Shown to the first client that connects, then cleared.
+    startup_notice: Mutex<Option<String>>,
     /// Serializes rolling-notes chunking and recap generation (no duplicate chunks).
     notes: tokio::sync::Mutex<()>,
     inner: Mutex<Inner>,
@@ -421,7 +425,8 @@ fn visible_follow_ups(generated: &[String]) -> Vec<String> {
 }
 
 /// Provider ids to try, best first, with the model to use ("" = provider default).
-/// Typed: claude-sub, codex-sub, gemini, ollama. Live skips codex (no streaming).
+/// Typed: claude-sub, agy-sub, opencode, codex-sub, ollama-cloud, ollama. Live skips codex (no streaming) and agy-sub
+/// (first token measured too slow for live answers; see the plan deviations log).
 /// The chosen provider leads when usable, so an explicit ollama is kept.
 fn plan_chain(
     chosen: &str,
@@ -433,7 +438,10 @@ fn plan_chain(
     let candidates = CHAT_PROVIDERS.iter().map(|p| p.id);
     let first = CHAT_PROVIDERS.iter().find(|p| p.id == chosen).map(|p| p.id);
     for id in first.into_iter().chain(candidates) {
-        if (live && id == "codex-sub") || out.iter().any(|(i, _)| *i == id) || !usable(id) {
+        if (live && matches!(id, "codex-sub" | "agy-sub"))
+            || out.iter().any(|(i, _)| *i == id)
+            || !usable(id)
+        {
             continue;
         }
         let m = if Some(id) == first { model } else { "" };
@@ -455,7 +463,37 @@ fn stays_local(config: &ProviderConfig) -> bool {
                         .parse::<std::net::IpAddr>()
                         .is_ok_and(|ip| ip.is_loopback())
             });
-    loopback && !config.model.to_lowercase().ends_with("-cloud")
+    loopback && config.id != "ollama-cloud" && !config.model.to_lowercase().ends_with("-cloud")
+}
+
+/// Loopback ollama: the one provider that may sit silent while a cold model loads.
+fn loopback_ollama(config: &ProviderConfig) -> bool {
+    config.id == "ollama" && stays_local(config)
+}
+
+/// The Gemini API provider was replaced by `agy-sub`: move the settings over and delete its key.
+fn migrate_gemini(db: &Database, vault: &Vault) -> Option<String> {
+    for key in ["chat_provider", "live_provider"] {
+        if crate::db::settings::get(db.connection(), key)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("gemini")
+        {
+            let _ = crate::db::settings::set(db.connection(), key, "agy-sub");
+        }
+    }
+    if credentials::load(vault, Kind::Chat, "gemini")
+        .ok()
+        .flatten()
+        .is_some()
+        && credentials::remove(vault, Kind::Chat, "gemini").is_ok()
+    {
+        let notice = "Removed the stored Gemini API key; Gemini now runs through Antigravity (sign in with `agy`).";
+        tracing::warn!("{notice}");
+        return Some(notice.to_owned());
+    }
+    None
 }
 
 /// Lowercase with whitespace runs as one space; a soft hyphen (and the line break after it) vanishes.
@@ -508,6 +546,8 @@ fn cli_binary(id: &str) -> Option<&'static str> {
     match id {
         "claude-sub" => Some("claude"),
         "codex-sub" => Some("codex"),
+        "agy-sub" => Some("agy"),
+        "opencode" => Some("opencode"),
         _ => None,
     }
 }
@@ -551,6 +591,7 @@ impl Daemon {
         crate::core::install_tls_provider();
         let vault = Vault::open(&options.vault_dir).map_err(|e| e.to_string())?;
         let db = Database::open(&options.db_path).map_err(|e| e.to_string())?;
+        let startup_notice = migrate_gemini(&db, &vault);
         let settings = Settings::load(&db).unwrap_or_default();
         let active_profile_id = profiles::selected(db.connection())
             .ok()
@@ -565,6 +606,7 @@ impl Daemon {
             shutdown: Notify::new(),
             chunking: AtomicBool::new(false),
             local_only: AtomicBool::new(false),
+            startup_notice: Mutex::new(startup_notice),
             notes: tokio::sync::Mutex::new(()),
             inner: Mutex::new(Inner {
                 db,
@@ -583,6 +625,7 @@ impl Daemon {
                 recording: None,
                 meeting_id: None,
                 effective: (String::new(), String::new()),
+                loading: false,
                 finishing_meeting: None,
                 resume_meeting: None,
                 meeting_offset: 0.0,
@@ -613,7 +656,11 @@ impl Daemon {
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
-        self.tx.subscribe()
+        let receiver = self.tx.subscribe();
+        if let Some(text) = self.startup_notice.lock().take() {
+            self.emit("notice", json!({"text": text}));
+        }
+        receiver
     }
 
     fn emit(&self, name: &str, fields: Value) {
@@ -688,11 +735,15 @@ impl Daemon {
         let mut config = match credentials::load(&self.vault, Kind::Chat, id) {
             Ok(Some(c)) => c.to_config(),
             _ => ChatProvider::by_id(id)
-                .filter(|p| !p.requires_key)
+                .filter(|p| !p.requires_key || p.id == "ollama-cloud")
                 .map(|_| {
                     ProviderConfig::new(id, "", models::default_for(id).unwrap_or_default())
                 })?,
         };
+        if id == "ollama-cloud" && config.api_key.trim().is_empty() {
+            // The service environment is the other place the key may live; never logged.
+            config.api_key = std::env::var("OLLAMA_API_KEY").unwrap_or_default();
+        }
         if !model.is_empty() {
             config.model = model.to_owned();
         }
@@ -972,7 +1023,7 @@ impl Daemon {
             && !config.chat_definition().is_some_and(|p| p.supports_images)
         {
             return Err(
-                "Choose an image-capable model such as Gemini, or remove the image attachments."
+                "Choose an image-capable model such as Claude, or remove the image attachments."
                     .into(),
             );
         }
@@ -1032,6 +1083,7 @@ impl Daemon {
         g.turn += 1;
         let turn = g.turn;
         g.effective = (config.id.clone(), config.model.clone());
+        g.loading = loopback_ollama(&config);
         self.emit(
             "answer.started",
             json!({"turn": turn, "question": question_text, "automatic": automatic,
@@ -1087,12 +1139,18 @@ impl Daemon {
     ) -> Result<String, engine::ChatError> {
         let mut last = Instant::now();
         let streamed = Arc::new(AtomicBool::new(false));
-        let client = engine::http_client();
         let mut result = Ok(String::new());
         for (attempt, config) in chain.iter().take(2).enumerate() {
             if attempt > 0 {
-                self.inner.lock().effective = (config.id.clone(), config.model.clone());
+                let mut g = self.inner.lock();
+                g.effective = (config.id.clone(), config.model.clone());
+                g.loading = loopback_ollama(config);
             }
+            let client = if loopback_ollama(config) {
+                engine::loading_http_client()
+            } else {
+                engine::http_client()
+            };
             result = engine::stream_chat_bounded(
                 &client,
                 config,
@@ -2362,10 +2420,24 @@ impl Daemon {
                 let has_key = credentials::load(&self.vault, Kind::Chat, p.id)
                     .ok()
                     .flatten()
-                    .is_some_and(|c| !c.api_key.trim().is_empty());
+                    .is_some_and(|c| !c.api_key.trim().is_empty())
+                    || (p.id == "ollama-cloud" && std::env::var_os("OLLAMA_API_KEY").is_some());
                 json!({"id": p.id, "name": p.name, "requires_key": p.requires_key, "has_key": has_key})
             })
             .collect()
+    }
+
+    /// Readiness of every chat provider with the fix for the ones that are not ready.
+    async fn providers_status(&self) -> Value {
+        let rows = CHAT_PROVIDERS.iter().map(|p| {
+            let has_key = credentials::load(&self.vault, Kind::Chat, p.id)
+                .ok()
+                .flatten()
+                .is_some_and(|c| !c.api_key.trim().is_empty())
+                || (p.id == "ollama-cloud" && std::env::var_os("OLLAMA_API_KEY").is_some());
+            crate::ai::chat::status::status(p.id, p.name, has_key)
+        });
+        json!(futures_util::future::join_all(rows).await)
     }
 
     async fn models_list(&self, provider: &str) -> Result<Value, String> {
@@ -2917,11 +2989,13 @@ impl Daemon {
         Ok(json!({"meeting": meeting, "lines": lines}))
     }
 
-    /// What the overlay shows now. `writing` while an answer streams, `ready` when
+    /// What the overlay shows now. `loading` while a loopback ollama has sent nothing yet, `writing` while an answer streams, `ready` when
     /// one is waiting, else `listening` while recording, else `idle`.
     fn now_get(&self) -> Value {
         let g = self.inner.lock();
-        let status = if g.chat.is_streaming() {
+        let status = if g.chat.is_streaming() && g.loading && g.chat.answer().is_empty() {
+            "loading"
+        } else if g.chat.is_streaming() {
             "writing"
         } else if !g.chat.answer().is_empty() {
             "ready"
@@ -3170,6 +3244,7 @@ impl Daemon {
                 self.prompts(args)
             }
             "providers.list" => Ok(self.providers_list()),
+            "providers.status" => Ok(self.providers_status().await),
             "models.list" => {
                 self.models_list(&parse::<protocol::ProviderArg>(args)?.provider)
                     .await
@@ -3219,7 +3294,14 @@ mod routing_tests {
         let plan = plan_chain("claude-sub", "sonnet", false, |_| true);
         assert_eq!(
             ids(plan.clone()),
-            ["claude-sub", "codex-sub", "gemini", "ollama"]
+            [
+                "claude-sub",
+                "agy-sub",
+                "opencode",
+                "codex-sub",
+                "ollama-cloud",
+                "ollama"
+            ]
         );
         assert_eq!(plan[0].1, "sonnet");
         assert_eq!(plan[1].1, "");
@@ -3407,9 +3489,12 @@ mod routing_tests {
     }
 
     #[test]
-    fn live_never_uses_codex() {
+    fn live_never_uses_codex_or_agy() {
         let plan = plan_chain("claude-sub", "haiku", true, |_| true);
-        assert_eq!(ids(plan.clone()), ["claude-sub", "gemini", "ollama"]);
+        assert_eq!(
+            ids(plan.clone()),
+            ["claude-sub", "opencode", "ollama-cloud", "ollama"]
+        );
         assert_eq!(plan[0].1, "haiku");
         // Even when codex is chosen for live, it is skipped.
         assert!(!ids(plan_chain("codex-sub", "", true, |_| true)).contains(&"codex-sub"));
@@ -3418,7 +3503,10 @@ mod routing_tests {
     #[test]
     fn missing_binary_falls_through_and_ollama_stays_last_automatically() {
         let plan = plan_chain("claude-sub", "sonnet", false, |id| id != "claude-sub");
-        assert_eq!(ids(plan), ["codex-sub", "gemini", "ollama"]);
+        assert_eq!(
+            ids(plan),
+            ["agy-sub", "opencode", "codex-sub", "ollama-cloud", "ollama"]
+        );
         let plan = plan_chain("claude-sub", "", false, |id| id == "ollama");
         assert_eq!(ids(plan), ["ollama"]);
         // An explicit ollama is kept first.
@@ -3486,6 +3574,76 @@ mod command_tests {
             capture: false,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn local_only_chains_hold_loopback_ollama_whatever_is_chosen() {
+        let d = daemon();
+        let mut s = d.inner.lock().settings.clone();
+        for chosen in [
+            "ollama-cloud",
+            "claude-sub",
+            "opencode",
+            "agy-sub",
+            "ollama",
+        ] {
+            s.chat_provider = chosen.into();
+            s.live_provider = chosen.into();
+            for live in [false, true] {
+                let ids: Vec<_> = d.chain(&s, live, true).into_iter().map(|c| c.id).collect();
+                assert_eq!(ids, ["ollama"], "{chosen} live={live}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_status_lists_every_provider_with_a_login_command() {
+        let rows = daemon().providers_status().await;
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), CHAT_PROVIDERS.len());
+        for row in rows {
+            assert!(
+                ["ready", "not_installed", "not_logged_in", "no_key"]
+                    .contains(&row["state"].as_str().unwrap())
+            );
+            assert!(!row["login"].as_str().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn stored_gemini_settings_move_to_agy_and_its_key_is_deleted() {
+        let root = std::env::temp_dir().join(format!("nm-mig-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let vault = Vault::open(&root).unwrap();
+        vault
+            .set(
+                "provider:chat:gemini",
+                json!({"kind": "chat", "provider": "gemini", "api_key": "sk-fake"}),
+            )
+            .unwrap();
+        let db = Database::open(root.join("t.db")).unwrap();
+        for key in ["chat_provider", "live_provider"] {
+            crate::db::settings::set(db.connection(), key, "gemini").unwrap();
+        }
+        drop(db);
+        let d = Daemon::new(Options {
+            db_path: root.join("t.db"),
+            vault_dir: root.clone(),
+            capture: false,
+        })
+        .unwrap();
+        let s = d.inner.lock().settings.clone();
+        assert_eq!(
+            (s.chat_provider.as_str(), s.live_provider.as_str()),
+            ("agy-sub", "agy-sub")
+        );
+        assert!(vault.get("provider:chat:gemini").unwrap().is_none());
+        // The first subscriber is told once.
+        let mut first = d.subscribe();
+        assert_eq!(first.try_recv().unwrap()["event"], "notice");
+        let _second = d.subscribe();
+        assert!(first.try_recv().is_err());
+        std::fs::remove_dir_all(root).ok();
     }
 
     fn line(text: &str, start: f64) -> LiveEvent {
@@ -3856,6 +4014,9 @@ mod command_tests {
             assert!(!stays_local(&cfg(bad, "llama3")), "{bad}");
         }
         assert!(!stays_local(&cfg("", "gpt-oss:120b-cloud")));
+        let mut cloud = cfg("", "gpt-oss:120b");
+        cloud.id = "ollama-cloud".into();
+        assert!(!stays_local(&cloud));
     }
 
     #[test]

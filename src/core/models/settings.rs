@@ -603,7 +603,7 @@ mod tests {
     fn round_trips_every_field() {
         let database = database();
         let settings = Settings {
-            chat_provider: "gemini".into(),
+            chat_provider: "agy-sub".into(),
             reduce_motion: true,
             capture_delay_seconds: 3,
             use_image_on_send: true,
@@ -626,7 +626,7 @@ mod tests {
             recap_prompt_interviewer: "my interviewer".into(),
             auto_record_on_call: true,
             chat_model: "opus".into(),
-            live_provider: "gemini".into(),
+            live_provider: "agy-sub".into(),
             live_model: "flash".into(),
             meeting_mode: MeetingMode::TeamMeeting,
             text_scale: 130,

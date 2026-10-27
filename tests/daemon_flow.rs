@@ -136,7 +136,7 @@ async fn daemon_flow_scripted_session() {
     let provider = fake_provider().await;
     {
         let vault = Vault::open(&vault_dir).unwrap();
-        let mut credential = credentials::Credential::chat("gemini", SECRET);
+        let mut credential = credentials::Credential::chat("ollama", SECRET);
         credential.model = "mock".into();
         credential.base_url = provider;
         credentials::save(&vault, &credential).unwrap();
@@ -167,7 +167,7 @@ async fn daemon_flow_scripted_session() {
     let mut client = Client::connect(&socket).await;
     assert_eq!(client.call("bogus.command", json!({})).await["ok"], false);
     for (key, value) in [
-        ("chat_provider", json!("gemini")),
+        ("chat_provider", json!("ollama")),
         ("chat_model", json!("")),
         ("auto_response", json!("off")),
     ] {
@@ -195,10 +195,10 @@ async fn daemon_flow_scripted_session() {
     let started = client.event("answer.started").await;
     assert_eq!(started["question"], "Summarise the plan.");
     assert_eq!(started["automatic"], false);
-    assert_eq!(started["provider"], "gemini");
+    assert_eq!(started["provider"], "ollama");
     let delta = client.event("answer.delta").await;
     assert_eq!(delta["text"], "Mock answer.");
-    assert_eq!(delta["provider"], "gemini");
+    assert_eq!(delta["provider"], "ollama");
     assert_eq!(delta["model"], "mock");
     let found = client
         .call("settings.search", json!({"query": "provider"}))
@@ -261,7 +261,7 @@ async fn daemon_flow_scripted_session() {
     let empty = client
         .call(
             "settings.set",
-            json!({"key": "api_key", "provider": "gemini", "value": ""}),
+            json!({"key": "api_key", "provider": "ollama", "value": ""}),
         )
         .await;
     assert_eq!(empty["ok"], false, "{empty}");
@@ -325,7 +325,7 @@ async fn team_series_carries_an_action_into_the_next_meeting() {
     let vault_dir = root.join("data");
     {
         let vault = Vault::open(&vault_dir).unwrap();
-        let mut credential = credentials::Credential::chat("gemini", SECRET);
+        let mut credential = credentials::Credential::chat("ollama", SECRET);
         credential.model = "mock".into();
         credential.base_url = fake_provider_with(team_reply).await;
         credentials::save(&vault, &credential).unwrap();
@@ -349,7 +349,7 @@ async fn team_series_carries_an_action_into_the_next_meeting() {
     }
     let mut client = Client::connect(&socket).await;
     for (key, value) in [
-        ("chat_provider", json!("gemini")),
+        ("chat_provider", json!("ollama")),
         ("chat_model", json!("")),
         ("auto_response", json!("off")),
         ("meeting_mode", json!("team_meeting")),
@@ -465,7 +465,7 @@ async fn interviewer_session_then_delete_leaves_nothing() {
     let vault_dir = root.join("data");
     {
         let vault = Vault::open(&vault_dir).unwrap();
-        let mut credential = credentials::Credential::chat("gemini", SECRET);
+        let mut credential = credentials::Credential::chat("ollama", SECRET);
         credential.model = "mock".into();
         credential.base_url = fake_provider_with(interviewer_reply).await;
         credentials::save(&vault, &credential).unwrap();
@@ -490,9 +490,9 @@ async fn interviewer_session_then_delete_leaves_nothing() {
     }
     let mut client = Client::connect(&socket).await;
     for (key, value) in [
-        ("chat_provider", json!("gemini")),
+        ("chat_provider", json!("ollama")),
         ("chat_model", json!("")),
-        ("live_provider", json!("gemini")),
+        ("live_provider", json!("ollama")),
         ("auto_response", json!("off")),
         ("response_pace", json!("Fast")),
         ("meeting_mode", json!("interviewer")),
@@ -661,8 +661,8 @@ async fn local_only_data_never_reaches_a_cloud_model_even_without_the_session_fl
     let vault_dir = root.join("data");
     {
         let vault = Vault::open(&vault_dir).unwrap();
-        let mut credential = credentials::Credential::chat("gemini", SECRET);
-        credential.model = "mock".into();
+        let mut credential = credentials::Credential::chat("ollama", SECRET);
+        credential.model = "mock-cloud".into();
         credential.base_url = fake_provider_with(counting_reply).await;
         credentials::save(&vault, &credential).unwrap();
     }
@@ -686,7 +686,7 @@ async fn local_only_data_never_reaches_a_cloud_model_even_without_the_session_fl
     }
     let mut client = Client::connect(&socket).await;
     for (key, value) in [
-        ("chat_provider", json!("gemini")),
+        ("chat_provider", json!("ollama")),
         ("chat_model", json!("")),
     ] {
         client
@@ -714,7 +714,7 @@ async fn local_only_data_never_reaches_a_cloud_model_even_without_the_session_fl
         id
     };
 
-    // C3: the session has no candidate, but the target is local-only: nothing goes to gemini.
+    // C3: the session has no candidate, but the target is local-only: nothing goes to a cloud model (a -cloud ollama model).
     let local = candidate(&mut client, true).await;
     let refused = client
         .call("questions.generate", json!({"candidate": local}))

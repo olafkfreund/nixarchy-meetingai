@@ -18,8 +18,8 @@ const EMPTY_CATALOG: &str = "This account's catalog has no text-chat models. You
 
 pub const MODELS: &[ModelList] = &[
     ModelList {
-        provider: "gemini",
-        models: &["gemini-3.8-flash"],
+        provider: "agy-sub",
+        models: &["gemini-3.8-flash-low"],
     },
     // Ollama's real list comes from /api/tags; this is only the starting choice.
     ModelList {
@@ -33,7 +33,22 @@ pub const MODELS: &[ModelList] = &[
     // "default" lets the CLI choose; any other id is passed with -m.
     ModelList {
         provider: "codex-sub",
-        models: &[super::super::chat::cli::CLI_DEFAULT_MODEL],
+        models: &[
+            super::super::chat::cli::CLI_DEFAULT_MODEL,
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-5.6-sol",
+        ],
+    },
+    // The real list comes from `opencode serve` (config/providers).
+    ModelList {
+        provider: "opencode",
+        models: &["opencode/big-pickle"],
+    },
+    // The real list comes from ollama.com/api/tags.
+    ModelList {
+        provider: "ollama-cloud",
+        models: &["gpt-oss:120b"],
     },
 ];
 
@@ -90,6 +105,16 @@ mod tests {
     }
 
     #[test]
+    fn show_capabilities_decide_whether_a_model_can_chat() {
+        let chat = serde_json::json!({"capabilities":["completion","tools"]});
+        let embed = serde_json::json!({"capabilities":["embedding"]});
+        let old = serde_json::json!({"details":{}});
+        assert!(has_completion(&chat));
+        assert!(!has_completion(&embed));
+        assert!(has_completion(&old));
+    }
+
+    #[test]
     fn unknown_provider_is_empty_not_a_panic() {
         assert!(for_provider("nope").is_empty());
         assert_eq!(default_for("nope"), None);
@@ -97,9 +122,9 @@ mod tests {
 
     #[test]
     fn label_prefers_the_configured_model() {
-        assert_eq!(label(Some("gpt-4o"), Some("gemini")), "gpt-4o");
-        assert_eq!(label(None, Some("gemini")), "gemini-3.8-flash");
-        assert_eq!(label(Some("   "), Some("gemini")), "gemini-3.8-flash");
+        assert_eq!(label(Some("gpt-4o"), Some("agy-sub")), "gpt-4o");
+        assert_eq!(label(None, Some("agy-sub")), "gemini-3.8-flash-low");
+        assert_eq!(label(Some("   "), Some("agy-sub")), "gemini-3.8-flash-low");
         assert_eq!(label(None, None), "Add a provider");
     }
 
@@ -142,7 +167,7 @@ pub fn cache_key(config: &super::providers::ProviderConfig) -> String {
     let scope =
         serde_json::to_vec(&(&config.id, config.endpoint(), &config.api_key)).expect("cache scope");
     format!(
-        "model_catalog:v2:{}",
+        "model_catalog:v3:{}",
         Sha256::digest(scope)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -163,7 +188,7 @@ pub fn cached(
 /// custom gateways. Never send a key to a second vendor as a fallback.
 pub fn models_endpoint(config: &super::providers::ProviderConfig) -> Result<String, String> {
     let endpoint = config.endpoint().ok_or("Unknown provider")?;
-    if config.id == "ollama" {
+    if matches!(config.id.as_str(), "ollama" | "ollama-cloud") {
         let origin = endpoint.split("/v1/").next().unwrap_or(&endpoint);
         return Ok(format!("{}/api/tags", origin.trim_end_matches('/')));
     }
@@ -231,6 +256,71 @@ pub fn parse_models(value: &serde_json::Value) -> Result<Vec<String>, String> {
     }
 }
 
+/// Whether an `/api/show` reply says the model can generate text (embedding-only models cannot).
+/// Older servers send no `capabilities`; those are kept.
+fn has_completion(show: &serde_json::Value) -> bool {
+    show.get("capabilities")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(|caps| caps.iter().any(|c| c.as_str() == Some("completion")))
+}
+
+/// Keep the models Ollama says can complete text. Answers are cached for the daemon's run;
+/// a model whose `/api/show` fails is kept and asked again next time.
+async fn completion_only(
+    config: &super::providers::ProviderConfig,
+    models: Vec<String>,
+) -> Vec<String> {
+    use futures_util::StreamExt;
+    static SHOWN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    let Ok(tags) = models_endpoint(config) else {
+        return models;
+    };
+    let origin = tags.trim_end_matches("/api/tags").to_owned();
+    let cache = SHOWN.get_or_init(Default::default);
+    let client = crate::ai::engine::http_client();
+    let check = |model: String| {
+        let (client, origin) = (client.clone(), origin.clone());
+        async move {
+            let key = format!("{origin}\0{model}");
+            if let Some(known) = cache.lock().expect("show cache").get(&key) {
+                return (model, *known);
+            }
+            let shown = async {
+                let response = client
+                    .post(format!("{origin}/api/show"))
+                    .json(&serde_json::json!({"model": model}))
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await
+                    .ok()?;
+                response.status().is_success().then_some(())?;
+                let bytes = crate::core::network::read_body(response, 1024 * 1024)
+                    .await
+                    .ok()?;
+                serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+            }
+            .await;
+            match shown {
+                Some(show) => {
+                    let ok = has_completion(&show);
+                    cache.lock().expect("show cache").insert(key, ok);
+                    (model, ok)
+                }
+                None => (model, true),
+            }
+        }
+    };
+    let mut kept: Vec<String> = futures_util::stream::iter(models)
+        .map(check)
+        .buffer_unordered(8)
+        .filter_map(|(model, ok)| async move { ok.then_some(model) })
+        .collect()
+        .await;
+    kept.sort();
+    kept
+}
+
 pub async fn discover(
     path: Option<std::path::PathBuf>,
     config: super::providers::ProviderConfig,
@@ -239,6 +329,21 @@ pub async fn discover(
     if super::providers::ChatProvider::by_id(&config.id)
         .is_some_and(|p| p.wire == super::providers::ChatWire::Cli)
     {
+        if config.id == "opencode"
+            && let Ok(models) = crate::ai::chat::opencode::models().await
+        {
+            return Ok(models);
+        }
+        if config.id == "codex-sub"
+            && let Ok(models) = crate::ai::chat::cli::codex_models().await
+        {
+            return Ok(models);
+        }
+        if config.id == "agy-sub"
+            && let Ok(models) = crate::ai::chat::cli::agy_models().await
+        {
+            return Ok(models);
+        }
         return Ok(for_provider(&config.id)
             .iter()
             .map(|m| (*m).to_owned())
@@ -253,6 +358,14 @@ pub async fn discover(
     let models = tokio::time::timeout(std::time::Duration::from_secs(30), fetch_catalog(&config))
         .await
         .map_err(|_| "Model refresh timed out. Your saved key and models have been kept.")??;
+    let models = if config.id == "ollama" {
+        completion_only(&config, models).await
+    } else {
+        models
+    };
+    if models.is_empty() {
+        return Err(EMPTY_CATALOG.into());
+    }
     if let Some(path) = path
         && let Ok(db) = crate::db::Database::open(path)
     {
@@ -388,12 +501,19 @@ mod discovery_tests {
         );
     }
 
+    /// A keyed OpenAI-style provider; the catalog has none built in.
+    fn openai_config(key: &str, model: &str) -> ProviderConfig {
+        let mut config = ProviderConfig::new("custom-test", key, model);
+        config.custom = Some(crate::ai::catalog::custom::CustomProvider::default());
+        config
+    }
+
     fn catalog_server(
         pages: Vec<(u16, serde_json::Value)>,
     ) -> (ProviderConfig, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
-        let mut config = ProviderConfig::new("gemini", "saved-list-key", "my-custom-model");
+        let mut config = openai_config("saved-list-key", "my-custom-model");
         config.base_url = format!(
             "http://{}/v1/chat/completions",
             listener.local_addr().unwrap()
@@ -460,10 +580,7 @@ mod discovery_tests {
                     ),
                 ]
             };
-            let (mut config, server) = catalog_server(pages);
-            if google {
-                config.id = "gemini".into();
-            }
+            let (config, server) = catalog_server(pages);
             assert_eq!(discover(None, config, false).await.unwrap(), ["a", "b"]);
             let requests = server.join().unwrap();
             assert!(
@@ -530,10 +647,11 @@ mod discovery_tests {
 
     #[test]
     fn endpoint_and_cache_scope_follow_the_actual_account_and_gateway() {
-        let mut config = ProviderConfig::new("gemini", "key-a", "m");
+        let mut config = openai_config("key-a", "m");
+        config.base_url = "https://api.example.test/v1/chat/completions".into();
         assert_eq!(
             models_endpoint(&config).unwrap(),
-            "https://generativelanguage.googleapis.com/v1beta/openai/models"
+            "https://api.example.test/v1/models"
         );
         let scope = cache_key(&config);
         config.api_key = "key-b".into();
@@ -573,7 +691,7 @@ mod discovery_tests {
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("catalog.db");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut config = ProviderConfig::new("gemini", "catalog-test-key", "custom-model");
+        let mut config = openai_config("catalog-test-key", "custom-model");
         config.base_url = format!(
             "http://{}/v1/chat/completions",
             listener.local_addr().unwrap()
