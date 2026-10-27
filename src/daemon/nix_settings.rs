@@ -51,7 +51,11 @@ fn valid(key: &str, value: &str) -> bool {
             "response_pace" => ResponsePace::ALL.iter().any(|v| v.label() == value),
             "response_length" => ResponseLength::ALL.iter().any(|v| v.label() == value),
             "auto_response" => AutoResponse::ALL.iter().any(|v| v.as_str() == value),
-            "smart_follow_ups" | "auto_record_on_call" | "reduce_motion" | "mcp_allow_record" => {
+            "smart_follow_ups"
+            | "auto_record_on_call"
+            | "calendar_enabled"
+            | "reduce_motion"
+            | "mcp_allow_record" => {
                 matches!(value, "true" | "false")
             }
             "chat_provider" | "live_provider" => {

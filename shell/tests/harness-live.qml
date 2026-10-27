@@ -38,7 +38,7 @@ ShellRoot {
     }
     PanelWindow { // qmllint disable uncreatable-type
         anchors { top: true; left: true }
-        implicitWidth: 160; implicitHeight: 36
+        implicitWidth: 320; implicitHeight: 36
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.layer: WlrLayer.Overlay
         color: "transparent"

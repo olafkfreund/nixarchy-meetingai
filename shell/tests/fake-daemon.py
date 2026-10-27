@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--providers] [--locked] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--call] [--providers] [--locked] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -13,6 +13,9 @@ record.start refused with consent_required until it carries consent:true, then a
 
 --providers: the real provider list, providers.status and a models.list per provider (replies carry `provider`; claude-sub answers a second late,
 out of order, and opencode fails), for the SCENARIO=providers switch in live-shots.sh.
+
+--call writes a running Zoom call ("Weekly sync", pid of this process) to ../meeting-mode.json beside the socket's directory and
+stays idle (not recording), so the bar shows the outlined dot and the "Take notes?" chip. record.start is logged with its title.
 
 --drop cuts the first connection mid-answer. Like the real daemon, the answer goes on for whoever is connected, and a client that
 (re)connects gets nothing replayed: it must ask transcript.get and now.get for what it missed.
@@ -45,6 +48,7 @@ first_run = "--first-run" in sys.argv   # no provider, speech not ready: the Set
 err = "--error" in sys.argv          # a typed question starts, waits, then fails (Writing bar, then Retry)
 drop = "--drop" in sys.argv          # the first connection is cut mid-answer; the client reconnects and asks transcript.get / now.get
 providers = "--providers" in sys.argv
+call = "--call" in sys.argv
 locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, meeting_mode, text_scale
 live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
@@ -403,12 +407,14 @@ class Handler(socketserver.StreamRequestHandler):
         for raw in self.rfile:
             req = json.loads(raw)
             cmd = req["cmd"]
-            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else ""))
+            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) if cmd == "record.start" else ""))
             if cmd == "record.start" and iv and not (state["consent"] or req.get("args", {}).get("consent")):
                 self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed."})
                 continue
             if cmd == "record.start":
                 state.update(recording=True, since=int(time.time() * 1000))
+                if call:
+                    cast({"event": "state", **state})
                 if iv:
                     state["consent"] = True
                     threading.Thread(target=self.stream_iv_call, daemon=True).start()
@@ -461,6 +467,11 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 
 
 os.makedirs(os.path.dirname(sock_path), mode=0o700, exist_ok=True)
+if call:
+    now_ms = int(time.time() * 1000)
+    with open(os.path.join(os.path.dirname(os.path.dirname(sock_path)), "meeting-mode.json"), "w") as f:
+        json.dump({"active": True, "reason": "Zoom", "since": now_ms - 90_000, "updated": now_ms, "pid": os.getpid(), "call": "call", "callApp": "Zoom",
+                   "callTitle": "Weekly sync", "callSince": now_ms - 90_000, "callDetected": True}, f)
 if os.path.exists(sock_path):
     os.unlink(sock_path)
 Server(sock_path, Handler).serve_forever()

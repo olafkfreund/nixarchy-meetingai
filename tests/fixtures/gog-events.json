@@ -1,0 +1,25 @@
+{
+  "events": [
+    {
+      "id": "a1",
+      "summary": "Lunch",
+      "start": {"dateTime": "2026-10-27T11:30:00+01:00"},
+      "end": {"dateTime": "2026-10-27T12:30:00+01:00"},
+      "location": "Cafe"
+    },
+    {
+      "id": "b2",
+      "summary": "Sprint planning",
+      "start": {"dateTime": "2026-10-27T10:00:00+01:00"},
+      "end": {"dateTime": "2026-10-27T11:00:00+01:00"},
+      "hangoutLink": "https://meet.google.com/abc-defg-hij"
+    },
+    {
+      "id": "c3",
+      "summary": "All day",
+      "start": {"date": "2026-10-27"},
+      "end": {"date": "2026-10-28"},
+      "description": "https://zoom.us/j/1"
+    }
+  ]
+}

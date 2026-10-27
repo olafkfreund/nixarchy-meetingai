@@ -3,18 +3,18 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// Watches the call state written by nixarchy.meeting-mode and offers to take
-// notes. It never stops a recording on its own: the hang-up notification only
-// offers to.
+// Watches the call state written by nixarchy.meeting-mode (CallState.qml) and offers to take
+// notes, or records at once with auto_record_on_call (never in interviewer mode: consent stays
+// manual). It never stops a recording on its own: the hang-up notification only offers to.
 Item {
     id: root
 
     property var shell: null
     property var manifest: null
 
-    readonly property string callFile: Quickshell.env("XDG_RUNTIME_DIR") + "/meeting-mode.json"
-    property bool callActive: false
-    property bool seen: false   // the first read is the baseline: a call already running at startup is not a new call
+    CallState { id: calls }   // titles stay in memory; never logged
+    property string prevCall: "none"
+    property double offeredFor: -1   // the call (its start) already offered or auto-started
 
     Client { id: client }
 
@@ -42,8 +42,8 @@ Item {
 
     // The overlay's consent banner lives in another Client, so a refused start (candidate not told,
     // or local_only) is shown as a notification here; the interviewer then starts it from the overlay.
-    function startNotes(quiet) {
-        client.send("record.start", {}, function(r) {
+    function startNotes(quiet, title) {
+        client.send("record.start", title ? { title: title } : {}, function(r) {
             var e = String(r.error || "");
             if (r.ok) { if (!quiet) Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", "Taking notes"]); return; }
             Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", e.replace(/^(consent_required|local_only): /, "") + (e.indexOf("consent_required: ") === 0 ? " Open the overlay and start recording." : "")]);
@@ -51,7 +51,7 @@ Item {
     }
 
     function act(what) {
-        if (what === "start") root.startNotes(true);
+        if (what === "start") root.startNotes(true, calls.title);
         else client.send("record.stop", {});
     }
 
@@ -64,43 +64,39 @@ Item {
         });
     }
 
-    onCallActiveChanged: {
-        if (!root.seen) return;
-        if (root.callActive && !client.recording) {
-            if (client.settings.auto_record_on_call === true) {
-                root.startNotes(false);
-            } else {
-                root.offer("A call started", "take", "Take notes");
-            }
-        } else if (!root.callActive && client.recording) {
-            root.offer("The call ended. Notes are still recording.", "stop", "Stop notes");
+    // A call is on and nobody is taking notes: record (consent stays manual, so never in interviewer mode) or offer.
+    // Once per call, whether it comes from the state change or from meeting-mode's hook.
+    function react() {
+        var key = calls.since || 1;
+        if (calls.call !== "call" || client.recording || root.offeredFor === key) return "idle";
+        root.offeredFor = key;
+        if (client.settings.auto_record_on_call === true && client.settings.meeting_mode !== "interviewer") {
+            root.startNotes(false, calls.title);
+            return "recording";
         }
+        root.offer("A call started" + (calls.app ? " in " + calls.app : ""), "take", "Take notes");
+        return "offered";
     }
 
-    FileView {
-        id: callIn
-        path: root.callFile
-        watchChanges: true
-        printErrors: false
-        onFileChanged: reload()
-        onLoadFailed: root.seen = true   // no file yet: the baseline is "no call"
-        onLoaded: {
-            try {
-                root.callActive = JSON.parse(text()).active === true;
-                root.seen = true;
-            } catch (e) {}
+    Connections {
+        target: calls
+        function onCallChanged() {
+            var was = root.prevCall;
+            root.prevCall = calls.call;
+            if (!calls.seen) return;
+            if (client.connected) client.send("calendar.refresh", {});
+            if (calls.call === "call") root.react();
+            else if (calls.call === "none" && was === "call" && client.recording)
+                root.offer("The call ended. Notes are still recording.", "stop", "Stop notes");
         }
-    }
-
-    // Atomic replaces can slip past the watcher.
-    Timer {
-        interval: 5000; repeat: true; running: true
-        onTriggered: callIn.reload()
     }
 
     // omarchy-shell meetingai toggle
     IpcHandler {
         target: "meetingai"
+        function offer(): string {
+            return root.react();
+        }
         function toggle(): string {
             return root.shell && root.shell.toggle("nixarchy.meetingai", "{}") ? "ok" : "unavailable";
         }

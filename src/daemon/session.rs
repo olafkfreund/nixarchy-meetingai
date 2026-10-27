@@ -218,6 +218,10 @@ struct Inner {
     last_earlier: Option<Instant>,
     /// Earlier items already offered this session, so the callout moves on to a new one.
     shown_earlier: HashSet<String>,
+    /// The calendar event on now (a conference link), when `calendar_enabled`.
+    calendar: Option<super::calendar::Event>,
+    /// A meeting named from a call window or the calendar: the notes keep that title.
+    named_meeting: Option<String>,
 }
 
 /// Least time between two "Earlier task?" callouts.
@@ -694,6 +698,8 @@ impl Daemon {
                 consent: false,
                 last_earlier: None,
                 shown_earlier: HashSet::new(),
+                calendar: None,
+                named_meeting: None,
             }),
         }))
     }
@@ -730,6 +736,7 @@ impl Daemon {
             "consent": g.consent,
             "finishing": g.finishing_meeting.is_some(),   // stopped, notes still being written
             "meeting": g.meeting_id.as_ref().or(g.resume_meeting.as_ref()),
+            "calendar_title": g.calendar.as_ref().map(|e| e.title.as_str()),
             "ready": {"chat": chat, "speech": speech},
             "hints": {
                 "chat": (!chat).then_some(if local {
@@ -744,6 +751,40 @@ impl Daemon {
                 }),
             },
         })
+    }
+
+    /// Look the calendar up (only when `calendar_enabled`; `idle_only` skips it while recording),
+    /// keep the event in memory and in `calendar.json`, and tell the shells. Titles are not logged.
+    pub async fn calendar_refresh(self: &Arc<Self>, idle_only: bool) {
+        let now = now_ms();
+        let enabled = {
+            let mut g = self.inner.lock();
+            g.settings = Settings::load(&g.db).unwrap_or_default();
+            if idle_only && g.recording.is_some() {
+                return;
+            }
+            g.settings.calendar_enabled
+        };
+        let event = if enabled {
+            match super::calendar::fetch("gog", now).await {
+                Some(out) => super::calendar::pick(&out, now),
+                None => return, // no gog, or not logged in: keep quiet and keep what we had
+            }
+        } else {
+            None
+        };
+        if enabled
+            && let Some(dir) =
+                crate::cli::socket_path().and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        {
+            super::calendar::write(&dir, event.as_ref(), now);
+        }
+        let mut g = self.inner.lock();
+        if g.calendar != event {
+            tracing::info!(event = event.is_some(), "calendar event changed");
+            g.calendar = event;
+            self.emit_state(&g);
+        }
     }
 
     fn emit_state(&self, g: &Inner) {
@@ -1671,7 +1712,7 @@ impl Daemon {
 
     // ----- recording ----------------------------------------------------
 
-    async fn record_start(self: &Arc<Self>, consent: bool) -> Result<Value, String> {
+    async fn record_start(self: &Arc<Self>, consent: bool, title: String) -> Result<Value, String> {
         let (stop, speech, device, output_device, system) = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
@@ -1775,15 +1816,28 @@ impl Daemon {
                     .map_err(|e| format!("Could not resume the meeting: {e}"))
             } else {
                 // Name it at creation so the list never shows a blank title.
-                meetings::start(
+                let given: String = title.trim().chars().take(120).collect();
+                let given = if given.is_empty() {
+                    g.calendar.as_ref().map(|e| e.title.clone())
+                } else {
+                    Some(given)
+                };
+                let name = given
+                    .clone()
+                    .unwrap_or_else(|| format!("Session · {}", clock()));
+                let started = meetings::start(
                     g.db.connection(),
-                    &format!("Session · {}", clock()),
+                    &name,
                     "meeting",
                     "en",
                     g.series.as_deref().filter(|_| g.candidate.is_none()),
                     g.settings.meeting_mode,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string());
+                if let (Ok(id), Some(_)) = (&started, &given) {
+                    g.named_meeting = Some(id.clone());
+                }
+                started
             };
             match outcome {
                 Ok(id) => {
@@ -1977,7 +2031,7 @@ impl Daemon {
 
     /// Name the meeting, then summarise what is left and consolidate every chunk.
     async fn finish_meeting_artifacts(self: &Arc<Self>, meeting: &str) {
-        let (config, language, body, local, interview, said) = {
+        let (config, language, body, local, interview, said, named) = {
             let g = self.inner.lock();
             let c = g.db.connection();
             let local = self.local_for(c, Some(meeting));
@@ -1988,6 +2042,7 @@ impl Daemon {
                 local,
                 candidates::for_meeting(c, meeting).ok().flatten().is_some(),
                 candidates::said(c, meeting),
+                g.named_meeting.as_deref() == Some(meeting),
             )
         };
         // Merging duplicates needs no model, so every path ends here, and tells the shell once.
@@ -2011,7 +2066,8 @@ impl Daemon {
             return;
         };
         let _serial = self.notes.lock().await;
-        if !body.trim().is_empty()
+        if !named
+            && !body.trim().is_empty()
             && let Some(title) =
                 titling::request_title(&engine::http_client(), &config, &body).await
         {
@@ -3167,6 +3223,10 @@ impl Daemon {
     async fn dispatch(self: &Arc<Self>, cmd: &str, args: Value) -> Result<Value, String> {
         match cmd {
             "state.get" => Ok(self.state_value(&self.inner.lock())),
+            "calendar.refresh" => {
+                self.calendar_refresh(false).await;
+                Ok(json!({}))
+            }
             "quit" => {
                 self.quit();
                 Ok(json!({}))
@@ -3248,8 +3308,8 @@ impl Daemon {
             "session.list" => self.session_list(false),
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
             "record.start" => {
-                self.record_start(parse::<protocol::RecordStart>(args)?.consent)
-                    .await
+                let a = parse::<protocol::RecordStart>(args)?;
+                self.record_start(a.consent, a.title).await
             }
             "candidate.create" => {
                 let name = parse::<protocol::NameArg>(args)?.name;
@@ -3871,6 +3931,18 @@ mod command_tests {
         while let Ok(e) = events.try_recv() {
             assert_ne!(e["event"], "notice");
         }
+    }
+
+    #[tokio::test]
+    async fn record_start_names_the_session_from_the_call() {
+        let d = daemon();
+        d.handle("record.start", json!({"title": "  Sprint planning "}), None)
+            .await
+            .unwrap();
+        let g = d.inner.lock();
+        let rows = meetings::list(g.db.connection(), 5).unwrap();
+        assert_eq!(rows[0].title, "Sprint planning");
+        assert_eq!(g.named_meeting.as_deref(), Some(rows[0].id.as_str()));
     }
 
     #[tokio::test]

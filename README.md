@@ -233,9 +233,37 @@ dialog, then a drawer, then the overlay; everything is reachable with `Tab`.
 
 ### Calls
 
-With the [nixarchy-meeting-mode](https://github.com/olafkfreund/nixarchy-meeting-mode)
-plugin installed, a detected call offers "Take notes", or starts them by
-itself when Auto-record calls is on.
+The [nixarchy-meeting-mode](https://github.com/olafkfreund/nixarchy-meeting-mode) plugin is the only
+detector; the Home Manager option `callDetection.enable` (on by default) installs it. meetingai reads its
+state file `$XDG_RUNTIME_DIR/meeting-mode.json` and reacts to the call state, never to whether Meeting
+Mode is switched on (switching it on by hand is not a call).
+
+- **Maybe** is a browser holding the microphone that nothing has confirmed yet. The bar shows a dim dot and
+  nothing else.
+- **Call** is a call app holding the microphone, or a browser call that a meeting window title, a screen
+  share or one minute of continuous microphone confirms. The bar shows an outlined dot and a **Take notes?**
+  chip with the app's glyph, and a notification with a "Take notes" button. Click the chip to start (it
+  names the session after the call window), right-click to dismiss it for this call. The record hotkey and
+  `omarchy-shell meetingai offer` do the same. Auto-record calls
+  (`settings.autoRecordOnCall`) starts the notes at once instead, except in interviewer mode, where
+  consent stays manual and the offer is shown.
+- **Call ends** while recording: a "Stop notes" offer. The notes are never stopped by themselves, because a
+  call can drop and resume.
+- **No detector:** if the state file is still missing 30 seconds after start, Settings says "Call
+  detection is off: enable the meeting-mode plugin" with the command. A state file whose writer has
+  exited is ignored.
+
+**Calendar (optional, off by default).** With `settings.calendarEnabled` the daemon runs
+`gog calendar events` (read-only, with your own `gog` login) for now plus or minus ten minutes, every five
+minutes while idle and whenever the call state changes. An event with a Meet, Teams or Zoom link names the
+session and is written to `$XDG_RUNTIME_DIR/nixarchy-meetingai/calendar.json` (mode 0600) for meeting-mode to
+use as a confirmer. A missing or logged-out `gog` is silently skipped.
+
+**Privacy.** Window and event titles stay in memory, the two runtime files and the session name. They are
+never written to logs or notifications (log lines and notifications name only the app).
+
+The old meeting-mode `onStart` and `onEnd` hooks that called `ctl record.start` are no longer needed: remove
+them.
 
 ## Nix options
 
@@ -556,6 +584,27 @@ Which utterances get an automatic answer\.
 
 *Type:*
 null or one of “off”, “questions”, “pauses”
+
+
+
+*Default:*
+
+```nix
+null
+```
+
+
+
+## programs\.nixarchy-meetingai\.settings\.calendarEnabled
+
+
+
+Name sessions from the calendar (read-only, through ` gog `; off by default)\.
+
+
+
+*Type:*
+null or boolean
 
 
 
