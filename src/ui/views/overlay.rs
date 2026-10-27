@@ -5432,7 +5432,10 @@ mod tests {
     use crate::core::security::credentials::{self, Credential, Kind};
 
     fn fixture() -> (std::path::PathBuf, Overlay) {
-        let path = std::env::temp_dir().join(format!("nixarchy-meetingai-overlay-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "nixarchy-meetingai-overlay-{}",
+            uuid::Uuid::new_v4()
+        ));
         let vault = crate::core::security::vault::Vault::open(&path).unwrap();
         let services = crate::app::Services {
             vault: std::sync::Arc::new(Some(vault)),
@@ -6578,6 +6581,8 @@ mod tests {
     #[test]
     fn speech_key_changes_refresh_without_restarting_the_app() {
         let (path, mut overlay) = fixture();
+        // The default is now whisper-local; this test is about a Deepgram key.
+        overlay.runtime_settings.speech_provider = "deepgram-stt".into();
         let vault = overlay.services.vault.as_ref().as_ref().unwrap();
         credentials::save(
             vault,
@@ -6613,10 +6618,7 @@ mod tests {
         assert_eq!(config.id, "ollama");
         assert_eq!(config.model, "llama3.2");
         overlay.refresh_configuration();
-        assert_eq!(
-            overlay.selected_chat_config().unwrap().model,
-            "llama3.2"
-        );
+        assert_eq!(overlay.selected_chat_config().unwrap().model, "llama3.2");
         std::fs::remove_dir_all(path).unwrap();
     }
     #[test]

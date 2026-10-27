@@ -225,7 +225,8 @@ mod tests {
     use super::*;
 
     fn temp_dir() -> PathBuf {
-        let path = std::env::temp_dir().join(format!("nixarchy-meetingai-vault-{}", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("nixarchy-meetingai-vault-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
         path
     }

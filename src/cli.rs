@@ -20,7 +20,9 @@ pub fn handle_args() -> Option<String> {
         "--toggle-system-audio" => "toggle-system-audio",
         "--toggle-voice" => "toggle-voice",
         "--screenshot" => "screenshot",
-        "--version" | "-V" => return Some(format!("nixarchy-meetingai {}", env!("CARGO_PKG_VERSION"))),
+        "--version" | "-V" => {
+            return Some(format!("nixarchy-meetingai {}", env!("CARGO_PKG_VERSION")));
+        }
         "--help" | "-h" => {
             return Some(usage());
         }

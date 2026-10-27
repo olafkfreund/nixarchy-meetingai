@@ -12,4 +12,3 @@ pub use display::window;
 pub use shortcuts::control;
 pub use shortcuts::hyprland;
 pub use shortcuts::wayland;
-

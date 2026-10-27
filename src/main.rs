@@ -21,7 +21,9 @@ fn main() {
         // exists, so retry briefly: a second keypress should surface the window,
         // never vanish. If it never answers, exit rather than start a second copy.
         if !cli::wait_for_running_instance(std::time::Duration::from_secs(15)) {
-            println!("nixarchy-meetingai: another instance is running but did not accept the request");
+            println!(
+                "nixarchy-meetingai: another instance is running but did not accept the request"
+            );
         }
         return;
     };

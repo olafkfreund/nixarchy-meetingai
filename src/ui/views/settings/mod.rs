@@ -50,10 +50,7 @@ pub enum CaptureCheck {
     Screen,
 }
 
-pub const KEY_PROVIDERS: &[(&str, &str)] = &[
-    ("Gemini", "gemini"),
-    ("Deepgram", "deepgram-stt"),
-];
+pub const KEY_PROVIDERS: &[(&str, &str)] = &[("Gemini", "gemini"), ("Deepgram", "deepgram-stt")];
 
 /// Settings state shared by every settings page.
 pub struct SettingsState {
@@ -1561,8 +1558,10 @@ mod tests {
     #[test]
     fn saved_chat_key_is_selected_and_reused_without_pasting_it_again() {
         use crate::core::credentials::{self, Credential, Kind};
-        let path =
-            std::env::temp_dir().join(format!("nixarchy-meetingai-saved-model-key-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "nixarchy-meetingai-saved-model-key-{}",
+            uuid::Uuid::new_v4()
+        ));
         let vault = crate::core::vault::Vault::open(&path).unwrap();
         let mut saved = Credential::chat("gemini", " saved-api-key ");
         saved.model = "my-custom-model".into();

@@ -211,7 +211,10 @@ async fn batch_listen_flushes_the_remote_channel_on_stop() {
 #[test]
 fn custom_providers_are_encrypted_managed_and_do_not_reactivate_retired_ids() {
     use nixarchy_meetingai::ai::catalog::custom::CustomProvider;
-    let directory = std::env::temp_dir().join(format!("nixarchy-meetingai-custom-{}", uuid::Uuid::new_v4()));
+    let directory = std::env::temp_dir().join(format!(
+        "nixarchy-meetingai-custom-{}",
+        uuid::Uuid::new_v4()
+    ));
     let vault = Vault::open(&directory).unwrap();
     let mut credential = Credential::chat("custom-my-provider", "custom-secret-key");
     credential.base_url = "http://localhost:12345/chat/completions".into();
@@ -280,7 +283,8 @@ fn server(
 #[tokio::test]
 async fn meeting_recap_uses_final_persisted_words_and_survives_reopen() {
     use nixarchy_meetingai::ai::catalog::custom::CustomProvider;
-    let directory = std::env::temp_dir().join(format!("nixarchy-meetingai-recap-{}", uuid::Uuid::new_v4()));
+    let directory =
+        std::env::temp_dir().join(format!("nixarchy-meetingai-recap-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("test.db");
     let db = Database::open(&path).unwrap();
@@ -340,7 +344,8 @@ async fn meeting_recap_uses_final_persisted_words_and_survives_reopen() {
 #[tokio::test]
 async fn speech_to_streamed_answer_and_finished_meeting_for_both_ai_services() {
     for provider in ["gemini", "ollama"] {
-        let dir = std::env::temp_dir().join(format!("nixarchy-meetingai-flow-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("nixarchy-meetingai-flow-{}", uuid::Uuid::new_v4()));
         let vault = Vault::open(&dir).unwrap();
         let mut speech = Credential::speech("deepgram-stt", "test-speech-key");
         // Keep the request observer for a separate server so we can assert auth and WAV.
@@ -533,7 +538,11 @@ async fn markdown_code_deltas_arrive_before_the_provider_finishes() {
                     _ => None,
                 })
                 .unwrap();
-            let tokens = nixarchy_meetingai::ui::widgets::syntax::highlight(code.0.as_deref(), code.1, false);
+            let tokens = nixarchy_meetingai::ui::widgets::syntax::highlight(
+                code.0.as_deref(),
+                code.1,
+                false,
+            );
             assert_eq!(tokens.last().unwrap().range.end, code.1.len());
             if snapshots == 1 {
                 assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
