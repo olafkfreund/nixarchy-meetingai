@@ -181,7 +181,7 @@ Item {
                 width: Math.max(Style.space(150), parent.width * 0.28); height: parent.height
                 spacing: Style.spacing.xs
                 ListView {
-                    width: parent.width; height: parent.height - newBtn.height - parent.spacing
+                    width: parent.width; height: Math.min(contentHeight, parent.height - newBtn.height - parent.spacing)   // New sits right under the list
                     clip: true
                     model: root.profiles.filter(function(p) { return root.match(p.name); })
                     delegate: IconButton {
