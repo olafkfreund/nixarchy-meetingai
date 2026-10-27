@@ -18,11 +18,14 @@ Item {
 
     Client { id: client }
 
-    // The daemon tells its first client once about provider changes (the removed Gemini key): that is this one.
+    // The daemon keeps its one-time provider notice (e.g. the removed Gemini key) until this service asks.
     Connections {
         target: client
-        function onProviderNoticeChanged() {
-            if (client.providerNotice !== "") Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", client.providerNotice]);
+        function onConnectedChanged() {
+            if (!client.connected) return;
+            client.send("notice.take", {}, function(r) {
+                if (r.ok && r.data && r.data.text) Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", String(r.data.text)]);
+            });
         }
     }
 

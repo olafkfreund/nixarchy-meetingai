@@ -21,6 +21,7 @@ use crate::core::domain::{Message, Role};
 
 const MAX_ANSWER_BYTES: usize = 2 * 1024 * 1024;
 const STDERR_TAIL: usize = 2048;
+const LIST_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// Catalog model id meaning "let the CLI pick".
 pub const CLI_DEFAULT_MODEL: &str = "default";
 
@@ -158,63 +159,116 @@ pub fn agy_args(model: &str, prompt: &str) -> Vec<String> {
     args
 }
 
-/// Private HOME for agy: the real `~/.gemini` (login, state) linked in, except its MCP servers
-/// and settings, which are emptied. agy starts every configured MCP server on each call
-/// (~40 s here); with none it answers in seconds, and no tool can reach the call.
+/// Private HOME for agy, built from an allowlist: only the login files of `~/.gemini` are linked
+/// and the settings are rewritten, so no MCP server, hook, skill, plugin or user config reaches
+/// the call (agy starts every MCP server on each call, ~40 s). Tools are denied by the settings.
 fn agy_home(dir: &Path) -> Result<std::path::PathBuf, ChatError> {
-    use std::os::unix::fs::symlink;
     let io = |e: std::io::Error| ChatError::Cli(format!("could not prepare agy: {e}"));
     let real = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .ok_or_else(|| ChatError::Cli("HOME is not set".into()))?;
     let home = dir.join("home");
-    let gemini = home.join(".gemini");
-    std::fs::create_dir_all(gemini.join("config")).map_err(io)?;
-    let link_all = |from: &Path, to: &Path, skip: &dyn Fn(&str) -> bool| -> Result<(), ChatError> {
-        let Ok(entries) = std::fs::read_dir(from) else {
-            return Ok(());
-        };
-        for entry in entries.flatten() {
-            if !skip(&entry.file_name().to_string_lossy()) {
-                symlink(entry.path(), to.join(entry.file_name())).map_err(io)?;
-            }
+    let cli = home.join(".gemini/antigravity-cli");
+    std::fs::create_dir_all(&cli).map_err(io)?;
+    for name in [
+        "oauth_creds.json",
+        "google_accounts.json",
+        "installation_id",
+        "user_id",
+    ] {
+        let from = real.join(".gemini").join(name);
+        if from.exists() {
+            std::os::unix::fs::symlink(from, home.join(".gemini").join(name)).map_err(io)?;
         }
-        Ok(())
-    };
-    link_all(&real.join(".gemini"), &gemini, &|n| {
-        matches!(
-            n,
-            "config" | "settings.json" | "settings.json.orig" | "settings.nix"
-        )
-    })?;
-    link_all(&real.join(".gemini/config"), &gemini.join("config"), &|n| {
-        n.starts_with("mcp_config")
-    })?;
+    }
     std::fs::write(
-        gemini.join("config/mcp_config.json"),
-        r#"{"mcpServers":{}}"#,
+        cli.join("settings.json"),
+        r#"{"permissions":{"allow":[]},"allowNonWorkspaceAccess":false}"#,
     )
     .map_err(io)?;
-    std::fs::write(gemini.join("settings.json"), "{}").map_err(io)?;
-    for name in [".config", ".local", ".cache"] {
-        let _ = symlink(real.join(name), home.join(name));
-    }
     Ok(home)
+}
+
+/// Run a short listing command in its own session with a time limit; the group dies on timeout.
+async fn list_output(
+    program: &str,
+    args: &[&str],
+    agy: bool,
+    limit: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    let shown = format!("{program} {}", args.join(" "));
+    let dir = TempDir::new().map_err(|e| e.to_string())?;
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(&dir.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    scrub_env(&mut command);
+    if agy {
+        command.env("HOME", agy_home(&dir.0).map_err(|e| e.to_string())?);
+    }
+    // SAFETY: setsid is async-signal-safe; pgid == pid, so killpg reaches grandchildren.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let child = command
+        .spawn()
+        .map_err(|e| format!("could not run `{shown}`: {e}"))?;
+    let pid = child.id();
+    match tokio::time::timeout(limit, child.wait_with_output()).await {
+        Err(_) => {
+            if let Some(pid) = pid {
+                kill_group(pid);
+            }
+            Err(format!("`{shown}` timed out"))
+        }
+        Ok(Err(e)) => Err(format!("could not run `{shown}`: {e}")),
+        Ok(Ok(output)) => {
+            if let Some(pid) = pid {
+                kill_group(pid);
+            }
+            Ok(output.stdout)
+        }
+    }
+}
+
+/// Provider credentials the CLIs must never inherit: they would bypass the subscription login.
+pub(super) fn scrub_env(command: &mut Command) {
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_API_KEY_FILE",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEY_FILE",
+        "GOOGLE_API_KEY",
+        "OLLAMA_API_KEY",
+        "OPENROUTER_API_KEY",
+        "MISTRAL_API_KEY",
+        "GROQ_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "TOGETHER_API_KEY",
+    ] {
+        command.env_remove(key);
+    }
+}
+
+/// The last `agy models` list, so synchronous checks can validate a stored model.
+static AGY_KNOWN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn agy_known() -> Vec<String> {
+    AGY_KNOWN.lock().expect("agy models").clone()
 }
 
 /// Models agy offers: the first column of `agy models`.
 pub async fn agy_models() -> Result<Vec<String>, String> {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        Command::new("agy")
-            .arg("models")
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| "`agy models` timed out".to_owned())?
-    .map_err(|e| format!("could not run `agy models`: {e}"))?;
-    let models: Vec<String> = String::from_utf8_lossy(&output.stdout)
+    let stdout = list_output("agy", &["models"], true, LIST_LIMIT).await?;
+    let models: Vec<String> = String::from_utf8_lossy(&stdout)
         .lines()
         .filter_map(|l| l.split_once('\t').map(|(id, _)| id.trim().to_owned()))
         .filter(|id| !id.is_empty() && !id.starts_with('-'))
@@ -222,22 +276,13 @@ pub async fn agy_models() -> Result<Vec<String>, String> {
     if models.is_empty() {
         return Err("`agy models` listed nothing; sign in with `agy`".into());
     }
+    *AGY_KNOWN.lock().expect("agy models") = models.clone();
     Ok(models)
 }
 
 /// Models codex offers: the listed entries of `codex debug models`, `default` first.
 pub async fn codex_models() -> Result<Vec<String>, String> {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        Command::new("codex")
-            .args(["debug", "models"])
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| "`codex debug models` timed out".to_owned())?
-    .map_err(|e| format!("could not run `codex debug models`: {e}"))?;
-    parse_codex_models(&output.stdout)
+    parse_codex_models(&list_output("codex", &["debug", "models"], false, LIST_LIMIT).await?)
 }
 
 fn parse_codex_models(json: &[u8]) -> Result<Vec<String>, String> {
@@ -453,15 +498,8 @@ pub(super) async fn run<F: Future<Output = ()>>(
     }
     let mut cancellation = (*cancel).clone();
     let mut command = Command::new(program);
-    command
-        .args(args)
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("OPENAI_API_KEY_FILE")
-        .env_remove("GEMINI_API_KEY")
-        .env_remove("GEMINI_API_KEY_FILE")
-        .env_remove("GOOGLE_API_KEY")
-        .current_dir(dir);
+    command.args(args).current_dir(dir);
+    scrub_env(&mut command);
     if kind == Kind::Agy {
         command.env("HOME", dir.join("home"));
     }
@@ -492,9 +530,21 @@ pub(super) async fn run<F: Future<Output = ()>>(
         let _ = stdin.write_all(payload.as_bytes()).await;
     });
     let mut stderr = child.stderr.take().expect("stderr piped");
+    // agy prints this when it drops `--mode plan`; it could then use tools, so the turn fails.
+    let plan_dropped = Arc::new(tokio::sync::Notify::new());
+    let flag = plan_dropped.clone();
     let stderr_task = tokio::spawn(async move {
         let mut bytes = Vec::new();
-        let _ = (&mut stderr).take(1 << 20).read_to_end(&mut bytes).await;
+        let mut lines = BufReader::new((&mut stderr).take(1 << 20)).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if kind == Kind::Agy
+                && (line.contains("is unavailable") || line.contains("has no effect"))
+            {
+                flag.notify_one();
+            }
+            bytes.extend_from_slice(line.as_bytes());
+            bytes.push(b'\n');
+        }
         let start = bytes.len().saturating_sub(STDERR_TAIL);
         String::from_utf8_lossy(&bytes[start..]).trim().to_owned()
     });
@@ -505,6 +555,9 @@ pub(super) async fn run<F: Future<Output = ()>>(
         let line = tokio::select! {
             line = lines.next_line() => line,
             _ = wait_for_cancellation(&mut cancellation) => break Ok(()),
+            () = plan_dropped.notified() => break Err(ChatError::Cli(
+                "agy did not apply plan mode (tools would be allowed); refusing the turn".into(),
+            )),
         };
         let line = match line {
             Ok(Some(line)) => line,
@@ -621,17 +674,20 @@ mod tests {
     }
 
     #[test]
-    fn agy_home_replaces_mcp_and_settings_but_keeps_the_login() {
+    fn agy_home_links_only_the_login_allowlist() {
         let real = std::env::temp_dir().join(format!("agy-real-{}", uuid::Uuid::new_v4()));
         let g = real.join(".gemini");
         std::fs::create_dir_all(g.join("config")).unwrap();
+        std::fs::create_dir_all(g.join("antigravity-cli")).unwrap();
         for f in [
             "oauth_creds.json",
+            "installation_id",
             "settings.json",
-            "settings.nix",
+            "GEMINI.md",
             "config/config.json",
             "config/mcp_config.json",
-            "config/mcp_config.sync-conflict.json",
+            "antigravity-cli/settings.json",
+            "antigravity-cli/hooks.json",
         ] {
             std::fs::write(g.join(f), "real").unwrap();
         }
@@ -642,21 +698,110 @@ mod tests {
         unsafe { std::env::set_var("HOME", &real) };
         let home = agy_home(&dir).unwrap();
         unsafe { std::env::set_var("HOME", old.unwrap_or_default()) };
-        let read = |p: &str| std::fs::read_to_string(home.join(p)).unwrap();
-        assert_eq!(read(".gemini/oauth_creds.json"), "real");
-        assert_eq!(read(".gemini/config/config.json"), "real");
+        let names = |d: std::path::PathBuf| {
+            let mut n: Vec<String> = std::fs::read_dir(d)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(home.clone()), [".gemini"]);
+        // user_id and google_accounts.json do not exist, so they are not linked.
         assert_eq!(
-            read(".gemini/config/mcp_config.json"),
-            r#"{"mcpServers":{}}"#
+            names(home.join(".gemini")),
+            ["antigravity-cli", "installation_id", "oauth_creds.json"]
         );
-        assert_eq!(read(".gemini/settings.json"), "{}");
-        assert!(!home.join(".gemini/settings.nix").exists());
-        assert!(
-            !home
-                .join(".gemini/config/mcp_config.sync-conflict.json")
-                .exists()
+        assert_eq!(
+            names(home.join(".gemini/antigravity-cli")),
+            ["settings.json"]
         );
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".gemini/antigravity-cli/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["permissions"]["allow"], json!([]));
+        assert_eq!(settings["allowNonWorkspaceAccess"], json!(false));
+        // Nothing under the overlay may resolve into the real antigravity-cli or config dirs.
+        fn walk(d: &Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(d).unwrap().flatten() {
+                let p = e.path();
+                out.push(std::fs::canonicalize(&p).unwrap());
+                if p.is_dir() && !p.is_symlink() {
+                    walk(&p, out);
+                }
+            }
+        }
+        let mut all = Vec::new();
+        walk(&home, &mut all);
+        let real_g = std::fs::canonicalize(&g).unwrap();
+        assert!(!all.iter().any(|p| {
+            p.starts_with(real_g.join("antigravity-cli")) || p.starts_with(real_g.join("config"))
+        }));
         let _ = std::fs::remove_dir_all(&real);
+    }
+
+    #[tokio::test]
+    async fn agy_stderr_saying_plan_mode_is_dropped_fails_the_turn() {
+        let dir = std::env::temp_dir();
+        let (_tx, rx) = watch::channel(false);
+        let error = run(
+            "sh",
+            Kind::Agy,
+            vec![
+                "-c".into(),
+                "echo 'plan mode is unavailable' >&2; sleep 5".into(),
+            ],
+            String::new(),
+            &dir,
+            Arc::new(rx),
+            |_| std::future::ready(()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ChatError::Cli(_)), "{error}");
+        assert!(error.to_string().contains("plan mode"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_listing_that_hangs_is_killed_with_its_group() {
+        let pid_file = std::env::temp_dir().join(format!("list-pid-{}", uuid::Uuid::new_v4()));
+        let script = format!("sleep 60 & echo $! > {}; wait", pid_file.display());
+        let started = std::time::Instant::now();
+        let error = list_output(
+            "sh",
+            &["-c", &script],
+            false,
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // SAFETY: signal 0 only probes for existence.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "grandchild survived");
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    #[test]
+    fn provider_keys_are_removed_from_child_environments() {
+        let mut command = Command::new("true");
+        scrub_env(&mut command);
+        let removed: Vec<_> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        for key in ["OLLAMA_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"] {
+            assert!(removed.iter().any(|k| k == key), "{key}");
+        }
     }
 
     #[test]

@@ -137,7 +137,7 @@ Item {
     function dropDump() {   // tests/smoke.sh --drop: what the transcript holds after a reconnect
         const rows = [];
         for (let i = 0; i < backend.transcript.count; i++) rows.push(backend.transcript.get(i).who + "|" + backend.transcript.get(i).body);
-        return JSON.stringify({ rows: rows, now: backend.now.body, answering: backend.answering, connected: backend.connected });
+        return JSON.stringify({ rows: rows, now: backend.now.body, error: backend.now.error || "", answering: backend.answering, connected: backend.connected });
     }
     function geometryRoot() { return card; }   // tests/geometry.js walks this item
     readonly property real ctl: metrics.ctl

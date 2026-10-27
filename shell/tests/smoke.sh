@@ -81,6 +81,27 @@ if not d["connected"] or d["answering"] or not d["now"].startswith("**Talking po
 print("drop: reconnected, the transcript and NOW were rebuilt from transcript.get and now.get")
 PY
 
+# --stale: the late tail of an earlier turn (delta, error, done) must not touch the turn that started after it.
+ln -sf "$here/tests/harness-stale.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-stale"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/stale.log" --stale &
+fake=$!
+sleep 0.5
+timeout 7 quickshell -p "$work/cfg" > "$work/stale.out" 2> "$work/stale.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/stale.err" "$work/stale.out"; then echo "FAIL (stale): QML errors above" >&2; exit 1; fi
+python3 - "$work/stale.out" <<'PY'
+import json, sys
+line = next((l for l in open(sys.argv[1], errors="replace") if "STALE {" in l), None)
+if line is None:
+    sys.exit("FAIL (stale): no dump")
+d = json.loads(line[line.index("STALE ") + 6:])
+if d["now"] != "NEW" or d["error"] != "":
+    sys.exit(f"FAIL (stale): a late reply of an earlier turn reached NOW: {d}")
+print("stale: replies of earlier turns are dropped")
+PY
+
 # --locked: settings fixed by Nix are never sent (live_provider is free and still is; a locked provider keeps its model), and the Settings page loads.
 ln -sf "$here/tests/harness-locked.qml" "$work/cfg/shell.qml"
 export XDG_RUNTIME_DIR="$work/run-locked"

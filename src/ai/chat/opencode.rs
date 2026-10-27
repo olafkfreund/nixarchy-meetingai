@@ -5,7 +5,9 @@
 //! permission ruleset), `GET /event` (SSE), `POST /session/{id}/prompt_async` (204),
 //! `POST /session/{id}/abort`, `DELETE /session/{id}`, `GET /config/providers`.
 //! The server runs in a 0700 temp dir with a private config, so none of the user's MCP servers
-//! or plugins start (they made each call slow); only `auth.json` is linked in. It is protected
+//! or plugins start (they made each call slow); the login travels in `OPENCODE_AUTH_CONTENT`, read
+//! fresh from the real `auth.json` at each server start, so a refreshed token never lands in the
+//! temp dir (a refresh inside the server is not saved; run `opencode auth login` to renew). It is protected
 //! by a random basic-auth password, started on first use and stopped after 10 minutes idle or
 //! when the daemon exits.
 
@@ -30,6 +32,7 @@ use crate::core::domain::Message;
 const IDLE_LIMIT: Duration = Duration::from_secs(10 * 60);
 const MAX_ANSWER_BYTES: usize = 2 * 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
+const TURN_TIMEOUT: Duration = Duration::from_secs(300);
 
 struct Server {
     child: Child,
@@ -76,23 +79,25 @@ fn parse_base(line: &str) -> Option<String> {
     (!port.is_empty()).then(|| format!("http://127.0.0.1:{port}"))
 }
 
-async fn start(program: &str) -> Result<Server, ChatError> {
-    let dir = TempDir::new()?;
-    let io = |e: std::io::Error| ChatError::Cli(format!("could not prepare opencode: {e}"));
-    let (data, conf, work) = (dir.0.join("data"), dir.0.join("conf"), dir.0.join("work"));
-    std::fs::create_dir_all(data.join("opencode")).map_err(io)?;
-    std::fs::create_dir_all(&conf).map_err(io)?;
-    std::fs::create_dir_all(&work).map_err(io)?;
-    let real_data = std::env::var_os("XDG_DATA_HOME")
+/// The user's OpenCode login, read fresh from `auth.json`.
+fn read_auth() -> Option<String> {
+    let data = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".local/share"))
-        });
-    if let Some(auth) = real_data.map(|d| d.join("opencode/auth.json"))
-        && auth.exists()
-    {
-        std::os::unix::fs::symlink(auth, data.join("opencode/auth.json")).map_err(io)?;
-    }
+        })?;
+    std::fs::read_to_string(data.join("opencode/auth.json"))
+        .ok()
+        .filter(|a| !a.trim().is_empty())
+}
+
+async fn start(program: &str, auth: Option<String>) -> Result<Server, ChatError> {
+    let dir = TempDir::new()?;
+    let io = |e: std::io::Error| ChatError::Cli(format!("could not prepare opencode: {e}"));
+    let (data, conf, work) = (dir.0.join("data"), dir.0.join("conf"), dir.0.join("work"));
+    std::fs::create_dir_all(&data).map_err(io)?;
+    std::fs::create_dir_all(&conf).map_err(io)?;
+    std::fs::create_dir_all(&work).map_err(io)?;
     let password = uuid::Uuid::new_v4().simple().to_string();
     let mut command = Command::new(program);
     command
@@ -102,10 +107,16 @@ async fn start(program: &str) -> Result<Server, ChatError> {
         .env("XDG_CONFIG_HOME", &conf)
         .env("OPENCODE_SERVER_PASSWORD", &password)
         .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
+        .env_remove("OPENCODE_SERVER_USERNAME")
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    super::cli::scrub_env(&mut command);
+    match auth {
+        Some(auth) => command.env("OPENCODE_AUTH_CONTENT", auth),
+        None => command.env_remove("OPENCODE_AUTH_CONTENT"),
+    };
     // SAFETY: setsid is async-signal-safe; it gives the server its own process group for shutdown.
     unsafe {
         command.pre_exec(|| {
@@ -164,7 +175,9 @@ fn watch_idle() {
             tokio::time::sleep(Duration::from_secs(30)).await;
             let mut slot = SERVER.lock().await;
             let last = *LAST_USE.lock().expect("last use");
+            // Cleared while the lock is held, so connect() cannot see a watcher that is exiting.
             if slot.is_none() {
+                WATCHING.store(false, Ordering::SeqCst);
                 break;
             }
             if idle_expired(
@@ -176,10 +189,10 @@ fn watch_idle() {
                 if let Some(server) = slot.take() {
                     stop(server);
                 }
+                WATCHING.store(false, Ordering::SeqCst);
                 break;
             }
         }
-        WATCHING.store(false, Ordering::SeqCst);
     });
 }
 
@@ -192,7 +205,7 @@ async fn connect() -> Result<(String, String, Active), ChatError> {
         *slot = None;
     }
     if slot.is_none() {
-        *slot = Some(start("opencode").await?);
+        *slot = Some(start("opencode", read_auth()).await?);
     }
     let server = slot.as_ref().expect("just started");
     let out = (server.base.clone(), server.password.clone(), Active::new());
@@ -219,8 +232,10 @@ pub async fn models() -> Result<Vec<String>, String> {
     Ok(models)
 }
 
+/// Zen's zero-cost models are rate limited and run out, so they sort last (the dropdown's first
+/// entry becomes the default); zero cost under another provider is a subscription, not a free tier.
 fn parse_models(value: &Value) -> Vec<String> {
-    let mut models: Vec<String> = value["providers"]
+    let mut models: Vec<(bool, String)> = value["providers"]
         .as_array()
         .into_iter()
         .flatten()
@@ -229,14 +244,19 @@ fn parse_models(value: &Value) -> Vec<String> {
             p["models"]
                 .as_object()
                 .into_iter()
-                .flat_map(|m| m.keys())
-                .map(move |m| format!("{id}/{m}"))
+                .flatten()
+                .map(move |(name, m)| {
+                    let free = id == "opencode"
+                        && m["cost"]["input"] == json!(0)
+                        && m["cost"]["output"] == json!(0);
+                    (free, format!("{id}/{name}"))
+                })
         })
-        .filter(|m| !m.starts_with('/') && !m.contains(char::is_control))
+        .filter(|(_, m)| !m.starts_with('/') && !m.contains(char::is_control))
         .collect();
     models.sort();
     models.dedup();
-    models
+    models.into_iter().map(|(_, m)| m).collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -250,7 +270,11 @@ enum Step {
 /// Interpret one SSE event of session `sid`. Only deltas of text parts count (reasoning is skipped).
 fn step(event: &Value, sid: &str, text_parts: &mut HashSet<String>) -> Step {
     let p = &event["properties"];
-    if p["sessionID"].as_str() != Some(sid) {
+    let kind = event["type"].as_str().unwrap_or_default();
+    // A session.error without a sessionID is a server-wide failure: it ends our turn too.
+    let ours = p["sessionID"].as_str() == Some(sid)
+        || (kind == "session.error" && p["sessionID"].is_null());
+    if !ours {
         return Step::Skip;
     }
     let message = |v: &Value| {
@@ -260,7 +284,7 @@ fn step(event: &Value, sid: &str, text_parts: &mut HashSet<String>) -> Step {
             .unwrap_or("OpenCode reported an error")
             .to_owned()
     };
-    match event["type"].as_str().unwrap_or_default() {
+    match kind {
         "message.part.updated" if p["part"]["type"] == "text" => {
             if let Some(id) = p["part"]["id"].as_str() {
                 text_parts.insert(id.to_owned());
@@ -303,14 +327,14 @@ pub async fn stream<F: Future<Output = ()>>(
         .split_once('/')
         .filter(|(p, m)| !p.is_empty() && !m.is_empty())
         .ok_or_else(|| {
-            ChatError::Protocol(format!(
+            ChatError::Cli(format!(
                 "OpenCode models look like provider/model, not `{}`",
                 config.model
             ))
         })?;
     let (last, earlier) = history
         .split_last()
-        .ok_or_else(|| ChatError::Protocol("there is nothing to send".into()))?;
+        .ok_or_else(|| ChatError::Cli("there is nothing to send".into()))?;
     let mut text = String::new();
     if !earlier.is_empty() {
         text.push_str("Conversation so far (quoted):\n");
@@ -326,11 +350,13 @@ pub async fn stream<F: Future<Output = ()>>(
         context.system.as_deref().unwrap_or_default(),
         &text,
         cancel,
+        TURN_TIMEOUT,
         on_text,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)] // one call site; a struct would only rename them
 async fn turn<F: Future<Output = ()>>(
     base: &str,
     password: &str,
@@ -338,6 +364,7 @@ async fn turn<F: Future<Output = ()>>(
     system: &str,
     text: &str,
     cancel: Arc<watch::Receiver<bool>>,
+    limit: Duration,
     mut on_text: impl FnMut(String) -> F,
 ) -> Result<String, ChatError> {
     if *cancel.borrow() {
@@ -345,7 +372,7 @@ async fn turn<F: Future<Output = ()>>(
     }
     let mut cancellation = (*cancel).clone();
     let client = super::engine::loading_http_client();
-    let http = |e: reqwest::Error| ChatError::Protocol(e.without_url().to_string());
+    let http = |e: reqwest::Error| ChatError::Cli(e.without_url().to_string());
     let get = |path: &str| {
         client
             .get(format!("{base}{path}"))
@@ -369,7 +396,7 @@ async fn turn<F: Future<Output = ()>>(
         .map_err(http)?;
     let sid = created["id"]
         .as_str()
-        .ok_or_else(|| ChatError::Protocol("OpenCode created no session".into()))?
+        .ok_or_else(|| ChatError::Cli("OpenCode created no session".into()))?
         .to_owned();
     let result = async {
         // Subscribe before asking so no event is missed.
@@ -390,7 +417,7 @@ async fn turn<F: Future<Output = ()>>(
             .await
             .map_err(http)?;
         if !sent.status().is_success() {
-            return Err(ChatError::Protocol(format!(
+            return Err(ChatError::Cli(format!(
                 "OpenCode refused the message (HTTP {})",
                 sent.status().as_u16()
             )));
@@ -398,19 +425,20 @@ async fn turn<F: Future<Output = ()>>(
         let mut stream = events.bytes_stream();
         let (mut buffer, mut answer) = (Vec::new(), String::new());
         let mut text_parts = HashSet::new();
+        let deadline = tokio::time::Instant::now() + limit;
         loop {
             let chunk = tokio::select! {
                 chunk = stream.next() => match chunk { Some(c) => c.map_err(http)?, None => {
-                    return Err(ChatError::Protocol("OpenCode closed the event stream".into()));
+                    return Err(ChatError::Cli("OpenCode closed the event stream".into()));
                 } },
                 _ = wait_for_cancellation(&mut cancellation) => return Ok(answer),
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(ChatError::Cli(format!(
+                        "OpenCode did not finish within {} s", limit.as_secs()
+                    )));
+                }
             };
             buffer.extend_from_slice(&chunk);
-            if buffer.len() > MAX_EVENT_BYTES {
-                return Err(ChatError::Protocol(
-                    "OpenCode event exceeded the size limit".into(),
-                ));
-            }
             while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
                 let line: Vec<u8> = buffer.drain(..=end).collect();
                 let Some(json) = std::str::from_utf8(&line)
@@ -426,9 +454,7 @@ async fn turn<F: Future<Output = ()>>(
                     Step::Skip => {}
                     Step::Delta(delta) => {
                         if delta.len() > MAX_ANSWER_BYTES.saturating_sub(answer.len()) {
-                            return Err(ChatError::Protocol(
-                                "answer exceeded the size limit".into(),
-                            ));
+                            return Err(ChatError::Cli("answer exceeded the size limit".into()));
                         }
                         answer.push_str(&delta);
                         tokio::select! {
@@ -437,11 +463,17 @@ async fn turn<F: Future<Output = ()>>(
                         }
                     }
                     Step::Done if answer.is_empty() => {
-                        return Err(ChatError::Protocol("OpenCode returned no answer".into()));
+                        return Err(ChatError::Cli("OpenCode returned no answer".into()));
                     }
                     Step::Done => return Ok(answer),
-                    Step::Fail(message) => return Err(ChatError::Protocol(message)),
+                    Step::Fail(message) => return Err(ChatError::Cli(message)),
                 }
+            }
+            // Only an unfinished line is left in the buffer: that is what the limit bounds.
+            if buffer.len() > MAX_EVENT_BYTES {
+                return Err(ChatError::Cli(
+                    "OpenCode event exceeded the size limit".into(),
+                ));
             }
         }
     }
@@ -475,10 +507,18 @@ mod tests {
     fn models_are_provider_slash_model() {
         let value = json!({"providers": [
             {"id": "openai", "models": {"gpt-a": {}, "gpt-b": {}}},
+            {"id": "opencode", "models": {"big-pickle": {"cost": {"input": 0, "output": 0}}, "paid": {"cost": {"input": 1, "output": 2}}}},
             {"id": "ollama-cloud", "models": {"gpt-oss:120b": {}}}]});
+        // The free Zen model comes last, so the first entry is never one that ran out.
         assert_eq!(
             parse_models(&value),
-            ["ollama-cloud/gpt-oss:120b", "openai/gpt-a", "openai/gpt-b"]
+            [
+                "ollama-cloud/gpt-oss:120b",
+                "openai/gpt-a",
+                "openai/gpt-b",
+                "opencode/paid",
+                "opencode/big-pickle"
+            ]
         );
         assert!(parse_models(&json!({})).is_empty());
     }
@@ -594,6 +634,12 @@ mod tests {
                     } else {
                         ("200 OK", "application/json", "true".to_owned())
                     };
+                    if body == "STALL" {
+                        let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+                        let _ = socket.write_all(head.as_bytes()).await;
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        return;
+                    }
                     let reply = format!(
                         "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                         body.len()
@@ -631,6 +677,7 @@ mod tests {
             "be brief",
             "hi",
             Arc::new(rx),
+            Duration::from_secs(30),
             |d| {
                 deltas.push(d);
                 std::future::ready(())
@@ -661,6 +708,7 @@ mod tests {
             "",
             "hi",
             Arc::new(rx),
+            Duration::from_secs(30),
             |_| std::future::ready(()),
         )
         .await
@@ -673,16 +721,86 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("oc-fake-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("opencode");
-        std::fs::write(&script, "#!/bin/sh\necho 'Warning: unsecured'\necho 'opencode server listening on http://127.0.0.1:4242'\nexec sleep 60\n").unwrap();
+        let env_dump = dir.join("env");
+        std::fs::write(&script, format!("#!/bin/sh\nenv > {}\necho 'Warning: unsecured'\necho 'opencode server listening on http://127.0.0.1:4242'\nexec sleep 60\n", env_dump.display())).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let server = start(script.to_str().unwrap()).await.unwrap();
+        let server = start(script.to_str().unwrap(), Some(r#"{"x":"tok"}"#.into()))
+            .await
+            .unwrap();
         assert_eq!(server.base, "http://127.0.0.1:4242");
+        // The login is passed in the environment; no auth.json is written or linked.
+        let env = std::fs::read_to_string(&env_dump).unwrap();
+        assert!(
+            env.contains(r#"OPENCODE_AUTH_CONTENT={"x":"tok"}"#),
+            "no auth env"
+        );
+        assert!(!env.contains("OPENCODE_SERVER_USERNAME"));
+        assert!(!server._dir.0.join("data/opencode/auth.json").exists());
         let pid = server.child.id().unwrap() as i32;
         stop(server);
         tokio::time::sleep(Duration::from_millis(200)).await;
         // SAFETY: signal 0 only probes for existence.
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "server survived");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_silent_server_times_out_with_a_failover_error() {
+        let (base, _) = fake_server("STALL".into()).await;
+        let (_tx, rx) = watch::channel(false);
+        let error = turn(
+            &base,
+            "pw",
+            ("openai", "gpt-a"),
+            "",
+            "hi",
+            Arc::new(rx),
+            Duration::from_millis(300),
+            |_| std::future::ready(()),
+        )
+        .await
+        .unwrap_err();
+        // Cli, so the chain moves on to the next provider.
+        assert!(matches!(error, ChatError::Cli(_)), "{error}");
+        assert!(error.to_string().contains("did not finish"), "{error}");
+    }
+
+    #[test]
+    fn a_session_error_without_a_session_id_ends_the_turn() {
+        let mut parts = HashSet::new();
+        let event = json!({"type": "session.error", "properties": {"error": {"name": "ProviderAuthError", "data": {"message": "expired login"}}}});
+        assert_eq!(
+            step(&event, "s1", &mut parts),
+            Step::Fail("expired login".into())
+        );
+        let other =
+            json!({"type": "session.error", "properties": {"sessionID": "s2", "error": {}}});
+        assert_eq!(step(&other, "s1", &mut parts), Step::Skip);
+    }
+
+    #[tokio::test]
+    async fn many_small_events_in_one_burst_do_not_trip_the_line_limit() {
+        let noise = json!({"type": "server.heartbeat", "properties": {"pad": "x".repeat(80)}});
+        let mut events = vec![noise; 20_000];
+        events.push(json!({"type": "message.part.updated", "properties": {"sessionID": "s1", "part": {"id": "t", "type": "text"}}}));
+        events.push(json!({"type": "message.part.delta", "properties": {"sessionID": "s1", "partID": "t", "field": "text", "delta": "ok"}}));
+        events.push(json!({"type": "session.idle", "properties": {"sessionID": "s1"}}));
+        let (base, _) = fake_server(sse(&events)).await;
+        assert!(sse(&events).len() > 2 * MAX_EVENT_BYTES);
+        let (_tx, rx) = watch::channel(false);
+        let answer = turn(
+            &base,
+            "pw",
+            ("openai", "gpt-a"),
+            "",
+            "hi",
+            Arc::new(rx),
+            Duration::from_secs(30),
+            |_| std::future::ready(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer, "ok");
     }
 }

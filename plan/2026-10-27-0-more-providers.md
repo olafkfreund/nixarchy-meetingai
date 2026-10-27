@@ -231,3 +231,21 @@ None yet.
   `system_audio::tests::malformed_output_yields_nothing` asserts this host
   has ≤ 8 monitor sources, so it fails when more audio devices are active.
   Fixed in the rewrite plan.
+- **Review fixes (#6, Opus):** SECURITY: the agy HOME overlay is an
+  allowlist (only `oauth_creds.json`, `google_accounts.json`,
+  `installation_id`, `user_id`, plus a fresh `antigravity-cli/settings.json`
+  allowing nothing); the old denylist linked agy's own CLI settings, which
+  allowed `cat`/`grep`/`git show` outside the workspace, plus plugins and
+  hooks. Measured on p620: logged in, and it refuses `cat /etc/hostname`.
+  agy stderr "is unavailable"/"has no effect" fails the turn. Failover loops
+  the whole chain (was `take(2)`); OpenCode errors are `Cli` and OpenCode
+  leaves the live chain unless chosen; its static default
+  `opencode/big-pickle` is gone and Zen free models sort last. OpenCode
+  gets credentials through `OPENCODE_AUTH_CONTENT` (no `auth.json` in the
+  temp dir; a token refreshed inside the server is not saved back). Model
+  listing uses the overlay, setsid and group kill. The gemini migration
+  clears the models and sets live to `claude-sub`. Provider keys are
+  scrubbed from every CLI child. OpenCode turns time out after 300 s.
+  `providers.status` reads "not logged in" output. The one-time notice is
+  pulled by the shell service with `notice.take` instead of going to the
+  first socket connection.
