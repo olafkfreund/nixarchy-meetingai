@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Screenshots of the overlay against fake-daemon.py: transcript + answer with
-# the model dropdown open, then the Library settings tab. Needs a Wayland
-# session and grim. usage: shots.sh [OUT_DIR]
+# Screenshots against fake-daemon.py: overlay streaming, model dropdown with a
+# typed id, Library settings, bar menu. Needs a Wayland session and grim.
+# usage: shots.sh [OUT_DIR]
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -20,9 +20,12 @@ export XDG_RUNTIME_DIR="$work/run"
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/fake.log" &
 sleep 0.5
-timeout 8 quickshell -p "$work/cfg" 2> "$work/qs.err" &
-sleep 3.2; grim "$out/overlay-dropdown.png"
-sleep 2.8; grim "$out/library-settings.png"
+timeout 11 quickshell -p "$work/cfg" 2> "$work/qs.err" &
+sleep 1.8; grim "$out/overlay-stream.png"
+sleep 1.4; grim "$out/overlay-dropdown.png"
+sleep 2.6; grim "$out/library-settings.png"
+sleep 3.0; grim "$out/bar-menu.png"
 wait %2 || true
+cat "$work/qs.err" >&2
 if grep -E 'ERROR' "$work/qs.err"; then echo "FAIL: QML errors" >&2; exit 1; fi
 ls "$out"

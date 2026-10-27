@@ -16,10 +16,7 @@ Item {
     readonly property bool recording: state.recording === true
     readonly property bool reduceMotion: settings.reduce_motion === true
     property alias transcript: lines
-    property string answer: ""
-    property int answerTurn: -1
     property bool answering: false
-    property string answerError: ""
     property var suggestions: []
     property string lastError: ""
     signal notesUpdated(var meeting)
@@ -56,8 +53,6 @@ Item {
     }
 
     function ask(text, attachments, screenshot, noContext) {
-        root.answer = "";
-        root.answerError = "";
         root.answering = true;
         root.suggestions = [];
         root.send("chat.send", { text: text, attachments: attachments || [], screenshot: screenshot === true, no_context: noContext === true });
@@ -70,7 +65,12 @@ Item {
                 break;
             }
         }
-        lines.append({ who: String(ev.who || ""), speaker: String(ev.speaker || ""), body: String(ev.text || ""), partial: partial });
+        root.addRow(String(ev.who || ""), String(ev.speaker || ""), String(ev.text || ""), partial);
+    }
+
+    // Answers and errors share the transcript model: one virtualized list.
+    function addRow(who, speaker, body, partial, turn) {
+        lines.append({ who: who, speaker: speaker, body: body, partial: partial, turn: turn === undefined ? -1 : turn });
         while (lines.count > root.maxLines) lines.remove(0);
     }
 
@@ -80,12 +80,14 @@ Item {
         case "transcript.partial": root.pushLine(ev, true); break;
         case "transcript.final": root.pushLine(ev, false); break;
         case "answer.delta":
-            if (ev.turn !== root.answerTurn) { root.answerTurn = ev.turn; root.answer = ""; }
             root.answering = true;
-            root.answer += ev.text || "";
+            var at = -1;   // transcript lines may interleave with the stream
+            for (var i = lines.count - 1; i >= 0 && at < 0; i--) if (lines.get(i).who === "answer" && lines.get(i).turn === ev.turn) at = i;
+            if (at < 0) { root.addRow("answer", "", "", false, ev.turn); at = lines.count - 1; }
+            lines.setProperty(at, "body", lines.get(at).body + (ev.text || ""));
             break;
         case "answer.done": root.answering = false; break;
-        case "answer.error": root.answering = false; root.answerError = String(ev.message || ev.error || "answer failed"); break;
+        case "answer.error": root.answering = false; root.addRow("error", "", String(ev.message || ev.error || "answer failed"), false); break;
         case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]); break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
         case "error": root.lastError = String(ev.message || ""); break;

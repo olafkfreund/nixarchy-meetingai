@@ -17,13 +17,17 @@ import time
 sock_path, log_path = sys.argv[1], sys.argv[2]
 auto = "--auto" in sys.argv
 state = {"recording": False, "since": 0, "mic": True, "system": True}
-settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "ollama", "response_pace": "Balanced"}
+settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "ollama", "chat_model": "llama3", "response_pace": "Balanced"}
 DATA = {
     "providers.list": [{"id": "ollama", "name": "Ollama", "requires_key": False, "has_key": False}],
     "models.list": ["llama3", "qwen3"],
     "session.list": [{"id": 1, "kind": "meeting", "title": "Fake standup"}],
     "profiles.list": [],
-    "settings.search": [{"key": "auto_record_on_call", "label": "Auto record on call", "value": auto}],
+    "settings.search": [
+        {"key": "auto_record_on_call", "label": "Take notes automatically when a call starts", "value": auto},
+        {"key": "reduce_motion", "label": "Reduce motion", "value": False},
+        {"key": "chat_model", "label": "Chat model", "value": "llama3"},
+    ],
     "prompts.get": {"text": "fake prompt"},
     "notes.get": {"text": "## Summary\nfake"},
 }
@@ -47,7 +51,13 @@ class Handler(socketserver.StreamRequestHandler):
         time.sleep(0.3)
         self.send({"event": "transcript.final", "who": "system", "speaker": "Alex", "text": "What is the plan?", "t0": 0, "t1": 2})
         self.send({"event": "transcript.partial", "who": "mic", "speaker": "", "text": "We should", "t0": 2, "t1": 3})
-        for i, word in enumerate(["Ship ", "it ", "**Friday**."]):
+        for who, speaker, text in [
+            ("mic", "", "I think we can ship this on Friday if QA signs off, but the migration needs another look."),
+            ("system", "Sam", "Agreed. Last time the migration took two days longer than planned, so let us pad it."),
+            ("mic", "", "Fine, let us say next Tuesday."),
+        ]:
+            self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": 3, "t1": 6})
+        for word in ["Ship ", "it ", "**next Tuesday**.\n\n", "- QA sign-off first\n", "- Pad the migration by two days\n"]:
             self.send({"event": "answer.delta", "turn": 1, "text": word})
         self.send({"event": "answer.done", "turn": 1})
         self.send({"event": "suggestion", "text": "Who owns it?"})

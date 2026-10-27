@@ -1,10 +1,11 @@
 pragma ComponentBehavior: Bound
 // qmllint disable missing-property
+// ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
 import QtQuick.Controls
-import qs.Commons // qmllint disable import
-import qs.Commons as Commons // qmllint disable import
-import qs.Ui // qmllint disable import
+import qs.Commons
+import qs.Commons as Commons
+import qs.Ui
 
 // Restore / Profiles / Prompts / Providers / Settings. One search field asks
 // the daemon (settings.search) and also filters the lists on the other tabs.
@@ -96,7 +97,7 @@ Item {
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
                     text: (parent.modelData.kind === "meeting" ? "Meeting · " : "Chat · ") + parent.modelData.title
-                    color: Commons.Color.menu.text
+                    color: Commons.Color.popups.text
                     font.pixelSize: Style.font.body
                 }
                 Button { text: "Restore"; onClicked: root.client.send("session.restore", { id: parent.modelData.id }) }
@@ -117,7 +118,7 @@ Item {
             wrapMode: Text.Wrap
             clip: true
             text: root.notes
-            color: Commons.Color.menu.text
+            color: Commons.Color.popups.text
             font.pixelSize: Style.font.body
         }
 
@@ -134,7 +135,7 @@ Item {
                     width: parent.width - Style.space(100)
                     textFormat: Text.PlainText
                     text: parent.modelData.name
-                    color: Commons.Color.menu.text
+                    color: Commons.Color.popups.text
                     font.pixelSize: Style.font.body
                 }
                 Button { text: "Delete"; onClicked: { root.client.send("profiles.delete", { name: parent.modelData.name }); root.load(); } }
@@ -166,7 +167,7 @@ Item {
                 TextArea {
                     id: promptText
                     wrapMode: TextEdit.Wrap
-                    color: Commons.Color.menu.text
+                    color: Commons.Color.popups.text
                     font.pixelSize: Style.font.body
                     background: BorderSurface {
                         color: Style.controlFill(promptText.activeFocus, promptText.hovered, Commons.Color.foreground, Commons.Color.accent)
@@ -192,7 +193,7 @@ Item {
                     width: Style.space(220)
                     textFormat: Text.PlainText
                     text: (prow.modelData.name || prow.modelData.id) + (prow.modelData.requires_key === false ? "" : (prow.modelData.has_key ? " · key set" : " · no key"))
-                    color: Commons.Color.menu.text
+                    color: Commons.Color.popups.text
                     font.pixelSize: Style.font.body
                 }
                 TextField {
@@ -211,7 +212,7 @@ Item {
                     onClicked: root.client.send("models.list", { provider: prow.modelData.id }, function(r) { root.modelsText = r.ok ? (r.data || []).join(", ") : r.error; })
                 }
             }
-            footer: Text { text: root.modelsText; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Commons.Color.menu.text; font.pixelSize: Style.font.caption }
+            footer: Text { text: root.modelsText; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption }
         }
 
         ListView {
@@ -219,43 +220,42 @@ Item {
             width: parent.width; height: parent.height - y
             clip: true
             model: root.found
-            header: Row {
-                width: ListView.view.width
-                spacing: Style.spacing.xs
-                Text {
-                    width: parent.width / 2
-                    textFormat: Text.PlainText
-                    text: "Take notes automatically when a call starts"
-                    wrapMode: Text.Wrap
-                    color: Commons.Color.menu.text
-                    font.pixelSize: Style.font.body
-                }
-                ToggleSwitch {
-                    checked: root.client.settings.auto_record_on_call === true
-                    onToggled: root.client.setSetting("auto_record_on_call", !checked)
-                }
-            }
-            delegate: Row {
+            delegate: Item {   // label left, control right, both centred on the row
                 id: srow
                 required property var modelData
                 width: ListView.view.width
-                spacing: Style.spacing.xs
+                height: Math.max(label.implicitHeight, ctl.height) + Style.spacing.sm
                 Text {
-                    width: parent.width / 2
+                    id: label
+                    anchors.left: parent.left
+                    anchors.right: ctl.left
+                    anchors.rightMargin: Style.spacing.md
+                    anchors.verticalCenter: parent.verticalCenter
                     textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
                     text: srow.modelData.label || srow.modelData.key
-                    color: Commons.Color.menu.text
+                    color: Commons.Color.popups.text
                     font.pixelSize: Style.font.body
                 }
-                ToggleSwitch {
-                    visible: typeof srow.modelData.value === "boolean"
-                    checked: srow.modelData.value === true
-                    onToggled: { root.client.setSetting(srow.modelData.key, !srow.modelData.value); root.search(); }
-                }
-                TextField {
-                    visible: typeof srow.modelData.value !== "boolean"
-                    text: String(srow.modelData.value)
-                    onEditingFinished: root.client.setSetting(srow.modelData.key, typeof srow.modelData.value === "number" ? Number(text) : text)
+                Item {
+                    id: ctl
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(220)
+                    height: Style.spacing.controlHeight
+                    ToggleSwitch {
+                        visible: typeof srow.modelData.value === "boolean"
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        checked: srow.modelData.value === true
+                        onToggled: { root.client.setSetting(srow.modelData.key, !srow.modelData.value); root.search(); }
+                    }
+                    TextField {
+                        visible: typeof srow.modelData.value !== "boolean"
+                        anchors.fill: parent
+                        text: String(srow.modelData.value)
+                        onEditingFinished: root.client.setSetting(srow.modelData.key, typeof srow.modelData.value === "number" ? Number(text) : text)
+                    }
                 }
             }
         }

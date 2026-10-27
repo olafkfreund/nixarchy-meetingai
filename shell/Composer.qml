@@ -1,11 +1,12 @@
 pragma ComponentBehavior: Bound
 // qmllint disable missing-property
+// ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
-import qs.Commons // qmllint disable import
-import qs.Commons as Commons // qmllint disable import
-import qs.Ui // qmllint disable import
+import qs.Commons
+import qs.Commons as Commons
+import qs.Ui
 
 // Question box. Grows to 5 lines then scrolls; Enter sends, Shift+Enter adds
 // a line. Code and large pastes become chips; files go as paths.
@@ -73,8 +74,8 @@ Item {
                     id: input
                     wrapMode: TextEdit.Wrap
                     placeholderText: "Ask about the meeting"
-                    color: Commons.Color.menu.text
-                    placeholderTextColor: Qt.alpha(Commons.Color.menu.text, 0.5)
+                    color: Commons.Color.popups.text
+                    placeholderTextColor: Qt.alpha(Commons.Color.popups.text, 0.5)
                     font.pixelSize: Style.font.body
                     background: BorderSurface {
                         color: Style.controlFill(input.activeFocus, input.hovered, Commons.Color.foreground, Commons.Color.accent)
