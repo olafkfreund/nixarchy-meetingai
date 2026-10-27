@@ -337,3 +337,18 @@ async fn whisper_local_gives_up_with_the_lost_range() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn empty_whisper_text_is_skipped_without_failing() {
+    use nixarchy_meetingai::speech::transcription::LiveEvent;
+    // A cough (empty text) then a real chunk would need two chunks; one empty reply must end cleanly.
+    let (config, server) = whisper_mock(vec![Some("")]).await;
+    let events = run_whisper(&config).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, LiveEvent::Failed(_) | LiveEvent::Transcript(_))),
+        "{events:?}"
+    );
+    server.abort();
+}

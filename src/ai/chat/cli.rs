@@ -91,8 +91,8 @@ fn quoted_transcript(history: &[Message]) -> String {
         .join("\n\n")
 }
 
-/// Claude argv. The system prompt carries the earlier history as a quoted transcript.
-pub fn claude_args(model: &str, system: &str) -> Vec<String> {
+/// Claude argv. The system prompt lives in `system_file`, never in argv (E2BIG, `/proc`).
+pub fn claude_args(model: &str, system_file: &Path) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -107,11 +107,11 @@ pub fn claude_args(model: &str, system: &str) -> Vec<String> {
         "--no-session-persistence",
         "--settings",
         r#"{"disableAllHooks":true}"#,
-        "--system-prompt",
+        "--system-prompt-file",
     ]
     .map(String::from)
     .to_vec();
-    args.push(system.to_owned());
+    args.push(system_file.display().to_string());
     if model != CLI_DEFAULT_MODEL && !model.is_empty() {
         args.extend(["--model".into(), model.to_owned()]);
     }
@@ -157,11 +157,71 @@ fn claude_message(text: &str, images: &[String]) -> String {
     )
 }
 
-fn kill_group(pid: Option<u32>) {
-    if let Some(pid) = pid {
-        // SAFETY: killpg only signals the process group we created with process_group(0).
-        unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+fn kill_group(pid: u32) {
+    // SAFETY: killpg only signals the process group we created with process_group(0).
+    unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+}
+
+/// Kills the child's process group when dropped, so a cancelled future leaves nothing running.
+struct GroupGuard(Option<u32>);
+
+impl GroupGuard {
+    fn kill(&mut self) {
+        if let Some(pid) = self.0.take() {
+            kill_group(pid);
+        }
     }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// Private (0700) temp dir removed when dropped, also when the future is dropped.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new() -> Result<Self, ChatError> {
+        use std::os::unix::fs::DirBuilderExt;
+        let path =
+            std::env::temp_dir().join(format!("nixarchy-meetingai-cli-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(|e| ChatError::Cli(e.to_string()))?;
+        Ok(Self(path))
+    }
+
+    /// Write a 0600 file into the dir.
+    fn write(&self, name: &str, bytes: &[u8]) -> Result<std::path::PathBuf, ChatError> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = self.0.join(name);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(bytes))
+            .map_err(|e| ChatError::Cli(e.to_string()))?;
+        Ok(path)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A model id is passed to the CLI as a value; one that looks like a flag is refused.
+fn check_model(model: &str) -> Result<(), ChatError> {
+    if model.starts_with('-') {
+        return Err(ChatError::Protocol(format!("invalid model id `{model}`")));
+    }
+    Ok(())
 }
 
 /// Stream one turn through the subscription CLI named by `config.id`.
@@ -180,39 +240,39 @@ pub async fn stream<F: Future<Output = ()>>(
     let (last, earlier) = history
         .split_last()
         .ok_or_else(|| ChatError::Protocol("there is nothing to send".into()))?;
-    let mut system = context.system.clone().unwrap_or_default();
+    check_model(&config.model)?;
+    let system = context.system.clone().unwrap_or_default();
+    // Earlier turns ride in the stdin user message, not in argv.
+    let mut text = String::new();
     if !earlier.is_empty() {
-        system.push_str("\n\nConversation so far (quoted):\n");
-        system.push_str(&quoted_transcript(earlier));
+        text.push_str("Conversation so far (quoted):\n");
+        text.push_str(&quoted_transcript(earlier));
+        text.push_str("\n\n");
     }
-    let dir = std::env::temp_dir().join(format!("nixarchy-meetingai-cli-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).map_err(|e| ChatError::Cli(e.to_string()))?;
-    let result = async {
-        let (program, args, payload) = match kind {
-            Kind::Claude => (
+    text.push_str(&last.content);
+    let dir = TempDir::new()?;
+    let (program, args, payload) = match kind {
+        Kind::Claude => {
+            let file = dir.write("system.md", system.as_bytes())?;
+            (
                 "claude",
-                claude_args(&config.model, &system),
-                claude_message(&last.content, &context.images),
-            ),
-            Kind::Codex => {
-                let mut files = Vec::new();
-                for (i, image) in context.images.iter().enumerate() {
-                    let bytes = STANDARD.decode(image).map_err(|_| {
-                        ChatError::Protocol("attachment is not valid base64".into())
-                    })?;
-                    let path = dir.join(format!("image-{i}.png"));
-                    std::fs::write(&path, bytes).map_err(|e| ChatError::Cli(e.to_string()))?;
-                    files.push(path);
-                }
-                let prompt = format!("{system}\n\n{}", last.content);
-                ("codex", codex_args(&config.model, &dir, &files), prompt)
+                claude_args(&config.model, &file),
+                claude_message(&text, &context.images),
+            )
+        }
+        Kind::Codex => {
+            let mut files = Vec::new();
+            for (i, image) in context.images.iter().enumerate() {
+                let bytes = STANDARD
+                    .decode(image)
+                    .map_err(|_| ChatError::Protocol("attachment is not valid base64".into()))?;
+                files.push(dir.write(&format!("image-{i}.png"), &bytes)?);
             }
-        };
-        run(program, kind, args, payload, &dir, cancel, on_text).await
-    }
-    .await;
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+            let prompt = format!("{system}\n\n{text}");
+            ("codex", codex_args(&config.model, &dir.0, &files), prompt)
+        }
+    };
+    run(program, kind, args, payload, &dir.0, cancel, on_text).await
 }
 
 /// Spawn `program`, feed `payload`, and turn stdout into deltas.
@@ -247,7 +307,7 @@ pub(super) async fn run<F: Future<Output = ()>>(
             )),
             _ => ChatError::Cli(format!("could not start `{program}`: {error}")),
         })?;
-    let pid = child.id();
+    let mut group = GroupGuard(child.id());
     let mut stdin = child.stdin.take().expect("stdin piped");
     // Written off-task so a full pipe cannot block cancellation; dropping closes stdin.
     tokio::spawn(async move {
@@ -299,7 +359,7 @@ pub(super) async fn run<F: Future<Output = ()>>(
         }
     };
     // Done, cancelled, failed or EOF: never leave the group running.
-    kill_group(pid);
+    group.kill();
     let status = child.wait().await;
     let tail = stderr_task.await.unwrap_or_default();
     outcome?;
@@ -371,7 +431,9 @@ mod tests {
 
     #[test]
     fn argv_follows_the_plan_and_never_passes_dangerous_flags() {
-        let claude = claude_args("haiku", "sys");
+        let claude = claude_args("haiku", Path::new("/t/system.md"));
+        assert!(claude.contains(&"/t/system.md".to_owned()));
+        assert!(!claude.contains(&"--system-prompt".to_owned()));
         assert!(claude.windows(2).any(|w| w == ["--tools", ""]));
         assert!(claude.windows(2).any(|w| w == ["--model", "haiku"]));
         let codex = codex_args("default", Path::new("/t"), &["/t/a.png".into()]);
@@ -439,5 +501,62 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("boom"), "{error}");
+    }
+
+    #[test]
+    fn temp_dir_is_private_and_removed_on_drop() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.0.clone();
+        assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o700);
+        let file = dir.write("system.md", b"secret").unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        drop(dir);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn flag_like_model_ids_are_rejected() {
+        assert!(check_model("-x").is_err());
+        assert!(check_model("haiku").is_ok());
+    }
+
+    #[tokio::test]
+    async fn dropping_the_future_kills_the_group() {
+        let dir = TempDir::new().unwrap();
+        let script = dir
+            .write(
+                "fake.sh",
+                b"#!/bin/sh\nsleep 60 &\necho $! > pid\necho $$ > self\nwait\n",
+            )
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (_tx, rx) = watch::channel(false);
+        let run = run(
+            script.to_str().unwrap(),
+            Kind::Claude,
+            vec![],
+            String::new(),
+            &dir.0,
+            Arc::new(rx),
+            |_| std::future::ready(()),
+        );
+        // The timeout drops the future mid-run.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(500), run)
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        for name in ["pid", "self"] {
+            let pid: i32 = std::fs::read_to_string(dir.0.join(name))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            // SAFETY: signal 0 only probes for existence.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "{name} survived");
+        }
     }
 }

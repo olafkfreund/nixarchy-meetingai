@@ -178,8 +178,8 @@ async fn transcribe_inner(
         }
         let value: Value = serde_json::from_str(&text)
             .map_err(|_| SttError::Protocol("response was not JSON".into()))?;
-        return extract_transcript(provider, &value)
-            .ok_or_else(|| SttError::Protocol("no transcript in the response".into()));
+        // Empty text is silence (a cough), not a failure.
+        return Ok(extract_transcript(provider, &value).unwrap_or_default());
     }
     if config.api_key.trim().is_empty() {
         return Err(SttError::MissingKey);
@@ -237,8 +237,7 @@ async fn transcribe_inner(
     }
     let value: Value = serde_json::from_str(&text)
         .map_err(|_| SttError::Protocol("response was not JSON".into()))?;
-    extract_transcript(provider, &value)
-        .ok_or_else(|| SttError::Protocol("no transcript in the response".into()))
+    Ok(extract_transcript(provider, &value).unwrap_or_default())
 }
 
 /// One transcript line from the live stream.
@@ -570,7 +569,8 @@ impl LiveTranscriber {
                     }
                     result = requests.next(), if !requests.is_empty() => {
                         match result {
-                            Some(Ok(line)) => { let _ = sender.send(LiveEvent::Transcript(line)).await; }
+                            Some(Ok(Some(line))) => { let _ = sender.send(LiveEvent::Transcript(line)).await; }
+                            Some(Ok(None)) => {}
                             Some(Err(error)) => { let _ = sender.send(LiveEvent::Failed(error)).await; break; }
                             None => {}
                         }
@@ -590,7 +590,10 @@ impl LiveTranscriber {
                         let text = transcribe_with_retry(&config, &samples)
                             .await
                             .map_err(|e| format!("{e} (lost audio {start:.1}s..{end:.1}s)"))?;
-                        Ok::<_, String>(TranscriptLine {
+                        if text.is_empty() {
+                            return Ok(None);
+                        }
+                        Ok::<_, String>(Some(TranscriptLine {
                             channel,
                             speaker: None,
                             text,
@@ -598,15 +601,16 @@ impl LiveTranscriber {
                             speech_final: true,
                             start,
                             end,
-                        })
+                        }))
                     });
                 }
                 if finished {
                     while let Some(result) = requests.next().await {
                         match result {
-                            Ok(line) => {
+                            Ok(Some(line)) => {
                                 let _ = sender.send(LiveEvent::Transcript(line)).await;
                             }
+                            Ok(None) => {}
                             Err(error) => {
                                 let _ = sender.send(LiveEvent::Failed(error)).await;
                                 break;
