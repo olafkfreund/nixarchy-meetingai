@@ -24,6 +24,8 @@ Item {
     signal submit(string text, var chips)
     signal preview(string text)
     signal screenshot()
+    property bool captured: false   // a screenshot waits for the next question (daemon state.capture)
+    signal clearCapture()
     signal quick()
     property bool team: false      // team meeting mode: show the series picker
     property var seriesList: []    // series.list rows
@@ -33,7 +35,7 @@ Item {
     signal seriesPicked(string id)         // "" = no series
     signal seriesCreated(string name)
     signal pick(int n)   // 1..3 typed into an empty composer: choose that suggestion
-    readonly property bool empty: input.text.trim() === "" && root.chips.length === 0
+    readonly property bool empty: input.text.trim() === "" && root.chips.length === 0 && !root.captured
 
     implicitHeight: col.implicitHeight
 
@@ -43,7 +45,7 @@ Item {
 
     function send() {
         var t = input.text.trim();
-        if (t === "" && root.chips.length === 0) return;
+        if (t === "" && root.chips.length === 0 && !root.captured) return;
         root.submit(t, root.chips);
         input.text = "";
         root.chips = [];
@@ -57,8 +59,13 @@ Item {
         Flow {
             width: parent.width
             spacing: Style.spacing.xs
-            visible: root.chips.length > 0
+            visible: root.chips.length > 0 || root.captured
 
+            Row {   // the screenshot taken with the camera button or the screenshot key
+                visible: root.captured
+                IconButton { ts: root.theme.ts; objectName: "captureChip"; iconText: root.iCamera; text: "Screenshot"; bordered: true; tooltipText: "Sent with your next question" }
+                IconButton { ts: root.theme.ts; text: "\u00d7"; tooltipText: "Remove"; Accessible.name: "Remove screenshot"; onClicked: root.clearCapture() }
+            }
             Repeater {
                 model: root.chips
                 Row {

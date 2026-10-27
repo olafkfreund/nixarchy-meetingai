@@ -889,3 +889,10 @@ Round 5 protocol (daemon and shell must agree):
   encrypted database; `profiles.detach{name, id}`
 - `prompts.reset{mode, kind}`; kinds are `answer`, `live_answer`,
   `follow_up` and `recap`
+- **Screenshot fix (owner report, 2026-10-27):** a capture was stored as
+  `pending_capture` and silently sent with the next question, but the UI
+  was never told, so no chip appeared, it could not be removed, and a
+  screenshot could not be sent without text. `state` now carries `capture`
+  (emitted on capture, on send and by the new `capture.clear`); the
+  composer shows a "Screenshot" chip with remove and allows sending a
+  screenshot alone; a session reset clears the flag in the client.

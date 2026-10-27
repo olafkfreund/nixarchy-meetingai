@@ -338,6 +338,8 @@ Item {
                         seriesError: root.seriesError
                         onSeriesPicked: function(id) { backend.send("session.new", id === "" ? {} : { series: id }, function(r) { root.seriesError = r.ok ? "" : String(r.error); }); }
                         onSeriesCreated: function(name) { backend.send("series.create", { name: name }, function(r) { if (!r.ok) { root.seriesError = String(r.error); return; } backend.refreshSeries(); backend.send("session.new", { series: r.data.id }, function(r2) { root.seriesError = r2.ok ? "" : String(r2.error); }); }); }
+                        captured: backend.state.capture === true
+                        onClearCapture: backend.send("capture.clear", {})
                         onSubmit: function(text, chips) { root.submit(text, chips); }
                         onPreview: function(text) { root.previewText = text; }
                         onScreenshot: backend.send("screenshot.capture", { region: true })

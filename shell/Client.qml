@@ -216,7 +216,7 @@ Item {
         if (ev.turn !== undefined && ev.turn === root.staleTurn && (ev.event === "answer.delta" || ev.event === "answer.done" || ev.event === "answer.error")) return;
         switch (ev.event) {
         case "settings": root.settings = ev.settings || ({}); break;
-        case "session.reset": root.resetSession(); break;
+        case "session.reset": root.resetSession(); root.state = Object.assign({}, root.state, { capture: false }); break;
         case "history":
             lines.clear();   // a reconnect replays the history: it replaces the transcript, it does not add to it
             for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(ev.rows[h].who === "question" ? "asked" : String(ev.rows[h].who), "", String(ev.rows[h].text), false);

@@ -729,6 +729,7 @@ impl Daemon {
             "candidate": g.candidate,
             "consent": g.consent,
             "finishing": g.finishing_meeting.is_some(),   // stopped, notes still being written
+            "capture": g.pending_capture.is_some(),   // a screenshot waits for the next question
             "meeting": g.meeting_id.as_ref().or(g.resume_meeting.as_ref()),
             "ready": {"chat": chat, "speech": speech},
             "hints": {
@@ -1049,7 +1050,14 @@ impl Daemon {
                 Err(error) => self.error(error),
             }
         }
-        let image = self.inner.lock().pending_capture.take();
+        let image = {
+            let mut g = self.inner.lock();
+            let image = g.pending_capture.take();
+            if image.is_some() {
+                self.emit_state(&g);
+            }
+            image
+        };
         let turn = self.begin_send(question, image, false, args.no_context)?;
         Ok(json!({"turn": turn}))
     }
@@ -3302,7 +3310,15 @@ impl Daemon {
             "dictate.stop" => self.dictate_stop().await,
             "screenshot.capture" => {
                 let image = grab_screen(parse::<protocol::RegionArg>(args)?.region).await?;
-                self.inner.lock().pending_capture = Some(image);
+                let mut g = self.inner.lock();
+                g.pending_capture = Some(image);
+                self.emit_state(&g);
+                Ok(json!({"capture": true}))
+            }
+            "capture.clear" => {
+                let mut g = self.inner.lock();
+                g.pending_capture = None;
+                self.emit_state(&g);
                 Ok(json!({}))
             }
             "attachment.preview" => {
@@ -3828,6 +3844,21 @@ mod command_tests {
             notices,
             ["An agent started recording", "An agent stopped recording"]
         );
+    }
+
+    #[tokio::test]
+    async fn a_pending_screenshot_shows_in_state_until_cleared() {
+        let d = daemon();
+        d.inner.lock().pending_capture = Some(CapturedImage {
+            base64: "AA==".into(),
+            mime: "image/png",
+        });
+        let st = d.handle("state.get", json!({}), None).await.unwrap();
+        assert_eq!(st["capture"], true);
+        d.handle("capture.clear", json!({}), None).await.unwrap();
+        let st = d.handle("state.get", json!({}), None).await.unwrap();
+        assert_eq!(st["capture"], false);
+        assert!(d.inner.lock().pending_capture.is_none());
     }
 
     #[tokio::test]

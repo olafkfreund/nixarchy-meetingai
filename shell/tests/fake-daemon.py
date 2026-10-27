@@ -414,6 +414,9 @@ class Handler(socketserver.StreamRequestHandler):
                     threading.Thread(target=self.stream_iv_call, daemon=True).start()
             elif cmd == "record.stop":
                 state["recording"] = False
+            elif cmd in ("screenshot.capture", "capture.clear", "chat.send"):   # a screenshot waits for the next question
+                state["capture"] = cmd == "screenshot.capture"
+                self.send({"event": "state", **state})
             data = state if cmd == "state.get" else settings if cmd == "settings.get" else DATA.get(cmd, {})
             if cmd == "models.list":   # the reply carries the provider it answers, so a client can drop a stale one
                 p = req.get("args", {}).get("provider")
