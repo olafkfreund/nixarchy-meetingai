@@ -494,3 +494,57 @@ are `coder` (Sonnet) agents run by a Workflow, at most 5 at once:
 - Step 12 and merge-conflict resolution stay with the session model.
 - Review after wave 3: a fresh Opus agent gets only this path and `git diff
   main...`, plus Codex `review --base main` and agy, per `reviewers:`.
+
+## Deviations log (recorded by the session model)
+
+- **Worktree base (wave 2):** the workflow's automatic worktrees were
+  created from `main` (c873851), not from the task branch, so coders A, B
+  and C made no changes. From then on the lead creates worktrees from the
+  task branch. Coders cannot commit (guard hook), so the lead commits all
+  handed-back work.
+- **Step 5:** coder B, not A, owns the `whisper-local` catalog entry. B
+  needed it to compile its tests.
+- **Step 4:** no separate `--version` probe; a missing binary already fails
+  at spawn with a clear `ChatError::Cli`.
+  - The Codex model list is `["default"]`, meaning no `-m` flag; any other
+    id is passed to `-m`.
+  - The Claude fixture has its `system` lines stripped (they contain local
+    paths).
+  - `ChatProvider::requires_key` is now a field.
+- **Step 6:** notes coverage is tracked by time (`end_time > last t1`), so
+  a late line with an earlier end time would be missed. **Fixed in wave 3:**
+  coverage is tracked by meeting line id.
+  - Short meetings (under 8k characters) consolidate the raw transcript
+    directly.
+  - `transcript_excerpt` stays until step 8, because the UI still uses it.
+- **Step 9:**
+  - The model picker lost free-typed model ids; this is restored in
+    wave 3.
+  - The multi-line composer and prompt editor remain QtQuick `TextArea`
+    (`qs.Ui` has no multi-line field), drawn with the same flat
+    `BorderSurface` as `qs.Ui` `TextField`.
+  - `Pill.qml` is deleted in favour of `qs.Ui` `Button`.
+- **Step 11:**
+  - Binds are a generated `~/.config/hypr/meetingai-binds.lua` that the
+    user loads from `bindings.lua`.
+  - The flake output is `homeManagerModules` (`nix flake check` warns that
+    the name is non-standard).
+  - `nix build` fails until step 8 removes GPUI (egl/gbm).
+
+## Wave 3 (owner: "max 5 agents")
+
+In parallel:
+- **(a)** step 7, the daemon, in the main tree
+- **(b)** the Quickshell UI fixes from the screenshot review, in their own
+  worktree:
+  - an opaque surface (`Commons.Color.popups.background`)
+  - remove the duplicate auto-record row; right-align toggles in a
+    label/control grid
+  - transcript and answer in one virtualized ListView with no gaps or
+    clipping
+  - the model trigger shows the current model; free-typed ids accepted
+  - a properly run `qmllint` (with `-I` paths)
+  - smoke-load `BarWidget` with its `PopupCard` menu
+- **(c)** notes coverage by line id, in its own worktree.
+
+Step 8 follows once these are merged.
