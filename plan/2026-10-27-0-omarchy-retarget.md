@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: none (issues are disabled on olafkfreund/mixarchy-meetingai)
 spec: spec/2026-10-27-0-omarchy-retarget.md
 reviewers:   # extra read-only reviews on top of the Opus review; the owner asked for both as team mates
