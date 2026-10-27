@@ -1,0 +1,443 @@
+//! Subscription providers that drive the `claude` and `codex` CLIs.
+//!
+//! The CLI runs in an empty temp dir and its own process group, without any
+//! API-key variable, so it always uses the user's subscription login. Cancel
+//! kills the whole group.
+
+use std::future::Future;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
+
+use base64::{Engine, engine::general_purpose::STANDARD};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::watch;
+
+use super::engine::{ChatError, TurnContext, wait_for_cancellation};
+use crate::ai::providers::ProviderConfig;
+use crate::core::domain::{Message, Role};
+
+const MAX_ANSWER_BYTES: usize = 2 * 1024 * 1024;
+const STDERR_TAIL: usize = 2048;
+/// Catalog model id meaning "let the CLI pick".
+pub const CLI_DEFAULT_MODEL: &str = "default";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Claude,
+    Codex,
+}
+
+/// One parsed stdout line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliEvent {
+    Delta(String),
+    /// End of the answer; claude carries the full text as a fallback.
+    Done(Option<String>),
+    Failed(String),
+}
+
+/// Parse one stdout line; unknown or non-JSON lines are ignored.
+pub fn parse_line(kind: Kind, line: &str) -> Option<CliEvent> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let text = |pointer: &str| value.pointer(pointer).and_then(Value::as_str);
+    match (kind, value.get("type")?.as_str()?) {
+        (Kind::Claude, "stream_event") => {
+            if text("/event/type") == Some("content_block_delta") {
+                text("/event/delta/text").map(|t| CliEvent::Delta(t.to_owned()))
+            } else {
+                None
+            }
+        }
+        (Kind::Claude, "result") => {
+            if value.get("is_error").and_then(Value::as_bool) == Some(true) {
+                Some(CliEvent::Failed(
+                    text("/result")
+                        .unwrap_or("claude reported an error")
+                        .to_owned(),
+                ))
+            } else {
+                Some(CliEvent::Done(text("/result").map(str::to_owned)))
+            }
+        }
+        (Kind::Codex, "item.completed") if text("/item/type") == Some("agent_message") => {
+            text("/item/text").map(|t| CliEvent::Delta(t.to_owned()))
+        }
+        (Kind::Codex, "turn.completed") => Some(CliEvent::Done(None)),
+        (Kind::Codex, "turn.failed") => Some(CliEvent::Failed(
+            text("/error/message")
+                .unwrap_or("codex turn failed")
+                .to_owned(),
+        )),
+        _ => None,
+    }
+}
+
+fn quoted_transcript(history: &[Message]) -> String {
+    history
+        .iter()
+        .map(|m| {
+            let who = match m.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+                Role::System => "System",
+            };
+            let body = m.content.lines().collect::<Vec<_>>().join("\n> ");
+            format!("{who}:\n> {body}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Claude argv. The system prompt carries the earlier history as a quoted transcript.
+pub fn claude_args(model: &str, system: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--no-session-persistence",
+        "--settings",
+        r#"{"disableAllHooks":true}"#,
+        "--system-prompt",
+    ]
+    .map(String::from)
+    .to_vec();
+    args.push(system.to_owned());
+    if model != CLI_DEFAULT_MODEL && !model.is_empty() {
+        args.extend(["--model".into(), model.to_owned()]);
+    }
+    args
+}
+
+/// Codex argv; the prompt arrives on stdin (`-`).
+pub fn codex_args(model: &str, dir: &Path, images: &[std::path::PathBuf]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "exec",
+        "--json",
+        "-c",
+        "forced_login_method=chatgpt",
+        "-s",
+        "read-only",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "-C",
+    ]
+    .map(String::from)
+    .to_vec();
+    args.push(dir.display().to_string());
+    if model != CLI_DEFAULT_MODEL && !model.is_empty() {
+        args.extend(["-m".into(), model.to_owned()]);
+    }
+    for image in images {
+        args.extend(["-i".into(), image.display().to_string()]);
+    }
+    args.push("-".into());
+    args
+}
+
+fn claude_message(text: &str, images: &[String]) -> String {
+    let mut content = vec![json!({"type":"text","text":text})];
+    content.extend(images.iter().map(|image| {
+        json!({
+            "type":"image","source":{"type":"base64","media_type":"image/png","data":image}
+        })
+    }));
+    format!(
+        "{}\n",
+        json!({"type":"user","message":{"role":"user","content":content}})
+    )
+}
+
+fn kill_group(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        // SAFETY: killpg only signals the process group we created with process_group(0).
+        unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+    }
+}
+
+/// Stream one turn through the subscription CLI named by `config.id`.
+pub async fn stream<F: Future<Output = ()>>(
+    config: &ProviderConfig,
+    history: &[Message],
+    context: &TurnContext,
+    cancel: Arc<watch::Receiver<bool>>,
+    on_text: impl FnMut(String) -> F,
+) -> Result<String, ChatError> {
+    let kind = if config.id == "codex-sub" {
+        Kind::Codex
+    } else {
+        Kind::Claude
+    };
+    let (last, earlier) = history
+        .split_last()
+        .ok_or_else(|| ChatError::Protocol("there is nothing to send".into()))?;
+    let mut system = context.system.clone().unwrap_or_default();
+    if !earlier.is_empty() {
+        system.push_str("\n\nConversation so far (quoted):\n");
+        system.push_str(&quoted_transcript(earlier));
+    }
+    let dir = std::env::temp_dir().join(format!("nixarchy-meetingai-cli-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).map_err(|e| ChatError::Cli(e.to_string()))?;
+    let result = async {
+        let (program, args, payload) = match kind {
+            Kind::Claude => (
+                "claude",
+                claude_args(&config.model, &system),
+                claude_message(&last.content, &context.images),
+            ),
+            Kind::Codex => {
+                let mut files = Vec::new();
+                for (i, image) in context.images.iter().enumerate() {
+                    let bytes = STANDARD.decode(image).map_err(|_| {
+                        ChatError::Protocol("attachment is not valid base64".into())
+                    })?;
+                    let path = dir.join(format!("image-{i}.png"));
+                    std::fs::write(&path, bytes).map_err(|e| ChatError::Cli(e.to_string()))?;
+                    files.push(path);
+                }
+                let prompt = format!("{system}\n\n{}", last.content);
+                ("codex", codex_args(&config.model, &dir, &files), prompt)
+            }
+        };
+        run(program, kind, args, payload, &dir, cancel, on_text).await
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// Spawn `program`, feed `payload`, and turn stdout into deltas.
+pub(super) async fn run<F: Future<Output = ()>>(
+    program: &str,
+    kind: Kind,
+    args: Vec<String>,
+    payload: String,
+    dir: &Path,
+    cancel: Arc<watch::Receiver<bool>>,
+    mut on_text: impl FnMut(String) -> F,
+) -> Result<String, ChatError> {
+    if *cancel.borrow() {
+        return Ok(String::new());
+    }
+    let mut cancellation = (*cancel).clone();
+    let mut child = Command::new(program)
+        .args(args)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENAI_API_KEY_FILE")
+        .current_dir(dir)
+        .process_group(0)
+        .kill_on_drop(true)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ChatError::Cli(format!(
+                "`{program}` was not found in PATH; install it and sign in with your subscription"
+            )),
+            _ => ChatError::Cli(format!("could not start `{program}`: {error}")),
+        })?;
+    let pid = child.id();
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    // Written off-task so a full pipe cannot block cancellation; dropping closes stdin.
+    tokio::spawn(async move {
+        let _ = stdin.write_all(payload.as_bytes()).await;
+    });
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        let _ = (&mut stderr).take(1 << 20).read_to_end(&mut bytes).await;
+        let start = bytes.len().saturating_sub(STDERR_TAIL);
+        String::from_utf8_lossy(&bytes[start..]).trim().to_owned()
+    });
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout piped")).lines();
+    let mut answer = String::new();
+    let mut done = false;
+    let outcome: Result<(), ChatError> = loop {
+        let line = tokio::select! {
+            line = lines.next_line() => line,
+            _ = wait_for_cancellation(&mut cancellation) => break Ok(()),
+        };
+        let line = match line {
+            Ok(Some(line)) => line,
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(ChatError::Protocol(error.to_string())),
+        };
+        match parse_line(kind, &line) {
+            Some(CliEvent::Delta(text)) => {
+                if text.len() > MAX_ANSWER_BYTES.saturating_sub(answer.len()) {
+                    break Err(ChatError::Protocol("answer exceeded the size limit".into()));
+                }
+                answer.push_str(&text);
+                tokio::select! {
+                    _ = on_text(text) => {},
+                    _ = wait_for_cancellation(&mut cancellation) => break Ok(()),
+                }
+            }
+            Some(CliEvent::Done(full)) => {
+                if answer.is_empty()
+                    && let Some(full) = full.filter(|t| !t.is_empty())
+                {
+                    answer = full.clone();
+                    on_text(full).await;
+                }
+                done = true;
+                break Ok(());
+            }
+            Some(CliEvent::Failed(message)) => break Err(ChatError::Cli(message)),
+            None => {}
+        }
+    };
+    // Done, cancelled, failed or EOF: never leave the group running.
+    kill_group(pid);
+    let status = child.wait().await;
+    let tail = stderr_task.await.unwrap_or_default();
+    outcome?;
+    if *cancel.borrow() || (done && !answer.trim().is_empty()) {
+        return Ok(answer);
+    }
+    let status = status.map(|s| s.to_string()).unwrap_or_default();
+    Err(ChatError::Cli(format!(
+        "`{program}` ended ({status}) without an answer: {tail}"
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+
+    fn events(kind: Kind, name: &str) -> Vec<CliEvent> {
+        fixture(name)
+            .lines()
+            .filter_map(|l| parse_line(kind, l))
+            .collect()
+    }
+
+    #[test]
+    fn claude_fixture_yields_delta_then_result() {
+        assert_eq!(
+            events(Kind::Claude, "claude-stream.ndjson"),
+            [
+                CliEvent::Delta("hi there".into()),
+                CliEvent::Done(Some("hi there".into()))
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_fixture_yields_one_delta_then_done() {
+        assert_eq!(
+            events(Kind::Codex, "codex-exec.ndjson"),
+            [CliEvent::Delta("hi there".into()), CliEvent::Done(None)]
+        );
+    }
+
+    #[test]
+    fn errors_and_noise_are_classified() {
+        assert_eq!(
+            parse_line(
+                Kind::Claude,
+                r#"{"type":"result","is_error":true,"result":"not logged in"}"#
+            ),
+            Some(CliEvent::Failed("not logged in".into()))
+        );
+        assert_eq!(
+            parse_line(
+                Kind::Codex,
+                r#"{"type":"turn.failed","error":{"message":"nope"}}"#
+            ),
+            Some(CliEvent::Failed("nope".into()))
+        );
+        assert_eq!(parse_line(Kind::Codex, "not json"), None);
+    }
+
+    #[test]
+    fn argv_follows_the_plan_and_never_passes_dangerous_flags() {
+        let claude = claude_args("haiku", "sys");
+        assert!(claude.windows(2).any(|w| w == ["--tools", ""]));
+        assert!(claude.windows(2).any(|w| w == ["--model", "haiku"]));
+        let codex = codex_args("default", Path::new("/t"), &["/t/a.png".into()]);
+        assert!(codex.windows(2).any(|w| w == ["-s", "read-only"]));
+        assert!(!codex.contains(&"-m".to_owned()));
+        assert_eq!(codex.last().unwrap(), "-");
+        assert!(
+            ![&claude, &codex]
+                .iter()
+                .any(|a| a.iter().any(|s| s.contains("dangerously")))
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_kills_the_whole_group() {
+        let dir = std::env::temp_dir().join(format!("cli-cancel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake.sh");
+        // The sleep is a grandchild: only a group kill ends it.
+        std::fs::write(&script, "#!/bin/sh\nsleep 60 &\necho $! > pid\nwait\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (tx, rx) = watch::channel(false);
+        let cancel = async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tx.send(true).unwrap();
+        };
+        let started = std::time::Instant::now();
+        let run = run(
+            script.to_str().unwrap(),
+            Kind::Claude,
+            vec![],
+            String::new(),
+            &dir,
+            Arc::new(rx),
+            |_| std::future::ready(()),
+        );
+        let (_, answer) = tokio::join!(cancel, run);
+        assert_eq!(answer.unwrap(), "");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let pid: i32 = std::fs::read_to_string(dir.join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // SAFETY: signal 0 only probes for existence.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "grandchild survived");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn exit_without_answer_reports_stderr() {
+        let dir = std::env::temp_dir();
+        let (_tx, rx) = watch::channel(false);
+        let error = run(
+            "sh",
+            Kind::Codex,
+            vec!["-c".into(), "echo boom >&2; exit 3".into()],
+            String::new(),
+            &dir,
+            Arc::new(rx),
+            |_| std::future::ready(()),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("boom"), "{error}");
+    }
+}

@@ -14,7 +14,6 @@ pub struct ModelList {
 
 /// Bundled suggestions. Ordered with the fastest and cheapest first, matching
 /// how people pick a model for quick answers.
-pub const MERGE_MODEL: &str = "deepseek/deepseek-v4.1-flash-1017";
 const EMPTY_CATALOG: &str = "This account's catalog has no text-chat models. Your saved key and configured model have been kept.";
 
 pub const MODELS: &[ModelList] = &[
@@ -22,9 +21,19 @@ pub const MODELS: &[ModelList] = &[
         provider: "gemini",
         models: &["gemini-3.8-flash"],
     },
+    // Ollama's real list comes from /api/tags; this is only the starting choice.
     ModelList {
-        provider: "merge-gateway",
-        models: &[MERGE_MODEL],
+        provider: "ollama",
+        models: &["llama3.2"],
+    },
+    ModelList {
+        provider: "claude-sub",
+        models: &["sonnet", "opus", "haiku"],
+    },
+    // "default" lets the CLI choose; any other id is passed with -m.
+    ModelList {
+        provider: "codex-sub",
+        models: &[super::super::chat::cli::CLI_DEFAULT_MODEL],
     },
 ];
 
@@ -154,6 +163,10 @@ pub fn cached(
 /// custom gateways. Never send a key to a second vendor as a fallback.
 pub fn models_endpoint(config: &super::providers::ProviderConfig) -> Result<String, String> {
     let endpoint = config.endpoint().ok_or("Unknown provider")?;
+    if config.id == "ollama" {
+        let origin = endpoint.split("/v1/").next().unwrap_or(&endpoint);
+        return Ok(format!("{}/api/tags", origin.trim_end_matches('/')));
+    }
     let prefix = endpoint
         .trim_end_matches('/')
         .strip_suffix("/chat/completions")
@@ -178,28 +191,6 @@ fn supports_chat(row: &serde_json::Value) -> bool {
         return methods
             .iter()
             .any(|method| matches!(method.as_str(), Some("generateContent" | "generateMessage")));
-    }
-    // Merge exposes capabilities per vendor, rather than on the model itself.
-    if let Some(vendors) = row.get("vendors").and_then(serde_json::Value::as_object) {
-        let mut described = false;
-        for vendor in vendors.values() {
-            match vendor
-                .pointer("/capabilities/output")
-                .and_then(serde_json::Value::as_array)
-                .filter(|v| !v.is_empty())
-            {
-                Some(output) => {
-                    described = true;
-                    if output.iter().any(|item| item.as_str() == Some("text")) {
-                        return true;
-                    }
-                }
-                None => return true, // Missing metadata is not evidence of incompatibility.
-            }
-        }
-        if described {
-            return false;
-        }
     }
     true
 }
@@ -245,6 +236,14 @@ pub async fn discover(
     config: super::providers::ProviderConfig,
     force: bool,
 ) -> Result<Vec<String>, String> {
+    if super::providers::ChatProvider::by_id(&config.id)
+        .is_some_and(|p| p.wire == super::providers::ChatWire::Cli)
+    {
+        return Ok(for_provider(&config.id)
+            .iter()
+            .map(|m| (*m).to_owned())
+            .collect());
+    }
     if !force
         && let Some(cache) = cached(path.as_deref(), &config)
         && cache.fresh()
@@ -288,7 +287,7 @@ async fn fetch_catalog(config: &super::providers::ProviderConfig) -> Result<Vec<
             if let Some((name, value)) = custom.header(&config.api_key) {
                 request = request.header(name, value);
             }
-        } else {
+        } else if !config.api_key.is_empty() {
             request = request.bearer_auth(&config.api_key);
         }
         let response = request
@@ -364,22 +363,20 @@ mod discovery_tests {
     use std::io::{Read, Write};
 
     #[test]
-    fn merge_catalog_uses_canonical_model_ids_and_vendor_capabilities() {
+    fn catalog_uses_canonical_model_ids_and_output_modalities() {
         let catalog = serde_json::json!({"data":[
-            {"model":"anthropic/chat-model", "vendors":{"a":{"capabilities":{"output":["text","tool_use"]}}}},
-            {"model":"audio-only", "vendors":{"a":{"capabilities":{"output":["audio"]}}}},
-            {"model":"mixed", "vendors":{"a":{"capabilities":{"output":["image"]}},"b":{"capabilities":{"output":["text"]}}}},
+            {"model":"chat-model", "modalities":{"output":["text"]}},
+            {"model":"audio-only", "modalities":{"output":["audio"]}},
             {"model":"unknown-output", "modalities":{"output":[]}},
             {"model":"canonical-name", "id":"internal-database-id"}
         ]});
         assert_eq!(
             parse_models(&catalog).unwrap(),
-            [
-                "anthropic/chat-model",
-                "canonical-name",
-                "mixed",
-                "unknown-output"
-            ]
+            ["canonical-name", "chat-model", "unknown-output"]
+        );
+        assert_eq!(
+            parse_models(&serde_json::json!({"models":[{"name":"llama3.2:latest"}]})).unwrap(),
+            ["llama3.2:latest"]
         );
         assert_eq!(
             parse_models(&serde_json::json!({"models":[
@@ -396,7 +393,7 @@ mod discovery_tests {
     ) -> (ProviderConfig, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
-        let mut config = ProviderConfig::new("merge-gateway", "saved-list-key", "my-custom-model");
+        let mut config = ProviderConfig::new("gemini", "saved-list-key", "my-custom-model");
         config.base_url = format!(
             "http://{}/v1/chat/completions",
             listener.local_addr().unwrap()
@@ -441,7 +438,7 @@ mod discovery_tests {
     }
 
     #[tokio::test]
-    async fn merge_and_gemini_pagination_keep_auth_on_the_configured_endpoint() {
+    async fn pagination_keep_auth_on_the_configured_endpoint() {
         for google in [false, true] {
             let pages = if google {
                 vec![
@@ -500,8 +497,10 @@ mod discovery_tests {
                 ]
             };
             let (config, server) = catalog_server(pages);
-            let directory = std::env::temp_dir()
-                .join(format!("nixarchy-meetingai-catalog-failure-{}", uuid::Uuid::new_v4()));
+            let directory = std::env::temp_dir().join(format!(
+                "nixarchy-meetingai-catalog-failure-{}",
+                uuid::Uuid::new_v4()
+            ));
             std::fs::create_dir_all(&directory).unwrap();
             let path = directory.join("cache.db");
             let db = crate::db::Database::open(&path).unwrap();
@@ -547,6 +546,11 @@ mod discovery_tests {
         );
         config.base_url = "http://127.0.0.1:1234/custom".into();
         assert!(models_endpoint(&config).is_err());
+        let ollama = ProviderConfig::new("ollama", "", "m");
+        assert_eq!(
+            models_endpoint(&ollama).unwrap(),
+            "http://127.0.0.1:11434/api/tags"
+        );
     }
 
     #[test]
@@ -562,12 +566,14 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn live_discovery_authenticates_then_reuses_persistent_cache_without_network() {
-        let directory =
-            std::env::temp_dir().join(format!("nixarchy-meetingai-models-{}", uuid::Uuid::new_v4()));
+        let directory = std::env::temp_dir().join(format!(
+            "nixarchy-meetingai-models-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("catalog.db");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut config = ProviderConfig::new("merge-gateway", "catalog-test-key", "custom-model");
+        let mut config = ProviderConfig::new("gemini", "catalog-test-key", "custom-model");
         config.base_url = format!(
             "http://{}/v1/chat/completions",
             listener.local_addr().unwrap()

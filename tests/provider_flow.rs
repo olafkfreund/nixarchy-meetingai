@@ -3,7 +3,6 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use nixarchy_meetingai::{
     ai::{
         engine::{self, TurnContext},
-        models::MERGE_MODEL,
         providers::ProviderConfig,
         session::{self, ChatSession},
     },
@@ -340,7 +339,7 @@ async fn meeting_recap_uses_final_persisted_words_and_survives_reopen() {
 
 #[tokio::test]
 async fn speech_to_streamed_answer_and_finished_meeting_for_both_ai_services() {
-    for provider in ["gemini", "merge-gateway"] {
+    for provider in ["gemini", "ollama"] {
         let dir = std::env::temp_dir().join(format!("nixarchy-meetingai-flow-{}", uuid::Uuid::new_v4()));
         let vault = Vault::open(&dir).unwrap();
         let mut speech = Credential::speech("deepgram-stt", "test-speech-key");
@@ -349,11 +348,7 @@ async fn speech_to_streamed_answer_and_finished_meeting_for_both_ai_services() {
         speech.base_url = stt_url;
         let (chat_url, chat_request) = server(200, "text/event-stream", "data: {\"choices\":[{\"delta\":{\"content\":\"Ownership \"}}]}\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"prevents races. ✓\"}}]}\n\ndata: [DONE]".into());
         let mut chat = Credential::chat(provider, "test-chat-key");
-        chat.model = if provider == "merge-gateway" {
-            MERGE_MODEL.into()
-        } else {
-            "gemini-test-model".into()
-        };
+        chat.model = "chat-test-model".into();
         chat.base_url = chat_url;
         credentials::save(&vault, &speech).unwrap();
         credentials::save(&vault, &chat).unwrap();
@@ -446,7 +441,7 @@ async fn auth_errors_empty_streams_and_trailing_errors_are_visible() {
         ),
     ] {
         let (url, request) = server(status, "text/event-stream", payload.into());
-        let mut config = ProviderConfig::new("merge-gateway", "test-key", MERGE_MODEL);
+        let mut config = ProviderConfig::new("gemini", "test-key", "chat-test-model");
         config.base_url = url;
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let error = engine::stream_chat(
@@ -489,7 +484,7 @@ async fn cancelling_a_silent_provider_does_not_wait_for_another_delta() {
 #[tokio::test]
 async fn markdown_code_deltas_arrive_before_the_provider_finishes() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut config = ProviderConfig::new("merge-gateway", "test-key", MERGE_MODEL);
+    let mut config = ProviderConfig::new("gemini", "test-key", "chat-test-model");
     config.base_url = format!("http://{}", listener.local_addr().unwrap());
     let (ack_tx, ack_rx) = std::sync::mpsc::channel();
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -554,9 +549,9 @@ async fn markdown_code_deltas_arrive_before_the_provider_finishes() {
 }
 
 #[tokio::test]
-async fn selecting_a_live_gateway_model_sends_that_model_without_pinned_model_options() {
+async fn selecting_a_live_model_sends_that_model_without_pinned_model_options() {
     let (url, request) = server(200, "text/event-stream", "data: {\"choices\":[{\"delta\":{\"content\":\"Selected model works\"}}]}\n\ndata: [DONE]\n\n".into());
-    let mut config = ProviderConfig::new("merge-gateway", "test-key", "vendor/live-model");
+    let mut config = ProviderConfig::new("gemini", "test-key", "vendor/live-model");
     config.base_url = url;
     let answer = engine::stream_chat(
         &engine::http_client(),
