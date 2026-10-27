@@ -258,7 +258,7 @@ Item {
             Row {
                 spacing: Style.spacing.xs
                 Repeater {
-                    model: ["general", "interview", "team_meeting"]
+                    model: ["general", "interview", "team_meeting", "interviewer"]
                     IconButton { ts: root.ts; required property string modelData; text: modelData === "team_meeting" ? "Team" : modelData; active: root.promptMode === modelData; onClicked: root.promptMode = modelData }
                 }
                 Repeater {

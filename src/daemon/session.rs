@@ -27,7 +27,7 @@ use crate::{
         cli,
         conversation::Conversation,
         engine::{self, TurnContext},
-        models, recap,
+        guard, models, recap,
         session::{ChatSession, SendError},
         titling,
     },
@@ -38,14 +38,18 @@ use crate::{
         domain::{Message, Role},
         settings::{
             AutoResponse, FOLLOW_UP_PROMPT, MeetingMode, RECAP_PROMPT_GENERAL,
-            RECAP_PROMPT_INTERVIEW, RECAP_PROMPT_TEAM, ResponseLength, Settings,
-            response_instruction,
+            RECAP_PROMPT_INTERVIEW, RECAP_PROMPT_INTERVIEWER, RECAP_PROMPT_TEAM, ResponseLength,
+            Settings, response_instruction,
         },
         vault::Vault,
     },
-    db::{self, Database, conversations, items, meetings, profiles, sessions, settings as store},
+    db::{
+        self, Database, conversations, items, meetings, profiles, repos::candidates, sessions,
+        settings as store,
+    },
     speech::{
         listen::{ListenSession, SessionConfig, SessionEvent},
+        stt::filter::{similarity, tokens},
         transcription::{self, LiveEvent, LiveTranscriber, LiveTurns, SttHints},
     },
 };
@@ -84,13 +88,14 @@ fn recap_suffix(mode: MeetingMode) -> &'static str {
         MeetingMode::General => "general",
         MeetingMode::Interview => "interview",
         MeetingMode::TeamMeeting => "team",
+        MeetingMode::Interviewer => "interviewer",
     }
 }
 
 /// Quick actions the shell offers itself; generated suggestions never repeat them.
 const FIXED_FOLLOW_UPS: [&str; 3] = ["What should I say?", "Follow-up questions", "Fact check"];
 /// Settings with their own controls elsewhere; `settings.search` hides them.
-const MANAGED_SETTINGS: [&str; 12] = [
+const MANAGED_SETTINGS: [&str; 13] = [
     "chat_provider",
     "chat_model",
     "live_provider",
@@ -100,6 +105,7 @@ const MANAGED_SETTINGS: [&str; 12] = [
     "recap_prompt_general",
     "recap_prompt_interview",
     "recap_prompt_team",
+    "recap_prompt_interviewer",
     "smart_follow_ups_prompt",
     "personal_context",
     "meeting_context",
@@ -202,6 +208,10 @@ struct Inner {
     suggestions: Vec<String>,
     /// Series chosen for the next meeting (team mode).
     series: Option<String>,
+    /// Candidate chosen for the next (or restored) interview (interviewer mode).
+    candidate: Option<String>,
+    /// The candidate was told about the recording for the current meeting.
+    consent: bool,
     /// When `earlier_item` last fired; at most one per `EARLIER_GAP`.
     last_earlier: Option<Instant>,
     /// Earlier items already offered this session, so the callout moves on to a new one.
@@ -231,6 +241,8 @@ pub struct Daemon {
     tx: broadcast::Sender<Value>,
     pub shutdown: Notify,
     chunking: AtomicBool,
+    /// The session's candidate is local-only: only ollama and whisper-local may be used.
+    local_only: AtomicBool,
     /// Serializes rolling-notes chunking and recap generation (no duplicate chunks).
     notes: tokio::sync::Mutex<()>,
     inner: Mutex<Inner>,
@@ -485,6 +497,7 @@ impl Daemon {
             tx,
             shutdown: Notify::new(),
             chunking: AtomicBool::new(false),
+            local_only: AtomicBool::new(false),
             notes: tokio::sync::Mutex::new(()),
             inner: Mutex::new(Inner {
                 db,
@@ -524,6 +537,8 @@ impl Daemon {
                 last_question: String::new(),
                 suggestions: Vec::new(),
                 series: None,
+                candidate: None,
+                consent: false,
                 last_earlier: None,
                 shown_earlier: HashSet::new(),
             }),
@@ -549,6 +564,8 @@ impl Daemon {
             "mic": g.mic,
             "system": g.system,
             "series": g.series,
+            "candidate": g.candidate,
+            "consent": g.consent,
             "meeting": g.meeting_id.as_ref().or(g.resume_meeting.as_ref()),
         })
     }
@@ -604,8 +621,11 @@ impl Daemon {
         } else {
             (&s.chat_provider, &s.chat_model)
         };
+        let local = self.local_only.load(Ordering::Relaxed);
         let usable = |id: &str| {
-            cli_binary(id).is_none_or(cli::on_path) && self.provider_config(id, "").is_some()
+            (!local || id == "ollama")
+                && cli_binary(id).is_none_or(cli::on_path)
+                && self.provider_config(id, "").is_some()
         };
         plan_chain(chosen, model, live, usable)
             .into_iter()
@@ -624,6 +644,9 @@ impl Daemon {
         } else {
             &s.speech_provider
         };
+        if self.local_only.load(Ordering::Relaxed) && id != "whisper-local" {
+            return None;
+        }
         let mut config = match credentials::load(&self.vault, Kind::Speech, id) {
             Ok(Some(c)) => c.to_config(),
             _ => SttProvider::by_id(id)
@@ -806,7 +829,7 @@ impl Daemon {
         if g.dictation.is_some() {
             return Err("Finish dictation before sending your message.".into());
         }
-        let mut chain = self.chain(&g.settings, automatic);
+        let chain = self.chain(&g.settings, automatic);
         if chain.is_empty() {
             return Err(SendError::NoKey.message());
         }
@@ -877,49 +900,86 @@ impl Daemon {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         g.cancel = Some(cancel_tx);
         g.automatic_inflight = automatic;
+        let guarded = g.settings.meeting_mode == MeetingMode::Interviewer;
         let me = self.clone();
         let cancel = Arc::new(cancel_rx);
         g.request = Some(tokio::spawn(async move {
-            let mut last = Instant::now();
-            let streamed = Arc::new(AtomicBool::new(false));
-            let client = engine::http_client();
-            // A provider that cannot even start is replaced once, before any text.
-            chain.truncate(2);
-            let mut result = Ok(String::new());
-            for (attempt, config) in chain.iter().enumerate() {
-                if attempt > 0 {
-                    me.inner.lock().effective = (config.id.clone(), config.model.clone());
-                }
-                result = engine::stream_chat_bounded(
-                    &client,
-                    config,
-                    &history,
-                    &context,
-                    cancel.clone(),
-                    |delta| {
-                        let checkpoint = last.elapsed() >= Duration::from_millis(150);
-                        if checkpoint {
-                            last = Instant::now();
-                        }
-                        streamed.store(true, Ordering::Relaxed);
-                        let me = me.clone();
-                        async move { me.on_delta(turn, &delta, checkpoint) }
-                    },
-                )
+            let result = if guarded {
+                // Interviewer answers are held back until the verdict guard has seen them.
+                let text = guard::with_retry(|extra| {
+                    let mut context = context.clone();
+                    context.system = context.system.map(|s| format!("{s}\n\n{extra}"));
+                    let (me, chain, history, cancel) =
+                        (me.clone(), chain.clone(), history.clone(), cancel.clone());
+                    async move {
+                        me.run_chain(&chain, &history, &context, cancel, turn, true)
+                            .await
+                            .map_err(|e| e.to_string())
+                    }
+                })
                 .await;
-                let spawn_failed = matches!(result, Err(engine::ChatError::Cli(_)))
-                    && !streamed.load(Ordering::Relaxed);
-                if !spawn_failed {
-                    break;
-                }
-            }
-            me.finish_turn(
-                turn,
-                result.map(|_| ()).map_err(|e| e.to_string()),
-                automatic,
-            );
+                text.map(|text| {
+                    if me.inner.lock().turn == turn {
+                        me.on_delta(turn, &text, true);
+                    }
+                })
+            } else {
+                me.run_chain(&chain, &history, &context, cancel, turn, false)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            };
+            me.finish_turn(turn, result, automatic);
         }));
         Ok(turn)
+    }
+
+    /// Stream one answer, replacing a provider that cannot even start once. `quiet` holds the text back.
+    async fn run_chain(
+        self: &Arc<Self>,
+        chain: &[ProviderConfig],
+        history: &[Message],
+        context: &TurnContext,
+        cancel: Arc<watch::Receiver<bool>>,
+        turn: u64,
+        quiet: bool,
+    ) -> Result<String, engine::ChatError> {
+        let mut last = Instant::now();
+        let streamed = Arc::new(AtomicBool::new(false));
+        let client = engine::http_client();
+        let mut result = Ok(String::new());
+        for (attempt, config) in chain.iter().take(2).enumerate() {
+            if attempt > 0 {
+                self.inner.lock().effective = (config.id.clone(), config.model.clone());
+            }
+            result = engine::stream_chat_bounded(
+                &client,
+                config,
+                history,
+                context,
+                cancel.clone(),
+                |delta| {
+                    let checkpoint = last.elapsed() >= Duration::from_millis(150);
+                    if checkpoint {
+                        last = Instant::now();
+                    }
+                    streamed.store(true, Ordering::Relaxed);
+                    let me = self.clone();
+                    async move {
+                        if !quiet {
+                            me.on_delta(turn, &delta, checkpoint);
+                        }
+                    }
+                },
+            )
+            .await;
+            let spawn_failed = matches!(result, Err(engine::ChatError::Cli(_)))
+                && !streamed.load(Ordering::Relaxed);
+            if !spawn_failed {
+                break;
+            }
+        }
+        result
     }
 
     fn on_delta(&self, turn: u64, delta: &str, checkpoint: bool) {
@@ -969,7 +1029,7 @@ impl Daemon {
                 }
                 self.emit(
                     "answer.error",
-                    json!({"turn": turn, "message": format!("Couldn't get an answer: {message}")}),
+                    json!({"turn": turn, "message": if message == guard::WITHHELD { message } else { format!("Couldn't get an answer: {message}") }}),
                 );
             }
         }
@@ -1011,6 +1071,7 @@ impl Daemon {
         };
         let me = self.clone();
         let turn = g.turn;
+        let guarded = g.settings.meeting_mode == MeetingMode::Interviewer;
         g.follow_up_task = Some(tokio::spawn(async move {
             let result = tokio::time::timeout(
                 Duration::from_secs(25),
@@ -1028,6 +1089,11 @@ impl Daemon {
                 Ok(Ok(text)) => parse_follow_ups(&text),
                 _ => Vec::new(),
             };
+            // An assessment is dropped rather than retried: suggestions are optional.
+            let generated: Vec<String> = generated
+                .into_iter()
+                .filter(|t| !guarded || guard::assessment(t).is_none())
+                .collect();
             for text in visible_follow_ups(&generated) {
                 {
                     let mut g = me.inner.lock();
@@ -1092,6 +1158,10 @@ impl Daemon {
             let eligible = match g.settings.auto_response {
                 // Team meetings give no automatic answers.
                 _ if g.settings.meeting_mode == MeetingMode::TeamMeeting => false,
+                // The interviewer gets probes after every meaningful candidate turn.
+                _ if g.settings.meeting_mode == MeetingMode::Interviewer => {
+                    meaningful_remark(&text)
+                }
                 AutoResponse::Off => false,
                 AutoResponse::Questions => is_question(&text),
                 AutoResponse::Pauses => meaningful_remark(&text),
@@ -1123,7 +1193,10 @@ impl Daemon {
             if g.pending_question.is_none() {
                 return;
             }
-            if g.recording.is_none() || g.settings.auto_response == AutoResponse::Off {
+            if g.recording.is_none()
+                || (g.settings.auto_response == AutoResponse::Off
+                    && g.settings.meeting_mode != MeetingMode::Interviewer)
+            {
                 g.pending_question = None;
                 g.pending_created = None;
                 g.pending_since = None;
@@ -1188,6 +1261,10 @@ impl Daemon {
                             line.channel,
                             line.speaker.map(|s| s + speaker),
                         );
+                        if line.channel == 0 && g.settings.meeting_mode == MeetingMode::Interviewer
+                        {
+                            self.cover_question(g, &line.text);
+                        }
                         if let Some(id) = g.meeting_id.clone() {
                             self.spawn_chunk(id);
                         }
@@ -1336,7 +1413,7 @@ impl Daemon {
 
     // ----- recording ----------------------------------------------------
 
-    async fn record_start(self: &Arc<Self>) -> Result<Value, String> {
+    async fn record_start(self: &Arc<Self>, consent: bool) -> Result<Value, String> {
         let (stop, speech, device, output_device, system) = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
@@ -1354,6 +1431,16 @@ impl Daemon {
                 return Err("Finish or cancel dictation before starting a meeting.".into());
             }
             g.settings = Settings::load(&g.db).unwrap_or_default();
+            if g.settings.meeting_mode == MeetingMode::Interviewer {
+                let stt = g.settings.speech_provider.as_str();
+                if self.local_only.load(Ordering::Relaxed) && !matches!(stt, "" | "whisper-local") {
+                    return Err("local_only: this interview is local-only. Choose whisper-local for speech-to-text.".into());
+                }
+                if !consent && !g.consent {
+                    return Err("consent_required: Tell the candidate this interview is being recorded and transcribed.".into());
+                }
+                g.consent = true;
+            }
             let speech = if self.capture {
                 Some(self.speech_config(&g.settings).ok_or(
                     "Speech-to-text is not ready. Start whisper-server or add a Deepgram key.",
@@ -1439,6 +1526,11 @@ impl Daemon {
             };
             match outcome {
                 Ok(id) => {
+                    if g.settings.meeting_mode == MeetingMode::Interviewer
+                        && let Some(candidate) = &g.candidate
+                    {
+                        let _ = candidates::link_meeting(g.db.connection(), candidate, &id);
+                    }
                     g.meeting_id = Some(id.clone());
                     self.emit_state(g);
                     id
@@ -1764,6 +1856,9 @@ impl Daemon {
         g.last_question.clear();
         g.suggestions.clear();
         g.shown_earlier.clear();
+        g.candidate = None;
+        g.consent = false;
+        self.local_only.store(false, Ordering::Relaxed);
     }
 
     fn known_series(g: &Inner, id: &str) -> Result<(), String> {
@@ -1880,6 +1975,11 @@ impl Daemon {
         );
         context::add(&mut g.sources, source)?;
         g.resume_meeting = Some(id.to_owned());
+        let candidate = candidates::for_meeting(g.db.connection(), id)
+            .ok()
+            .flatten()
+            .map(|c| c.id);
+        self.set_candidate(g, candidate);
         self.emit_state(g);
         Ok(json!({"kind": "meeting"}))
     }
@@ -2099,6 +2199,7 @@ impl Daemon {
                             MeetingMode::General => s.recap_prompt_general.clone(),
                             MeetingMode::Interview => s.recap_prompt_interview.clone(),
                             MeetingMode::TeamMeeting => s.recap_prompt_team.clone(),
+                            MeetingMode::Interviewer => s.recap_prompt_interviewer.clone(),
                         },
                     }
                 }
@@ -2138,12 +2239,13 @@ impl Daemon {
                 .iter()
                 .find(|m| m.name == mode.listen_name())
                 .map_or(db::seed::DEFAULT_SYSTEM_PROMPT, |m| m.prompt),
-            "live_answer" => db::seed::DEFAULT_LIVE_ANSWER,
+            "live_answer" => db::seed::default_live_answer(mode),
             "follow_up" => FOLLOW_UP_PROMPT,
             "recap" => match mode {
                 MeetingMode::General => RECAP_PROMPT_GENERAL,
                 MeetingMode::Interview => RECAP_PROMPT_INTERVIEW,
                 MeetingMode::TeamMeeting => RECAP_PROMPT_TEAM,
+                MeetingMode::Interviewer => RECAP_PROMPT_INTERVIEWER,
             },
             other => return Err(format!("unknown prompt kind '{other}'")),
         };
@@ -2273,6 +2375,249 @@ impl Daemon {
         )
     }
 
+    // ----- interviewer mode ---------------------------------------------
+
+    /// Choose the session's candidate and apply their local-only flag to the chain builders.
+    fn set_candidate(&self, g: &mut Inner, id: Option<String>) {
+        let local = id
+            .as_deref()
+            .and_then(|id| candidates::get(g.db.connection(), id).ok().flatten())
+            .is_some_and(|c| c.local_only);
+        g.candidate = id;
+        self.local_only.store(local, Ordering::Relaxed);
+    }
+
+    fn candidate_get(&self, id: &str) -> Result<Value, String> {
+        let g = self.inner.lock();
+        let c = g.db.connection();
+        let candidate = candidates::get(c, id)
+            .map_err(|e| e.to_string())?
+            .ok_or("No such candidate.")?;
+        let documents: Vec<Value> = candidates::documents(c, id)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .map(|d| json!({"id": d.id, "kind": d.kind, "name": d.name, "chars": d.text.chars().count()}))
+            .collect();
+        let questions = candidates::questions(c, id).map_err(|e| e.to_string())?;
+        Ok(json!({"candidate": candidate, "documents": documents, "questions": questions}))
+    }
+
+    async fn candidate_attach(&self, a: protocol::CandidateAttach) -> Result<Value, String> {
+        if !matches!(a.kind.as_str(), "cv" | "job") {
+            return Err("Attach a 'cv' or a 'job' description.".into());
+        }
+        let path = a.path;
+        let item = tokio::task::spawn_blocking(move || context::import(Path::new(&path)))
+            .await
+            .map_err(|e| e.to_string())??;
+        if item.image.is_some() {
+            return Err("Attach a PDF, text or Markdown file.".into());
+        }
+        let g = self.inner.lock();
+        let c = g.db.connection();
+        candidates::get(c, &a.id)
+            .map_err(|e| e.to_string())?
+            .ok_or("No such candidate.")?;
+        let doc = candidates::add_document(c, &a.id, &a.kind, &item.name, &item.text)
+            .map_err(|e| e.to_string())?;
+        Ok(
+            json!({"id": doc.id, "kind": doc.kind, "name": doc.name, "chars": item.text.chars().count()}),
+        )
+    }
+
+    /// One typed-model call for 8-12 questions; any whose `source` is not a verbatim quote is dropped.
+    async fn questions_generate(&self, candidate: &str) -> Result<Value, String> {
+        let (config, documents) = {
+            let g = self.inner.lock();
+            let c = g.db.connection();
+            candidates::get(c, candidate)
+                .map_err(|e| e.to_string())?
+                .ok_or("No such candidate.")?;
+            let documents = candidates::documents(c, candidate).map_err(|e| e.to_string())?;
+            if documents.is_empty() {
+                return Err("Attach a CV or a job description first.".into());
+            }
+            let config = self.chat_config(&g.settings).ok_or_else(|| {
+                if self.local_only.load(Ordering::Relaxed) {
+                    "local_only: no local model (ollama) is available.".to_owned()
+                } else {
+                    SendError::NoKey.message()
+                }
+            })?;
+            (config, documents)
+        };
+        let mut prompt = String::from(
+            "Write 8 to 12 interview questions for the candidate from the documents below. Reply with only a JSON array of objects {\"text\", \"source\", \"competency\"}, in the order to ask them. `source` must be an exact, verbatim quote from one document that the question is based on.\n",
+        );
+        for d in &documents {
+            prompt.push_str(&format!("\n=== {} ({}) ===\n{}\n", d.name, d.kind, d.text));
+        }
+        let context = TurnContext {
+            system: Some("You help an interviewer prepare. You only write questions; you never assess the candidate.".into()),
+            images: Vec::new(),
+        };
+        let reply = tokio::time::timeout(
+            Duration::from_secs(120),
+            engine::stream_chat(
+                &engine::http_client(),
+                &config,
+                &[Message::user(prompt)],
+                &context,
+                Arc::new(watch::channel(false).1),
+                |_| {},
+            ),
+        )
+        .await
+        .map_err(|_| "The model took too long to write questions.".to_owned())?
+        .map_err(|e| e.to_string())?;
+        #[derive(serde::Deserialize)]
+        struct Generated {
+            text: String,
+            source: String,
+            competency: Option<String>,
+        }
+        let (open, close) = (reply.find('['), reply.rfind(']'));
+        let generated: Vec<Generated> = match (open, close) {
+            (Some(a), Some(b)) if a < b => serde_json::from_str(&reply[a..=b]),
+            _ => Ok(Vec::new()),
+        }
+        .map_err(|e| format!("The model's questions could not be read: {e}"))?;
+        let mut kept = Vec::new();
+        let mut dropped = 0;
+        {
+            let g = self.inner.lock();
+            let c = g.db.connection();
+            for q in generated.into_iter().take(12) {
+                let source = q.source.trim();
+                if q.text.trim().is_empty()
+                    || source.is_empty()
+                    || !documents.iter().any(|d| d.text.contains(source))
+                {
+                    dropped += 1;
+                    continue;
+                }
+                kept.push(
+                    candidates::add_question(
+                        c,
+                        candidate,
+                        q.text.trim(),
+                        source,
+                        q.competency.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?,
+                );
+            }
+        }
+        self.emit("questions.updated", json!({"candidate": candidate}));
+        Ok(json!({"questions": kept, "dropped": dropped}))
+    }
+
+    fn questions(&self, cmd: &str, args: Value) -> Result<Value, String> {
+        let g = self.inner.lock();
+        let c = g.db.connection();
+        let err = |e: crate::db::DbError| e.to_string();
+        let candidate = match cmd {
+            "questions.add" => {
+                let a: protocol::QuestionAdd = parse(args)?;
+                candidates::get(c, &a.candidate)
+                    .map_err(err)?
+                    .ok_or("No such candidate.")?;
+                let q = candidates::add_question(
+                    c,
+                    &a.candidate,
+                    &a.text,
+                    a.source.as_deref().unwrap_or("manual"),
+                    a.competency.as_deref(),
+                )
+                .map_err(err)?;
+                self.emit("questions.updated", json!({"candidate": a.candidate}));
+                return Ok(json!(q));
+            }
+            "questions.update" => {
+                let a: protocol::QuestionUpdate = parse(args)?;
+                if let Some(status) = &a.patch.status
+                    && !matches!(status.as_str(), "planned" | "asked" | "covered" | "skipped")
+                {
+                    return Err("Status must be planned, asked, covered or skipped.".into());
+                }
+                if !candidates::update_question(c, &a.id, &a.patch).map_err(err)? {
+                    return Err("No such question.".into());
+                }
+                let q = candidates::question(c, &a.id).map_err(err)?;
+                self.emit(
+                    "questions.updated",
+                    json!({"candidate": q.as_ref().map(|q| &q.candidate_id)}),
+                );
+                return Ok(json!(q));
+            }
+            "questions.reorder" => {
+                let a: protocol::QuestionReorder = parse(args)?;
+                candidates::reorder(c, &a.candidate, &a.ids).map_err(err)?;
+                a.candidate
+            }
+            _ => {
+                let id = parse::<protocol::IdArg>(args)?.id;
+                let q = candidates::question(c, &id)
+                    .map_err(err)?
+                    .ok_or("No such question.")?;
+                candidates::delete_question(c, &id).map_err(err)?;
+                q.candidate_id
+            }
+        };
+        self.emit("questions.updated", json!({"candidate": candidate}));
+        Ok(json!({}))
+    }
+
+    /// Remove the candidate and everything about their interview.
+    fn candidate_delete(&self, id: &str) -> Result<Value, String> {
+        let mut guard = self.inner.lock();
+        let g = &mut *guard;
+        let candidate = candidates::get(g.db.connection(), id)
+            .map_err(|e| e.to_string())?
+            .ok_or("No such candidate.")?;
+        if let Some(m) = &candidate.meeting_id
+            && (g.meeting_id.as_ref() == Some(m) || g.finishing_meeting.as_ref() == Some(m))
+        {
+            return Err(
+                "Stop the recording and wait for the notes before deleting this interview.".into(),
+            );
+        }
+        candidates::delete_all(g.db.connection(), id).map_err(|e| e.to_string())?;
+        if candidate.meeting_id.is_some() && g.resume_meeting == candidate.meeting_id {
+            self.reset_session(g);
+            self.emit("session.reset", json!({}));
+        } else if g.candidate.as_deref() == Some(id) {
+            self.set_candidate(g, None);
+        }
+        self.emit_state(g);
+        Ok(json!({}))
+    }
+
+    /// Mark the planned question a final interviewer line most resembles (similarity >= 0.6) as asked.
+    fn cover_question(&self, g: &Inner, text: &str) {
+        let Some(candidate) = &g.candidate else {
+            return;
+        };
+        let c = g.db.connection();
+        let line = tokens(text);
+        let best = candidates::questions(c, candidate)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|q| q.status == "planned")
+            .map(|q| (similarity(&line, &tokens(&q.text)), q.id))
+            .filter(|(score, _)| *score >= 0.6)
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, id)) = best {
+            let patch = candidates::QuestionPatch {
+                status: Some("asked".into()),
+                ..Default::default()
+            };
+            if candidates::update_question(c, &id, &patch).unwrap_or(false) {
+                self.emit("questions.updated", json!({"candidate": candidate}));
+            }
+        }
+    }
+
     fn notes_get(&self, meeting: &str) -> Result<Value, String> {
         let g = self.inner.lock();
         let c = g.db.connection();
@@ -2360,6 +2705,32 @@ impl Daemon {
             return self.dispatch(cmd, args).await;
         }
         tracing::info!(origin = "mcp", cmd);
+        // Agents cannot give the candidate's consent, and cannot read a local-only interview.
+        let mut args = args;
+        if cmd == "record.start"
+            && let Some(map) = args.as_object_mut()
+        {
+            map.remove("consent");
+        }
+        if matches!(cmd, "transcript.get" | "notes.get" | "now.get") {
+            let g = self.inner.lock();
+            let meeting = args["meeting"].as_str().map(str::to_owned).or_else(|| {
+                g.meeting_id
+                    .clone()
+                    .or_else(|| g.finishing_meeting.clone())
+                    .or_else(|| g.resume_meeting.clone())
+            });
+            let local = meeting.is_some_and(|m| {
+                candidates::for_meeting(g.db.connection(), &m)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| c.local_only)
+            }) || (args["meeting"].is_null()
+                && self.local_only.load(Ordering::Relaxed));
+            if local {
+                return Err("This interview is local-only".into());
+            }
+        }
         if cmd == "record.start" && !self.inner.lock().settings.mcp_allow_record {
             return Err("Recording by agents is disabled (setting mcp_allow_record)".into());
         }
@@ -2390,14 +2761,22 @@ impl Daemon {
                 Ok(json!({}))
             }
             "session.new" => {
-                let series = parse::<protocol::SessionNew>(args)?.series;
+                let a = parse::<protocol::SessionNew>(args)?;
+                let series = a.series;
                 let mut g = self.inner.lock();
                 Self::require_idle(&g)?;
                 if let Some(id) = &series {
                     Self::known_series(&g, id)?;
                 }
+                if let Some(id) = &a.candidate {
+                    let c = candidates::get(g.db.connection(), id).map_err(|e| e.to_string())?;
+                    if c.ok_or("No such candidate.")?.meeting_id.is_some() {
+                        return Err("This candidate already has an interview.".into());
+                    }
+                }
                 self.reset_session(&mut g);
                 g.series = series;
+                self.set_candidate(&mut g, a.candidate);
                 self.emit("session.reset", json!({}));
                 self.emit_state(&g);
                 Ok(json!({}))
@@ -2457,7 +2836,37 @@ impl Daemon {
             "session.restore" => self.session_restore(&parse::<protocol::IdArg>(args)?.id),
             "session.list" => self.session_list(),
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
-            "record.start" => self.record_start().await,
+            "record.start" => {
+                self.record_start(parse::<protocol::RecordStart>(args)?.consent)
+                    .await
+            }
+            "candidate.create" => {
+                let name = parse::<protocol::NameArg>(args)?.name;
+                json_of(candidates::create(self.inner.lock().db.connection(), &name))
+            }
+            "candidates.list" => json_of(candidates::list(self.inner.lock().db.connection())),
+            "candidate.get" => self.candidate_get(&parse::<protocol::IdArg>(args)?.id),
+            "candidate.attach" => self.candidate_attach(parse(args)?).await,
+            "candidate.local_only" => {
+                let a: protocol::LocalOnly = parse(args)?;
+                let mut g = self.inner.lock();
+                let c = g.db.connection();
+                if !candidates::set_local_only(c, &a.id, a.on).map_err(|e| e.to_string())? {
+                    return Err("No such candidate.".into());
+                }
+                let row = candidates::get(c, &a.id).map_err(|e| e.to_string())?;
+                let current = g.candidate.clone();
+                self.set_candidate(&mut g, current);
+                json_of(Ok(row))
+            }
+            "questions.generate" => {
+                self.questions_generate(&parse::<protocol::CandidateArg>(args)?.candidate)
+                    .await
+            }
+            "questions.add" | "questions.update" | "questions.reorder" | "questions.delete" => {
+                self.questions(cmd, args)
+            }
+            "candidates.delete" => self.candidate_delete(&parse::<protocol::IdArg>(args)?.id),
             "record.stop" => self.record_stop(),
             "record.toggle_mic" | "record.toggle_system" => {
                 let mut g = self.inner.lock();
@@ -2657,6 +3066,9 @@ mod routing_tests {
             ("answer", "team_meeting"),
             ("recap", "team_meeting"),
             ("live_answer", "team_meeting"),
+            ("answer", "interviewer"),
+            ("recap", "interviewer"),
+            ("live_answer", "interviewer"),
         ] {
             let before = call("prompts.get", json!({"mode": mode, "kind": kind}))
                 .await
@@ -2984,5 +3396,72 @@ mod command_tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn interviewer_consent_local_only_and_mcp_refusal() {
+        let d = daemon();
+        let call = |cmd: &'static str, args: Value| {
+            let d = d.clone();
+            async move { d.handle(cmd, args, None).await }
+        };
+        call(
+            "settings.set",
+            json!({"key": "meeting_mode", "value": "interviewer"}),
+        )
+        .await
+        .unwrap();
+        let c = call("candidate.create", json!({"name": "Ada"}))
+            .await
+            .unwrap();
+        let id = c["id"].as_str().unwrap().to_owned();
+        call("session.new", json!({"candidate": id})).await.unwrap();
+        let err = call("record.start", json!({})).await.unwrap_err();
+        assert!(
+            err.starts_with("consent_required: Tell the candidate"),
+            "{err}"
+        );
+        assert_eq!(
+            call("state.get", json!({})).await.unwrap()["consent"],
+            false
+        );
+        // A local-only interview refuses a cloud speech provider, with or without consent.
+        call("candidate.local_only", json!({"id": id, "on": true}))
+            .await
+            .unwrap();
+        call(
+            "settings.set",
+            json!({"key": "speech_provider", "value": "deepgram-stt"}),
+        )
+        .await
+        .unwrap();
+        let err = call("record.start", json!({"consent": true}))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("local_only: "), "{err}");
+        assert!(d.speech_config(&d.inner.lock().settings).is_none());
+        // The chain never leaves the machine.
+        let chain = d.chain(&d.inner.lock().settings.clone(), false);
+        assert!(chain.iter().all(|c| c.id == "ollama"));
+        call(
+            "settings.set",
+            json!({"key": "speech_provider", "value": "whisper-local"}),
+        )
+        .await
+        .unwrap();
+        call("record.start", json!({"consent": true}))
+            .await
+            .unwrap();
+        let state = call("state.get", json!({})).await.unwrap();
+        assert_eq!(
+            (&state["consent"], &state["candidate"]),
+            (&json!(true), &json!(id))
+        );
+        let err = d.handle("transcript.get", json!({}), Some("mcp")).await;
+        assert!(err.unwrap_err().contains("local-only"));
+        assert!(d.handle("now.get", json!({}), Some("mcp")).await.is_err());
+        // The same read is fine for a person at the overlay.
+        call("transcript.get", json!({})).await.unwrap();
+        call("record.stop", json!({})).await.unwrap();
     }
 }

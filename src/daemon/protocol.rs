@@ -62,6 +62,52 @@ pub struct IdArg {
 #[serde(default)]
 pub struct SessionNew {
     pub series: Option<String>,
+    pub candidate: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RecordStart {
+    pub consent: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CandidateAttach {
+    pub id: String,
+    pub kind: String,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LocalOnly {
+    pub id: String,
+    pub on: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CandidateArg {
+    pub candidate: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuestionAdd {
+    pub candidate: String,
+    pub text: String,
+    pub source: Option<String>,
+    pub competency: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuestionUpdate {
+    pub id: String,
+    #[serde(flatten)]
+    pub patch: crate::db::repos::candidates::QuestionPatch,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuestionReorder {
+    pub candidate: String,
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

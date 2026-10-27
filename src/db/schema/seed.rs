@@ -21,6 +21,17 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are nixarchy-meetingai, helping the
 /// Default text of the `live_answer` prompt kind, used for automatic answers in every mode.
 pub const DEFAULT_LIVE_ANSWER: &str = "Write a reply the user can take in at a glance. Start with one bold sentence they can say first, then give 3 to 4 short bullet talking points. Use about 80 words or fewer, with no preamble and no closing remark. Ground every point in the supplied profile, documents and recent speech; never invent experience, numbers or commitments, and say so in a bullet when a needed fact is missing.";
 
+/// Default `live_answer` prompt for interviewer mode: probes grounded in the candidate's words.
+pub const INTERVIEWER_LIVE_ANSWER: &str = "Suggest 1 to 3 short follow-up probes the interviewer could ask about the candidate's last answer. Start each with a quote from that answer in double quotes, then the probe as a question. Use about 80 words or fewer, with no preamble. Never assess the candidate: give no score, rating, ranking, hiring recommendation or inference about emotion, personality, confidence or honesty.";
+
+/// The built-in `live_answer` text for a mode.
+pub const fn default_live_answer(mode: MeetingMode) -> &'static str {
+    match mode {
+        MeetingMode::Interviewer => INTERVIEWER_LIVE_ANSWER,
+        _ => DEFAULT_LIVE_ANSWER,
+    }
+}
+
 /// The setting that holds the editable `live_answer` prompt for a mode.
 pub fn live_answer_key(mode: MeetingMode) -> String {
     format!("live_answer_prompt_{}", mode.as_str())
@@ -32,10 +43,10 @@ pub fn live_answer(connection: &rusqlite::Connection, mode: MeetingMode) -> Stri
         .ok()
         .flatten()
         .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_LIVE_ANSWER.to_owned())
+        .unwrap_or_else(|| default_live_answer(mode).to_owned())
 }
 
-/// The five default listen modes, in tab order.
+/// The default listen modes, in tab order.
 pub const DEFAULT_LISTEN_MODES: &[SeedPrompt] = &[
     SeedPrompt {
         name: "General",
@@ -61,6 +72,11 @@ pub const DEFAULT_LISTEN_MODES: &[SeedPrompt] = &[
         name: "Meeting",
         prompt: "Help the user contribute to this meeting. Answer the latest question or request directed to them with the words they could actually say next. Connect the reply to the preceding point, use the user's voice and keep it to what moves the discussion forward. Do not add a recap, talking-point headings, a list of actions or a generic closing to every reply. Preserve the distinction between a suggestion, an agreement and an unresolved question. Include an owner, deadline or commitment only when it is recorded; do not promise work for the user. A request for a recommendation is not permission to make a commitment. Do not claim 'I can run it', 'I will make time', or a particular demo environment unless the user supplied that fact. If readiness depends on an unverified condition, make the recommendation conditional rather than assuming the check can be skipped. If asked for a recap, produce a clear account of decisions, open questions and actions instead of a spoken reply. If the discussion is unclear, offer one useful clarification rather than inventing agreement.",
         slot: 4,
+    },
+    SeedPrompt {
+        name: "Interviewer",
+        prompt: "Help the user run an interview, asking the questions and listening to the candidate. Suggest what the interviewer could ask next, in their voice, grounded in the planned question bank and in what the candidate has actually said. Quote the candidate when probing. Never assess the candidate: give no score, rating, ranking, hiring recommendation or inference about emotion, personality, confidence or honesty. Report only what was said and what is still unverified.",
+        slot: 5,
     },
 ];
 
@@ -162,6 +178,10 @@ mod tests {
         ] {
             assert_eq!(live_answer(c, mode), DEFAULT_LIVE_ANSWER);
         }
+        assert_eq!(
+            live_answer(c, MeetingMode::Interviewer),
+            INTERVIEWER_LIVE_ANSWER
+        );
         settings::set(c, &live_answer_key(MeetingMode::Interview), "mine").unwrap();
         assert_eq!(live_answer(c, MeetingMode::Interview), "mine");
         assert_eq!(live_answer(c, MeetingMode::General), DEFAULT_LIVE_ANSWER);
@@ -174,7 +194,7 @@ mod tests {
         let connection = database.connection();
         seed_listen_modes(connection).unwrap();
         seed_listen_modes(connection).unwrap();
-        assert_eq!(settings::listen_modes(connection).unwrap().len(), 5);
+        assert_eq!(settings::listen_modes(connection).unwrap().len(), 6);
     }
 
     #[test]
@@ -238,8 +258,25 @@ mod tests {
     }
 
     #[test]
-    fn slots_are_ordered_zero_to_four() {
+    fn interviewer_prompts_forbid_assessment() {
+        let answer = DEFAULT_LISTEN_MODES
+            .iter()
+            .find(|mode| mode.name == MeetingMode::Interviewer.listen_name())
+            .unwrap()
+            .prompt;
+        for text in [
+            answer,
+            INTERVIEWER_LIVE_ANSWER,
+            crate::core::settings::RECAP_PROMPT_INTERVIEWER,
+        ] {
+            assert!(text.contains("Give no score") || text.contains("give no score"));
+            assert!(text.contains("hiring recommendation"));
+        }
+    }
+
+    #[test]
+    fn slots_are_ordered_zero_to_five() {
         let slots: Vec<i64> = DEFAULT_LISTEN_MODES.iter().map(|mode| mode.slot).collect();
-        assert_eq!(slots, [0, 1, 2, 3, 4]);
+        assert_eq!(slots, [0, 1, 2, 3, 4, 5]);
     }
 }

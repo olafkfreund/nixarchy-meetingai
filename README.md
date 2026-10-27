@@ -93,6 +93,41 @@ meeting belongs to a **series**; choose one (or create one) before you record.
 
 Agents read items with `meeting_items` and `series_list` (below).
 
+## Interviews you run
+
+Pick "Interviewer" as the meeting mode when you are the one asking the
+questions. The copilot helps you ask; it never judges the candidate.
+
+- **Before the call.** Create a candidate, attach their CV and the job
+  description, and generate a question bank of 8 to 12 questions. Each one
+  quotes the CV or job text it came from; questions whose quote is not in the
+  documents are dropped. Edit, reorder, add and delete freely.
+- **During the call.** A question you say aloud is marked asked; you can tick
+  any question as covered or skipped and keep an evidence note per question.
+  After each candidate answer you get one to three follow-up probes that quote
+  what they said.
+- **After the call.** The recap lists each question, what the candidate said
+  (quotes) and gaps to verify. It is evidence only.
+- **Limits.** No scores, ratings, rankings, hire or no-hire advice, and no
+  guesses about emotion, personality, confidence or honesty. The prompts
+  forbid them and a filter rejects any answer or recap that contains one,
+  retries once, then withholds it. The filter is strict, so a harmless word
+  such as "hire date" can cost a retry.
+- **Consent.** Tell the candidate the interview is recorded and transcribed.
+  The first recording of each interview asks you to confirm that. Agents
+  cannot start an interview recording.
+- **Local-only.** Turn it on per interview (recommended). Speech-to-text must
+  then be whisper-local and every model call goes to ollama; anything else is
+  refused, and agents cannot read that interview's transcript or notes.
+- **Deletion.** Candidate data is kept until you delete it. "Delete candidate
+  data" removes the candidate, documents, questions, transcript, notes and
+  chat of that interview. Candidate data is never added to your profiles or to
+  other meetings.
+
+You are responsible for using this lawfully where you are: telling candidates,
+keeping the data only as long as you need it, and making hiring decisions
+yourself.
+
 ## Use from AI agents
 
 `nixarchy-meetingai mcp` is an MCP server over stdio. It talks to the running

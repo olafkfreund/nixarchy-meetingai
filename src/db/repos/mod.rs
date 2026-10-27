@@ -1,5 +1,6 @@
 //! Database repositories for conversations, meetings, library files, and settings.
 
+pub mod candidates;
 pub mod conversations;
 pub mod items;
 pub mod library;

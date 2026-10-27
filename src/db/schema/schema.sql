@@ -231,3 +231,32 @@ CREATE INDEX IF NOT EXISTS idx_meeting_items_meeting ON meeting_items (meeting_i
 CREATE INDEX IF NOT EXISTS idx_meeting_items_series ON meeting_items (series_id, status);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(meeting_id UNINDEXED, body);
+
+-- Interviewer mode: one candidate per interview, never shared with profiles or other meetings.
+CREATE TABLE IF NOT EXISTS candidates (
+    id TEXT PRIMARY KEY,
+    meeting_id TEXT,
+    name TEXT NOT NULL DEFAULT '',
+    local_only INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS candidate_documents (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('cv','job')),
+    name TEXT NOT NULL,
+    text TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS interview_questions (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL,
+    competency TEXT,
+    status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned','asked','covered','skipped')),
+    note TEXT,
+    position INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_interview_questions_candidate ON interview_questions (candidate_id, position);

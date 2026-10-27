@@ -437,3 +437,204 @@ async fn team_series_carries_an_action_into_the_next_meeting() {
     assert_eq!(client.call("record.stop", json!({})).await["ok"], true);
     assert_eq!(client.call("quit", json!({})).await["ok"], true);
 }
+
+/// Interviewer replies: questions with one real and one invented quote, probes, and a recap
+/// that first passes judgement and then, after the reminder, reports evidence.
+fn interviewer_reply(request: &str) -> String {
+    if request.contains("Rate the candidate") {
+        "Score 7/10.".into()
+    } else if request.contains("previous answer contained an assessment") {
+        "Evidence recap.".into()
+    } else if request.contains("Question bank") {
+        "Strong candidate, 7/10.".into()
+    } else if request.contains("interview questions") {
+        json!([
+            {"text": "What was your part in the Rust migration?", "source": "Led the Rust migration", "competency": "ownership"},
+            {"text": "Tell me about your Go years.", "source": "Ten years of Go", "competency": "depth"}
+        ])
+        .to_string()
+    } else {
+        "Probe: what was your part in the migration?".into()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interviewer_session_then_delete_leaves_nothing() {
+    let root = std::env::temp_dir().join(format!("nixarchy-iv-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let vault_dir = root.join("data");
+    {
+        let vault = Vault::open(&vault_dir).unwrap();
+        let mut credential = credentials::Credential::chat("gemini", SECRET);
+        credential.model = "mock".into();
+        credential.base_url = fake_provider_with(interviewer_reply).await;
+        credentials::save(&vault, &credential).unwrap();
+    }
+    let db_path = vault_dir.join("test.db");
+    let daemon = Daemon::new(Options {
+        db_path: db_path.clone(),
+        vault_dir,
+        capture: false,
+    })
+    .unwrap();
+    let socket = cli::socket_path_in(&root.join("run"));
+    {
+        let (socket, daemon) = (socket.clone(), daemon.clone());
+        tokio::spawn(async move { server::serve(&socket, daemon).await });
+    }
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut client = Client::connect(&socket).await;
+    for (key, value) in [
+        ("chat_provider", json!("gemini")),
+        ("chat_model", json!("")),
+        ("live_provider", json!("gemini")),
+        ("auto_response", json!("off")),
+        ("response_pace", json!("Fast")),
+        ("meeting_mode", json!("interviewer")),
+    ] {
+        let set = client
+            .call("settings.set", json!({"key": key, "value": value}))
+            .await;
+        assert_eq!(set["ok"], true, "{set}");
+    }
+
+    // Prepare: a candidate, two documents and a question bank with the invented quote dropped.
+    let id = client
+        .call("candidate.create", json!({"name": "Ada"}))
+        .await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (kind, name, text) in [
+        ("cv", "cv.txt", "Ada. Led the Rust migration of billing."),
+        ("job", "job.txt", "Senior engineer."),
+    ] {
+        let path = root.join(name);
+        std::fs::write(&path, text).unwrap();
+        let attached = client
+            .call(
+                "candidate.attach",
+                json!({"id": id, "kind": kind, "path": path}),
+            )
+            .await;
+        assert_eq!(attached["ok"], true, "{attached}");
+    }
+    let generated = client
+        .call("questions.generate", json!({"candidate": id}))
+        .await;
+    assert_eq!(generated["ok"], true, "{generated}");
+    assert_eq!(generated["data"]["dropped"], 1);
+    assert_eq!(generated["data"]["questions"].as_array().unwrap().len(), 1);
+    client.event("questions.updated").await;
+    let got = client.call("candidate.get", json!({"id": id})).await["data"].clone();
+    assert_eq!(got["documents"].as_array().unwrap().len(), 2);
+    let question = got["questions"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(got["questions"][0]["status"], "planned");
+
+    // Consent is required once; then a mic line that matches the question marks it asked.
+    assert_eq!(
+        client.call("session.new", json!({"candidate": id})).await["ok"],
+        true
+    );
+    let refused = client.call("record.start", json!({})).await;
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("consent_required: "),
+        "{refused}"
+    );
+    let started = client.call("record.start", json!({"consent": true})).await;
+    assert_eq!(started["ok"], true, "{started}");
+    let state = client.call("state.get", json!({})).await["data"].clone();
+    assert_eq!(
+        (&state["candidate"], &state["consent"]),
+        (&json!(id), &json!(true))
+    );
+    daemon.inject_live(final_line(
+        0,
+        "What was your part in the Rust migration?",
+        0.0,
+    ));
+    assert_eq!(client.event("questions.updated").await["candidate"], id);
+    let got = client.call("candidate.get", json!({"id": id})).await["data"].clone();
+    assert_eq!(got["questions"][0]["status"], "asked");
+    let noted = client
+        .call(
+            "questions.update",
+            json!({"id": question, "note": "Owned the cutover"}),
+        )
+        .await;
+    assert_eq!(noted["data"]["note"], "Owned the cutover", "{noted}");
+
+    // A candidate turn gets a probe even with automatic answers off.
+    daemon.inject_live(final_line(
+        1,
+        "I led the migration of the billing system last year.",
+        3.0,
+    ));
+    let probe = client.event("answer.started").await;
+    assert_eq!(probe["automatic"], true);
+    assert!(
+        client.event("answer.delta").await["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Probe:")
+    );
+    client.event("answer.done").await;
+
+    // A verdict never reaches the overlay.
+    let sent = client
+        .call("chat.send", json!({"text": "Rate the candidate."}))
+        .await;
+    assert_eq!(sent["ok"], true, "{sent}");
+    assert_eq!(
+        client.event("answer.error").await["message"],
+        "The answer contained an assessment and was withheld."
+    );
+
+    // The recap retries once with the reminder and reports evidence only.
+    assert_eq!(client.call("record.stop", json!({})).await["ok"], true);
+    let meeting = client.event("notes.updated").await["meeting"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let notes = client.call("notes.get", json!({"meeting": meeting})).await;
+    assert_eq!(notes["data"]["text"], "Evidence recap.", "{notes}");
+
+    // Deleting the candidate removes everything.
+    let mut deleted = json!({});
+    for _ in 0..100 {
+        deleted = client.call("candidates.delete", json!({"id": id})).await;
+        if deleted["ok"] == true {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(deleted["ok"], true, "{deleted}");
+    let db = nixarchy_meetingai::db::Database::open(&db_path).unwrap();
+    for table in [
+        "candidates",
+        "candidate_documents",
+        "interview_questions",
+        "meetings",
+        "meeting_lines",
+        "meeting_note_chunks",
+        "meeting_recaps",
+        "meeting_items",
+        "notes_fts",
+        "conversations",
+    ] {
+        let rows: i64 = db
+            .connection()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "{table} still has rows");
+    }
+    assert_eq!(client.call("quit", json!({})).await["ok"], true);
+}

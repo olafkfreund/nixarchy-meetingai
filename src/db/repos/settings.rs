@@ -177,10 +177,20 @@ mod tests {
         let names: Vec<_> = modes.iter().map(|mode| mode.name.as_str()).collect();
         assert_eq!(
             names,
-            ["General", "Interview", "Coding", "Translate", "Meeting"]
+            [
+                "General",
+                "Interview",
+                "Coding",
+                "Translate",
+                "Meeting",
+                "Interviewer"
+            ]
         );
         let slots: Vec<_> = modes.iter().map(|mode| mode.listen_slot).collect();
-        assert_eq!(slots, [Some(0), Some(1), Some(2), Some(3), Some(4)]);
+        assert_eq!(
+            slots,
+            [Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)]
+        );
     }
 
     #[test]

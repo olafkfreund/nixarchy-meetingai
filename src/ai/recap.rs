@@ -4,7 +4,7 @@
 //! `meeting_note_chunks`. `generate` summarises what is left, then consolidates
 //! every chunk into the recap, so a 3-hour meeting never needs one giant prompt.
 use crate::{
-    ai::{engine, providers::ProviderConfig},
+    ai::{engine, guard, providers::ProviderConfig},
     core::{
         domain::Message,
         settings::{MeetingMode, Settings},
@@ -13,6 +13,7 @@ use crate::{
         Database,
         items::{self, ItemRecord, NewItem, Scope},
         meetings::{self, LineRecord, NoteChunk},
+        repos::candidates,
     },
     speech::stt::filter::{similarity, tokens},
 };
@@ -468,6 +469,23 @@ pub async fn maybe_chunk_items(
     Ok((made > 0, continued))
 }
 
+/// The interviewer's question bank with status and evidence notes, for the recap prompt.
+fn question_bank(c: &Connection, meeting: &str) -> Result<String, crate::db::DbError> {
+    let mut out = String::from(
+        "Question bank (planned questions, status, the interviewer's evidence notes):\n",
+    );
+    if let Some(candidate) = candidates::for_meeting(c, meeting)? {
+        for q in candidates::questions(c, &candidate.id)? {
+            out.push_str(&format!("- [{}] {}", q.status, q.text));
+            if let Some(note) = q.note.filter(|n| !n.is_empty()) {
+                out.push_str(&format!(" (note: {note})"));
+            }
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
 pub async fn generate(
     path: &Path,
     id: &str,
@@ -487,9 +505,21 @@ pub async fn generate(
         MeetingMode::General => &settings.recap_prompt_general,
         MeetingMode::Interview => &settings.recap_prompt_interview,
         MeetingMode::TeamMeeting => &settings.recap_prompt_team,
+        MeetingMode::Interviewer => &settings.recap_prompt_interviewer,
     };
     let result = match config {
         None => Err("Choose a configured AI provider in Settings to generate the recap.".into()),
+        Some(config) if mode == MeetingMode::Interviewer => {
+            let owned = id.to_owned();
+            let bank = db(path, move |db| question_bank(db.connection(), &owned)).await?;
+            // The recap is evidence only: retry once, then withhold, if it passes judgement.
+            guard::with_retry(|extra| {
+                let prompt = format!("{prompt}\n\n{bank}\n\n{extra}");
+                let config = &config;
+                async move { notes(path, id, config, &prompt, language, false).await }
+            })
+            .await
+        }
         Some(config) => {
             let team = mode == MeetingMode::TeamMeeting;
             notes(path, id, &config, prompt, language, team).await
