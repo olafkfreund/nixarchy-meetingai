@@ -44,6 +44,11 @@ Measured on p620 (2026-10-27):
   a list plus a key.
 - **Fallback order** for typed questions: Claude → Gemini CLI → OpenCode
   → Codex → agy (notes only) → Ollama. Live answers skip Codex and agy.
+- **Codex, local Ollama and Ollama Cloud must work** (owner): each is
+  verified end to end on this machine before the new providers are built,
+  and kept working. Ollama Cloud (`ollama.com`, API key from the owner's
+  agenix/sops secrets) is a first-class provider next to local Ollama,
+  with its models listed.
 - **Setup is visible:** Providers shows which logins work, with the login
   command for each (`claude`, `gemini`, `opencode auth login`, `agy`).
 
@@ -67,11 +72,10 @@ Measured on p620 (2026-10-27):
 - Using these CLIs from another program must stay within each service's
   terms; the README says the user is responsible for their plan's limits.
 
-## Open questions
+## Decisions (owner approved the proposals)
 
-1. **Order:** after the UI quality plan and before call detection?
-   (Proposed: yes.)
-2. **Gemini CLI on the live path:** decide from the measurement in the
-   plan (proposed), or notes-only from the start?
-3. **OpenCode server lifetime:** start on first use and stop after 10 min
-   idle (proposed), or keep it running with the daemon?
+1. **Order:** after the UI quality plan and before call detection.
+2. **Gemini CLI on the live path:** decided from the measurement in the
+   plan.
+3. **OpenCode server lifetime:** start on first use, stop after 10 min
+   idle.
