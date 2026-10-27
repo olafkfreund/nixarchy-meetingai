@@ -221,3 +221,17 @@ step 4. The session model merges, commits each step, and runs step 8.
 - **Old recaps** are backfilled into `notes_fts` on open.
 - **No item delete in the UI:** dropping an item covers it.
 - **Series dropdown** doesn't scale with text size (shared component).
+- **agy review fixes:** reconcile is a union merge (done > open >
+  dropped; owner, due and link filled; the item a callout refers to
+  survives); `open_for_series` excludes the current meeting (resume and
+  regenerate no longer self-reference); items carry `origin_text` and show
+  a "continues: …" line with unlink; restore sets the series and Last time
+  shows the meeting *before* the restored one (`previous_meeting` removed);
+  item edits survive refreshes and Escape reverts the edit; items are
+  reconciled and `items.updated` sent once on every stop path; `<`/`>` are
+  stripped from transcript and notes in prompts, the touched list is capped
+  and framed as untrusted, and a stray fence no longer breaks parsing; the
+  `notes_fts` backfill runs once (`PRAGMA user_version` 0 → 1); stale
+  `earlier_item` events from another meeting are ignored; `due()` uses the
+  real time span; owners match on word boundaries and "You/Me/I" from the
+  mic becomes "You".
