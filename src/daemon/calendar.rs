@@ -15,11 +15,18 @@ const LINKS: [&str; 4] = [
 /// How far either side of now the lookup reaches.
 const WINDOW_MS: i64 = 10 * 60_000;
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Event {
     pub title: String,
     pub start: i64,
     pub end: i64,
+}
+
+impl Event {
+    /// On now, or starting within the lookup window.
+    pub fn current(&self, now: i64) -> bool {
+        self.end > now && self.start <= now + WINDOW_MS
+    }
 }
 
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -78,15 +85,17 @@ fn moment(v: &Value) -> Option<i64> {
     parse_time(v.as_str().or_else(|| v["dateTime"].as_str())?)
 }
 
-/// The timed event with a conference link that is on now (or starts within the window);
-/// the one starting closest to now wins. All-day events never count.
+/// The timed event with a conference link that is on now, else the next one starting within the
+/// window. Back to back, the next one wins once the current one ends within 2 minutes.
+/// All-day events never count.
 pub fn pick(json: &str, now: i64) -> Option<Event> {
     let root: Value = serde_json::from_str(json).ok()?;
     let list = root
         .as_array()
         .or_else(|| root["events"].as_array())
         .or_else(|| root["items"].as_array())?;
-    list.iter()
+    let all: Vec<Event> = list
+        .iter()
         .filter_map(|e| {
             let (start, end) = (moment(&e["start"])?, moment(&e["end"])?);
             let text = [
@@ -98,17 +107,26 @@ pub fn pick(json: &str, now: i64) -> Option<Event> {
             .map(|v| v.to_string())
             .join(" ");
             let title = e["summary"].as_str()?.trim();
-            (LINKS.iter().any(|l| text.contains(l))
-                && !title.is_empty()
-                && start <= now + WINDOW_MS
-                && end > now)
-                .then(|| Event {
-                    title: title.chars().take(120).collect(),
-                    start,
-                    end,
-                })
+            let e = Event {
+                title: title.chars().take(120).collect(),
+                start,
+                end,
+            };
+            (LINKS.iter().any(|l| text.contains(l)) && !title.is_empty() && e.current(now))
+                .then_some(e)
         })
-        .min_by_key(|e| (e.start - now).abs())
+        .collect();
+    let next = all.iter().filter(|e| e.start > now).min_by_key(|e| e.start);
+    let cur = all
+        .iter()
+        .filter(|e| e.start <= now)
+        .max_by_key(|e| e.start);
+    match (cur, next) {
+        (Some(c), Some(n)) if c.end - now <= 2 * 60_000 => Some(n),
+        (Some(c), _) => Some(c),
+        (None, n) => n,
+    }
+    .cloned()
 }
 
 /// `gog calendar events` stdout for now ± 10 minutes, or None when `gog` is missing, logged out or slow.
@@ -118,8 +136,10 @@ pub async fn fetch(program: &str, now: i64) -> Option<String> {
         tokio::process::Command::new(program)
             .args([
                 "--readonly",
+                "--no-input",
                 "calendar",
                 "events",
+                "--all",
                 "--json",
                 "--results-only",
             ])
@@ -181,6 +201,20 @@ mod tests {
         // Lunch has no link, the all-day Zoom event is not timed.
         assert!(pick(FIXTURE, parse_time("2026-10-27T11:45:00+01:00").unwrap()).is_none());
         assert!(pick("not json", now).is_none());
+    }
+
+    #[test]
+    fn back_to_back_events_hand_over_near_the_end() {
+        let ev = |t: &str, a: i64, b: i64| {
+            let f = |m: i64| format_time(m * 60_000).replace('Z', "+00:00");
+            json!({"summary": t, "hangoutLink": "https://meet.google.com/x",
+                   "start": {"dateTime": f(a)}, "end": {"dateTime": f(b)}})
+        };
+        let list = json!([ev("Second", 30, 60), ev("First", 0, 30)]).to_string();
+        let m = 60_000;
+        assert_eq!(pick(&list, 10 * m).unwrap().title, "First");
+        assert_eq!(pick(&list, 29 * m).unwrap().title, "Second");
+        assert_eq!(pick(&list, -5 * m).unwrap().title, "First");
     }
 
     #[tokio::test]

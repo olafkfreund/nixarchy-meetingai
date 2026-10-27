@@ -117,3 +117,19 @@ None yet.
   `--from/--to` (`now-10m` is rejected). The bar chip and dot don't scale
   with `text_scale`. Unverified: the Discord/Slack/Skype glyph codepoints and
   the real `gog` JSON shape (no `gog` login on this machine).
+- **Review round 1 (#2):** the calendar event in progress names the session
+  and alone skips AI re-titling; a window title is only the starting name.
+  `record.start` takes `new: true` (every call path: auto, chip, offer,
+  notification, hotkey while a call is on) and starts a fresh meeting; manual
+  Play still resumes. The service waits for the connection and the first
+  settings before deciding, then reacts once. IPC `offer` re-reads the state
+  file synchronously; IPC `show` opens the overlay only (the chip's consent
+  path). A call that ends through `maybe` still offers "Stop notes"; Take/Stop
+  actions from an older call are ignored; chip dismissal lives in the
+  `CallOffer.qml` singleton; the `/proc` probe runs only during a call or on a
+  pid change. The daemon serialises calendar refreshes, drops an event past
+  its end, removes `calendar.json` when `calendar_enabled` is off, prefers an
+  event in progress (the next one within 2 minutes of its end), and calls
+  `gog --readonly --no-input calendar events --all`.
+  **Follow-up, other repo:** nothing in `nixarchy-meeting-mode` reads
+  `calendar.json` yet; the confirmer side is not implemented here.

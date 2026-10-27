@@ -79,6 +79,8 @@ pub struct RecordStart {
     pub consent: bool,
     /// Names the session (the call window or the calendar event); empty uses the default.
     pub title: String,
+    /// A call starts a fresh meeting instead of resuming the last one.
+    pub new: bool,
 }
 
 #[derive(Debug, Deserialize)]

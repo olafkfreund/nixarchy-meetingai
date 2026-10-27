@@ -49,6 +49,7 @@ err = "--error" in sys.argv          # a typed question starts, waits, then fail
 drop = "--drop" in sys.argv          # the first connection is cut mid-answer; the client reconnects and asks transcript.get / now.get
 providers = "--providers" in sys.argv
 call = "--call" in sys.argv
+slow = "--slow-settings" in sys.argv   # settings.get answers after 2.5 s and no settings event is pushed: the client must wait for them
 locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, meeting_mode, text_scale
 live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
@@ -269,7 +270,8 @@ class Handler(socketserver.StreamRequestHandler):
 
     def stream(self):
         time.sleep(0.3)
-        self.send({"event": "settings", "settings": settings})
+        if not slow:
+            self.send({"event": "settings", "settings": settings})
         self.send({"event": "session.reset"})
         self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})
         self.send({"event": "transcript.final", "who": "system", "speaker": "Alex", "text": "What is the plan?", "t0": 0, "t1": 2})
@@ -407,7 +409,7 @@ class Handler(socketserver.StreamRequestHandler):
         for raw in self.rfile:
             req = json.loads(raw)
             cmd = req["cmd"]
-            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) if cmd == "record.start" else ""))
+            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") if cmd == "record.start" else ""))
             if cmd == "record.start" and iv and not (state["consent"] or req.get("args", {}).get("consent")):
                 self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed."})
                 continue
@@ -424,6 +426,9 @@ class Handler(socketserver.StreamRequestHandler):
                 state["capture"] = cmd == "screenshot.capture"
                 self.send({"event": "state", **state})
             data = state if cmd == "state.get" else settings if cmd == "settings.get" else DATA.get(cmd, {})
+            if slow and cmd == "settings.get":
+                threading.Timer(2.5, self.send, args=({"id": req["id"], "ok": True, "data": settings},)).start()
+                continue
             if cmd == "models.list":   # the reply carries the provider it answers, so a client can drop a stale one
                 p = req.get("args", {}).get("provider")
                 models = MODELS.get(p, "unknown provider")

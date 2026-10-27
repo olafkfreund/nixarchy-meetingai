@@ -19,9 +19,9 @@ chmod +x "$work/bin/notify-send"
 . "$(dirname "$0")/headless.sh"
 export PATH="$work/bin:$PATH"
 
-# st <call> [pid] [updated-ms]: a state file as meeting-mode writes it; `active` is true throughout (a manual meeting mode)
+# st <call> [pid] [updated-ms] [callSince]: a state file as meeting-mode writes it; `active` is true throughout (a manual meeting mode)
 st() { printf '{"active":true,"reason":"manual","since":1,"updated":%s,"pid":%s,"call":"%s","callApp":"Zoom","callTitle":"Secret roadmap review","callSince":%s,"callDetected":%s}' \
-    "${3:-$(date +%s%3N)}" "${2:-$$}" "$1" "$(date +%s%3N)" "$([ "$1" = call ] && echo true || echo false)"; }
+    "${3:-$(date +%s%3N)}" "${2:-$$}" "$1" "${4:-$(date +%s%3N)}" "$([ "$1" = call ] && echo true || echo false)"; }
 wr() { printf '%s' "$1" > "$XDG_RUNTIME_DIR/meeting-mode.json"; }   # in place, so the watcher sees it
 
 # run <label> <fake-daemon flags> <steps function>: the baseline file is written before the service starts
@@ -60,7 +60,7 @@ grep -q "Zoom" "$work/offer.notify" || fail offer "the offer does not name the a
 grep -q "Secret roadmap" "$work/offer.notify" && fail offer "a window title reached a notification"
 
 run auto --auto started
-grep -q 'record.start title=Secret roadmap review' "$work/auto.log" || fail auto "no record.start with the call title on none -> call"
+grep -q 'record.start title=Secret roadmap review new' "$work/auto.log" || fail auto "no record.start with the call title on none -> call"
 no_offer auto
 
 maybe_only() { case $1 in base) wr "$(st none)" ;; go) wr "$(st maybe)"; sleep 4 ;; esac; }
@@ -77,6 +77,26 @@ hangup() { case $1 in base) wr "$(st call)" ;; go) wr "$(st none)"; sleep 4 ;; e
 run hangup "--live --auto" hangup
 no_record hangup
 grep -q -- '-A stop=Stop notes' "$work/hangup.notify" || fail hangup "no Stop notes offer on call -> none"
+
+# the same call ending through "maybe" still offers "Stop notes"
+viamaybe() { case $1 in base) wr "$(st call "$$" "" 5000)" ;; go) wr "$(st maybe "$$" "" 5000)"; sleep 1.5; wr "$(st none)"; sleep 3 ;; esac; }
+run viamaybe "--live --auto" viamaybe
+no_record viamaybe
+grep -q -- '-A stop=Stop notes' "$work/viamaybe.notify" || fail viamaybe "no Stop notes offer on call -> maybe -> none"
+
+# settings arrive after the call: auto-record decides once they are there, never an offer
+slowset() { case $1 in base) wr "$(st none)" ;; go) wr "$(st call)"; sleep 5 ;; esac; }
+run slow "--auto --slow-settings" slowset
+grep -q 'record.start title=Secret roadmap review new' "$work/slow.log" || fail slow "no auto-record once the settings arrived"
+no_offer slow
+
+# an IPC offer arriving right after an atomic write the watcher may not have seen still offers
+race() { case $1 in base) wr "$(st none)" ;; go)
+    printf '%s' "$(st call)" > "$XDG_RUNTIME_DIR/mm.tmp"; mv "$XDG_RUNTIME_DIR/mm.tmp" "$XDG_RUNTIME_DIR/meeting-mode.json"
+    quickshell ipc -p "$work/cfg" call meetingai offer > /dev/null 2>&1 || true
+    sleep 1; cp "$work/notify.log" "$work/race.snap"; sleep 3 ;; esac; }
+run race "" race
+grep -q -- '-A take=Take notes' "$work/race.snap" || fail race "the IPC offer did not see the new call before the 5 s poll"
 
 # a file whose writer is dead, or an old one with no pid, reads as none
 dead() { case $1 in base) wr "$(st none)" ;; go) wr "$(st call 999999999)"; sleep 3; wr "$(st call 0 1000)"; sleep 3 ;; esac; }

@@ -261,6 +261,8 @@ pub struct Daemon {
     startup_notice: Mutex<Option<String>>,
     /// Serializes rolling-notes chunking and recap generation (no duplicate chunks).
     notes: tokio::sync::Mutex<()>,
+    /// Serialises calendar lookups so an older `gog` result never overwrites a newer one.
+    calendar_gate: tokio::sync::Mutex<()>,
     inner: Mutex<Inner>,
 }
 
@@ -655,6 +657,7 @@ impl Daemon {
             locked: Mutex::new(Vec::new()),
             startup_notice: Mutex::new(startup_notice),
             notes: tokio::sync::Mutex::new(()),
+            calendar_gate: tokio::sync::Mutex::new(()),
             inner: Mutex::new(Inner {
                 db,
                 settings,
@@ -757,6 +760,7 @@ impl Daemon {
     /// Look the calendar up (only when `calendar_enabled`; `idle_only` skips it while recording),
     /// keep the event in memory and in `calendar.json`, and tell the shells. Titles are not logged.
     pub async fn calendar_refresh(self: &Arc<Self>, idle_only: bool) {
+        let _serial = self.calendar_gate.lock().await;
         let now = now_ms();
         let enabled = {
             let mut g = self.inner.lock();
@@ -766,19 +770,34 @@ impl Daemon {
             }
             g.settings.calendar_enabled
         };
+        let dir =
+            crate::cli::socket_path().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let event = if enabled {
             match super::calendar::fetch("gog", now).await {
                 Some(out) => super::calendar::pick(&out, now),
-                None => return, // no gog, or not logged in: keep quiet and keep what we had
+                None => {
+                    // no gog, or not logged in: keep quiet and keep the event, but never past its end
+                    if self
+                        .inner
+                        .lock()
+                        .calendar
+                        .as_ref()
+                        .is_none_or(|e| e.end > now)
+                    {
+                        return;
+                    }
+                    None
+                }
             }
         } else {
             None
         };
-        if enabled
-            && let Some(dir) =
-                crate::cli::socket_path().and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-        {
-            super::calendar::write(&dir, event.as_ref(), now);
+        if let Some(dir) = &dir {
+            if enabled {
+                super::calendar::write(dir, event.as_ref(), now);
+            } else {
+                let _ = std::fs::remove_file(dir.join("calendar.json"));
+            }
         }
         let mut g = self.inner.lock();
         if g.calendar != event {
@@ -1720,7 +1739,12 @@ impl Daemon {
 
     // ----- recording ----------------------------------------------------
 
-    async fn record_start(self: &Arc<Self>, consent: bool, title: String) -> Result<Value, String> {
+    async fn record_start(
+        self: &Arc<Self>,
+        consent: bool,
+        title: String,
+        new: bool,
+    ) -> Result<Value, String> {
         let (stop, speech, device, output_device, system) = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
@@ -1816,6 +1840,11 @@ impl Daemon {
         let meeting = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
+            if new {
+                // A call starts a fresh meeting; only manual Play resumes the previous one.
+                self.reset_session(g);
+                self.emit("session.reset", json!({}));
+            }
             let outcome = if self.capture && session.is_none() {
                 Err(failure.unwrap_or_else(|| "Could not start audio capture.".into()))
             } else if let Some(id) = g.resume_meeting.clone() {
@@ -1825,13 +1854,17 @@ impl Daemon {
             } else {
                 // Name it at creation so the list never shows a blank title.
                 let given: String = title.trim().chars().take(120).collect();
-                let given = if given.is_empty() {
-                    g.calendar.as_ref().map(|e| e.title.clone())
-                } else {
-                    Some(given)
-                };
-                let name = given
+                // The calendar event on now names the meeting for good; a window title is only the
+                // starting name and the AI still re-titles it.
+                let now = now_ms();
+                let cal = g
+                    .calendar
+                    .as_ref()
+                    .filter(|e| e.current(now))
+                    .map(|e| e.title.clone());
+                let name = cal
                     .clone()
+                    .or_else(|| (!given.is_empty()).then_some(given))
                     .unwrap_or_else(|| format!("Session · {}", clock()));
                 let started = meetings::start(
                     g.db.connection(),
@@ -1842,7 +1875,7 @@ impl Daemon {
                     g.settings.meeting_mode,
                 )
                 .map_err(|e| e.to_string());
-                if let (Ok(id), Some(_)) = (&started, &given) {
+                if let (Ok(id), Some(_)) = (&started, &cal) {
                     g.named_meeting = Some(id.clone());
                 }
                 started
@@ -3317,7 +3350,7 @@ impl Daemon {
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
             "record.start" => {
                 let a = parse::<protocol::RecordStart>(args)?;
-                self.record_start(a.consent, a.title).await
+                self.record_start(a.consent, a.title, a.new).await
             }
             "candidate.create" => {
                 let name = parse::<protocol::NameArg>(args)?.name;
@@ -3973,7 +4006,64 @@ mod command_tests {
         let g = d.inner.lock();
         let rows = meetings::list(g.db.connection(), 5).unwrap();
         assert_eq!(rows[0].title, "Sprint planning");
-        assert_eq!(g.named_meeting.as_deref(), Some(rows[0].id.as_str()));
+        assert_ne!(g.named_meeting.as_deref(), Some(rows[0].id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn the_calendar_names_the_meeting_for_good_but_a_stale_event_does_not() {
+        use super::super::calendar::Event;
+        let d = daemon();
+        let now = now_ms();
+        let ev = |end| Event {
+            title: "Cal".into(),
+            start: now - 1000,
+            end,
+        };
+        d.inner.lock().calendar = Some(ev(now + 60_000));
+        d.handle("record.start", json!({"title": "Window"}), None)
+            .await
+            .unwrap();
+        let m = d.inner.lock().meeting_id.clone().unwrap();
+        assert_eq!(d.inner.lock().named_meeting.as_deref(), Some(m.as_str()));
+        d.finish_recording(&m).await;
+        d.inner.lock().calendar = Some(ev(now - 1));
+        d.handle(
+            "record.start",
+            json!({"title": "Window", "new": true}),
+            None,
+        )
+        .await
+        .unwrap();
+        let g = d.inner.lock();
+        let id = g.meeting_id.clone().unwrap();
+        let rows = meetings::list(g.db.connection(), 5).unwrap();
+        assert_eq!(rows.iter().find(|r| r.id == id).unwrap().title, "Window");
+        assert_ne!(g.named_meeting.as_deref(), Some(id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_call_start_makes_a_new_meeting_instead_of_resuming() {
+        let d = daemon();
+        d.handle("record.start", json!({"title": "First"}), None)
+            .await
+            .unwrap();
+        let first = d.inner.lock().meeting_id.clone().unwrap();
+        d.finish_recording(&first).await;
+        d.handle(
+            "record.start",
+            json!({"title": "Second", "new": true}),
+            None,
+        )
+        .await
+        .unwrap();
+        let g = d.inner.lock();
+        let second = g.meeting_id.clone().unwrap();
+        assert_ne!(first, second);
+        let rows = meetings::list(g.db.connection(), 5).unwrap();
+        assert_eq!(
+            rows.iter().find(|m| m.id == second).unwrap().title,
+            "Second"
+        );
     }
 
     #[tokio::test]
