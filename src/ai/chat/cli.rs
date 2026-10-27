@@ -158,7 +158,7 @@ fn claude_message(text: &str, images: &[String]) -> String {
 }
 
 fn kill_group(pid: u32) {
-    // SAFETY: killpg only signals the process group we created with process_group(0).
+    // SAFETY: killpg only signals the process group (= session) we created with setsid.
     unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
 }
 
@@ -300,13 +300,22 @@ pub(super) async fn run<F: Future<Output = ()>>(
         return Ok(String::new());
     }
     let mut cancellation = (*cancel).clone();
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("OPENAI_API_KEY_FILE")
-        .current_dir(dir)
-        .process_group(0)
+        .current_dir(dir);
+    // SAFETY: setsid is async-signal-safe and runs between fork and exec; it drops the
+    // controlling terminal, so a wrapper (mise) that opens /dev/tty cannot stall. pgid == pid.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = command
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -493,6 +502,38 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         // SAFETY: signal 0 only probes for existence.
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "grandchild survived");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn child_touching_the_terminal_cannot_stall() {
+        let dir = std::env::temp_dir().join(format!("cli-tty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nstty -a </dev/tty >/dev/null 2>&1\necho '{\"type\":\"result\",\"result\":\"ok\"}'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (_tx, rx) = watch::channel(false);
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(
+                script.to_str().unwrap(),
+                Kind::Claude,
+                vec![],
+                String::new(),
+                &dir,
+                Arc::new(rx),
+                |_| std::future::ready(()),
+            ),
+        )
+        .await
+        .expect("child stalled on the terminal")
+        .unwrap();
+        assert_eq!(answer, "ok");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

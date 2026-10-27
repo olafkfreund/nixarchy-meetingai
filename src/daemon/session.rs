@@ -172,6 +172,8 @@ struct Inner {
     turn: u64,
     /// Provider and model answering the current turn.
     effective: (String, String),
+    /// Effective provider is loopback ollama, so a silent start means "loading".
+    loading: bool,
     cancel: Option<watch::Sender<bool>>,
     request: Option<JoinHandle<()>>,
     follow_up_task: Option<JoinHandle<()>>,
@@ -452,6 +454,11 @@ fn stays_local(config: &ProviderConfig) -> bool {
     loopback && !config.model.to_lowercase().ends_with("-cloud")
 }
 
+/// Loopback ollama: the one provider that may sit silent while a cold model loads.
+fn loopback_ollama(config: &ProviderConfig) -> bool {
+    config.id == "ollama" && stays_local(config)
+}
+
 /// Lowercase with whitespace runs as one space; a soft hyphen (and the line break after it) vanishes.
 fn normalize(text: &str) -> String {
     let mut out = String::new();
@@ -569,6 +576,7 @@ impl Daemon {
                 recording: None,
                 meeting_id: None,
                 effective: (String::new(), String::new()),
+                loading: false,
                 finishing_meeting: None,
                 resume_meeting: None,
                 meeting_offset: 0.0,
@@ -1002,6 +1010,7 @@ impl Daemon {
         g.turn += 1;
         let turn = g.turn;
         g.effective = (config.id.clone(), config.model.clone());
+        g.loading = loopback_ollama(&config);
         self.emit(
             "answer.started",
             json!({"turn": turn, "question": question_text, "automatic": automatic,
@@ -1056,12 +1065,18 @@ impl Daemon {
     ) -> Result<String, engine::ChatError> {
         let mut last = Instant::now();
         let streamed = Arc::new(AtomicBool::new(false));
-        let client = engine::http_client();
         let mut result = Ok(String::new());
         for (attempt, config) in chain.iter().take(2).enumerate() {
             if attempt > 0 {
-                self.inner.lock().effective = (config.id.clone(), config.model.clone());
+                let mut g = self.inner.lock();
+                g.effective = (config.id.clone(), config.model.clone());
+                g.loading = loopback_ollama(config);
             }
+            let client = if loopback_ollama(config) {
+                engine::loading_http_client()
+            } else {
+                engine::http_client()
+            };
             result = engine::stream_chat_bounded(
                 &client,
                 config,
@@ -2881,11 +2896,13 @@ impl Daemon {
         Ok(json!({"meeting": meeting, "lines": lines}))
     }
 
-    /// What the overlay shows now. `writing` while an answer streams, `ready` when
+    /// What the overlay shows now. `loading` while a loopback ollama has sent nothing yet, `writing` while an answer streams, `ready` when
     /// one is waiting, else `listening` while recording, else `idle`.
     fn now_get(&self) -> Value {
         let g = self.inner.lock();
-        let status = if g.chat.is_streaming() {
+        let status = if g.chat.is_streaming() && g.loading && g.chat.answer().is_empty() {
+            "loading"
+        } else if g.chat.is_streaming() {
             "writing"
         } else if !g.chat.answer().is_empty() {
             "ready"

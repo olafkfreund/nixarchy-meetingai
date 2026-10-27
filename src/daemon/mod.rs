@@ -7,6 +7,16 @@ pub mod session;
 
 pub use session::{Daemon, Options};
 
+fn which_on_path(name: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|p| {
+            p.metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+}
+
 /// Run the daemon until `quit` or a termination signal.
 pub fn run() -> Result<(), String> {
     crate::core::install_tls_provider();
@@ -25,6 +35,11 @@ pub fn run() -> Result<(), String> {
         let socket = crate::cli::socket_path().ok_or("XDG_RUNTIME_DIR is not set")?;
         let daemon = Daemon::new(Options::from_env()?)?;
         tracing::info!(version = env!("CARGO_PKG_VERSION"), socket = %socket.display(), "daemon ready");
+        for name in ["claude", "codex", "agy", "opencode"] {
+            if let Some(path) = which_on_path(name) {
+                tracing::info!(cli = name, path = %path.display(), "provider CLI found");
+            }
+        }
         let signal = {
             let daemon = daemon.clone();
             async move {

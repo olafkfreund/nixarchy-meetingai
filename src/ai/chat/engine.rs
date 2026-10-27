@@ -47,6 +47,10 @@ pub struct TurnContext {
 }
 
 /// Shared HTTP client, so connections are reused across turns.
+pub fn loading_http_client() -> reqwest::Client {
+    crate::core::network::loading_chat_client()
+}
+
 pub fn http_client() -> reqwest::Client {
     crate::core::network::chat_client()
 }
