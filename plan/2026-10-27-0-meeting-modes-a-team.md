@@ -235,3 +235,9 @@ step 4. The session model merges, commits each step, and runs step 8.
   `earlier_item` events from another meeting are ignored; `due()` uses the
   real time span; owners match on word boundaries and "You/Me/I" from the
   mic becomes "You".
+- **Concurrency fix (found by CI #1):** the guarded `ALTER TABLE` steps
+  (`last_line`, `series_id`, `mode`) and the `notes_fts` backfill now run in
+  one `BEGIN IMMEDIATE` transaction. Concurrent first opens (daemon and MCP
+  server at login, or the 8-thread encryption test on a CI runner) both saw
+  a column missing and both added it: "duplicate column name: series_id".
+  Stress-tested 40× locally.

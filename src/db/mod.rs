@@ -65,45 +65,58 @@ impl Database {
              PRAGMA temp_store = MEMORY;",
         )?;
         connection.execute_batch(schema::SCHEMA)?;
-        // Databases made before coverage was tracked by line id lack this column.
-        let has_last_line: bool = connection.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('meeting_note_chunks') WHERE name = 'last_line'",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_last_line {
-            connection.execute_batch(
-                "ALTER TABLE meeting_note_chunks ADD COLUMN last_line INTEGER NOT NULL DEFAULT 0",
+        // One writer at a time: concurrent first opens (daemon, MCP, tests) otherwise both
+        // see a column missing and both add it ("duplicate column name").
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let upgraded = (|| -> Result<()> {
+            // Databases made before coverage was tracked by line id lack this column.
+            let has_last_line: bool = connection.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meeting_note_chunks') WHERE name = 'last_line'",
+                [],
+                |r| r.get(0),
             )?;
-        }
-        let has_series: bool = connection.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('meetings') WHERE name = 'series_id'",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_series {
-            connection.execute_batch("ALTER TABLE meetings ADD COLUMN series_id TEXT")?;
-        }
-        let has_mode: bool = connection.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('meetings') WHERE name = 'mode'",
-            [],
-            |r| r.get(0),
-        )?;
-        if !has_mode {
-            connection.execute_batch(
-                "ALTER TABLE meetings ADD COLUMN mode TEXT NOT NULL DEFAULT 'general'",
+            if !has_last_line {
+                connection.execute_batch(
+                    "ALTER TABLE meeting_note_chunks ADD COLUMN last_line INTEGER NOT NULL DEFAULT 0",
+                )?;
+            }
+            let has_series: bool = connection.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meetings') WHERE name = 'series_id'",
+                [],
+                |r| r.get(0),
             )?;
-        }
-        // Recaps written before notes_fts existed become searchable, once.
-        let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < 1 {
-            connection.execute_batch(
-                "INSERT INTO notes_fts (meeting_id, body)
-                 SELECT meeting_id, content FROM meeting_recaps r
-                 WHERE status = 'ready' AND content != ''
-                   AND NOT EXISTS (SELECT 1 FROM notes_fts f WHERE f.meeting_id = r.meeting_id);
-                 PRAGMA user_version = 1;",
+            if !has_series {
+                connection.execute_batch("ALTER TABLE meetings ADD COLUMN series_id TEXT")?;
+            }
+            let has_mode: bool = connection.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meetings') WHERE name = 'mode'",
+                [],
+                |r| r.get(0),
             )?;
+            if !has_mode {
+                connection.execute_batch(
+                    "ALTER TABLE meetings ADD COLUMN mode TEXT NOT NULL DEFAULT 'general'",
+                )?;
+            }
+            // Recaps written before notes_fts existed become searchable, once.
+            let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            if version < 1 {
+                connection.execute_batch(
+                    "INSERT INTO notes_fts (meeting_id, body)
+                     SELECT meeting_id, content FROM meeting_recaps r
+                     WHERE status = 'ready' AND content != ''
+                       AND NOT EXISTS (SELECT 1 FROM notes_fts f WHERE f.meeting_id = r.meeting_id);
+                     PRAGMA user_version = 1;",
+                )?;
+            }
+            Ok(())
+        })();
+        match upgraded {
+            Ok(()) => connection.execute_batch("COMMIT")?,
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                return Err(error);
+            }
         }
         seed::seed_listen_modes(&connection)?;
         profiles::migrate_legacy(&connection)?;
