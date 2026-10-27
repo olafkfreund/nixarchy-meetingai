@@ -658,3 +658,36 @@ PATH wrapper (`grim`, `slurp`, `libnotify`) instead of
 5. **Theme audit.** No hard-coded colors, fonts or sizes in `shell/*.qml`
    (tests excepted): everything comes from `Commons.Color`, `Style.font`
    and `Style.spacing`, so theme switches apply live.
+
+## Owner requests, round 3 (2026-10-27)
+
+1. **Frontier models by default; local on demand.**
+   - The `chat_provider` default is `claude-sub` with model `sonnet`.
+   - The fallback order when the chosen provider is unusable is
+     `claude-sub` → `codex-sub` → `gemini` (needs a key) → `ollama`.
+     `CHAT_PROVIDERS` and the daemon's fallback follow this order.
+   - Ollama stays selectable in Settings and is never picked automatically
+     while a frontier provider is usable.
+   - Measured warm time to first token on this machine: claude haiku
+     1.8–2.2 s, sonnet 3.0 s, codex about 8.7 s (no streaming), ollama
+     qwen2.5:7b 0.04 s.
+2. **Who said what, at a glance.** Theme tints only (the shell exposes
+   `foreground`, `background`, `accent`, `urgent`, `muted` and surface
+   roles):
+   - **meeting** (system audio): left-aligned bubble, speaker name in bold,
+     background `Qt.alpha(foreground, 0.06)`
+   - **you** (mic): right-aligned bubble, background
+     `Qt.alpha(accent, 0.18)`, "You" label
+   - **answers**: the existing striped card, full width
+   - **partials**: the same bubble, dimmed and in italics
+
+   Bubbles use the round-2 radius (max of `Style.cornerRadius` and 12)
+   and are at most 80% of the width.
+3. **Suggestions you can read at a glance.** A pinned strip above the
+   composer, visible without scrolling:
+   - each suggestion is a full-width row with a number badge **1/2/3** in
+     the accent color, the text at body size or larger (not monospace
+     caption), and a hover fill from `Style.controlFill`
+   - click, or press 1/2/3 when the composer is empty, to send it as a
+     question
+   - the strip clears when a new answer starts; at most 3 rows
