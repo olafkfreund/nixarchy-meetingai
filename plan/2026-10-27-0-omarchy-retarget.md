@@ -691,3 +691,89 @@ PATH wrapper (`grim`, `slurp`, `libnotify`) instead of
    - click, or press 1/2/3 when the composer is empty, to send it as a
      question
    - the strip clears when a new answer starts; at most 3 rows
+
+### Round 3, final (replaces items 1 to 3 above; reviewed by Codex gpt-6-sol, agy, and web research; approved by the owner 2026-10-27)
+
+Shared protocol additions:
+- event `answer.started{turn, question, automatic, provider, model}`;
+  `answer.delta` and `answer.done` also carry `provider` and `model`
+- typed questions appear through `answer.started.question`; the client
+  shows them as a "You · Asked" bubble
+- `suggestion` events carry only the generated follow-ups, at most 3
+  (`FIXED_FOLLOW_UPS` are no longer emitted)
+
+Daemon and providers:
+- **D1** Typed questions use `chat_provider`/`chat_model` (default
+  `claude-sub`/`sonnet`). Automatic live answers use `live_provider`/
+  `live_model` (default `claude-sub`/`haiku`).
+- **D2** Real fallback when the chosen provider is unusable or fails to
+  spawn:
+  - typed: claude-sub → codex-sub → gemini (key) → ollama
+  - live: claude-sub → gemini (key) → ollama, never codex (no streaming)
+  - `claude`/`codex` usability checks that the binary is on PATH
+  - the effective provider and model are reported in `answer.started`
+  - an explicitly chosen ollama is kept
+- **D3** `settings.search` hides keys managed elsewhere: chat_provider,
+  chat_model, live_provider, live_model, response_pace, meeting_mode,
+  recap_prompt_*, smart_follow_ups_prompt, personal_context,
+  meeting_context.
+
+UI (`shell/`):
+- **U1** No scrim while recording. Clicks outside the card pass through
+  (input mask = card). Click-outside-to-close works only when not
+  recording.
+- **U2** Layout from top to bottom:
+  - the header: Stop/Record, timer, Mic/System level dots (click to
+    mute), General/Interview, ⚙
+  - a compact transcript, bottom-anchored, with a "Transcript" toggle to
+    collapse it
+  - a pinned **NOW** panel: who asked, the question, the status
+    (Listening / Writing / Ready), and the answer at a larger size than
+    the transcript, with the provider/model in small type
+  - an **ASK NEXT** strip of up to 3 rows with [1]/[2]/[3] badges at body
+    size or larger
+  - the composer: `+`, 📷 Screenshot, and a "What should I say?" quick
+    action
+- **U3** Bubbles: flat and borderless, radius max(`Style.cornerRadius`,
+  12), at most 80% of the width.
+  - meeting: left, `Qt.alpha(foreground, 0.10)`, label "Them" or the
+    speaker's name
+  - you: right, `Qt.alpha(accent, 0.22)`, label "You · Spoke" /
+    "You · Asked"
+  - text at full `popups.text` brightness; partials in italics only, not
+    dimmed
+- **U4** Keys 1/2/3 send a suggestion only while the overlay has focus,
+  the composer is empty and the Library is closed.
+- **U5** Reduce motion: no scroll animations; streamed text is still
+  appended, without a cursor or animations.
+- **U6** Contrast check: compute the ratio of `popups.text` against each
+  tinted fill for the current theme and one light theme (`flexoki-light`
+  or `catppuccin-latte`); at least 4.5:1, or raise the tint (logged in
+  `shell/tests`).
+- The step-9 rule is amended: flat, borderless tinted bubbles and cards
+  are allowed; nested bordered boxes are still not.
+
+Transcript quality:
+- **T1** A benchmark script `tools/whisper-bench.sh`:
+  - runs whisper-server with Vulkan on this GPU for `small.en`,
+    `medium.en` and `large-v3-turbo` against a public reference set (the
+    LibriSpeech test sample on the HF hub, with known text)
+  - reports WER and the real-time factor
+  - commits the results to `docs/whisper-bench.md`
+
+  The default model is the most accurate one with RTF ≤ 0.3 and p95
+  utterance latency ≤ 1.5 s; the Nix default is updated to match.
+- **T2** whisper-server requests send `prompt` = the last ~200 characters
+  of the same channel's final text, plus names and terms taken from the
+  profile/meeting context (≤ 200 characters), and `temperature=0`.
+- **T3** Hallucination filter: drop a result that is empty or punctuation
+  only, a known silence phrase ("thank you.", "thanks for watching", "you",
+  "[blank_audio]", "(silence)" and so on, case-insensitive, whole line),
+  or an exact repeat of the previous line on the same channel within 10 s.
+  Unit tests cover each case.
+- **T4** Echo dedupe: drop a mic line whose normalized text overlaps a
+  system line by ≥ 80% token similarity and whose time overlaps within
+  ±2 s. Unit-tested.
+- Known limit: whisper has no diarization, so all remote speakers are
+  "Them" unless Deepgram is chosen (shortcut, to be revisited with a local
+  diarizer).
