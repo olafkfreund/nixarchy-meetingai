@@ -13,6 +13,9 @@ Item {
     readonly property bool connected: sock.connected
     property var state: ({})
     property var settings: ({})
+    property bool settingsReady: false   // the first settings of this connection have arrived
+    property alias calls: callState
+    CallState { id: callState }
     property var profiles: []   // profiles.list rows; refreshProfiles() reloads them
     readonly property bool recording: state.recording === true
     readonly property real textScale: Math.max(0.8, Math.min(1.6, (Number(settings.text_scale) || 100) / 100))   // overlay font multiplier
@@ -72,7 +75,7 @@ Item {
 
     function refresh() {
         root.send("state.get", {}, function(r) { if (r.ok) root.state = r.data || {}; });
-        root.send("settings.get", {}, function(r) { if (r.ok) root.settings = r.data || {}; });
+        root.send("settings.get", {}, function(r) { if (r.ok) { root.settings = r.data || {}; root.settingsReady = true; } });
         root.refreshProfiles();
         root.refreshSeries();
         root.refreshCandidates();
@@ -103,7 +106,12 @@ Item {
 
     // consent_required opens the banner; local_only becomes an error row in the transcript.
     function startRecording(consent) {
-        root.send("record.start", consent ? { consent: true } : {}, function(r) {
+        var args = consent ? { consent: true } : {};
+        if (callState.call === "call") {   // a call on: a fresh meeting named after it
+            args.new = true;
+            if (callState.title) args.title = callState.title;
+        }
+        root.send("record.start", args, function(r) {
             var e = String(r.error || "");
             if (r.ok) root.consentPrompt = "";
             else if (e.indexOf("consent_required: ") === 0) root.consentPrompt = e.slice(18);
@@ -218,7 +226,7 @@ Item {
         if (ev.turn !== undefined && ev.turn === root.staleTurn && (ev.event === "answer.delta" || ev.event === "answer.done" || ev.event === "answer.error")) return;
         if (ev.turn !== undefined && ev.turn < root.minTurn && (ev.event === "answer.delta" || ev.event === "answer.done" || ev.event === "answer.error")) return;
         switch (ev.event) {
-        case "settings": root.settings = ev.settings || ({}); break;
+        case "settings": root.settings = ev.settings || ({}); root.settingsReady = true; break;
         case "session.reset": root.resetSession(); root.state = Object.assign({}, root.state, { capture: false }); break;
         case "history":
             lines.clear();   // a reconnect replays the history: it replaces the transcript, it does not add to it
@@ -288,6 +296,7 @@ Item {
                 var p = root.pending;
                 root.pending = ({});
                 root.state = ({});
+                root.settingsReady = false;
                 root.resetSession();
                 // after the reset, so an answer that was in flight leaves its error (and Retry) in NOW
                 for (var id in p) if (typeof p[id] === "function") p[id]({ ok: false, error: "disconnected" });

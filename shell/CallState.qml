@@ -37,12 +37,20 @@ Item {
         onExited: function(code) { root.writerGone = code !== 0; root.refresh(); root.seen = true; }
     }
 
-    function check() {
+    // Only while a call is on (or when the writer changed): an idle state needs no /proc probe.
+    function check(force) {
         var pid = root.raw ? Number(root.raw.pid) || 0 : 0;
-        if (pid > 0 && !alive.running) {
+        if (pid > 0 && !alive.running && (force === true || root.raw.call !== "none")) {
             alive.command = ["test", "-d", "/proc/" + pid];
             alive.running = true;
         }
+    }
+
+    // Reads the file now (blocking), for a caller that must not act on a state the watcher has not seen yet.
+    function reloadNow() {
+        callIn.blockLoading = true;
+        callIn.reload();
+        callIn.blockLoading = false;
     }
 
     FileView {
@@ -61,7 +69,7 @@ Item {
                     root.checkedPid = pid;
                     root.writerGone = true;
                     root.refresh();
-                    root.check();
+                    root.check(true);
                 } else {
                     root.refresh();
                     root.seen = true;
