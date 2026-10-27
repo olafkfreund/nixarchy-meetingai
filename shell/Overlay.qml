@@ -30,13 +30,13 @@ Item {
     property bool noContext: false
     property real now: Date.now()
     property bool transcriptOpen: true
-    readonly property string status: daemon.answering ? "Writing" : daemon.now.body !== "" ? "Ready" : "Listening"
+    readonly property string status: backend.answering ? "Writing" : backend.now.body !== "" ? "Ready" : "Listening"
 
     readonly property string pluginId: String((root.manifest && root.manifest.id) || "nixarchy.meetingai")
     // popups.background carries the theme alpha; the overlay must not show what is behind it.
     readonly property color solid: Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 1)
     readonly property string elapsed: {
-        var t = Math.max(0, Math.floor((root.now - (daemon.state.since || root.now)) / 1000));
+        var t = Math.max(0, Math.floor((root.now - (backend.state.since || root.now)) / 1000));
         var p = function(n) { return (n < 10 ? "0" : "") + n; };
         return Math.floor(t / 3600) + ":" + p(Math.floor(t / 60) % 60) + ":" + p(t % 60);
     }
@@ -46,35 +46,17 @@ Item {
     readonly property real padY: Style.space(12)
     readonly property real gap: Style.space(14)
     readonly property real leading: 1.3
-    readonly property real ts: daemon.textScale   // every font below is Style.font.x * ts
-    readonly property real iconPx: Style.font.title * ts
-    // Nerd Font Material Design glyphs (nf-md-*), monochrome
-    readonly property string iRecord: String.fromCodePoint(0xf044b)
-    readonly property string iStop: String.fromCodePoint(0xf04db)
-    readonly property string iMic: String.fromCodePoint(0xf036c)
-    readonly property string iMicOff: String.fromCodePoint(0xf036d)
-    readonly property string iVolume: String.fromCodePoint(0xf057e)
-    readonly property string iVolumeOff: String.fromCodePoint(0xf0581)
-    readonly property string iCog: String.fromCodePoint(0xf0493)
-    readonly property string iDown: String.fromCodePoint(0xf0140)
-    readonly property string iRight: String.fromCodePoint(0xf0142)
-    readonly property string iCheck: String.fromCodePoint(0xf012c)
-    readonly property string iClose: String.fromCodePoint(0xf0156)
-    readonly property string iAction: String.fromCodePoint(0xf0139)
-    readonly property string iDecision: String.fromCodePoint(0xf023b)
-    readonly property string iQuestion: String.fromCodePoint(0xf02d7)
-    readonly property var kinds: [{ kind: "action", title: "Actions", glyph: root.iAction }, { kind: "decision", title: "Decisions", glyph: root.iDecision }, { kind: "question", title: "Questions", glyph: root.iQuestion }]
-    readonly property bool team: daemon.settings.meeting_mode === "team_meeting"
-    readonly property bool iv: daemon.settings.meeting_mode === "interviewer"
+    readonly property real ts: backend.textScale   // every font below is Style.font.x * ts
+    readonly property bool team: backend.settings.meeting_mode === "team_meeting"
+    readonly property bool iv: backend.settings.meeting_mode === "interviewer"
     readonly property bool panel: root.team || root.iv   // the card above NOW: Items (team) or Question bank (interviewer)
-    readonly property var qStatuses: [{ status: "asked", title: "Asked" }, { status: "covered", title: "Covered" }, { status: "skipped", title: "Skipped" }]
-    readonly property string seriesId: String(daemon.state.series || "")
-    readonly property string meetingId: String(daemon.state.meeting || "")
+    readonly property string seriesId: String(backend.state.series || "")
+    readonly property string meetingId: String(backend.state.meeting || "")
     property bool lastOpen: false
     property var lastTime: null   // last_time.get reply for the current series
     function loadLastTime() {
         root.lastTime = null;
-        if (root.team && root.seriesId !== "") daemon.send("last_time.get", { series: root.seriesId }, function(r) { if (r.ok) root.lastTime = r.data; });
+        if (root.team && root.seriesId !== "") backend.send("last_time.get", { series: root.seriesId }, function(r) { if (r.ok) root.lastTime = r.data; });
     }
     onTeamChanged: loadLastTime()
     onSeriesIdChanged: loadLastTime()
@@ -89,7 +71,7 @@ Item {
     property real winH: 800
     function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
     readonly property var geom: {
-        var s = daemon.settings, r = root.live;
+        var s = backend.settings, r = root.live;
         var mw = Math.max(root.minW, root.winW - root.edgeGap * 2), mh = Math.max(root.minH, root.winH - root.edgeGap * 2);
         var w = r ? r.w : (Number(s.overlay_w) > 0 ? Number(s.overlay_w) : Math.min(mw, Style.space(900)));
         var h = r ? r.h : (Number(s.overlay_h) > 0 ? Number(s.overlay_h) : Math.min(mh, Style.space(760)));
@@ -116,19 +98,19 @@ Item {
         var g = root.live;
         root.grab = null;
         if (!g) return;
-        daemon.setSetting("overlay_x", Math.round(g.x)); daemon.setSetting("overlay_y", Math.round(g.y));
-        daemon.setSetting("overlay_w", Math.round(g.w)); daemon.setSetting("overlay_h", Math.round(g.h));
+        backend.setSetting("overlay_x", Math.round(g.x)); backend.setSetting("overlay_y", Math.round(g.y));
+        backend.setSetting("overlay_w", Math.round(g.w)); backend.setSetting("overlay_h", Math.round(g.h));
         root.live = null;
     }
-    function resetGeom() { ["overlay_x", "overlay_y", "overlay_w", "overlay_h"].forEach(function(k) { daemon.setSetting(k, -1); }); }
+    function resetGeom() { ["overlay_x", "overlay_y", "overlay_w", "overlay_h"].forEach(function(k) { backend.setSetting(k, -1); }); }
     readonly property string profileName: {
-        var p = daemon.profiles.filter(function(q) { return q.selected; });
+        var p = backend.profiles.filter(function(q) { return q.selected; });
         return p.length ? String(p[0].name) : "";
     }
     readonly property var paces: ["Fast", "Balanced", "Relaxed"]
 
-    Client { id: daemon }
-    Timer { running: root.opened && daemon.recording; interval: 1000; repeat: true; triggeredOnStart: true; onTriggered: root.now = Date.now() }
+    Client { id: backend }
+    Timer { running: root.opened && backend.recording; interval: 1000; repeat: true; triggeredOnStart: true; onTriggered: root.now = Date.now() }
 
     function open(payloadJson) {
         root.opened = true;
@@ -138,7 +120,7 @@ Item {
     // Hooks for tests/shots.sh.
     function openModelPicker() { root.library = true; lib.tab = "settings"; }
     function showLibrary(tab) { root.library = true; lib.tab = tab; }
-    function recordHook(consent) { daemon.startRecording(consent); }
+    function recordHook(consent) { backend.startRecording(consent); }
 
     function close() {
         root.opened = false;
@@ -146,37 +128,37 @@ Item {
     }
 
     function bumpScale(delta) {
-        var cur = Math.round(daemon.textScale * 100);
-        daemon.setSetting("text_scale", delta === 0 ? 100 : Math.max(80, Math.min(160, cur + delta)));
+        var cur = Math.round(backend.textScale * 100);
+        backend.setSetting("text_scale", delta === 0 ? 100 : Math.max(80, Math.min(160, cur + delta)));
     }
 
     function loadModels() {
-        daemon.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
-        var p = daemon.settings.chat_provider;
-        if (p) daemon.send("models.list", { provider: p }, function(r) { if (r.ok) root.models = r.data || []; });
-        var lp = daemon.settings.live_provider;
-        if (lp) daemon.send("models.list", { provider: lp }, function(r) { if (r.ok) root.liveModels = r.data || []; });
+        backend.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
+        var p = backend.settings.chat_provider;
+        if (p) backend.send("models.list", { provider: p }, function(r) { if (r.ok) root.models = r.data || []; });
+        var lp = backend.settings.live_provider;
+        if (lp) backend.send("models.list", { provider: lp }, function(r) { if (r.ok) root.liveModels = r.data || []; });
     }
 
     function submit(text, chips) {
         var files = chips.filter(function(c) { return c.kind === "file"; }).map(function(c) { return c.path; });
         var inline = chips.filter(function(c) { return c.kind === "text"; }).map(function(c) { return c.text; });
-        daemon.ask([text].concat(inline).join("\n\n"), files, false, root.noContext);
+        backend.ask([text].concat(inline).join("\n\n"), files, false, root.noContext);
     }
 
     function pickSuggestion(n) {
-        var t = daemon.suggestions[n - 1];
+        var t = backend.suggestions[n - 1];
         if (t !== undefined) root.submit(t, []);
     }
 
     function openRef(chip) {
         if (chip.kind === "text") root.previewText = chip.text;
-        else daemon.send("attachment.preview", { path: chip.path }, function(r) { root.previewText = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; });
+        else backend.send("attachment.preview", { path: chip.path }, function(r) { root.previewText = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; });
     }
 
     Connections {
-        target: daemon
-        function onConnectedChanged() { if (daemon.connected) root.loadModels(); }
+        target: backend
+        function onConnectedChanged() { if (backend.connected) root.loadModels(); }
         function onSettingsChanged() { if (root.models.length === 0 || root.liveModels.length === 0) root.loadModels(); }
     }
 
@@ -193,10 +175,10 @@ Item {
         // While recording the window only takes input over the card; clicks elsewhere reach the apps below.
         onWidthChanged: root.winW = width
         onHeightChanged: root.winH = height
-        mask: Region { item: daemon.recording ? card : full }
+        mask: Region { item: backend.recording ? card : full }
         Item { id: full; anchors.fill: parent }
-        Rectangle { visible: !daemon.recording; anchors.fill: parent; color: Commons.Color.menu.scrim }
-        MouseArea { enabled: !daemon.recording; anchors.fill: parent; onClicked: root.close() }
+        Rectangle { visible: !backend.recording; anchors.fill: parent; color: Commons.Color.menu.scrim }
+        MouseArea { enabled: !backend.recording; anchors.fill: parent; onClicked: root.close() }
 
         Rectangle {
             id: card
@@ -231,105 +213,48 @@ Item {
                 height: parent.height - Style.spacing.lg * 2
                 spacing: Style.spacing.md
 
-                // Header: one quiet toolbar of icon buttons.
-                Item {
+                Header {
+                    daemon: backend
+                    ts: root.ts
+                    round: root.round
+                    team: root.team
+                    iv: root.iv
+                    library: root.library
+                    profileName: root.profileName
+                    elapsed: root.elapsed
                     width: parent.width
-                    height: hdrLeft.height
-                    MouseArea {   // drag the header to move the card; double-click resets size and position
-                        anchors.fill: parent
-                        cursorShape: pressed ? Qt.ClosedHandCursor : Qt.ArrowCursor
-                        onPressed: function(m) { var g = mapToItem(null, m.x, m.y); root.beginGrab(g.x, g.y); }
-                        onPositionChanged: function(m) { if (pressed) { const g = mapToItem(null, m.x, m.y); root.dragTo("m", g.x, g.y); } }
-                        onReleased: root.endGrab()
-                        onDoubleClicked: { root.live = null; root.resetGeom(); }
-                    }
-                    Row {
-                        id: hdrLeft
-                        spacing: Style.spacing.xs
-                        IconButton { ts: root.ts; iconText: daemon.recording ? root.iStop : root.iRecord; active: daemon.recording; tooltipText: daemon.recording ? "Stop recording" : "Start recording"; onClicked: { if (daemon.recording) daemon.send("record.stop", {}); else daemon.startRecording(false); } }
-                        Text {
-                            anchors.verticalCenter: parent.verticalCenter
-                            visible: daemon.recording
-                            textFormat: Text.PlainText
-                            text: root.elapsed
-                            color: Commons.Color.popups.text
-                            font.pixelSize: Style.font.body * root.ts
-                            leftPadding: Style.spacing.xs; rightPadding: Style.spacing.xs
-                        }
-                        // Brightness follows the live level; a struck-out glyph means muted.
-                        IconButton { ts: root.ts; visible: daemon.recording; iconText: daemon.state.mic !== false ? root.iMic : root.iMicOff; opacity: daemon.state.mic !== false ? 0.4 + 0.6 * daemon.micLevel : 0.5; tooltipText: daemon.state.mic !== false ? "Mute microphone" : "Unmute microphone"; onClicked: daemon.send("record.toggle_mic", {}) }
-                        IconButton { ts: root.ts; visible: daemon.recording; iconText: daemon.state.system !== false ? root.iVolume : root.iVolumeOff; opacity: daemon.state.system !== false ? 0.4 + 0.6 * daemon.systemLevel : 0.5; tooltipText: daemon.state.system !== false ? "Mute system audio" : "Unmute system audio"; onClicked: daemon.send("record.toggle_system", {}) }
-                    }
-                    Row {
-                        anchors.right: parent.right
-                        spacing: Style.spacing.md
-                        Text {   // which profile's context is in use
-                            anchors.verticalCenter: parent.verticalCenter
-                            visible: root.profileName !== ""
-                            textFormat: Text.PlainText
-                            text: root.profileName
-                            elide: Text.ElideRight
-                            width: Math.min(implicitWidth, Style.space(160))
-                            color: Commons.Color.popups.text
-                            opacity: 0.7
-                            font.pixelSize: Style.font.caption * root.ts
-                        }
-                        Rectangle {   // segmented control
-                            width: seg.width + Style.space(4); height: seg.height + Style.space(4)
-                            radius: root.round
-                            color: Qt.alpha(Commons.Color.foreground, 0.08)
-                            Row {
-                                id: seg
-                                anchors.centerIn: parent
-                                IconButton { ts: root.ts; text: "General"; radius: root.round; active: daemon.settings.meeting_mode !== "interview" && !root.team && !root.iv; tooltipText: "General meeting"; onClicked: daemon.setSetting("meeting_mode", "general") }
-                                IconButton { ts: root.ts; text: "Interview"; radius: root.round; active: daemon.settings.meeting_mode === "interview"; tooltipText: "Interview mode"; onClicked: daemon.setSetting("meeting_mode", "interview") }
-                                IconButton { ts: root.ts; text: "Team"; radius: root.round; active: root.team; tooltipText: "Team meeting: items and series"; onClicked: daemon.setSetting("meeting_mode", "team_meeting") }
-                                IconButton { ts: root.ts; text: "Interviewer"; radius: root.round; active: root.iv; tooltipText: "Interviewer: question bank and evidence notes for a candidate"; onClicked: daemon.setSetting("meeting_mode", "interviewer") }
-                            }
-                        }
-                        IconButton { ts: root.ts; iconText: root.iCog; active: root.library; tooltipText: "Settings"; onClicked: { root.library = !root.library; lib.tab = "settings"; } }
-                    }
+                    onGrabBegan: function(gx, gy) { root.beginGrab(gx, gy); }
+                    onGrabMoved: function(gx, gy) { root.dragTo("m", gx, gy); }
+                    onGrabEnded: root.endGrab()
+                    onResetRequested: { root.live = null; root.resetGeom(); }
+                    onSettingsClicked: { root.library = !root.library; lib.tab = "settings"; }
                 }
                 Rectangle { width: parent.width; height: 1; color: Qt.alpha(Commons.Color.popups.border, 0.4) }
 
                 Text {
-                    visible: !daemon.connected || daemon.lastError !== ""
+                    visible: !backend.connected || backend.lastError !== ""
                     width: parent.width
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
-                    text: daemon.connected ? daemon.lastError : "The nixarchy-meetingai daemon is not running."
+                    text: backend.connected ? backend.lastError : "The nixarchy-meetingai backend is not running."
                     color: Commons.Color.urgent
                     font.pixelSize: Style.font.caption * root.ts
                 }
 
-                Rectangle {   // consent: the daemon refused record.start until the candidate is told
-                    visible: daemon.consentPrompt !== ""
+                ConsentBanner {
+                    daemon: backend
+                    ts: root.ts
+                    round: root.round
+                    padX: root.padX
+                    padY: root.padY
                     width: parent.width
-                    height: ccol2.implicitHeight + root.padY * 2
-                    radius: root.round
-                    color: Qt.alpha(Commons.Color.foreground, 0.10)
-                    border.width: Style.normalBorderWidth
-                    border.color: Commons.Color.popups.border
-                    Column {
-                        id: ccol2
-                        x: root.padX; y: root.padY
-                        width: parent.width - root.padX * 2
-                        spacing: Style.space(6)
-                        Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: daemon.consentPrompt; color: Commons.Color.popups.text; font.pixelSize: Style.font.body * root.ts; font.bold: true }
-                        Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: daemon.cand && daemon.cand.candidate.local_only ? "Local-only is on: audio and text stay on this machine." : "Recommended: turn on Local-only in the Candidate tab so nothing leaves this machine."; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: Style.font.caption * root.ts }
-                        Row {
-                            spacing: Style.spacing.xs
-                            IconButton { ts: root.ts; iconText: root.iRecord; text: "Recording is announced \u2014 start"; bordered: true; tooltipText: "Start recording; the candidate has been told"; onClicked: daemon.startRecording(true) }
-                            IconButton { ts: root.ts; text: "Cancel"; bordered: true; tooltipText: "Do not record"; onClicked: daemon.consentPrompt = "" }
-                        }
-                    }
                 }
 
                 Library {
                     id: lib
                     settingsHeader: settingsControls
                     visible: root.library
-                    client: daemon
+                    client: backend
                     width: parent.width
                     height: parent.height - y
                 }
@@ -348,14 +273,14 @@ Item {
                         anchors.bottom: parent.bottom
                         width: parent.width
                         team: root.team
-                        seriesList: daemon.series
+                        seriesList: backend.series
                         seriesId: root.seriesId
-                        seriesLocked: daemon.recording
-                        onSeriesPicked: function(id) { daemon.send("session.new", id === "" ? {} : { series: id }, function(r) { if (!r.ok) daemon.lastError = r.error; }); }
-                        onSeriesCreated: function(name) { daemon.send("series.create", { name: name }, function(r) { if (!r.ok) { daemon.lastError = r.error; return; } daemon.refreshSeries(); daemon.send("session.new", { series: r.data.id }, function(r2) { if (!r2.ok) daemon.lastError = r2.error; }); }); }
+                        seriesLocked: backend.recording
+                        onSeriesPicked: function(id) { backend.send("session.new", id === "" ? {} : { series: id }, function(r) { if (!r.ok) backend.lastError = r.error; }); }
+                        onSeriesCreated: function(name) { backend.send("series.create", { name: name }, function(r) { if (!r.ok) { backend.lastError = r.error; return; } backend.refreshSeries(); backend.send("session.new", { series: r.data.id }, function(r2) { if (!r2.ok) backend.lastError = r2.error; }); }); }
                         onSubmit: function(text, chips) { root.submit(text, chips); }
                         onPreview: function(text) { root.previewText = text; }
-                        onScreenshot: daemon.send("screenshot.capture", { region: true })
+                        onScreenshot: backend.send("screenshot.capture", { region: true })
                         onQuick: root.submit("What should I say?", [])
                         onPick: function(n) { root.pickSuggestion(n); }
                     }
@@ -366,7 +291,7 @@ Item {
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
                         Text {
-                            visible: daemon.suggestions.length > 0
+                            visible: backend.suggestions.length > 0
                             textFormat: Text.PlainText
                             text: "Ask next"
                             color: Commons.Color.popups.text
@@ -377,7 +302,7 @@ Item {
                             bottomPadding: Style.spacing.xs
                         }
                         Repeater {
-                            model: daemon.suggestions
+                            model: backend.suggestions
                             Rectangle {
                                 id: srow
                                 required property string modelData
@@ -422,379 +347,61 @@ Item {
 
                     // NOW: who asked, the question, status, and the answer larger than the transcript.
                     readonly property real below: composer.height + sugg.height + Style.spacing.md * 2
-                    readonly property real avail: height - below - tbar.height
-                    Rectangle {
+                    readonly property real avail: height - below - transcript.barHeight
+                    NowCard {
                         id: nowPanel
+                        daemon: backend
+                        ts: root.ts
+                        round: root.round
+                        padX: root.padX
+                        padY: root.padY
+                        leading: root.leading
+                        status: root.status
+                        themedLinks: root.themedLinks
                         // Team mode: only for a typed question, above the items.
-                        visible: !root.team || (daemon.now.turn >= 0 && !daemon.now.automatic)
+                        visible: !root.team || (backend.now.turn >= 0 && !backend.now.automatic)
                         anchors.bottom: sugg.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
                         height: root.panel ? Math.min(nowWant, convo.avail * 0.35) : root.transcriptOpen ? Math.min(nowWant, convo.avail * 0.7) : Math.max(nowWant, convo.avail)
-                        readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.implicitHeight + nowCol.spacing * 2 + root.padY * 2
-                        radius: root.round
-                        color: Qt.alpha(Commons.Color.accent, 0.12)
-                        Rectangle { width: Style.space(4); height: parent.height - root.round; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
-                        Column {
-                            id: nowCol
-                            x: root.padX; y: root.padY
-                            width: parent.width - root.padX * 2
-                            spacing: Style.space(8)
-                            Row {
-                                id: nowHead
-                                spacing: Style.spacing.md
-                                Text { textFormat: Text.PlainText; text: "Now"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-                                Text { textFormat: Text.PlainText; text: root.status; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts }
-                                Text {
-                                    textFormat: Text.PlainText
-                                    visible: text !== ""
-                                    text: (daemon.now.provider + " " + daemon.now.model).trim()
-                                    color: Commons.Color.popups.text
-                                    font.pixelSize: Style.font.caption * root.ts
-                                }
-                            }
-                            Text {
-                                id: nowQ
-                                width: parent.width
-                                visible: daemon.now.question !== ""
-                                textFormat: Text.PlainText
-                                wrapMode: Text.Wrap
-                                maximumLineCount: 2
-                                elide: Text.ElideRight
-                                text: daemon.now.asker + " asked: " + daemon.now.question
-                                color: Commons.Color.popups.text
-                                font.pixelSize: Style.font.body * root.ts
-                                font.bold: true
-                            }
-                            Flickable {
-                                id: nowFlick
-                                width: parent.width
-                                height: Math.max(0, Math.min(answerText.implicitHeight, nowPanel.height - nowHead.height - (nowQ.visible ? nowQ.implicitHeight : 0) - nowCol.spacing * 2 - root.padY * 2))
-                                contentHeight: answerText.implicitHeight
-                                clip: true
-                                // Follow the tail while streaming; a finished answer is read from its top.
-                                Binding { target: nowFlick; property: "contentY"; value: daemon.answering ? Math.max(0, nowFlick.contentHeight - nowFlick.height) : 0; restoreMode: Binding.RestoreNone }
-                                Text {
-                                    id: answerText
-                                    width: parent.width
-                                    textFormat: Text.MarkdownText
-                                    wrapMode: Text.Wrap
-                                    text: root.themedLinks(daemon.now.body)
-                                    color: Commons.Color.popups.text
-                                    linkColor: Commons.Color.accent
-                                    font.pixelSize: Style.font.subtitle * root.ts
-                                    lineHeight: root.leading
-                                    onLinkActivated: function(link) { Qt.openUrlExternally(link); }
-                                }
-                            }
-                        }
                     }
 
                     // Team meeting: replaces NOW. Last time drawer, "Earlier task?" callout, items by kind.
-                    Rectangle {
+                    ItemsPanel {
                         id: itemsPanel
+                        daemon: backend
+                        ts: root.ts
+                        round: root.round
+                        padX: root.padX
+                        padY: root.padY
+                        leading: root.leading
+                        iv: root.iv
+                        lastOpen: root.lastOpen
+                        lastTime: root.lastTime
+                        onLastOpenToggled: root.lastOpen = !root.lastOpen
+                        onItemsChanged: root.loadLastTime()
                         visible: root.panel
                         anchors.bottom: nowPanel.visible ? nowPanel.top : sugg.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
                         height: root.transcriptOpen ? Math.min(want, convo.avail * (nowPanel.visible ? 0.4 : 0.7)) : Math.max(want, convo.avail - (nowPanel.visible ? nowPanel.height + Style.spacing.md : 0))
-                        readonly property real want: (root.iv ? qcol : icol).implicitHeight + root.padY * 2
-                        radius: root.round
-                        color: Qt.alpha(Commons.Color.accent, 0.12)
-                        Rectangle { width: Style.space(4); height: parent.height - root.round; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
-                        Flickable {
-                            x: root.padX; y: root.padY
-                            width: parent.width - root.padX * 2
-                            height: parent.height - root.padY * 2
-                            contentHeight: (root.iv ? qcol : icol).implicitHeight
-                            clip: true
-                            Column {   // Interviewer: the Question bank checklist
-                                id: qcol
-                                visible: root.iv
-                                width: parent.width
-                                spacing: Style.space(8)
-                                Text { textFormat: Text.PlainText; text: "Question bank" + (daemon.cand ? "  " + daemon.cand.questions.filter(function(q) { return q.status !== "planned"; }).length + "/" + daemon.cand.questions.length : ""); color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-                                Text { visible: !daemon.cand || daemon.cand.questions.length === 0; textFormat: Text.PlainText; text: "No questions: pick a candidate and generate a bank in Settings, Candidate"; color: Commons.Color.popups.text; opacity: 0.6; font.italic: true; font.pixelSize: Style.font.body * root.ts }
-                                Repeater {
-                                    model: daemon.cand ? daemon.cand.questions : []
-                                    Column {
-                                        id: qrow
-                                        required property var modelData
-                                        width: qcol.width
-                                        spacing: Style.space(2)
-                                        Item {
-                                            width: parent.width
-                                            height: Math.max(Style.spacing.controlHeight, qtext.implicitHeight + Style.space(4))
-                                            Row {
-                                                id: qacts
-                                                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                                Repeater {
-                                                    model: root.qStatuses
-                                                    IconButton {
-                                                        required property var modelData
-                                                        ts: root.ts
-                                                        text: modelData.title
-                                                        active: qrow.modelData.status === modelData.status
-                                                        tooltipText: active ? "Back to planned" : "Mark " + modelData.status
-                                                        onClicked: daemon.updateQuestion(qrow.modelData.id, { status: active ? "planned" : modelData.status })
-                                                    }
-                                                }
-                                            }
-                                            Text {
-                                                id: qtext
-                                                anchors.left: parent.left; anchors.right: qacts.left; anchors.rightMargin: Style.spacing.md
-                                                anchors.verticalCenter: parent.verticalCenter
-                                                textFormat: Text.PlainText
-                                                wrapMode: Text.Wrap
-                                                text: qrow.modelData.text
-                                                color: Commons.Color.popups.text
-                                                opacity: qrow.modelData.status === "planned" ? 1 : 0.6
-                                                font.pixelSize: Style.font.body * root.ts
-                                                font.strikeout: qrow.modelData.status === "skipped"
-                                            }
-                                        }
-                                        TextField {   // evidence note: what the candidate said; never generated
-                                            width: parent.width
-                                            placeholderText: "Evidence note"
-                                            text: String(qrow.modelData.note || "")
-                                            onEditingFinished: { if (text !== String(qrow.modelData.note || "")) daemon.updateQuestion(qrow.modelData.id, { note: text }); }
-                                        }
-                                    }
-                                }
-                            }
-                            Column {
-                                id: icol
-                                visible: !root.iv
-                                width: parent.width
-                                spacing: Style.space(8)
-                                Row {
-                                    spacing: Style.spacing.md
-                                    Text { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "Items"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-                                    IconButton { ts: root.ts; visible: root.lastTime && root.lastTime.meeting; iconText: root.lastOpen ? root.iDown : root.iRight; text: "Last time"; tooltipText: "Recap and open items of the previous meeting in this series"; onClicked: root.lastOpen = !root.lastOpen }
-                                }
-                                Column {   // Last time drawer
-                                    visible: root.lastOpen && root.lastTime !== null
-                                    width: parent.width
-                                    spacing: Style.space(4)
-                                    Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.lastTime ? String(root.lastTime.title || "") + " · " + String(root.lastTime.started_at || "") : ""; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true }
-                                    Text { width: parent.width; textFormat: Text.MarkdownText; wrapMode: Text.Wrap; text: root.lastTime ? String(root.lastTime.recap || "") : ""; color: Commons.Color.popups.text; font.pixelSize: Style.font.body * root.ts; lineHeight: root.leading }
-                                    Repeater {
-                                        model: root.lastTime ? (root.lastTime.items || []) : []
-                                        Text { required property var modelData; width: icol.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "- " + modelData.text; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: Style.font.body * root.ts }
-                                    }
-                                }
-                                Rectangle {   // Earlier task?
-                                    id: callout
-                                    visible: daemon.earlierItem !== null
-                                    width: parent.width
-                                    height: ccol.implicitHeight + root.padY * 2
-                                    radius: root.round
-                                    color: Qt.alpha(Commons.Color.foreground, 0.10)
-                                    border.width: Style.normalBorderWidth
-                                    border.color: Commons.Color.popups.border
-                                    readonly property var it: daemon.earlierItem ? daemon.earlierItem.item : ({})
-                                    function dismiss() { daemon.earlierItem = null; }
-                                    Column {
-                                        id: ccol
-                                        x: root.padX; y: root.padY
-                                        width: parent.width - root.padX * 2
-                                        spacing: Style.space(6)
-                                        Text { textFormat: Text.PlainText; text: "Earlier task?"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-                                        Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(callout.it.text || "") + "  (" + String(callout.it.created_at || "").slice(0, 10) + ")"; color: Commons.Color.popups.text; font.pixelSize: Style.font.body * root.ts; font.bold: true }
-                                        Text { width: parent.width; visible: daemon.earlierItem !== null && daemon.earlierItem.quote !== ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: daemon.earlierItem ? "\u201c" + daemon.earlierItem.quote + "\u201d" : ""; color: Commons.Color.popups.text; opacity: 0.8; font.italic: true; font.pixelSize: Style.font.body * root.ts }
-                                        Row {
-                                            spacing: Style.spacing.xs
-                                            IconButton { ts: root.ts; text: "Discussed"; bordered: true; tooltipText: "It came up again; the link is already saved"; onClicked: callout.dismiss() }
-                                            IconButton { ts: root.ts; iconText: root.iCheck; text: "Done"; bordered: true; tooltipText: "Mark the earlier item done"; onClicked: { daemon.send("items.update", { id: callout.it.id, status: "done" }, function() { root.loadLastTime(); }); callout.dismiss(); } }
-                                            IconButton { ts: root.ts; text: "Not related"; bordered: true; tooltipText: "Remove the link to the earlier item"; onClicked: { if (daemon.earlierItem.new_item) daemon.updateItem(daemon.earlierItem.new_item, { origin_item: "" }); callout.dismiss(); } }
-                                        }
-                                    }
-                                }
-                                Text {
-                                    visible: daemon.items.length === 0
-                                    textFormat: Text.PlainText
-                                    text: "Nothing captured yet"
-                                    color: Commons.Color.popups.text
-                                    opacity: 0.6
-                                    font.italic: true
-                                    font.pixelSize: Style.font.body * root.ts
-                                }
-                                Repeater {
-                                    model: root.kinds
-                                    Column {
-                                        id: grp
-                                        required property var modelData
-                                        readonly property var rows: daemon.items.filter(function(i) { return i.kind === grp.modelData.kind; })
-                                        visible: rows.length > 0
-                                        width: icol.width
-                                        spacing: Style.space(4)
-                                        Text { textFormat: Text.PlainText; text: grp.modelData.title; color: Commons.Color.popups.text; opacity: 0.7; font.pixelSize: Style.font.caption * root.ts; font.bold: true }
-                                        Repeater {
-                                            model: grp.rows
-                                            Column {
-                                              id: cell
-                                              required property var modelData
-                                              width: grp.width
-                                            Item {
-                                                id: irow
-                                                readonly property var modelData: cell.modelData
-                                                readonly property bool open: modelData.status === "open"
-                                                width: grp.width
-                                                height: Math.max(Style.spacing.controlHeight, itext.implicitHeight + Style.space(4))
-                                                opacity: open ? 1 : 0.5
-                                                Text { id: glyph; anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: grp.modelData.glyph; color: Commons.Color.popups.text; font.pixelSize: root.iconPx }
-                                                Row {
-                                                    id: acts
-                                                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                                                    IconButton { ts: root.ts; iconText: root.iCheck; active: irow.modelData.status === "done"; tooltipText: irow.modelData.status === "done" ? "Reopen" : "Mark done"; onClicked: daemon.updateItem(irow.modelData.id, { status: irow.modelData.status === "done" ? "open" : "done" }) }
-                                                    IconButton { ts: root.ts; iconText: root.iClose; active: irow.modelData.status === "dropped"; tooltipText: irow.modelData.status === "dropped" ? "Reopen" : "Drop"; onClicked: daemon.updateItem(irow.modelData.id, { status: irow.modelData.status === "dropped" ? "open" : "dropped" }) }
-                                                }
-                                                Text {   // owner, due, source line
-                                                    id: meta
-                                                    anchors.right: acts.left; anchors.rightMargin: Style.spacing.md; anchors.verticalCenter: parent.verticalCenter
-                                                    textFormat: Text.PlainText
-                                                    text: [irow.modelData.owner, irow.modelData.due, irow.modelData.t0 !== null && irow.modelData.t0 !== undefined ? Math.floor(irow.modelData.t0 / 60) + ":" + ("0" + Math.floor(irow.modelData.t0 % 60)).slice(-2) : ""].filter(function(x) { return x; }).join(" · ")
-                                                    color: Commons.Color.popups.text
-                                                    opacity: 0.7
-                                                    font.pixelSize: Style.font.caption * root.ts
-                                                }
-                                                TextInput {   // inline edit; a draft is shown italic
-                                                    id: itext
-                                                    anchors.left: glyph.right; anchors.leftMargin: Style.spacing.md
-                                                    anchors.right: meta.left; anchors.rightMargin: Style.spacing.md
-                                                    anchors.verticalCenter: parent.verticalCenter
-                                                    wrapMode: TextInput.Wrap
-                                                    text: irow.modelData.text
-                                                    color: Commons.Color.popups.text
-                                                    selectionColor: Commons.Color.accent
-                                                    font.pixelSize: Style.font.body * root.ts
-                                                    font.italic: irow.modelData.draft === true || irow.modelData.draft === 1
-                                                    font.strikeout: irow.modelData.status !== "open"
-                                                    onEditingFinished: { if (text.trim() !== "" && text !== irow.modelData.text) daemon.updateItem(irow.modelData.id, { text: text.trim() }); }
-                                                    onActiveFocusChanged: daemon.itemEditing = activeFocus
-                                                    Keys.onEscapePressed: function(event) { text = irow.modelData.text; focus = false; event.accepted = true; }
-                                                }
-                                            }
-                                            Row {   // a continuation the callout did not show, or that was kept
-                                                visible: !!cell.modelData.origin_item
-                                                x: Style.spacing.md + root.iconPx
-                                                spacing: Style.spacing.xs
-                                                Text { width: Math.min(implicitWidth, grp.width - unlink.width - Style.spacing.md * 3 - root.iconPx); elide: Text.ElideRight; textFormat: Text.PlainText; anchors.verticalCenter: parent.verticalCenter; text: "continues: " + String(cell.modelData.origin_text || "an earlier item"); color: Commons.Color.popups.text; opacity: 0.6; font.pixelSize: Style.font.caption * root.ts }
-                                                IconButton { id: unlink; ts: root.ts; iconText: root.iClose; tooltipText: "Unlink from the earlier item"; onClicked: daemon.updateItem(cell.modelData.id, { origin_item: "" }) }
-                                            }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
 
-                    Row {   // transcript toggle
-                        id: tbar
+                    Transcript {
+                        id: transcript
+                        daemon: backend
+                        ts: root.ts
+                        round: root.round
+                        padX: root.padX
+                        padY: root.padY
+                        gap: root.gap
+                        leading: root.leading
+                        themedLinks: root.themedLinks
+                        open: root.transcriptOpen
+                        onToggled: root.transcriptOpen = !root.transcriptOpen
                         anchors.top: parent.top
-                        IconButton { ts: root.ts; iconText: root.transcriptOpen ? root.iDown : root.iRight; text: "Transcript"; tooltipText: root.transcriptOpen ? "Collapse the transcript" : "Expand the transcript"; onClicked: root.transcriptOpen = !root.transcriptOpen }
-                    }
-
-                    // Transcript and archived answers in one virtualized list (capped at 500 rows by Client).
-                    Item {
-                        visible: root.transcriptOpen
-                        anchors { top: tbar.bottom; left: parent.left; right: parent.right; bottom: root.panel ? itemsPanel.top : nowPanel.top; bottomMargin: Style.spacing.md }
-                        ListView {
-                            id: tlist
-                            anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
-                            height: Math.min(contentHeight, parent.height)
-                            clip: true
-                            spacing: root.gap
-                            model: daemon.transcript
-                            property bool follow: true
-                            // Exact bottom; positionViewAtEnd works from estimated delegate heights.
-                            function toEnd() { if (follow) contentY = originY + Math.max(0, contentHeight - height); }
-                            onContentHeightChanged: Qt.callLater(toEnd)
-                            onHeightChanged: Qt.callLater(toEnd)   // the NOW panel grows and shrinks the list
-                            onMovementEnded: follow = atYEnd
-                            delegate: Item {
-                                id: row
-                                required property string who
-                                required property string speaker
-                                required property string body
-                                required property bool partial
-                                readonly property bool answer: who === "answer"
-                                readonly property bool mine: who === "mic" || who === "asked"
-                                readonly property bool bubble: who === "mic" || who === "system" || who === "asked"
-                                readonly property string label: who === "asked" ? "You · Asked" : who === "mic" ? "You · Spoke" : (speaker !== "" ? speaker : "Them")
-                                width: ListView.view.width
-                                height: answer ? card2.height : bubble ? bub.height : err.implicitHeight
-                                // Markdown and line height settle after layout; keep the end pinned while following.
-                                onHeightChanged: Qt.callLater(tlist.toEnd)
-                                Rectangle {   // flat, borderless bubble
-                                    id: bub
-                                    visible: row.bubble
-                                    x: row.mine ? row.width - width : 0
-                                    width: Math.min(row.width * 0.8, Math.max(btxt.implicitWidth, blabel.implicitWidth) + root.padX * 2)
-                                    height: bcol.implicitHeight + root.padY * 2
-                                    radius: root.round
-                                    color: row.mine ? Qt.alpha(Commons.Color.accent, 0.22) : Qt.alpha(Commons.Color.foreground, 0.10)
-                                    Column {
-                                        id: bcol
-                                        x: root.padX; y: root.padY
-                                        width: parent.width - root.padX * 2
-                                        spacing: Style.space(4)
-                                        Text { id: blabel; textFormat: Text.PlainText; text: row.label; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true }
-                                        Text {
-                                            id: btxt
-                                            width: parent.width
-                                            textFormat: Text.PlainText
-                                            wrapMode: Text.Wrap
-                                            text: row.body
-                                            color: Commons.Color.popups.text
-                                            font.italic: row.partial
-                                            font.pixelSize: Style.font.body * root.ts
-                                            lineHeight: root.leading
-                                        }
-                                    }
-                                }
-                                Rectangle {   // an earlier answer: accent stripe, label, markdown
-                                    id: card2
-                                    visible: row.answer
-                                    width: parent.width
-                                    height: ansCol.implicitHeight + root.padY * 2
-                                    radius: root.round
-                                    color: Qt.alpha(Commons.Color.accent, 0.12)
-                                    Rectangle { width: Style.space(4); height: parent.height - root.round; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
-                                    Column {
-                                        id: ansCol
-                                        x: root.padX; y: root.padY
-                                        width: parent.width - root.padX * 2
-                                        spacing: Style.space(6)
-                                        Text { textFormat: Text.PlainText; text: "Suggested answer"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-                                        Text {
-                                            width: parent.width
-                                            textFormat: Text.MarkdownText
-                                            wrapMode: Text.Wrap
-                                            text: root.themedLinks(row.body)
-                                            color: Commons.Color.popups.text
-                                            linkColor: Commons.Color.accent
-                                            font.pixelSize: Style.font.body * root.ts
-                                            lineHeight: root.leading
-                                            onLinkActivated: function(link) { Qt.openUrlExternally(link); }
-                                        }
-                                    }
-                                }
-                                Text {
-                                    id: err
-                                    visible: !row.answer && !row.bubble
-                                    width: parent.width
-                                    textFormat: Text.PlainText
-                                    wrapMode: Text.Wrap
-                                    text: row.body
-                                    color: row.who === "error" ? Commons.Color.urgent : Commons.Color.popups.text
-                                    opacity: row.who === "notice" ? 0.6 : 1
-                                    font.italic: row.who === "notice"
-                                    font.pixelSize: (row.who === "notice" ? Style.font.caption : Style.font.bodySmall) * root.ts
-                                }
-                            }
-                        }
+                        width: parent.width
+                        height: (root.panel ? itemsPanel : nowPanel).y
                     }
                 }
             }
@@ -807,17 +414,17 @@ Item {
                     bottomPadding: Style.spacing.md
                     Dropdown {
                         label: "Chat provider"
-                        value: String(daemon.settings.chat_provider || "")
+                        value: String(backend.settings.chat_provider || "")
                         options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
-                        onChanged: function(v) { daemon.setSetting("chat_provider", v); daemon.setSetting("chat_model", ""); root.loadModels(); }
+                        onChanged: function(v) { backend.setSetting("chat_provider", v); backend.setSetting("chat_model", ""); root.loadModels(); }
                     }
                     SearchableDropdown {   // typing filters the list
                         id: modelBox
                         label: "Chat model"
-                        value: String(daemon.settings.chat_model || "")
+                        value: String(backend.settings.chat_model || "")
                         options: root.models.map(function(m) { return String(m); })
                         triggerLabel: "default"
-                        onChanged: function(v) { daemon.setSetting("chat_model", v); }
+                        onChanged: function(v) { backend.setSetting("chat_model", v); }
                     }
                     Item {
                         width: Style.space(200); height: modelBox.height
@@ -826,27 +433,27 @@ Item {
                             anchors.bottom: parent.bottom
                             width: parent.width
                             placeholderText: "or type a model id"
-                            onAccepted: { if (text.trim() !== "") daemon.setSetting("chat_model", text.trim()); text = ""; }
+                            onAccepted: { if (text.trim() !== "") backend.setSetting("chat_model", text.trim()); text = ""; }
                         }
                     }
                     Dropdown {   // automatic answers while a call is recorded
                         label: "Live answers provider"
-                        value: String(daemon.settings.live_provider || "")
+                        value: String(backend.settings.live_provider || "")
                         options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
-                        onChanged: function(v) { daemon.setSetting("live_provider", v); daemon.setSetting("live_model", ""); root.loadModels(); }
+                        onChanged: function(v) { backend.setSetting("live_provider", v); backend.setSetting("live_model", ""); root.loadModels(); }
                     }
                     SearchableDropdown {
                         label: "Live answers model"
-                        value: String(daemon.settings.live_model || "")
+                        value: String(backend.settings.live_model || "")
                         options: root.liveModels.map(function(m) { return String(m); })
                         triggerLabel: "default"
-                        onChanged: function(v) { daemon.setSetting("live_model", v); }
+                        onChanged: function(v) { backend.setSetting("live_model", v); }
                     }
                     Dropdown {
                         label: "Pace"
-                        value: String(daemon.settings.response_pace || "Balanced")
+                        value: String(backend.settings.response_pace || "Balanced")
                         options: root.paces
-                        onChanged: function(v) { daemon.setSetting("response_pace", v); }
+                        onChanged: function(v) { backend.setSetting("response_pace", v); }
                     }
                     Item {
                         width: ncRow.width; height: modelBox.height
@@ -869,7 +476,7 @@ Item {
                         width: Style.space(260); height: modelBox.height
                         Text {
                             textFormat: Text.PlainText
-                            text: "Text size " + Math.round(daemon.textScale * 100) + "%"
+                            text: "Text size " + Math.round(backend.textScale * 100) + "%"
                             color: Commons.Color.popups.text
                             font.pixelSize: Style.font.caption * root.ts
                         }
@@ -877,11 +484,11 @@ Item {
                             anchors.bottom: parent.bottom
                             width: parent.width
                             minimum: 80; maximum: 160; step: 10; integer: true
-                            value: Math.round(daemon.textScale * 100)
+                            value: Math.round(backend.textScale * 100)
                             trackColor: Qt.alpha(Commons.Color.popups.text, 0.2)
                             fillColor: Commons.Color.popups.text
                             knobColor: Commons.Color.popups.text
-                            onMoved: function(v) { var n = Math.round(v / 10) * 10; if (n !== Math.round(daemon.textScale * 100)) daemon.setSetting("text_scale", n); }
+                            onMoved: function(v) { var n = Math.round(v / 10) * 10; if (n !== Math.round(backend.textScale * 100)) backend.setSetting("text_scale", n); }
                         }
                     }
                 }
