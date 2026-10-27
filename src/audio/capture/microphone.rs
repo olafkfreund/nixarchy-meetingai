@@ -91,12 +91,6 @@ impl Microphone {
         Self::start_device(device, false)
     }
 
-    /// WASAPI treats an output endpoint opened for input as loopback capture.
-    #[cfg(windows)]
-    pub(super) fn start_loopback(device: Option<&str>) -> Result<Self, AudioError> {
-        Self::start_device(device, true)
-    }
-
     fn start_device(device: Option<&str>, loopback: bool) -> Result<Self, AudioError> {
         let requested = device
             .map(str::trim)
@@ -416,12 +410,12 @@ mod tests {
     #[test]
     fn missing_device_is_reported_by_name() {
         // A name that cannot exist: this must fail before any stream is built.
-        let error = Microphone::start(Some("lennette-nonexistent-input-xyz"))
+        let error = Microphone::start(Some("nixarchy-meetingai-nonexistent-input-xyz"))
             .err()
             .expect("a missing device must not start");
         match error {
             AudioError::DeviceMissing(name) => {
-                assert_eq!(name, "lennette-nonexistent-input-xyz")
+                assert_eq!(name, "nixarchy-meetingai-nonexistent-input-xyz")
             }
             other => panic!("unexpected error: {other}"),
         }

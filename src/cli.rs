@@ -1,151 +1,110 @@
 //! Command line entry point.
 //!
-//! Besides launching normally, lennette accepts one-shot control flags. Hyprland
-//! binds call these, so a shortcut reaches the running instance instead of
-//! starting a second copy.
+//! No arguments runs the daemon. `ctl <cmd> [json]` sends one request to the
+//! running daemon over its socket and prints the reply.
 
-/// A one-shot command requested by a shortcut.
-///
-/// Returns `None` when this invocation should launch the app instead: no control
-/// flag, or a toggle requested while nothing is listening on the socket. That
-/// second case is what makes a toggle key launch the app when it is not running;
-/// forwarding to nobody and exiting would leave the key doing nothing.
-pub fn handle_args() -> Option<String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let flag = args.first()?;
-    let command = match flag.as_str() {
-        "--toggle-dashboard" => "toggle-dashboard",
-        "--toggle-window" => "toggle-window",
-        "--focus-input" => "focus-input",
-        "--toggle-system-audio" => "toggle-system-audio",
-        "--toggle-voice" => "toggle-voice",
-        "--screenshot" => "screenshot",
-        "--privacy" => "privacy-mode",
-        "--normal" => "normal-mode",
-        "--version" | "-V" => return Some(format!("lennette {}", env!("CARGO_PKG_VERSION"))),
-        "--help" | "-h" => {
-            return Some(usage());
-        }
-        _ => return None,
-    };
+use std::{
+    io::{BufRead, BufReader, Write},
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
-    // Forward to the running instance over the shortcut socket, so bindings never
-    // spawn a duplicate window.
-    match send(command) {
-        Ok(()) => Some(String::new()),
-        Err(error) if launches_when_absent(command) => {
-            tracing::debug!(%error, %command, "no instance accepted the command; launching");
-            None
-        }
-        Err(error) => Some(format!("lennette: {error}")),
+/// Handle a one-shot invocation. Returns the text to print and the exit code, or
+/// `None` when this invocation should run the daemon.
+pub fn run_cli(args: &[String]) -> Option<(String, i32)> {
+    match args.first().map(String::as_str)? {
+        "ctl" => Some(ctl(&args[1..])),
+        "mcp" => Some(match crate::mcp::run() {
+            Ok(()) => (String::new(), 0),
+            Err(error) => (format!("nixarchy-meetingai mcp: {error}"), 1),
+        }),
+        "--version" | "-V" => Some((
+            format!("nixarchy-meetingai {}", env!("CARGO_PKG_VERSION")),
+            0,
+        )),
+        "--help" | "-h" => Some((usage(), 0)),
+        other => Some((
+            format!(
+                "nixarchy-meetingai: unknown argument '{other}'\n\n{}",
+                usage()
+            ),
+            2,
+        )),
     }
-}
-
-/// Toggles are safe to treat as "start the app" when no instance is listening.
-fn launches_when_absent(command: &str) -> bool {
-    matches!(
-        command,
-        "toggle-window" | "toggle-dashboard" | "focus-input" | "privacy-mode" | "normal-mode"
-    )
 }
 
 fn usage() -> String {
     [
-        "lennette — desktop assistant",
+        "nixarchy-meetingai: meeting copilot daemon",
         "",
-        "Usage: lennette [option]",
-        "",
-        "  --toggle-dashboard      show or hide the dashboard",
-        "  --toggle-window         show or hide the overlay",
-        "  --focus-input           focus the composer",
-        "  --toggle-system-audio   capture the far side of the call",
-        "  --toggle-voice          start or stop listening",
-        "  --screenshot            capture the screen",
-        "  --version               print the version",
-        "  --help                  print this help",
-        "",
-        "Run without a flag to launch the app.",
-        "LENNETTE_PRIVATE_OVERLAY=1 disables the desktop tray for protected launches.",
-        "  --privacy               launch without a tray or taskbar icon",
-        "  --normal                launch with a tray icon (default)",
+        "Usage:",
+        "  nixarchy-meetingai                  run the daemon",
+        "  nixarchy-meetingai ctl CMD [JSON]   send one command, e.g. ctl state.get",
+        "                                      or ctl chat.send '{\"text\":\"hi\"}'",
+        "  nixarchy-meetingai mcp              MCP server over stdio, for AI agents",
+        "  nixarchy-meetingai --version | --help",
     ]
     .join("\n")
 }
 
-/// Explorer owns tray pixels, so app-window capture exclusion cannot hide them.
-/// Privacy launches omit the tray; normal launches include it.
-pub fn private_overlay_enabled() -> bool {
-    MODE.get_or_init(|| std::sync::atomic::AtomicBool::new(launch_private()))
-        .load(std::sync::atomic::Ordering::Relaxed)
+/// Socket of the running daemon under `runtime`.
+pub fn socket_path_in(runtime: &Path) -> PathBuf {
+    runtime.join("nixarchy-meetingai").join("daemon.sock")
 }
 
-static MODE: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
-pub fn set_private_mode(private: bool) {
-    MODE.get_or_init(|| std::sync::atomic::AtomicBool::new(launch_private()))
-        .store(private, std::sync::atomic::Ordering::Relaxed);
+pub fn socket_path() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR").map(|r| socket_path_in(Path::new(&r)))
 }
 
-fn launch_private() -> bool {
-    if std::env::args().any(|arg| arg == "--privacy") {
-        return true;
-    }
-    if std::env::args().any(|arg| arg == "--normal") {
-        return false;
-    }
-    private_overlay_for(
-        cfg!(windows),
-        std::env::var("LENNETTE_PRIVATE_OVERLAY").ok().as_deref(),
-    )
-}
-
-fn private_overlay_for(_windows: bool, value: Option<&str>) -> bool {
-    match value {
-        Some("1") => true,
-        Some("0") => false,
-        _ => false,
-    }
-}
-
-/// If an instance is already running, activate its window and return true.
-pub fn activate_existing_instance() -> bool {
-    send("focus-input").is_ok()
-}
-
-/// Wait for the instance holding the lock to become reachable, then focus it.
-///
-/// A launch that loses the race may face an instance that has claimed the lock
-/// but not yet bound its socket. Retrying turns that into a normal "bring it up"
-/// instead of a silent no-op.
-pub fn wait_for_running_instance(timeout: std::time::Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if send("focus-input").is_ok() {
-            return true;
+/// Send one request and return the printed reply line plus an exit code.
+fn ctl(args: &[String]) -> (String, i32) {
+    let Some(cmd) = args.first() else {
+        return (usage(), 2);
+    };
+    let args_json = match args.get(1) {
+        Some(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) => value,
+            Err(error) => return (format!("nixarchy-meetingai: bad JSON: {error}"), 2),
+        },
+        None => serde_json::json!({}),
+    };
+    match exchange(cmd, args_json) {
+        Ok(reply) => {
+            let ok = reply["ok"] == true;
+            (reply.to_string(), if ok { 0 } else { 1 })
         }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        Err(error) => (format!("nixarchy-meetingai: {error}"), 1),
     }
 }
 
-/// Path of the control socket shared with the running instance.
-pub fn control_socket() -> Option<std::path::PathBuf> {
-    runtime_path("lennette-shortcut.sock")
+fn exchange(cmd: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
+    let path = socket_path().ok_or("XDG_RUNTIME_DIR is not set")?;
+    let mut stream = UnixStream::connect(&path)
+        .map_err(|_| "no running nixarchy-meetingai daemon was found".to_owned())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .map_err(|e| e.to_string())?;
+    let request = serde_json::json!({"id": 1, "cmd": cmd, "args": args});
+    writeln!(stream, "{request}").map_err(|e| e.to_string())?;
+    // Events share the socket; skip them until our reply arrives.
+    for line in BufReader::new(stream).lines() {
+        let value: serde_json::Value =
+            serde_json::from_str(&line.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        if value["id"] == 1 {
+            return Ok(value);
+        }
+    }
+    Err("the daemon closed the connection".into())
 }
 
 /// Path of the exclusive launch lock held by the running instance.
 pub fn instance_lock_path() -> Option<std::path::PathBuf> {
-    runtime_path("lennette-instance.lock")
+    runtime_path("nixarchy-meetingai-instance.lock")
 }
 
 fn runtime_path(name: &str) -> Option<std::path::PathBuf> {
-    #[cfg(unix)]
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)?;
-    #[cfg(windows)]
-    let runtime = directories::ProjectDirs::from("dev", "lennette", "lennette")?
-        .data_local_dir()
-        .join("runtime");
     std::fs::create_dir_all(&runtime).ok()?;
     Some(runtime.join(name))
 }
@@ -188,74 +147,14 @@ impl InstanceLock {
     }
 }
 
-#[cfg(unix)]
-fn send(command: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::net::UnixStream;
-
-    let path = control_socket().ok_or("XDG_RUNTIME_DIR is not set")?;
-    let mut stream = UnixStream::connect(&path)
-        .map_err(|_| "no running lennette instance was found".to_owned())?;
-    let payload = if command.ends_with('\n') {
-        command.to_owned()
-    } else {
-        format!("{command}\n")
-    };
-    stream
-        .write_all(payload.as_bytes())
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(windows)]
-fn send(command: &str) -> Result<(), String> {
-    use std::io::Write;
-    let name = crate::platform::control::pipe_name()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    let mut pipe = loop {
-        match std::fs::OpenOptions::new().write(true).open(&name) {
-            Ok(pipe) => break pipe,
-            Err(error)
-                if error.raw_os_error()
-                    == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32)
-                    && std::time::Instant::now() < deadline =>
-            {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Err(_) => return Err("no running lennette instance was found".to_owned()),
-        }
-    };
-    writeln!(pipe, "{command}").map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn normal_launch_has_a_tray_unless_privacy_is_requested() {
-        for value in [None, Some(""), Some("invalid")] {
-            assert!(!private_overlay_for(true, value));
-        }
-        assert!(private_overlay_for(true, Some("1")));
-        assert!(!private_overlay_for(true, Some("0")));
-        assert!(!private_overlay_for(false, None));
-        assert!(private_overlay_for(false, Some("1")));
-        assert!(!private_overlay_for(false, Some("0")));
-    }
-
-    #[test]
-    fn control_socket_lives_in_the_runtime_dir() {
-        // The function reads the environment, so only assert its shape when set.
-        if control_socket().is_some() {
-            let path = control_socket().unwrap();
-            assert!(path.ends_with("lennette-shortcut.sock"));
-        }
-    }
-
-    #[test]
     fn instance_lock_exists_in_the_runtime_dir() {
         if let Some(path) = instance_lock_path() {
-            assert!(path.ends_with("lennette-instance.lock"));
+            assert!(path.ends_with("nixarchy-meetingai-instance.lock"));
         }
     }
 
@@ -264,7 +163,7 @@ mod tests {
         // Use a private lock file: the developer's own running app legitimately
         // holds the real one, and the test must not depend on that.
         let path = std::env::temp_dir().join(format!(
-            "lennette-lock-test-{}-{:?}",
+            "nixarchy-meetingai-lock-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -278,41 +177,37 @@ mod tests {
         );
         drop(first);
         // Releasing returns the slot, so the app can start again after quitting.
-        assert!(
-            InstanceLock::acquire_at(&path).is_some(),
-            "the slot should be reusable"
-        );
+        // Other tests fork children in parallel; a child briefly holds a copy of
+        // the lock fd until its exec closes it, so allow that window to pass.
+        let reacquired = (0..100).any(|_| {
+            InstanceLock::acquire_at(&path).is_some() || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }
+        });
+        assert!(reacquired, "the slot should be reusable");
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn toggles_heal_a_missing_instance_by_launching() {
-        // A toggle must start the app when nothing is listening, or the bound key
-        // silently does nothing before the first launch.
-        for command in ["toggle-window", "toggle-dashboard", "focus-input"] {
-            assert!(launches_when_absent(command), "{command} should launch");
-        }
-        // A failed one-shot must not launch: the user asked for an action, not a start.
-        for command in ["screenshot", "toggle-voice", "toggle-system-audio"] {
-            assert!(
-                !launches_when_absent(command),
-                "{command} should not launch"
-            );
-        }
+    fn the_socket_sits_in_a_private_subdirectory() {
+        let path = socket_path_in(Path::new("/run/user/1"));
+        assert_eq!(
+            path,
+            Path::new("/run/user/1/nixarchy-meetingai/daemon.sock")
+        );
     }
 
     #[test]
-    fn usage_lists_every_shortcut_flag() {
-        let text = usage();
-        for flag in [
-            "--toggle-dashboard",
-            "--toggle-window",
-            "--focus-input",
-            "--toggle-system-audio",
-            "--toggle-voice",
-            "--screenshot",
-        ] {
-            assert!(text.contains(flag), "usage is missing {flag}");
-        }
+    fn unknown_arguments_are_rejected_and_no_arguments_run_the_daemon() {
+        assert!(run_cli(&[]).is_none());
+        assert_eq!(run_cli(&["--bogus".into()]).unwrap().1, 2);
+        assert_eq!(run_cli(&["ctl".into()]).unwrap().1, 2);
+        assert!(
+            run_cli(&["--version".into()])
+                .unwrap()
+                .0
+                .contains("nixarchy-meetingai")
+        );
     }
 }

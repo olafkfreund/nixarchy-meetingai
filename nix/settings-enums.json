@@ -1,0 +1,6 @@
+{
+  "meetingMode": ["general", "interview", "team_meeting", "interviewer"],
+  "responsePace": ["Fast", "Balanced", "Relaxed"],
+  "responseLength": ["Short", "Medium", "Auto"],
+  "autoResponse": ["off", "questions", "pauses"]
+}

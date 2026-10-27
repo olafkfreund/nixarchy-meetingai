@@ -18,6 +18,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 
 use crate::ai::providers::{ProviderConfig, SttProvider, SttWire};
 use crate::audio::{SAMPLE_RATE, encode_wav};
+use crate::speech::stt::filter::LineFilter;
 
 /// Errors from speech transcription.
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +46,7 @@ fn client() -> reqwest::Client {
 /// Pull the transcript out of a provider response.
 pub fn extract_transcript(provider: &SttProvider, value: &Value) -> Option<String> {
     let text = match provider.wire {
+        SttWire::WhisperServer => value.get("text").and_then(Value::as_str).map(str::to_owned),
         SttWire::RawAudio => value
             .pointer("/results/channels/0/alternatives/0/transcript")
             .and_then(Value::as_str)
@@ -64,7 +66,17 @@ pub async fn transcribe(
     wav: Vec<u8>,
     language: Option<&str>,
 ) -> Result<String, SttError> {
-    transcribe_inner(config, wav, language)
+    transcribe_with_prompt(config, wav, language, "").await
+}
+
+/// Like [`transcribe`], with a whisper `prompt` (recent text and glossary).
+pub async fn transcribe_with_prompt(
+    config: &ProviderConfig,
+    wav: Vec<u8>,
+    language: Option<&str>,
+    prompt: &str,
+) -> Result<String, SttError> {
+    transcribe_inner(config, wav, language, prompt)
         .await
         .map_err(|error| {
             let redact = |text: String| {
@@ -90,6 +102,7 @@ async fn transcribe_inner(
     config: &ProviderConfig,
     wav: Vec<u8>,
     language: Option<&str>,
+    prompt: &str,
 ) -> Result<String, SttError> {
     let language =
         language.or_else(|| (!config.language.is_empty()).then_some(config.language.as_str()));
@@ -117,7 +130,7 @@ async fn transcribe_inner(
             "json-wav" => request.json(&json!({"audio": STANDARD.encode(wav), "model": config.model, "language": language})),
             "multipart-wav" => {
                 // Generated boundary never appears in audio; no intermediate file.
-                let boundary = format!("lennette-{}", uuid::Uuid::new_v4());
+                let boundary = format!("nixarchy-meetingai-{}", uuid::Uuid::new_v4());
                 let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n", config.model).into_bytes();
                 body.extend(wav);
                 body.extend(format!("\r\n--{boundary}--\r\n").as_bytes());
@@ -148,6 +161,42 @@ async fn transcribe_inner(
         return custom.text(&text).map_err(SttError::Protocol);
     }
     let provider = SttProvider::by_id(&config.id).ok_or(SttError::NotConfigured)?;
+    if provider.wire == SttWire::WhisperServer {
+        let endpoint = if config.base_url.is_empty() {
+            provider.endpoint
+        } else {
+            &config.base_url
+        };
+        let file = reqwest::multipart::Part::bytes(wav)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")?;
+        let mut form = reqwest::multipart::Form::new()
+            .part("file", file)
+            .text("response_format", "json")
+            .text("temperature", "0");
+        if !prompt.is_empty() {
+            form = form.text("prompt", prompt.to_owned());
+        }
+        if let Some(language) = language.filter(|v| !v.is_empty()) {
+            form = form.text("language", language.to_owned());
+        }
+        let response = client().post(endpoint).multipart(form).send().await?;
+        let status = response.status();
+        let bytes = crate::core::network::read_body(response, 4 * 1024 * 1024)
+            .await
+            .map_err(|e| SttError::Protocol(e.to_string()))?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        if !status.is_success() {
+            return Err(SttError::Status {
+                status: status.as_u16(),
+                message: text.chars().take(512).collect(),
+            });
+        }
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|_| SttError::Protocol("response was not JSON".into()))?;
+        // Empty text is silence (a cough), not a failure.
+        return Ok(extract_transcript(provider, &value).unwrap_or_default());
+    }
     if config.api_key.trim().is_empty() {
         return Err(SttError::MissingKey);
     }
@@ -204,8 +253,7 @@ async fn transcribe_inner(
     }
     let value: Value = serde_json::from_str(&text)
         .map_err(|_| SttError::Protocol("response was not JSON".into()))?;
-    extract_transcript(provider, &value)
-        .ok_or_else(|| SttError::Protocol("no transcript in the response".into()))
+    Ok(extract_transcript(provider, &value).unwrap_or_default())
 }
 
 /// One transcript line from the live stream.
@@ -462,6 +510,13 @@ impl LiveTurns {
     }
 }
 
+/// Optional hints for batch providers; the daemon fills `glossary` from the profile.
+#[derive(Debug, Clone, Default)]
+pub struct SttHints {
+    /// Names and terms (profile and meeting context) that whisper should spell right.
+    pub glossary: String,
+}
+
 /// A running live transcription session. Dropping it cancels the socket task.
 pub struct LiveTranscriber {
     audio: mpsc::Sender<Vec<i16>>,
@@ -472,11 +527,19 @@ pub struct LiveTranscriber {
 
 impl LiveTranscriber {
     pub async fn connect_config(config: &ProviderConfig) -> Result<Self, SttError> {
+        Self::connect_config_with(config, SttHints::default()).await
+    }
+
+    /// Like [`connect_config`](Self::connect_config); hints help batch (whisper) providers.
+    pub async fn connect_config_with(
+        config: &ProviderConfig,
+        hints: SttHints,
+    ) -> Result<Self, SttError> {
         if !config.speech_usable() {
             return Err(SttError::NotConfigured);
         }
         if !config.speech_streaming() {
-            return Ok(Self::connect_batch(config.clone()));
+            return Ok(Self::connect_batch(config.clone(), hints));
         }
         let Some(custom) = &config.custom else {
             let mut url = deepgram_url(validate_model(&config.model)?, Some(&config.language));
@@ -516,12 +579,13 @@ impl LiveTranscriber {
 
     /// A bounded batch adapter keeps microphone and remote speakers separate.
     /// Silence closes an utterance; long speech is split at fifteen seconds.
-    fn connect_batch(config: ProviderConfig) -> Self {
+    fn connect_batch(config: ProviderConfig, hints: SttHints) -> Self {
         let (audio, mut incoming) = mpsc::channel::<Vec<i16>>(64);
         let (stop, mut stopping) = watch::channel(false);
         let (sender, events) = mpsc::channel(128);
         let task = tokio::spawn(async move {
             let mut chunks = BatchChunks::default();
+            let mut filter = LineFilter::default();
             let mut requests = futures_util::stream::FuturesOrdered::new();
             loop {
                 let finished;
@@ -537,7 +601,8 @@ impl LiveTranscriber {
                     }
                     result = requests.next(), if !requests.is_empty() => {
                         match result {
-                            Some(Ok(line)) => { let _ = sender.send(LiveEvent::Transcript(line)).await; }
+                            Some(Ok(Some(line))) => { if filter.accept(&line) { let _ = sender.send(LiveEvent::Transcript(line)).await; } }
+                            Some(Ok(None)) => {}
                             Some(Err(error)) => { let _ = sender.send(LiveEvent::Failed(error)).await; break; }
                             None => {}
                         }
@@ -553,11 +618,15 @@ impl LiveTranscriber {
                         return;
                     }
                     let config = config.clone();
+                    let prompt = filter.prompt(channel, &hints.glossary);
                     requests.push_back(async move {
-                        let text = transcribe_samples(&config, &samples, None)
+                        let text = transcribe_with_retry(&config, &samples, &prompt)
                             .await
-                            .map_err(|e| e.to_string())?;
-                        Ok::<_, String>(TranscriptLine {
+                            .map_err(|e| format!("{e} (lost audio {start:.1}s..{end:.1}s)"))?;
+                        if text.is_empty() {
+                            return Ok(None);
+                        }
+                        Ok::<_, String>(Some(TranscriptLine {
                             channel,
                             speaker: None,
                             text,
@@ -565,15 +634,18 @@ impl LiveTranscriber {
                             speech_final: true,
                             start,
                             end,
-                        })
+                        }))
                     });
                 }
                 if finished {
                     while let Some(result) = requests.next().await {
                         match result {
-                            Ok(line) => {
-                                let _ = sender.send(LiveEvent::Transcript(line)).await;
+                            Ok(Some(line)) => {
+                                if filter.accept(&line) {
+                                    let _ = sender.send(LiveEvent::Transcript(line)).await;
+                                }
                             }
+                            Ok(None) => {}
                             Err(error) => {
                                 let _ = sender.send(LiveEvent::Failed(error)).await;
                                 break;
@@ -817,6 +889,40 @@ impl Drop for LiveTranscriber {
     }
 }
 
+/// Loopback providers (whisper-server) may be restarting: retry transient failures.
+async fn transcribe_with_retry(
+    config: &ProviderConfig,
+    samples: &[f32],
+    prompt: &str,
+) -> Result<String, SttError> {
+    let loopback = SttProvider::by_id(&config.id).is_some_and(|p| p.wire == SttWire::WhisperServer)
+        && reqwest::Url::parse(if config.base_url.is_empty() {
+            "http://127.0.0.1"
+        } else {
+            &config.base_url
+        })
+        .ok()
+        .and_then(|u| {
+            u.host_str()
+                .map(|h| matches!(h, "localhost" | "127.0.0.1" | "[::1]"))
+        })
+        .unwrap_or(false);
+    let mut delays = [250u64, 1000, 3000].into_iter();
+    loop {
+        let result = transcribe_with_prompt(config, to_wav(samples)?, None, prompt).await;
+        let transient = matches!(
+            result,
+            Err(SttError::Request(_) | SttError::Status { status: 500.., .. })
+        );
+        match delays.next() {
+            Some(ms) if loopback && transient => {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await
+            }
+            _ => return result,
+        }
+    }
+}
+
 /// Encode samples as WAV, shared by batch transcription and local chunks.
 pub fn to_wav(samples: &[f32]) -> Result<Vec<u8>, SttError> {
     encode_wav(samples).map_err(|error| SttError::Encode(error.to_string()))
@@ -843,7 +949,7 @@ pub fn local_chunk_payload(samples: &[f32], start: f64) -> Result<Value, SttErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::providers::STT_PROVIDERS;
+    use crate::ai::providers::STT_PROVIDERS;
 
     #[test]
     fn speaker_changes_preserve_word_identity_and_one_endpoint() {
@@ -1021,7 +1127,7 @@ mod tests {
     fn every_stt_provider_has_defaults() {
         for provider in STT_PROVIDERS {
             assert!(!provider.name.is_empty());
-            assert!(provider.endpoint.starts_with("https://"));
+            assert!(provider.endpoint.starts_with("http"));
         }
     }
 }

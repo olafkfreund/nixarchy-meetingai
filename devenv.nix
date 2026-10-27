@@ -12,7 +12,7 @@ let
   );
 in
 {
-  name = "lennette";
+  name = "nixarchy-meetingai";
   cachix.enable = true;
   dotenv.enable = true;
   dotenv.disableHint = true;
@@ -21,7 +21,7 @@ in
   env = {
     RUST_BACKTRACE = "1";
     LD_LIBRARY_PATH = runtimeLibraryPath;
-    LENNETTE_RUNTIME_LIBRARY_PATH = runtimeLibraryPath;
+    NIXARCHY_MEETINGAI_RUNTIME_LIBRARY_PATH = runtimeLibraryPath;
   };
 
   packages = with pkgs; [
@@ -39,32 +39,10 @@ in
     llvmPackages.clang
     llvmPackages.libclang
     openssl
-    vulkan-loader
-    vulkan-headers
-    mesa
-    libgbm
-    libGL.dev
-    libGLU
-    wayland
-    wayland-protocols
-    libxkbcommon
-    libx11
-    libxcb
-    libxcursor
-    libxrandr
-    libxi
-    fontconfig
-    freetype
     pipewire
     alsa-lib
     alsa-lib.dev
-    pulseaudio
-    libpulseaudio
-    xorg.xauth
-    xorg.xvfb
-    imagemagick
     grim
-    wlrctl
     sqlite
     zlib
     cacert
@@ -95,23 +73,22 @@ in
 
   env.LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
-  env.PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig:${pkgs.libGL.dev}/lib/pkgconfig";
+  env.PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig";
 
   env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   env.NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-  env.XDG_DATA_DIRS = "${pkgs.fontconfig}/share:$XDG_DATA_DIRS";
 
   tasks = {
-    "lennette:build" = {
+    "nixarchy-meetingai:build" = {
       exec = "cargo build";
     };
-    "lennette:test" = {
+    "nixarchy-meetingai:test" = {
       exec = "cargo nextest run --workspace";
     };
-    "lennette:check" = {
+    "nixarchy-meetingai:check" = {
       exec = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings";
     };
-    "lennette:run" = {
+    "nixarchy-meetingai:run" = {
       exec = "cargo run";
     };
   };
@@ -119,7 +96,7 @@ in
   processes = { };
 
   enterShell = ''
-    echo "◆ lennette devenv — NixOS"
+    echo "◆ nixarchy-meetingai devenv — NixOS"
     echo "  rust $(rustc --version) | cargo $(cargo --version)"
     echo "  tip: just build | just test | just run"
   '';

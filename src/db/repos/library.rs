@@ -91,7 +91,7 @@ pub fn prompt_files(connection: &Connection, prompt_id: &str) -> Result<Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::db::Database;
+    use crate::db::Database;
 
     #[test]
     fn insert_and_list() {

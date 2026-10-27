@@ -1,7 +1,7 @@
 //! Provider catalog.
 //!
 //! Bring-your-own-key chat and speech-to-text providers. Endpoints, auth headers
-//! and request shapes for Gemini, Merge Gateway and Deepgram. Removed providers
+//! and request shapes for Ollama, the subscription CLIs and Deepgram. Removed providers
 //! are deliberately absent so old vault records cannot become active.
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,8 @@ pub enum ChatWire {
     OpenAi,
     /// Native Anthropic Messages API.
     Anthropic,
+    /// A subscription CLI (`claude` / `codex` / `agy`) driven as a subprocess.
+    Cli,
 }
 
 /// A chat provider definition.
@@ -23,34 +25,76 @@ pub struct ChatProvider {
     pub endpoint: &'static str,
     pub wire: ChatWire,
     pub supports_images: bool,
+    pub requires_key: bool,
 }
 
 /// Every bundled chat provider.
 pub const CHAT_PROVIDERS: &[ChatProvider] = &[
     ChatProvider {
-        id: "gemini",
-        name: "Google Gemini",
-        endpoint: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-        wire: ChatWire::OpenAi,
+        id: "claude-sub",
+        name: "Claude (subscription)",
+        endpoint: "",
+        wire: ChatWire::Cli,
         supports_images: true,
+        requires_key: false,
     },
     ChatProvider {
-        id: "merge-gateway",
-        name: "Merge Gateway",
-        endpoint: "https://api-gateway.merge.dev/v1/chat/completions",
+        id: "agy-sub",
+        name: "Antigravity (subscription)",
+        endpoint: "",
+        wire: ChatWire::Cli,
+        supports_images: false,
+        requires_key: false,
+    },
+    ChatProvider {
+        id: "opencode",
+        name: "OpenCode",
+        endpoint: "",
+        wire: ChatWire::Cli,
+        supports_images: false,
+        requires_key: false,
+    },
+    ChatProvider {
+        id: "codex-sub",
+        name: "ChatGPT / Codex (subscription)",
+        endpoint: "",
+        wire: ChatWire::Cli,
+        supports_images: true,
+        requires_key: false,
+    },
+    ChatProvider {
+        id: "ollama-cloud",
+        name: "Ollama Cloud",
+        endpoint: "https://ollama.com/v1/chat/completions",
         wire: ChatWire::OpenAi,
         supports_images: true,
+        requires_key: true,
+    },
+    ChatProvider {
+        id: "ollama",
+        name: "Ollama (local)",
+        endpoint: "http://127.0.0.1:11434/v1/chat/completions",
+        wire: ChatWire::OpenAi,
+        supports_images: true,
+        requires_key: false,
     },
 ];
+
+/// `https` anywhere, `http` only for loopback hosts.
+pub fn endpoint_allowed(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
+        _ => false,
+    }
+}
 
 impl ChatProvider {
     pub fn by_id(id: &str) -> Option<&'static ChatProvider> {
         CHAT_PROVIDERS.iter().find(|provider| provider.id == id)
-    }
-
-    /// Both supported chat services require an API key.
-    pub fn requires_key(self) -> bool {
-        true
     }
 }
 
@@ -59,6 +103,8 @@ impl ChatProvider {
 pub enum SttWire {
     /// Raw `audio/wav` body for Deepgram.
     RawAudio,
+    /// Multipart `POST /inference` to a local `whisper-server`; no key.
+    WhisperServer,
 }
 
 /// A speech-to-text provider definition.
@@ -73,17 +119,30 @@ pub struct SttProvider {
 }
 
 /// Every bundled speech provider.
-pub const STT_PROVIDERS: &[SttProvider] = &[SttProvider {
-    id: "deepgram-stt",
-    name: "Deepgram",
-    endpoint: "https://api.deepgram.com/v1/listen",
-    wire: SttWire::RawAudio,
-    default_model: "nova-3",
-}];
+pub const STT_PROVIDERS: &[SttProvider] = &[
+    SttProvider {
+        id: "deepgram-stt",
+        name: "Deepgram",
+        endpoint: "https://api.deepgram.com/v1/listen",
+        wire: SttWire::RawAudio,
+        default_model: "nova-3",
+    },
+    SttProvider {
+        id: "whisper-local",
+        name: "whisper.cpp (local)",
+        endpoint: "http://127.0.0.1:8178/inference",
+        wire: SttWire::WhisperServer,
+        default_model: "ggml-large-v3-turbo",
+    },
+];
 
 impl SttProvider {
     pub fn by_id(id: &str) -> Option<&'static SttProvider> {
         STT_PROVIDERS.iter().find(|provider| provider.id == id)
+    }
+
+    pub fn requires_key(&self) -> bool {
+        self.wire != SttWire::WhisperServer
     }
 }
 
@@ -126,8 +185,11 @@ impl ProviderConfig {
             return (!self.base_url.is_empty()).then(|| self.base_url.clone());
         }
         let provider = ChatProvider::by_id(&self.id)?;
+        if provider.wire == ChatWire::Cli {
+            return Some(String::new());
+        }
         if !self.base_url.is_empty() {
-            return Some(self.base_url.clone());
+            return endpoint_allowed(&self.base_url).then(|| self.base_url.clone());
         }
         Some(provider.endpoint.to_owned())
     }
@@ -141,7 +203,7 @@ impl ProviderConfig {
                 && custom.validate(false).is_ok();
         }
         let needs_key = ChatProvider::by_id(&self.id)
-            .map(|provider| provider.requires_key())
+            .map(|provider| provider.requires_key)
             .unwrap_or(true);
         self.endpoint().is_some()
             && !self.model.trim().is_empty()
@@ -155,12 +217,17 @@ impl ProviderConfig {
                 && (custom.auth == "none" || !self.api_key.trim().is_empty())
                 && custom.validate(true).is_ok()
         } else {
-            SttProvider::by_id(&self.id).is_some() && !self.api_key.trim().is_empty()
+            SttProvider::by_id(&self.id)
+                .is_some_and(|p| !p.requires_key() || !self.api_key.trim().is_empty())
         }
     }
 
     pub fn speech_streaming(&self) -> bool {
-        self.custom.as_ref().is_none_or(|custom| custom.streaming)
+        match &self.custom {
+            Some(custom) => custom.streaming,
+            // whisper-server is batch-only.
+            None => SttProvider::by_id(&self.id).is_none_or(|p| p.wire != SttWire::WhisperServer),
+        }
     }
 
     pub fn chat_definition(&self) -> Option<ChatProvider> {
@@ -175,6 +242,7 @@ impl ProviderConfig {
                     ChatWire::OpenAi
                 },
                 supports_images: custom.supports_images,
+                requires_key: custom.auth != "none",
             })
         } else {
             ChatProvider::by_id(&self.id).copied()
@@ -191,8 +259,12 @@ mod tests {
         let mut ids = std::collections::HashSet::new();
         for provider in CHAT_PROVIDERS {
             assert!(ids.insert(provider.id), "duplicate id {}", provider.id);
-            assert!(provider.endpoint.starts_with("http"), "{}", provider.id);
-            if provider.id != "ollama" {
+            assert!(
+                provider.wire == ChatWire::Cli || provider.endpoint.starts_with("http"),
+                "{}",
+                provider.id
+            );
+            if provider.wire != ChatWire::Cli && provider.id != "ollama" {
                 assert!(
                     provider.endpoint.starts_with("https://"),
                     "{} must be https",
@@ -204,8 +276,12 @@ mod tests {
 
     #[test]
     fn lookup_is_exact() {
-        assert_eq!(ChatProvider::by_id("gemini").unwrap().name, "Google Gemini");
-        assert!(ChatProvider::by_id("gemini ").is_none());
+        assert_eq!(
+            ChatProvider::by_id("agy-sub").unwrap().name,
+            "Antigravity (subscription)"
+        );
+        assert!(ChatProvider::by_id("agy-sub ").is_none());
+        assert!(ChatProvider::by_id("gemini").is_none());
         assert!(ChatProvider::by_id("nope").is_none());
     }
 
@@ -213,34 +289,69 @@ mod tests {
     fn only_current_providers_are_available() {
         assert_eq!(
             CHAT_PROVIDERS.iter().map(|p| p.id).collect::<Vec<_>>(),
-            ["gemini", "merge-gateway"]
+            [
+                "claude-sub",
+                "agy-sub",
+                "opencode",
+                "codex-sub",
+                "ollama-cloud",
+                "ollama"
+            ]
         );
-        assert_eq!(STT_PROVIDERS.len(), 1);
-        let mut retired = ProviderConfig::new("ollama", "k", "m");
-        retired.base_url = "http://localhost:1234".into();
+        assert_eq!(STT_PROVIDERS.len(), 2);
+        let retired = ProviderConfig::new("openai", "k", "m");
         assert!(!retired.is_usable());
         assert!(retired.endpoint().is_none());
         assert!(SttProvider::by_id("openai-whisper").is_none());
     }
 
     #[test]
-    fn hosted_providers_require_a_key_and_model() {
-        let blank = ProviderConfig::new("gemini", "", "gpt-4o");
-        assert!(!blank.is_usable());
-        let complete = ProviderConfig::new("gemini", "sk-test", "gpt-4o");
-        assert!(complete.is_usable());
-        let no_model = ProviderConfig::new("gemini", "sk-test", "  ");
-        assert!(!no_model.is_usable());
+    fn providers_require_a_model() {
+        assert!(ProviderConfig::new("ollama", "", "gpt-4o").is_usable());
+        assert!(!ProviderConfig::new("ollama", "", "  ").is_usable());
+        // An unknown id has no endpoint.
+        assert!(!ProviderConfig::new("unknown", "", "m").is_usable());
     }
 
     #[test]
     fn base_url_override_wins() {
-        let mut config = ProviderConfig::new("gemini", "k", "m");
+        let mut config = ProviderConfig::new("ollama", "k", "m");
         config.base_url = "http://127.0.0.1:8080/v1/chat/completions".into();
         assert_eq!(
             config.endpoint().unwrap(),
             "http://127.0.0.1:8080/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn keyless_providers_only_need_a_model() {
+        for id in ["ollama", "claude-sub", "codex-sub", "agy-sub", "opencode"] {
+            assert!(ProviderConfig::new(id, "", "m").is_usable(), "{id}");
+        }
+    }
+
+    #[test]
+    fn plain_http_is_loopback_only() {
+        for ok in [
+            "https://example.com/v1",
+            "http://localhost:1/v1",
+            "http://127.0.0.1/x",
+            "http://[::1]:11434/x",
+        ] {
+            assert!(endpoint_allowed(ok), "{ok}");
+        }
+        for bad in [
+            "http://example.com/v1",
+            "http://192.168.1.5/v1",
+            "ftp://localhost/x",
+            "nope",
+        ] {
+            assert!(!endpoint_allowed(bad), "{bad}");
+        }
+        let mut config = ProviderConfig::new("ollama", "k", "m");
+        config.base_url = "http://evil.example/v1/chat/completions".into();
+        assert!(config.endpoint().is_none());
+        assert!(!config.is_usable());
     }
 
     #[test]
@@ -250,5 +361,7 @@ mod tests {
             "nova-3"
         );
         assert!(SttProvider::by_id("missing").is_none());
+        let local = ProviderConfig::new("whisper-local", "", "");
+        assert!(local.speech_usable() && !local.speech_streaming());
     }
 }

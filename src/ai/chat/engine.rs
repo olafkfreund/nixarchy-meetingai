@@ -26,6 +26,8 @@ pub enum ChatError {
     Status { status: u16, message: String },
     #[error("the provider returned an unexpected response: {0}")]
     Protocol(String),
+    #[error("{0}")]
+    Cli(String),
 }
 
 /// A text delta or the end of the stream.
@@ -45,6 +47,10 @@ pub struct TurnContext {
 }
 
 /// Shared HTTP client, so connections are reused across turns.
+pub fn loading_http_client() -> reqwest::Client {
+    crate::core::network::loading_chat_client()
+}
+
 pub fn http_client() -> reqwest::Client {
     crate::core::network::chat_client()
 }
@@ -77,13 +83,7 @@ pub fn build_body(
         };
         messages.push(openai_message(message, images));
     }
-    let mut body = json!({ "model": config.model, "messages": messages, "stream": true });
-    if provider.id == "merge-gateway" && config.model == crate::ai::models::MERGE_MODEL {
-        // Meeting answers need the final response promptly, rather than a long
-        // reasoning stream. This control is supported by the pinned DeepSeek model.
-        body["reasoning_effort"] = json!("none");
-    }
-    body
+    json!({ "model": config.model, "messages": messages, "stream": true })
 }
 
 fn anthropic_body(
@@ -239,6 +239,19 @@ pub async fn stream_chat_bounded<F: std::future::Future<Output = ()>>(
     result
 }
 
+/// Anthropic's native API takes `x-api-key`; everything else takes a bearer token.
+fn with_key(
+    request: reqwest::RequestBuilder,
+    wire: ChatWire,
+    key: &str,
+) -> reqwest::RequestBuilder {
+    if wire == ChatWire::Anthropic {
+        request.header("x-api-key", key)
+    } else {
+        request.bearer_auth(key)
+    }
+}
+
 async fn stream_chat_inner<F: std::future::Future<Output = ()>>(
     client: &reqwest::Client,
     config: &ProviderConfig,
@@ -249,14 +262,15 @@ async fn stream_chat_inner<F: std::future::Future<Output = ()>>(
 ) -> Result<String, ChatError> {
     let definition = config.chat_definition().ok_or(ChatError::NotConfigured)?;
     let provider = &definition;
-    if config
+    let needs_key = config
         .custom
         .as_ref()
-        .map(|c| c.auth != "none")
-        .unwrap_or(true)
-        && config.api_key.trim().is_empty()
-    {
+        .map_or(provider.requires_key, |c| c.auth != "none");
+    if needs_key && config.api_key.trim().is_empty() {
         return Err(ChatError::MissingKey);
+    }
+    if provider.wire == ChatWire::Cli {
+        return super::cli::stream(config, history, context, cancel, on_text).await;
     }
     let endpoint = config.endpoint().ok_or(ChatError::NotConfigured)?;
     if *cancel.borrow() {
@@ -276,7 +290,7 @@ async fn stream_chat_inner<F: std::future::Future<Output = ()>>(
         }
         request
     } else {
-        client.post(endpoint).bearer_auth(&config.api_key)
+        with_key(client.post(endpoint), provider.wire, &config.api_key)
     };
     if provider.wire == ChatWire::Anthropic {
         request = request.header("anthropic-version", "2026-10-21");
@@ -398,7 +412,7 @@ async fn stream_chat_inner<F: std::future::Future<Output = ()>>(
     }
 }
 
-async fn wait_for_cancellation(cancel: &mut watch::Receiver<bool>) {
+pub(super) async fn wait_for_cancellation(cancel: &mut watch::Receiver<bool>) {
     loop {
         if *cancel.borrow() {
             return;
@@ -435,8 +449,8 @@ mod tests {
 
     #[test]
     fn openai_body_puts_system_first_and_streams() {
-        let provider = ChatProvider::by_id("gemini").unwrap();
-        let config = ProviderConfig::new("gemini", "k", "gpt-4o");
+        let provider = ChatProvider::by_id("ollama").unwrap();
+        let config = ProviderConfig::new("ollama", "k", "gpt-4o");
         let history = [Message::user("hi"), Message::assistant("hello")];
         let body = build_body(provider, &config, &history, &context("be brief"));
         assert_eq!(body["messages"][0]["role"], "system");
@@ -447,8 +461,8 @@ mod tests {
 
     #[test]
     fn image_attaches_to_openai_content_array() {
-        let provider = ChatProvider::by_id("gemini").unwrap();
-        let config = ProviderConfig::new("gemini", "k", "gpt-4o");
+        let provider = ChatProvider::by_id("ollama").unwrap();
+        let config = ProviderConfig::new("ollama", "k", "gpt-4o");
         let history = [Message::user("what is this")];
         let context = TurnContext {
             system: None,
@@ -463,8 +477,8 @@ mod tests {
 
     #[test]
     fn attachments_only_belong_to_the_current_user_turn() {
-        let provider = ChatProvider::by_id("gemini").unwrap();
-        let config = ProviderConfig::new("gemini", "k", "m");
+        let provider = ChatProvider::by_id("ollama").unwrap();
+        let config = ProviderConfig::new("ollama", "k", "m");
         let body = build_body(
             provider,
             &config,
@@ -485,7 +499,7 @@ mod tests {
 
     #[test]
     fn sse_parses_supported_streams_and_done() {
-        let openai = ChatProvider::by_id("gemini").unwrap();
+        let openai = ChatProvider::by_id("ollama").unwrap();
         assert_eq!(
             parse_sse_line(openai, br#"data: {"choices":[{"delta":{"content":"hi"}}]}"#).unwrap(),
             Some(ChatEvent::Delta("hi".into()))
@@ -500,7 +514,7 @@ mod tests {
 
     #[test]
     fn sse_surfaces_provider_errors() {
-        let openai = ChatProvider::by_id("gemini").unwrap();
+        let openai = ChatProvider::by_id("ollama").unwrap();
         assert!(matches!(
             parse_sse_line(openai, br#"data: {"error":"quota"}"#),
             Err(ChatError::Protocol(_))
@@ -512,8 +526,32 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_wire_sends_x_api_key_not_bearer() {
+        let client = reqwest::Client::new();
+        let request = with_key(
+            client.post("https://example.test"),
+            ChatWire::Anthropic,
+            "sk-a",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(request.headers()["x-api-key"], "sk-a");
+        assert!(request.headers().get("authorization").is_none());
+        let request = with_key(
+            client.post("https://example.test"),
+            ChatWire::OpenAi,
+            "sk-a",
+        )
+        .build()
+        .unwrap();
+        assert_eq!(request.headers()["authorization"], "Bearer sk-a");
+    }
+
+    #[test]
     fn missing_key_is_reported_before_network() {
-        let config = ProviderConfig::new("gemini", "", "gpt-4o");
+        let mut config = ProviderConfig::new("custom-test", "", "gpt-4o");
+        config.custom = Some(Default::default());
+        config.base_url = "http://127.0.0.1:1/v1/chat/completions".into();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

@@ -113,7 +113,7 @@ pub fn delete_prompt(connection: &Connection, id: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::db::Database;
+    use crate::db::Database;
 
     #[test]
     fn built_in_deletions_survive_reopen_and_custom_prompts_are_selectable() {
@@ -146,11 +146,11 @@ mod tests {
     fn settings_upsert_and_read_back() {
         let database = Database::open_in_memory().unwrap();
         let connection = database.connection();
-        set(connection, "overlay_size", "sm").unwrap();
-        set(connection, "overlay_size", "lg").unwrap();
+        set(connection, "reduce_motion", "false").unwrap();
+        set(connection, "reduce_motion", "true").unwrap();
         assert_eq!(
-            get(connection, "overlay_size").unwrap().as_deref(),
-            Some("lg")
+            get(connection, "reduce_motion").unwrap().as_deref(),
+            Some("true")
         );
         assert_eq!(all(connection).unwrap().len(), 1);
     }
@@ -177,10 +177,20 @@ mod tests {
         let names: Vec<_> = modes.iter().map(|mode| mode.name.as_str()).collect();
         assert_eq!(
             names,
-            ["General", "Interview", "Coding", "Translate", "Meeting"]
+            [
+                "General",
+                "Interview",
+                "Coding",
+                "Translate",
+                "Meeting",
+                "Interviewer"
+            ]
         );
         let slots: Vec<_> = modes.iter().map(|mode| mode.listen_slot).collect();
-        assert_eq!(slots, [Some(0), Some(1), Some(2), Some(3), Some(4)]);
+        assert_eq!(
+            slots,
+            [Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)]
+        );
     }
 
     #[test]

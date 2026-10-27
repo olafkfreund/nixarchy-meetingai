@@ -1,5 +1,5 @@
 //! Deterministic delayed-provider tests; no external keys or paid requests.
-use lennette::{
+use nixarchy_meetingai::{
     ai::{
         engine::{self, TurnContext},
         providers::ProviderConfig,
@@ -38,7 +38,7 @@ async fn read_request(socket: &mut TcpStream) {
 
 async fn response(status: u16, body: String) -> (ProviderConfig, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut config = ProviderConfig::new("gemini", "private-test-key", "model");
+    let mut config = ProviderConfig::new("ollama", "private-test-key", "model");
     config.base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
@@ -80,7 +80,7 @@ async fn two_workers_allow_twelve_requests_to_wait_concurrently() {
     });
     let tasks: Vec<_> = (0..REQUESTS)
         .map(|_| {
-            let mut config = ProviderConfig::new("gemini", "test-key", "model");
+            let mut config = ProviderConfig::new("ollama", "test-key", "model");
             config.base_url = url.clone();
             tokio::spawn(async move {
                 engine::stream_chat(
@@ -112,7 +112,7 @@ async fn two_workers_allow_twelve_requests_to_wait_concurrently() {
 #[tokio::test]
 async fn stop_cancels_a_stalled_error_body() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut config = ProviderConfig::new("gemini", "test-key", "model");
+    let mut config = ProviderConfig::new("ollama", "test-key", "model");
     config.base_url = format!("http://{}", listener.local_addr().unwrap());
     let (headers, ready) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
@@ -226,7 +226,7 @@ async fn errors_redact_credentials_and_abrupt_eof_does_not_claim_completion() {
 #[tokio::test]
 async fn inactive_response_body_times_out() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut config = ProviderConfig::new("gemini", "test-key", "model");
+    let mut config = ProviderConfig::new("ollama", "test-key", "model");
     config.base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
@@ -257,5 +257,98 @@ async fn inactive_response_body_times_out() {
     .unwrap()
     .unwrap_err();
     assert!(matches!(error, engine::ChatError::Request(e) if e.is_timeout()));
+    server.abort();
+}
+
+/// Serves one multipart request per entry: `None` drops the connection, `Some(text)` answers.
+async fn whisper_mock(
+    replies: Vec<Option<&'static str>>,
+) -> (ProviderConfig, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = ProviderConfig::new("whisper-local", "", "");
+    config.base_url = format!("http://{}/inference", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        for reply in replies {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            if let Some(text) = reply {
+                let body = format!("{{\"text\":\"{text}\"}}");
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(head.as_bytes()).await.unwrap();
+                socket.write_all(body.as_bytes()).await.unwrap();
+            }
+        }
+    });
+    (config, server)
+}
+
+async fn run_whisper(
+    config: &ProviderConfig,
+) -> Vec<nixarchy_meetingai::speech::transcription::LiveEvent> {
+    use nixarchy_meetingai::speech::transcription::LiveTranscriber;
+    let mut live = LiveTranscriber::connect_config(config).await.unwrap();
+    // 0.5 s of speech on the microphone channel only (interleaved L/R), then flush the chunk.
+    let pcm: Vec<f32> = (0..16_000)
+        .map(|i| if i % 2 == 0 { 0.25 } else { 0.0 })
+        .collect();
+    live.push(&pcm).await.unwrap();
+    live.finish();
+    let mut events = Vec::new();
+    while let Some(event) = live.next_event().await {
+        events.push(event);
+    }
+    events
+}
+
+#[tokio::test]
+async fn whisper_local_returns_text_and_retries_transient_failures() {
+    use nixarchy_meetingai::speech::transcription::LiveEvent;
+    for replies in [vec![Some("hello")], vec![None, None, Some("hello")]] {
+        let (config, server) = whisper_mock(replies).await;
+        let events = run_whisper(&config).await;
+        let lines = events
+            .iter()
+            .filter(|e| matches!(e, LiveEvent::Transcript(l) if l.text == "hello"))
+            .count();
+        assert!(lines >= 1, "{events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, LiveEvent::Failed(_))),
+            "{events:?}"
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn whisper_local_gives_up_with_the_lost_range() {
+    use nixarchy_meetingai::speech::transcription::LiveEvent;
+    let (config, server) = whisper_mock(vec![None; 4]).await;
+    let events = run_whisper(&config).await;
+    let failure = events.iter().find_map(|e| match e {
+        LiveEvent::Failed(m) => Some(m.clone()),
+        _ => None,
+    });
+    assert!(
+        failure.is_some_and(|m| m.contains("lost audio") && m.contains("s..")),
+        "{events:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn empty_whisper_text_is_skipped_without_failing() {
+    use nixarchy_meetingai::speech::transcription::LiveEvent;
+    // A cough (empty text) then a real chunk would need two chunks; one empty reply must end cleanly.
+    let (config, server) = whisper_mock(vec![Some("")]).await;
+    let events = run_whisper(&config).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, LiveEvent::Failed(_) | LiveEvent::Transcript(_))),
+        "{events:?}"
+    );
     server.abort();
 }

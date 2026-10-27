@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn missing_device_fails_with_a_readable_message() {
         let config = SessionConfig {
-            device: Some("cpal:lennette-no-such-device".into()),
+            device: Some("cpal:nixarchy-meetingai-no-such-device".into()),
             system_audio: false,
             output_device: None,
             speech: None,
@@ -531,7 +531,7 @@ mod tests {
     #[test]
     fn stop_is_safe_without_a_microphone() {
         let config = SessionConfig {
-            device: Some("cpal:lennette-no-such-device".into()),
+            device: Some("cpal:nixarchy-meetingai-no-such-device".into()),
             system_audio: false,
             output_device: None,
             speech: None,
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn pump_without_capture_is_quiet() {
         let config = SessionConfig {
-            device: Some("cpal:lennette-no-such-device".into()),
+            device: Some("cpal:nixarchy-meetingai-no-such-device".into()),
             system_audio: false,
             output_device: None,
             speech: None,

@@ -21,7 +21,7 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
     pub kind: Kind,
-    /// Catalog id, e.g. `gemini` or `deepgram-stt`.
+    /// Catalog id, e.g. `claude-sub` or `deepgram-stt`.
     pub provider: String,
     pub api_key: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -89,6 +89,9 @@ impl Credential {
             if !matches!(url.scheme(), "http" | "https") {
                 return Err("Use an http:// or https:// endpoint.".into());
             }
+            if !crate::ai::providers::endpoint_allowed(&self.base_url) {
+                return Err("Plain http:// is only allowed for localhost; use https://.".into());
+            }
             if custom.auth != "none" && self.api_key.trim().is_empty() {
                 return Err("Enter an API key or choose no authentication.".into());
             }
@@ -113,15 +116,15 @@ impl Credential {
             }
         }
         let needs_key = ChatProvider::by_id(&self.provider)
-            .map(|provider| provider.requires_key())
+            .map(|provider| provider.requires_key)
             .unwrap_or(true);
         if needs_key && self.api_key.trim().is_empty() {
             return Err("Enter an API key.".to_owned());
         }
-        if !self.base_url.is_empty()
-            && !(self.base_url.starts_with("http://") || self.base_url.starts_with("https://"))
-        {
-            return Err("The custom endpoint must start with http:// or https://.".to_owned());
+        if !self.base_url.is_empty() && !crate::ai::providers::endpoint_allowed(&self.base_url) {
+            return Err(
+                "The custom endpoint must be https://, or http:// on localhost.".to_owned(),
+            );
         }
         Ok(())
     }
@@ -216,26 +219,37 @@ mod tests {
     use super::*;
 
     fn vault() -> Vault {
-        let dir = std::env::temp_dir().join(format!("lennette-cred-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("nixarchy-meetingai-cred-{}", uuid::Uuid::new_v4()));
         Vault::open(dir).unwrap()
+    }
+
+    /// A keyed chat credential; no keyed provider is built in.
+    fn keyed(key: &str) -> Credential {
+        let mut credential = Credential::chat("custom-test", key);
+        credential.custom = Some(Default::default());
+        credential.model = "m".into();
+        credential.base_url = "http://127.0.0.1:1/v1".into();
+        credential
     }
 
     #[test]
     fn saves_and_loads_a_chat_key() {
         let vault = vault();
-        let mut credential = Credential::chat("gemini", "sk-test-123");
+        let mut credential = keyed("sk-test-123");
         credential.model = "gpt-4o".into();
         save(&vault, &credential).unwrap();
-        let loaded = load(&vault, Kind::Chat, "gemini").unwrap().unwrap();
+        let loaded = load(&vault, Kind::Chat, "custom-test").unwrap().unwrap();
         assert_eq!(loaded.api_key, "sk-test-123");
         assert_eq!(loaded.model, "gpt-4o");
     }
 
     #[test]
     fn keys_are_never_stored_in_plaintext_in_settings_but_are_encrypted() {
-        let dir = std::env::temp_dir().join(format!("lennette-cred2-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("nixarchy-meetingai-cred2-{}", uuid::Uuid::new_v4()));
         let vault = Vault::open(&dir).unwrap();
-        save(&vault, &Credential::chat("gemini", "sk-secret-value")).unwrap();
+        save(&vault, &keyed("sk-secret-value")).unwrap();
         let bytes = std::fs::read(dir.join("vault.bin")).unwrap();
         assert!(
             !bytes.windows(16).any(|w| w == b"sk-secret-value"),
@@ -245,13 +259,13 @@ mod tests {
 
     #[test]
     fn empty_key_is_rejected_for_hosted_providers() {
-        let credential = Credential::chat("gemini", "");
+        let credential = keyed("");
         assert!(credential.validate().unwrap_err().contains("API key"));
     }
 
     #[test]
     fn retired_provider_is_rejected() {
-        assert!(Credential::chat("ollama", "key").validate().is_err());
+        assert!(Credential::chat("openai", "key").validate().is_err());
     }
 
     #[test]
@@ -262,34 +276,45 @@ mod tests {
 
     #[test]
     fn custom_endpoint_must_be_http() {
-        let mut credential = Credential::chat("gemini", "k");
+        let mut credential = keyed("k");
         credential.base_url = "ftp://nope".into();
         assert!(credential.validate().unwrap_err().contains("http"));
         credential.base_url = "http://localhost:1234/v1".into();
         assert!(credential.validate().is_ok());
+        credential.base_url = "http://[::1]:1234/v1".into();
+        assert!(credential.validate().is_ok());
+        credential.base_url = "http://example.com/v1".into();
+        assert!(credential.validate().is_err());
+        let mut custom = Credential::chat("custom-x", "k");
+        custom.custom = Some(Default::default());
+        custom.model = "m".into();
+        custom.base_url = "http://example.com/v1".into();
+        assert!(custom.validate().is_err());
+        custom.base_url = "http://127.0.0.1:1/v1".into();
+        assert!(custom.validate().is_ok());
     }
 
     #[test]
     fn listing_filters_by_kind() {
         let vault = vault();
-        save(&vault, &Credential::chat("gemini", "a")).unwrap();
+        save(&vault, &keyed("a")).unwrap();
         save(&vault, &Credential::speech("deepgram-stt", "b")).unwrap();
         let chats = list(&vault, Kind::Chat).unwrap();
         let speech = list(&vault, Kind::Speech).unwrap();
         assert_eq!(chats.len(), 1);
         assert_eq!(speech.len(), 1);
-        assert_eq!(chats[0].provider, "gemini");
+        assert_eq!(chats[0].provider, "custom-test");
         assert_eq!(speech[0].provider, "deepgram-stt");
     }
 
     #[test]
     fn removing_clears_only_that_provider() {
         let vault = vault();
-        save(&vault, &Credential::chat("gemini", "a")).unwrap();
-        save(&vault, &Credential::chat("merge-gateway", "b")).unwrap();
-        remove(&vault, Kind::Chat, "gemini").unwrap();
-        assert!(load(&vault, Kind::Chat, "gemini").unwrap().is_none());
-        assert!(load(&vault, Kind::Chat, "merge-gateway").unwrap().is_some());
+        save(&vault, &keyed("a")).unwrap();
+        save(&vault, &Credential::chat("ollama", "b")).unwrap();
+        remove(&vault, Kind::Chat, "custom-test").unwrap();
+        assert!(load(&vault, Kind::Chat, "custom-test").unwrap().is_none());
+        assert!(load(&vault, Kind::Chat, "ollama").unwrap().is_some());
     }
 
     #[test]
@@ -308,11 +333,11 @@ mod tests {
     }
 
     #[test]
-    fn gateway_models_are_selectable_and_blank_models_have_working_defaults() {
-        let config = Credential::chat("merge-gateway", "test-key").to_config();
-        assert_eq!(config.model, crate::ai::models::MERGE_MODEL);
+    fn models_are_selectable_and_blank_models_have_working_defaults() {
+        let config = Credential::chat("claude-sub", "").to_config();
+        assert_eq!(config.model, "sonnet");
         assert!(config.is_usable());
-        let mut credential = Credential::chat("merge-gateway", "test-key");
+        let mut credential = Credential::chat("ollama", "");
         credential.model = "some-other-model".into();
         assert!(credential.validate().is_ok());
         assert_eq!(
@@ -325,8 +350,8 @@ mod tests {
 
     #[test]
     fn masked_keys_show_only_the_tail() {
-        let credential = Credential::chat("gemini", "sk-abcdefgh1234");
+        let credential = keyed("sk-abcdefgh1234");
         assert_eq!(credential.masked_key(), "••••1234");
-        assert_eq!(Credential::chat("gemini", "").masked_key(), "Not set");
+        assert_eq!(keyed("").masked_key(), "Not set");
     }
 }

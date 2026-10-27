@@ -1,7 +1,6 @@
-# lennette — development tasks
+# nixarchy-meetingai — development tasks
 
 devenv := if env_var_or_default("DEVENV_PROFILE", "") != "" { "" } else { "devenv shell -- " }
-web := "cd web && bun " 
 
 default:
     @just --list
@@ -32,18 +31,9 @@ check: typecheck
 build:
     {{devenv}}cargo build
 
-# Run the desktop application.
+# Run the daemon.
 run:
     {{devenv}}cargo run
-
-# Install/upgrade the released build with the one-line installer. No clone,
-# no toolchain: downloads the matching release and puts `lenny` on PATH.
-install-script:
-    bash web/public/install
-
-# Check native Linux setup and the lenny command against local release fixtures.
-test-install-script:
-    ./tests/install-sh.test.sh
 
 # Run the unit test suite.
 test:
@@ -55,39 +45,18 @@ pre-commit: fmt-check lint typecheck
 # Full pre-push check: pre-commit + all tests.
 pre-push: pre-commit test
 
-# Bump version (patch, minor, major, or auto).
-bump type="patch":
-    {{devenv}}./scripts/bump-version.sh {{type}}
-
 # Install repository git hooks into .git/hooks/
 install-hooks:
     lefthook install --force
 
-# Run the landing site dev server.
-web-dev:
-    cd web && bun run dev
-
-# Format, lint and type check the landing site.
-web-check:
-    cd web && bun run format
-    cd web && bun run lint
-    cd web && bun run typecheck
-
-# Run the landing site test suite.
-web-check-types:
-    cd web && bun run test
-
 # Validate lints, format, types, compile optimized release binary and install locally.
 install: fmt-check lint typecheck
     {{devenv}}cargo build --release
-    mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/512x512/apps ~/.local/share/icons/hicolor/scalable/apps
-    {{devenv}}./scripts/install-binary.sh target/release/lennette ~/.local/bin/lennette
-    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/dev.lennette.overlay.png
-    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/lennette.png
-    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/dev.lennette.overlay.png
-    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/lennette.png
-    rm -f ~/.local/share/applications/lennette.desktop
-    cp -f packaging/dev.lennette.overlay.desktop ~/.local/share/applications/dev.lennette.overlay.desktop
+    mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/scalable/apps
+    install -m755 target/release/nixarchy-meetingai ~/.local/bin/nixarchy-meetingai
+    cp packaging/nixarchy-meetingai.svg ~/.local/share/icons/hicolor/scalable/apps/dev.nixarchy.meetingai.svg
+    rm -f ~/.local/share/applications/nixarchy-meetingai.desktop
+    cp -f packaging/dev.nixarchy.meetingai.desktop ~/.local/share/applications/dev.nixarchy.meetingai.desktop
     @command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database ~/.local/share/applications || true
     @command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor || true
-    @echo "Lennette successfully built and installed to ~/.local/bin/lennette"
+    @echo "nixarchy-meetingai successfully built and installed to ~/.local/bin/nixarchy-meetingai"
