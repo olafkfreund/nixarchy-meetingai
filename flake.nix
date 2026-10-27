@@ -146,7 +146,7 @@
           withPlugins = evalHm stubPlugins;
           userMeetingMode = evalHm {
             imports = [ stubPlugins ];
-            programs.nixarchy.plugins.meeting-mode.src = "/user/meeting-mode";
+            programs.nixarchy.plugins."nixarchy.meeting-mode".src = "/user/meeting-mode";
           };
           svc = c: c.systemd.user.services;
           assertThat =
@@ -161,13 +161,13 @@
             withPlugins.programs.nixarchy.plugins."nixarchy.meetingai".src
             == self.packages.${pkgs.stdenv.hostPlatform.system}.plugin
             &&
-              withPlugins.programs.nixarchy.plugins.meeting-mode.src
+              withPlugins.programs.nixarchy.plugins."nixarchy.meeting-mode".src
               == nixarchy-meeting-mode.packages.${pkgs.stdenv.hostPlatform.system}.default
             && !(withPlugins.xdg.configFile ? "omarchy/plugins/nixarchy.meetingai")
-            && userMeetingMode.programs.nixarchy.plugins.meeting-mode.src == "/user/meeting-mode"
+            && userMeetingMode.programs.nixarchy.plugins."nixarchy.meeting-mode".src == "/user/meeting-mode"
             &&
               builtins.attrNames userMeetingMode.programs.nixarchy.plugins == [
-                "meeting-mode"
+                "nixarchy.meeting-mode"
                 "nixarchy.meetingai"
               ]
           ) "plugins not registered through programs.nixarchy.plugins";

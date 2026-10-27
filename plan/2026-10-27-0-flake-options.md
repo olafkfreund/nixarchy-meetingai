@@ -131,3 +131,7 @@ None yet.
   no `settings.set` is sent for locked keys (not each control's `enabled`).
   `providers.status` probes the configured Ollama address; IPv6 hosts are
   untested. The flake has no `nix fmt` formatter.
+- **Lead fix:** `callDetection` keyed the meeting-mode plugin as
+  `meeting-mode`, but owners declare it by its manifest id
+  `nixarchy.meeting-mode` (e.g. `omarchy-meeting-mode.nix`), so both would
+  install. It now uses `nixarchy.meeting-mode`; the check matches.

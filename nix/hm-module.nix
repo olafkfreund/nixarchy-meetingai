@@ -317,8 +317,8 @@ in
     programs = lib.optionalAttrs hasPlugins {
       nixarchy.plugins = lib.mkMerge [
         (lib.mkIf cfg.plugin.enable { "nixarchy.meetingai".src = plugin; })
-        # mkDefault: a `meeting-mode` entry the user declares wins, so it is never added twice.
-        (lib.mkIf cfg.callDetection.enable { meeting-mode.src = lib.mkDefault callDetectionPlugin; })
+        # Keyed by the id in its manifest, as owners declare it; mkDefault lets their entry win, so it is never added twice.
+        (lib.mkIf cfg.callDetection.enable { "nixarchy.meeting-mode".src = lib.mkDefault callDetectionPlugin; })
       ];
     };
 
