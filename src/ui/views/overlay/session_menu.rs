@@ -269,7 +269,7 @@ impl Overlay {
             )
             .child(
                 self.menu_row("app-quit", false)
-                    .child("Quit Lennette…")
+                    .child("Quit nixarchy-meetingai…")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_dialog(Dialog::Quit);
                         cx.notify();
@@ -480,7 +480,7 @@ impl Overlay {
                         div()
                             .text_size(scaled(17.0))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Quit Lennette?"),
+                            .child("Quit nixarchy-meetingai?"),
                     )
                     .child(
                         div()

@@ -16,7 +16,7 @@ pub fn pipe_name() -> Result<String, String> {
     let path = crate::cli::instance_lock_path().ok_or("no local data directory")?;
     let digest = sha2::Sha256::digest(path.to_string_lossy().as_bytes());
     let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok(format!(r"\\.\pipe\lennette-{hex}"))
+    Ok(format!(r"\\.\pipe\nixarchy-meetingai-{hex}"))
 }
 
 pub struct ControlListener {
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn named_pipe_delivers_commands_and_releases_on_drop() {
-        let name = format!(r"\\.\pipe\lennette-test-{}", uuid::Uuid::new_v4());
+        let name = format!(r"\\.\pipe\nixarchy-meetingai-test-{}", uuid::Uuid::new_v4());
         let listener = ControlListener::start_at(name.clone()).unwrap();
         // Exercise both initial listening and reconnects. Clients close without
         // waiting for the worker, just like one-shot shortcut invocations.
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn named_pipe_waits_for_delayed_and_partial_commands() {
-        let name = format!(r"\\.\pipe\lennette-test-{}", uuid::Uuid::new_v4());
+        let name = format!(r"\\.\pipe\nixarchy-meetingai-test-{}", uuid::Uuid::new_v4());
         let listener = ControlListener::start_at(name.clone()).unwrap();
         // The initial ConnectNamedPipe succeeds without a connected client.
         std::thread::sleep(Duration::from_millis(50));

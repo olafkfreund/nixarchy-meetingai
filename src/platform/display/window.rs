@@ -188,7 +188,7 @@ pub fn protect_from_capture(window: &Window) -> Result<(), String> {
         let handle = win32_window(window).ok_or("no Windows window handle")?;
         if let Err(error) = protect_win32(handle) {
             let message: Vec<u16> =
-                format!("{error}\n\nLennette will close without showing an unprotected window.")
+                format!("{error}\n\nnixarchy-meetingai will close without showing an unprotected window.")
                     .encode_utf16()
                     .chain([0])
                     .collect();
@@ -197,7 +197,7 @@ pub fn protect_from_capture(window: &Window) -> Result<(), String> {
                 windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
                     std::ptr::null_mut(),
                     message.as_ptr(),
-                    windows_sys::core::w!("Lennette capture protection"),
+                    windows_sys::core::w!("nixarchy-meetingai capture protection"),
                     windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
                         | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
                 );
@@ -488,7 +488,7 @@ mod tests {
             let handle = CreateWindowExW(
                 0,
                 w!("STATIC"),
-                w!("lennette capture policy test"),
+                w!("nixarchy-meetingai capture policy test"),
                 WS_OVERLAPPED,
                 0,
                 0,

@@ -216,7 +216,7 @@ mod tests {
     use super::*;
 
     fn vault() -> Vault {
-        let dir = std::env::temp_dir().join(format!("lennette-cred-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("nixarchy-meetingai-cred-{}", uuid::Uuid::new_v4()));
         Vault::open(dir).unwrap()
     }
 
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn keys_are_never_stored_in_plaintext_in_settings_but_are_encrypted() {
-        let dir = std::env::temp_dir().join(format!("lennette-cred2-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("nixarchy-meetingai-cred2-{}", uuid::Uuid::new_v4()));
         let vault = Vault::open(&dir).unwrap();
         save(&vault, &Credential::chat("gemini", "sk-secret-value")).unwrap();
         let bytes = std::fs::read(dir.join("vault.bin")).unwrap();

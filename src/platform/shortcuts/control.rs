@@ -1,7 +1,7 @@
 //! Control socket for one-shot shortcut commands.
 //!
 //! A Hyprland binding cannot reach a running app directly, so it runs
-//! `lennette --toggle-window` and that forwards the command here. The listener
+//! `nixarchy-meetingai --toggle-window` and that forwards the command here. The listener
 //! turns each line into an action the overlay applies on its next frame.
 
 use std::io::{BufRead, BufReader};

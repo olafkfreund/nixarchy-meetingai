@@ -1,6 +1,6 @@
 //! Protocol-level end-to-end checks without external credentials or devices.
 use base64::{Engine, engine::general_purpose::STANDARD};
-use lennette::{
+use nixarchy_meetingai::{
     ai::{
         engine::{self, TurnContext},
         models::MERGE_MODEL,
@@ -25,7 +25,7 @@ use std::{
 
 #[tokio::test]
 async fn anthropic_preset_sends_native_messages_and_streams_only_visible_text() {
-    use lennette::ai::catalog::presets::PRESETS;
+    use nixarchy_meetingai::ai::catalog::presets::PRESETS;
     for streaming in [false, true] {
         let response = if streaming {
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"private reasoning\"}}\n\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Claude answer\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n"
@@ -80,7 +80,7 @@ async fn anthropic_preset_sends_native_messages_and_streams_only_visible_text() 
 
 #[tokio::test]
 async fn custom_chat_uses_its_method_auth_model_and_response_pointer() {
-    use lennette::ai::catalog::custom::CustomProvider;
+    use nixarchy_meetingai::ai::catalog::custom::CustomProvider;
     let (url, request) = server(
         200,
         "application/json",
@@ -119,7 +119,7 @@ async fn custom_chat_uses_its_method_auth_model_and_response_pointer() {
 
 #[tokio::test]
 async fn custom_speech_uploads_each_format_and_extracts_configured_text() {
-    use lennette::{ai::catalog::custom::CustomProvider, speech::transcription};
+    use nixarchy_meetingai::{ai::catalog::custom::CustomProvider, speech::transcription};
     for format in ["raw-wav", "multipart-wav", "json-wav"] {
         let (url, request) = server(
             200,
@@ -152,7 +152,7 @@ async fn custom_speech_uploads_each_format_and_extracts_configured_text() {
                 assert!(headers.contains("audio/wav"));
             }
             "multipart-wav" => {
-                assert!(headers.contains("multipart/form-data; boundary=lennette-"));
+                assert!(headers.contains("multipart/form-data; boundary=nixarchy-meetingai-"));
                 assert!(body.windows(wav.len()).any(|part| part == wav));
                 assert!(String::from_utf8_lossy(body).contains("my-stt-model"));
             }
@@ -171,7 +171,7 @@ async fn custom_speech_uploads_each_format_and_extracts_configured_text() {
 
 #[tokio::test]
 async fn batch_listen_flushes_the_remote_channel_on_stop() {
-    use lennette::{
+    use nixarchy_meetingai::{
         ai::catalog::custom::CustomProvider,
         speech::transcription::{LiveEvent, LiveTranscriber},
     };
@@ -211,8 +211,8 @@ async fn batch_listen_flushes_the_remote_channel_on_stop() {
 
 #[test]
 fn custom_providers_are_encrypted_managed_and_do_not_reactivate_retired_ids() {
-    use lennette::ai::catalog::custom::CustomProvider;
-    let directory = std::env::temp_dir().join(format!("lennette-custom-{}", uuid::Uuid::new_v4()));
+    use nixarchy_meetingai::ai::catalog::custom::CustomProvider;
+    let directory = std::env::temp_dir().join(format!("nixarchy-meetingai-custom-{}", uuid::Uuid::new_v4()));
     let vault = Vault::open(&directory).unwrap();
     let mut credential = Credential::chat("custom-my-provider", "custom-secret-key");
     credential.base_url = "http://localhost:12345/chat/completions".into();
@@ -280,8 +280,8 @@ fn server(
 
 #[tokio::test]
 async fn meeting_recap_uses_final_persisted_words_and_survives_reopen() {
-    use lennette::ai::catalog::custom::CustomProvider;
-    let directory = std::env::temp_dir().join(format!("lennette-recap-{}", uuid::Uuid::new_v4()));
+    use nixarchy_meetingai::ai::catalog::custom::CustomProvider;
+    let directory = std::env::temp_dir().join(format!("nixarchy-meetingai-recap-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("test.db");
     let db = Database::open(&path).unwrap();
@@ -320,7 +320,7 @@ async fn meeting_recap_uses_final_persisted_words_and_survives_reopen() {
         response_format: "text".into(),
         ..Default::default()
     });
-    lennette::ai::recap::generate(&path, &id, Some(config), "French")
+    nixarchy_meetingai::ai::recap::generate(&path, &id, Some(config), "French")
         .await
         .unwrap();
     let bytes = request.join().unwrap();
@@ -341,7 +341,7 @@ async fn meeting_recap_uses_final_persisted_words_and_survives_reopen() {
 #[tokio::test]
 async fn speech_to_streamed_answer_and_finished_meeting_for_both_ai_services() {
     for provider in ["gemini", "merge-gateway"] {
-        let dir = std::env::temp_dir().join(format!("lennette-flow-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("nixarchy-meetingai-flow-{}", uuid::Uuid::new_v4()));
         let vault = Vault::open(&dir).unwrap();
         let mut speech = Credential::speech("deepgram-stt", "test-speech-key");
         // Keep the request observer for a separate server so we can assert auth and WAV.
@@ -528,17 +528,17 @@ async fn markdown_code_deltas_arrive_before_the_provider_finishes() {
         |delta| {
             partial.push_str(delta);
             snapshots += 1;
-            let blocks = lennette::ui::markdown::parse(&partial);
+            let blocks = nixarchy_meetingai::ui::markdown::parse(&partial);
             let code = blocks
                 .iter()
                 .find_map(|block| match block {
-                    lennette::ui::markdown::Block::Code { language, text } => {
+                    nixarchy_meetingai::ui::markdown::Block::Code { language, text } => {
                         Some((language, text))
                     }
                     _ => None,
                 })
                 .unwrap();
-            let tokens = lennette::ui::widgets::syntax::highlight(code.0.as_deref(), code.1, false);
+            let tokens = nixarchy_meetingai::ui::widgets::syntax::highlight(code.0.as_deref(), code.1, false);
             assert_eq!(tokens.last().unwrap().range.end, code.1.len());
             if snapshots == 1 {
                 assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));

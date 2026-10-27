@@ -1,11 +1,11 @@
 [package]
-name = "lennette"
+name = "nixarchy-meetingai"
 description = "An ambient real-time meeting and discussion copilot"
 version = "0.18.23"
 edition = "2024"
 rust-version = "1.99"
-license = "MIT"
-authors = ["lennette contributors"]
+license = "AGPL-3.0-or-later"
+authors = ["nixarchy-meetingai contributors"]
 
 [workspace]
 members = ["tools"]

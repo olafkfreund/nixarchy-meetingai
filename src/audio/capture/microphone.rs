@@ -416,12 +416,12 @@ mod tests {
     #[test]
     fn missing_device_is_reported_by_name() {
         // A name that cannot exist: this must fail before any stream is built.
-        let error = Microphone::start(Some("lennette-nonexistent-input-xyz"))
+        let error = Microphone::start(Some("nixarchy-meetingai-nonexistent-input-xyz"))
             .err()
             .expect("a missing device must not start");
         match error {
             AudioError::DeviceMissing(name) => {
-                assert_eq!(name, "lennette-nonexistent-input-xyz")
+                assert_eq!(name, "nixarchy-meetingai-nonexistent-input-xyz")
             }
             other => panic!("unexpected error: {other}"),
         }

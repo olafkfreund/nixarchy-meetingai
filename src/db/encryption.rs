@@ -132,7 +132,7 @@ mod tests {
 
     fn path() -> PathBuf {
         let directory =
-            std::env::temp_dir().join(format!("lennette-encryption-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("nixarchy-meetingai-encryption-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&directory).unwrap();
         directory.join("history.db")
     }

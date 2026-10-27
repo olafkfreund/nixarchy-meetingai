@@ -353,7 +353,7 @@ pub fn app_settings(
     .child(row(
         theme,
         "Show borders",
-        "Outline Lennette windows and panels",
+        "Outline nixarchy-meetingai windows and panels",
         switch(
             "show-borders",
             theme,
@@ -369,7 +369,7 @@ pub fn app_settings(
     .child(row(
         theme,
         "Always on top",
-        "Keep Lennette above other windows while listening or idle",
+        "Keep nixarchy-meetingai above other windows while listening or idle",
         switch(
             "always-on-top",
             theme,
@@ -387,12 +387,12 @@ pub fn app_settings(
     let startup = section(
         theme,
         "Launch and Windows",
-        "How lennette behaves when it is not in focus.",
+        "How nixarchy-meetingai behaves when it is not in focus.",
     )
     .child(row(
         theme,
         "Launch on startup",
-        "Open lennette when your system starts",
+        "Open nixarchy-meetingai when your system starts",
         switch(
             "autostart",
             theme,
@@ -407,7 +407,7 @@ pub fn app_settings(
     .child(row(
         theme,
         "Startup mode",
-        "Choose which Lennette launch opens when you sign in",
+        "Choose which nixarchy-meetingai launch opens when you sign in",
         segmented(
             "startup-mode",
             theme,
@@ -578,7 +578,7 @@ pub fn audio_settings(
     microphone = microphone.child(row(
         theme,
         "Always on top",
-        "Keep Lennette above the meeting window while using audio",
+        "Keep nixarchy-meetingai above the meeting window while using audio",
         switch(
             "audio-always-on-top",
             theme,
@@ -1262,7 +1262,7 @@ pub fn shortcut_settings(
     let mut list = section(
         theme,
         "Global Shortcuts",
-        "These work from any application while lennette runs.",
+        "These work from any application while nixarchy-meetingai runs.",
     );
     for (keys, label) in shortcut_catalog() {
         list = list.child(row(
@@ -1442,7 +1442,7 @@ pub fn dev_space(
     let storage = section(
         theme,
         "Storage",
-        "Where lennette keeps your data on this computer.",
+        "Where nixarchy-meetingai keeps your data on this computer.",
     )
     .child(row(
         theme,
@@ -1628,7 +1628,7 @@ mod tests {
     fn saved_chat_key_is_selected_and_reused_without_pasting_it_again() {
         use crate::core::credentials::{self, Credential, Kind};
         let path =
-            std::env::temp_dir().join(format!("lennette-saved-model-key-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("nixarchy-meetingai-saved-model-key-{}", uuid::Uuid::new_v4()));
         let vault = crate::core::vault::Vault::open(&path).unwrap();
         let mut saved = Credential::chat("merge-gateway", " saved-api-key ");
         saved.model = "my-custom-model".into();

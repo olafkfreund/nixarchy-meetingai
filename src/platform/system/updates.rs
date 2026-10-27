@@ -13,7 +13,7 @@ pub struct Release {
 fn version(value: &str) -> Option<(u64, u64, u64)> {
     let value = value.trim().trim_start_matches('v');
     // Main builds are published as v0.18.10-build.17.9512829; this is
-    // Lennette's stable release convention, not a beta channel.
+    // nixarchy-meetingai's stable release convention, not a beta channel.
     let value = if let Some((version, build)) = value.split_once("-build.") {
         let (number, commit) = build.split_once('.')?;
         number.parse::<u64>().ok()?;
@@ -43,10 +43,10 @@ pub fn newer(current: &str, available: &str) -> Result<bool, String> {
 pub async fn latest() -> Result<Release, String> {
     crate::core::install_tls_provider();
     let response = reqwest::Client::new()
-        .get("https://api.github.com/repos/parazeeknova/lennette/releases/latest")
+        .get("https://api.github.com/repos/parazeeknova/nixarchy-meetingai/releases/latest")
         .header(
             "User-Agent",
-            concat!("Lennette/", env!("CARGO_PKG_VERSION")),
+            concat!("nixarchy-meetingai/", env!("CARGO_PKG_VERSION")),
         )
         .header("Accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(15))

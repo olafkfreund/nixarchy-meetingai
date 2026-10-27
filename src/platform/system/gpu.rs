@@ -76,7 +76,7 @@ mod tests {
     struct Hardware(PathBuf);
     impl Hardware {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("lennette-gpu-{}", uuid::Uuid::new_v4()));
+            let root = std::env::temp_dir().join(format!("nixarchy-meetingai-gpu-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(root.join("drm")).unwrap();
             std::fs::create_dir_all(root.join("icd")).unwrap();
             Self(root)

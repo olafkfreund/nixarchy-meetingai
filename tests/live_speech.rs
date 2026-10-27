@@ -1,6 +1,6 @@
 //! Real WebSocket protocol tests: channel identity, interim/VAD events and trailing finals.
 use futures_util::{SinkExt, StreamExt};
-use lennette::speech::transcription::{LiveEvent, LiveTranscriber};
+use nixarchy_meetingai::speech::transcription::{LiveEvent, LiveTranscriber};
 use std::time::Duration;
 use tokio_tungstenite::{
     accept_hdr_async,
@@ -13,7 +13,7 @@ use tokio_tungstenite::{
 #[tokio::test]
 #[allow(clippy::result_large_err)]
 async fn custom_live_speech_uses_its_endpoint_and_auth_and_encodes_parameters() {
-    use lennette::ai::{catalog::custom::CustomProvider, providers::ProviderConfig};
+    use nixarchy_meetingai::ai::{catalog::custom::CustomProvider, providers::ProviderConfig};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut config = ProviderConfig::new("custom-live", "test-custom-key", "speech/model");
     config.language = "en-US".into();

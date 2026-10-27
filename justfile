@@ -1,4 +1,4 @@
-# lennette — development tasks
+# nixarchy-meetingai — development tasks
 
 devenv := if env_var_or_default("DEVENV_PROFILE", "") != "" { "" } else { "devenv shell -- " }
 web := "cd web && bun " 
@@ -81,13 +81,13 @@ web-check-types:
 install: fmt-check lint typecheck
     {{devenv}}cargo build --release
     mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons/hicolor/512x512/apps ~/.local/share/icons/hicolor/scalable/apps
-    {{devenv}}./scripts/install-binary.sh target/release/lennette ~/.local/bin/lennette
-    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/dev.lennette.overlay.png
+    {{devenv}}./scripts/install-binary.sh target/release/nixarchy-meetingai ~/.local/bin/nixarchy-meetingai
+    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/dev.nixarchy.meetingai.png
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/512x512/apps/lennette.png
-    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/dev.lennette.overlay.png
+    cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/dev.nixarchy.meetingai.png
     cp src/assets/lennette_app_icon.png ~/.local/share/icons/hicolor/scalable/apps/lennette.png
-    rm -f ~/.local/share/applications/lennette.desktop
-    cp -f packaging/dev.lennette.overlay.desktop ~/.local/share/applications/dev.lennette.overlay.desktop
+    rm -f ~/.local/share/applications/nixarchy-meetingai.desktop
+    cp -f packaging/dev.nixarchy.meetingai.desktop ~/.local/share/applications/dev.nixarchy.meetingai.desktop
     @command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database ~/.local/share/applications || true
     @command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor || true
-    @echo "Lennette successfully built and installed to ~/.local/bin/lennette"
+    @echo "nixarchy-meetingai successfully built and installed to ~/.local/bin/nixarchy-meetingai"

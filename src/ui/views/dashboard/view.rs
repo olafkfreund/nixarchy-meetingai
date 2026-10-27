@@ -957,7 +957,7 @@ impl DashboardView {
         let directory = self
             .database
             .as_ref()
-            .and_then(|_| directories::ProjectDirs::from("dev", "lennette", "lennette"))
+            .and_then(|_| directories::ProjectDirs::from("dev", "nixarchy", "nixarchy-meetingai"))
             .map(|dirs| dirs.data_dir().to_path_buf())
             .unwrap_or_else(std::env::temp_dir);
         let safe: String = title
@@ -1281,7 +1281,7 @@ impl DashboardView {
                             .text_size(scaled(13.0))
                             .font_weight(FontWeight::BOLD)
                             .text_color(self.theme.foreground)
-                            .child("lennette"),
+                            .child("nixarchy-meetingai"),
                     ),
             )
             .child(row)
@@ -1764,7 +1764,7 @@ impl DashboardView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.foreground)
                     .whitespace_normal()
-                    .child("About Lennette"),
+                    .child("About nixarchy-meetingai"),
             )
             .child(
                 div()
@@ -1857,9 +1857,9 @@ impl DashboardView {
             .child(div().w_full().flex_shrink_0().child(identity))
             .child(div().w_full().flex_shrink_0().child(description))
             .child(div().flex().flex_wrap().gap(px(8.0)).justify_center()
-                .child(action_button("about-website", &theme, "Visit Lennette ↗", cx, |_, cx, _| cx.open_url("https://lennette.itssingularity.com")))
+                .child(action_button("about-website", &theme, "Visit nixarchy-meetingai ↗", cx, |_, cx, _| cx.open_url("https://nixarchy-meetingai.itssingularity.com")))
                 .child(action_button("about-check-updates", &theme, if self.update_task.is_some() { "Checking…" } else { "Check for updates" }, cx, |this, cx, _| this.check_updates(cx)))
-                .children(self.update_available.then(|| action_button("about-open-update", &theme, "View update ↗", cx, |_, cx, _| cx.open_url("https://github.com/parazeeknova/lennette/releases/latest")))))
+                .children(self.update_available.then(|| action_button("about-open-update", &theme, "View update ↗", cx, |_, cx, _| cx.open_url("https://github.com/parazeeknova/nixarchy-meetingai/releases/latest")))))
             .children(self.update_status.as_ref().map(|status| div().w_full().text_center().text_size(scaled(12.0)).text_color(theme.muted_foreground).whitespace_normal().child(status.clone())))
             .child(
                 div()
@@ -1870,9 +1870,9 @@ impl DashboardView {
                     .child(action_button(
                         "about-github",
                         &self.theme,
-                        "View Lennette on GitHub ↗",
+                        "View nixarchy-meetingai on GitHub ↗",
                         cx,
-                        |_, cx, _| cx.open_url("https://github.com/parazeeknova/lennette"),
+                        |_, cx, _| cx.open_url("https://github.com/parazeeknova/nixarchy-meetingai"),
                     )),
             )
             .child(
@@ -2314,7 +2314,7 @@ impl DashboardView {
                     if message.role == "user" {
                         "You"
                     } else {
-                        "Lennette"
+                        "nixarchy-meetingai"
                     },
                 ],
             ) {
@@ -2367,7 +2367,7 @@ impl DashboardView {
                                         },
                                         12.0,
                                     ))
-                                    .child(if is_user { "You" } else { "Lennette" }),
+                                    .child(if is_user { "You" } else { "nixarchy-meetingai" }),
                             )
                             .child(
                                 div()
@@ -2531,7 +2531,7 @@ impl Render for DashboardView {
         }
         if self.native_icon_hidden != Some(hidden) {
             self.settings.notice = match crate::platform::window::set_icon_hidden(window, hidden) {
-                crate::platform::window::Applied::Unsupported if hidden => Some("This compositor controls dock visibility. Use its window rules to hide Lennette's app icon.".into()),
+                crate::platform::window::Applied::Unsupported if hidden => Some("This compositor controls dock visibility. Use its window rules to hide nixarchy-meetingai's app icon.".into()),
                 crate::platform::window::Applied::Failed => Some("The desktop could not update the app icon visibility.".into()),
                 _ => self.settings.notice.take(),
             };

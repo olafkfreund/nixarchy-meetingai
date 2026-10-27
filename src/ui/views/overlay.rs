@@ -2073,9 +2073,9 @@ impl Overlay {
             return;
         };
         tray.set_tooltip(if self.is_listening() {
-            "lennette · listening"
+            "nixarchy-meetingai · listening"
         } else {
-            "lennette"
+            "nixarchy-meetingai"
         });
         let actions = tray.poll();
         for action in actions {
@@ -2358,7 +2358,7 @@ impl Overlay {
                     .hover(|s| s.bg(self.surfaces().muted()))
                     .tooltip(move |_, cx| {
                         cx.new(|_| HoverLabel {
-                            text: "Lennette menu".into(),
+                            text: "nixarchy-meetingai menu".into(),
                             theme,
                         })
                         .into()
@@ -5568,7 +5568,7 @@ mod tests {
     use crate::core::security::credentials::{self, Credential, Kind};
 
     fn fixture() -> (std::path::PathBuf, Overlay) {
-        let path = std::env::temp_dir().join(format!("lennette-overlay-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("nixarchy-meetingai-overlay-{}", uuid::Uuid::new_v4()));
         let vault = crate::core::security::vault::Vault::open(&path).unwrap();
         let services = crate::app::Services {
             vault: std::sync::Arc::new(Some(vault)),

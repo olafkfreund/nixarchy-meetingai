@@ -67,7 +67,7 @@ impl Drop for Backend {
 
 pub fn start() -> Result<Backend, String> {
     let queue: Arc<Mutex<Vec<TrayAction>>> = Default::default();
-    let tooltip = Arc::new(Mutex::new("lennette".to_owned()));
+    let tooltip = Arc::new(Mutex::new("nixarchy-meetingai".to_owned()));
     let stop = Arc::new(AtomicBool::new(false));
     let (sink, tip, halt) = (queue.clone(), tooltip.clone(), stop.clone());
     let (ready, started) = std::sync::mpsc::sync_channel(1);
@@ -79,7 +79,7 @@ pub fn start() -> Result<Backend, String> {
             let class = WNDCLASSW {
                 lpfnWndProc: Some(tray_window_proc),
                 hInstance: instance,
-                lpszClassName: w!("lennette.native.tray"),
+                lpszClassName: w!("nixarchy-meetingai.native.tray"),
                 ..Default::default()
             };
             if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
@@ -88,8 +88,8 @@ pub fn start() -> Result<Backend, String> {
             }
             let hwnd = CreateWindowExW(
                 0,
-                w!("lennette.native.tray"),
-                w!("lennette tray"),
+                w!("nixarchy-meetingai.native.tray"),
+                w!("nixarchy-meetingai tray"),
                 0,
                 0,
                 0,
@@ -132,7 +132,7 @@ pub fn start() -> Result<Backend, String> {
                 hIcon: icon,
                 ..Default::default()
             };
-            for (dst, ch) in data.szTip.iter_mut().zip("lennette".encode_utf16()) {
+            for (dst, ch) in data.szTip.iter_mut().zip("nixarchy-meetingai".encode_utf16()) {
                 *dst = ch;
             }
             if Shell_NotifyIconW(NIM_ADD, &data) == 0 {
@@ -142,7 +142,7 @@ pub fn start() -> Result<Backend, String> {
                 return;
             }
             let _ = ready.send(Ok(()));
-            let mut last_tip = "lennette".to_owned();
+            let mut last_tip = "nixarchy-meetingai".to_owned();
             while !halt.load(Ordering::Relaxed) {
                 if let Ok(current) = tip.lock()
                     && *current != last_tip
@@ -174,7 +174,7 @@ pub fn start() -> Result<Backend, String> {
                                         w!("Go stealth (Privacy mode)"),
                                     );
                                     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-                                    AppendMenuW(menu, MF_STRING, 4, w!("Quit lennette"));
+                                    AppendMenuW(menu, MF_STRING, 4, w!("Quit nixarchy-meetingai"));
                                     let mut point = POINT::default();
                                     GetCursorPos(&mut point);
                                     SetForegroundWindow(hwnd);

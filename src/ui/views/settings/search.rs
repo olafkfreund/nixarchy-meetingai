@@ -123,7 +123,7 @@ const INDEX: &[(Route, &str, &str)] = &[
     (
         Route::About,
         "Check for updates",
-        "version github release website lennette.itssingularity.com",
+        "version github release website nixarchy-meetingai.itssingularity.com",
     ),
 ];
 

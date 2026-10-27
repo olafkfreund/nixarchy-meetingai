@@ -19,7 +19,7 @@ use rand::Rng;
 use serde_json::Value;
 
 /// File header, so format drift is detected instead of silently misread.
-const HEADER: &[u8] = b"LENNETTE-VAULT-v1\0";
+const HEADER: &[u8] = b"NIXARCHY-MEETINGAI-VAULT-v1\0";
 
 /// Errors surfaced to callers.
 #[derive(Debug, thiserror::Error)]
@@ -55,7 +55,7 @@ impl Vault {
 
     /// Open the vault in the platform's user data directory.
     pub fn open_default() -> Result<Self, VaultError> {
-        let base = directories::ProjectDirs::from("dev", "lennette", "lennette")
+        let base = directories::ProjectDirs::from("dev", "nixarchy", "nixarchy-meetingai")
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -225,7 +225,7 @@ mod tests {
     use super::*;
 
     fn temp_dir() -> PathBuf {
-        let path = std::env::temp_dir().join(format!("lennette-vault-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("nixarchy-meetingai-vault-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
         path
     }

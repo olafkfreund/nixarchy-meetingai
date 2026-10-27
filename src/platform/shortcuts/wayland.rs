@@ -97,7 +97,7 @@ impl PortalShortcuts {
         // NotAllowed. Set it explicitly for an un-packaged binary.
         options.insert(
             "handle_token",
-            zbus::zvariant::Value::from(format!("lennette{}", std::process::id())),
+            zbus::zvariant::Value::from(format!("nixarchy-meetingai{}", std::process::id())),
         );
         options.insert(
             "session_handle_token",
@@ -105,7 +105,7 @@ impl PortalShortcuts {
         );
         options.insert(
             "handle_token",
-            zbus::zvariant::Value::from(format!("lennette{}", std::process::id())),
+            zbus::zvariant::Value::from(format!("nixarchy-meetingai{}", std::process::id())),
         );
         options.insert(
             "session_handle_token",
@@ -244,20 +244,20 @@ impl PortalShortcuts {
 }
 
 /// The application id used for portal calls.
-const APP_ID: &str = "dev.lennette.overlay";
+const APP_ID: &str = "dev.nixarchy.meetingai";
 
 /// The desktop entry the portal needs to resolve the app id.
 const DESKTOP_FILE: &str = r#"[Desktop Entry]
 Type=Application
-Name=lennette
+Name=nixarchy-meetingai
 GenericName=Ambient Real-Time Meeting Copilot
 Comment=An ambient real-time meeting and discussion copilot
-Exec=lennette
-Icon=dev.lennette.overlay
+Exec=nixarchy-meetingai
+Icon=dev.nixarchy.meetingai
 Terminal=false
 Categories=Utility;AudioVideo;Audio;Office;
 Keywords=ai;meeting;transcription;copilot;speech;audio;notes;live;intelligence;
-StartupWMClass=dev.lennette.overlay
+StartupWMClass=dev.nixarchy.meetingai
 "#;
 
 /// Install the desktop entry into the user's applications directory.
@@ -389,9 +389,9 @@ mod tests {
 
     #[test]
     fn desktop_entry_matches_the_app_id() {
-        assert!(DESKTOP_FILE.contains("Name=lennette"));
+        assert!(DESKTOP_FILE.contains("Name=nixarchy-meetingai"));
         assert!(DESKTOP_FILE.contains("Type=Application"));
-        assert!(APP_ID.starts_with("dev.lennette"));
+        assert!(APP_ID.starts_with("dev.nixarchy"));
     }
 
     #[test]

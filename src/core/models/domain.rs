@@ -1,4 +1,4 @@
-//! Domain types for lennette.
+//! Domain types for nixarchy-meetingai.
 //!
 //! These mirror the observable behaviour of the reference build: a two-mode
 //! overlay (`Ask` / `Listen`), an overlay size preference, and a chat message

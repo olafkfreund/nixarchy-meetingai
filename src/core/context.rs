@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn text_import_and_binary_rejection() {
         let path =
-            std::env::temp_dir().join(format!("lennette-context-{}.txt", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("nixarchy-meetingai-context-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&path, "Useful meeting notes").unwrap();
         assert_eq!(import(&path).unwrap().text, "Useful meeting notes");
         std::fs::write(&path, [0, 1, 2]).unwrap();
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn pdf_text_and_image_import() {
         let directory =
-            std::env::temp_dir().join(format!("lennette-context-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("nixarchy-meetingai-context-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
         let stream = "BT /F1 12 Tf 72 720 Td (Project Quasar uses PostgreSQL) Tj ET";
         let objects = [

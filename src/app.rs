@@ -79,11 +79,11 @@ impl Services {
 }
 
 fn default_database_path() -> Option<std::path::PathBuf> {
-    let directory = directories::ProjectDirs::from("dev", "lennette", "lennette")?
+    let directory = directories::ProjectDirs::from("dev", "nixarchy", "nixarchy-meetingai")?
         .data_dir()
         .to_path_buf();
     std::fs::create_dir_all(&directory).ok()?;
-    Some(directory.join("lennette.db"))
+    Some(directory.join("nixarchy-meetingai.db"))
 }
 
 /// Assets bundled with the native application.
@@ -127,7 +127,7 @@ pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("lennette=info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("nixarchy_meetingai=info")),
         )
         .init();
 
@@ -148,7 +148,7 @@ pub fn run() {
         version = env!("CARGO_PKG_VERSION"),
         database = services.database_ready,
         vault = services.vault.is_some(),
-        "starting lennette"
+        "starting nixarchy-meetingai"
     );
 
     Application::new()
@@ -177,14 +177,14 @@ pub fn run() {
             let bounds = Bounds::centered(None, size(px(OVERLAY_WIDTH), px(OVERLAY_HEIGHT)), cx);
             let overlay_options = WindowOptions {
                 show: !cfg!(windows),
-                app_id: Some("dev.lennette.overlay".into()),
+                app_id: Some("dev.nixarchy.meetingai".into()),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(680.0), px(420.0))),
                 // A transparent window lets the opacity control show the desktop
                 // through the overlay instead of only fading toward black.
                 window_background: gpui::WindowBackgroundAppearance::Transparent,
                 titlebar: Some(TitlebarOptions {
-                    title: Some("lennette".into()),
+                    title: Some("nixarchy-meetingai".into()),
                     appears_transparent: true,
                     ..Default::default()
                 }),
@@ -273,8 +273,8 @@ pub fn run() {
             let bind_portal = pure_wayland && !crate::features::hyprland::is_hyprland();
             let control_handle = control.ok().map(std::sync::Arc::new);
             cx.open_window(overlay_options, move |window, cx| {
-                window.set_window_title("lennette");
-                window.set_app_id("dev.lennette.overlay");
+                window.set_window_title("nixarchy-meetingai");
+                window.set_app_id("dev.nixarchy.meetingai");
                 let protected = crate::platform::window::protect_from_capture(window);
                 #[cfg(windows)]
                 if protected.is_ok() {
@@ -364,12 +364,12 @@ pub fn open_dashboard_at(
     let bounds = Bounds::centered(None, size(px(DASHBOARD_WIDTH), px(DASHBOARD_HEIGHT)), cx);
     let options = WindowOptions {
         show: !cfg!(windows),
-        app_id: Some("dev.lennette.overlay".into()),
+        app_id: Some("dev.nixarchy.meetingai".into()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(960.0), px(540.0))),
         window_background: gpui::WindowBackgroundAppearance::Transparent,
         titlebar: Some(TitlebarOptions {
-            title: Some("lennette dashboard".into()),
+            title: Some("nixarchy-meetingai dashboard".into()),
             appears_transparent: true,
             ..Default::default()
         }),
@@ -377,7 +377,7 @@ pub fn open_dashboard_at(
     };
 
     if let Err(error) = cx.open_window(options, move |window, cx| {
-        window.set_window_title("lennette dashboard");
+        window.set_window_title("nixarchy-meetingai dashboard");
         let protected = crate::platform::window::protect_from_capture(window);
         #[cfg(windows)]
         if protected.is_ok() {
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn database_path_is_under_the_data_dir() {
         let path = default_database_path().expect("path");
-        assert!(path.ends_with("lennette.db"));
+        assert!(path.ends_with("nixarchy-meetingai.db"));
         assert!(
             path.parent().is_some_and(|parent| parent.exists()),
             "data directory must exist"

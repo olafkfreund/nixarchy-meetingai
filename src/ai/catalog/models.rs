@@ -501,7 +501,7 @@ mod discovery_tests {
             };
             let (config, server) = catalog_server(pages);
             let directory = std::env::temp_dir()
-                .join(format!("lennette-catalog-failure-{}", uuid::Uuid::new_v4()));
+                .join(format!("nixarchy-meetingai-catalog-failure-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&directory).unwrap();
             let path = directory.join("cache.db");
             let db = crate::db::Database::open(&path).unwrap();
@@ -563,7 +563,7 @@ mod discovery_tests {
     #[tokio::test]
     async fn live_discovery_authenticates_then_reuses_persistent_cache_without_network() {
         let directory =
-            std::env::temp_dir().join(format!("lennette-models-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("nixarchy-meetingai-models-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("catalog.db");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

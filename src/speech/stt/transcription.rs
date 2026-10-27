@@ -117,7 +117,7 @@ async fn transcribe_inner(
             "json-wav" => request.json(&json!({"audio": STANDARD.encode(wav), "model": config.model, "language": language})),
             "multipart-wav" => {
                 // Generated boundary never appears in audio; no intermediate file.
-                let boundary = format!("lennette-{}", uuid::Uuid::new_v4());
+                let boundary = format!("nixarchy-meetingai-{}", uuid::Uuid::new_v4());
                 let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n", config.model).into_bytes();
                 body.extend(wav);
                 body.extend(format!("\r\n--{boundary}--\r\n").as_bytes());

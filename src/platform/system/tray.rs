@@ -86,7 +86,7 @@ fn icon_at(size: u32) -> Vec<u8> {
     static ARTWORK: std::sync::OnceLock<image::RgbaImage> = std::sync::OnceLock::new();
     let artwork = ARTWORK.get_or_init(|| {
         image::load_from_memory(include_bytes!("../../assets/lennette_app_icon.png"))
-            .expect("bundled Lennette artwork")
+            .expect("bundled nixarchy-meetingai artwork")
             .into_rgba8()
     });
     image::imageops::resize(artwork, size, size, image::imageops::FilterType::Lanczos3).into_raw()
@@ -125,11 +125,11 @@ mod ksni_tray {
 
     impl ksni::Tray for Item {
         fn id(&self) -> String {
-            "dev.lennette.overlay".into()
+            "dev.nixarchy.meetingai".into()
         }
 
         fn title(&self) -> String {
-            "lennette".into()
+            "nixarchy-meetingai".into()
         }
 
         fn icon_pixmap(&self) -> Vec<ksni::Icon> {
@@ -147,7 +147,7 @@ mod ksni_tray {
 
         fn icon_name(&self) -> String {
             // A themed name gives the panel a fallback if pixmaps are ignored.
-            "lennette".into()
+            "nixarchy-meetingai".into()
         }
 
         fn status(&self) -> ksni::Status {
@@ -159,7 +159,7 @@ mod ksni_tray {
                 .tooltip
                 .lock()
                 .map(|value| value.clone())
-                .unwrap_or_else(|_| "lennette".to_owned());
+                .unwrap_or_else(|_| "nixarchy-meetingai".to_owned());
             ksni::ToolTip {
                 title: text,
                 description: String::new(),
@@ -212,7 +212,7 @@ mod ksni_tray {
                 .into(),
                 ksni::MenuItem::Separator,
                 StandardItem {
-                    label: "Quit lennette".into(),
+                    label: "Quit nixarchy-meetingai".into(),
                     activate: Box::new(push(TrayAction::Quit)),
                     ..Default::default()
                 }
@@ -246,7 +246,7 @@ mod ksni_tray {
 
     pub fn start() -> Result<Backend, String> {
         let queue: Queue = Arc::new(Mutex::new(Vec::new()));
-        let tooltip = Arc::new(Mutex::new("lennette".to_owned()));
+        let tooltip = Arc::new(Mutex::new("nixarchy-meetingai".to_owned()));
         let item = Item {
             queue: queue.clone(),
             tooltip,

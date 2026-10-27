@@ -1,6 +1,6 @@
 //! Command line entry point.
 //!
-//! Besides launching normally, lennette accepts one-shot control flags. Hyprland
+//! Besides launching normally, nixarchy-meetingai accepts one-shot control flags. Hyprland
 //! binds call these, so a shortcut reaches the running instance instead of
 //! starting a second copy.
 
@@ -22,7 +22,7 @@ pub fn handle_args() -> Option<String> {
         "--screenshot" => "screenshot",
         "--privacy" => "privacy-mode",
         "--normal" => "normal-mode",
-        "--version" | "-V" => return Some(format!("lennette {}", env!("CARGO_PKG_VERSION"))),
+        "--version" | "-V" => return Some(format!("nixarchy-meetingai {}", env!("CARGO_PKG_VERSION"))),
         "--help" | "-h" => {
             return Some(usage());
         }
@@ -37,7 +37,7 @@ pub fn handle_args() -> Option<String> {
             tracing::debug!(%error, %command, "no instance accepted the command; launching");
             None
         }
-        Err(error) => Some(format!("lennette: {error}")),
+        Err(error) => Some(format!("nixarchy-meetingai: {error}")),
     }
 }
 
@@ -51,9 +51,9 @@ fn launches_when_absent(command: &str) -> bool {
 
 fn usage() -> String {
     [
-        "lennette — desktop assistant",
+        "nixarchy-meetingai — desktop assistant",
         "",
-        "Usage: lennette [option]",
+        "Usage: nixarchy-meetingai [option]",
         "",
         "  --toggle-dashboard      show or hide the dashboard",
         "  --toggle-window         show or hide the overlay",
@@ -65,7 +65,7 @@ fn usage() -> String {
         "  --help                  print this help",
         "",
         "Run without a flag to launch the app.",
-        "LENNETTE_PRIVATE_OVERLAY=1 disables the desktop tray for protected launches.",
+        "NIXARCHY_MEETINGAI_PRIVATE_OVERLAY=1 disables the desktop tray for protected launches.",
         "  --privacy               launch without a tray or taskbar icon",
         "  --normal                launch with a tray icon (default)",
     ]
@@ -94,7 +94,7 @@ fn launch_private() -> bool {
     }
     private_overlay_for(
         cfg!(windows),
-        std::env::var("LENNETTE_PRIVATE_OVERLAY").ok().as_deref(),
+        std::env::var("NIXARCHY_MEETINGAI_PRIVATE_OVERLAY").ok().as_deref(),
     )
 }
 
@@ -131,19 +131,19 @@ pub fn wait_for_running_instance(timeout: std::time::Duration) -> bool {
 
 /// Path of the control socket shared with the running instance.
 pub fn control_socket() -> Option<std::path::PathBuf> {
-    runtime_path("lennette-shortcut.sock")
+    runtime_path("nixarchy-meetingai-shortcut.sock")
 }
 
 /// Path of the exclusive launch lock held by the running instance.
 pub fn instance_lock_path() -> Option<std::path::PathBuf> {
-    runtime_path("lennette-instance.lock")
+    runtime_path("nixarchy-meetingai-instance.lock")
 }
 
 fn runtime_path(name: &str) -> Option<std::path::PathBuf> {
     #[cfg(unix)]
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)?;
     #[cfg(windows)]
-    let runtime = directories::ProjectDirs::from("dev", "lennette", "lennette")?
+    let runtime = directories::ProjectDirs::from("dev", "nixarchy", "nixarchy-meetingai")?
         .data_local_dir()
         .join("runtime");
     std::fs::create_dir_all(&runtime).ok()?;
@@ -195,7 +195,7 @@ fn send(command: &str) -> Result<(), String> {
 
     let path = control_socket().ok_or("XDG_RUNTIME_DIR is not set")?;
     let mut stream = UnixStream::connect(&path)
-        .map_err(|_| "no running lennette instance was found".to_owned())?;
+        .map_err(|_| "no running nixarchy-meetingai instance was found".to_owned())?;
     let payload = if command.ends_with('\n') {
         command.to_owned()
     } else {
@@ -221,7 +221,7 @@ fn send(command: &str) -> Result<(), String> {
             {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            Err(_) => return Err("no running lennette instance was found".to_owned()),
+            Err(_) => return Err("no running nixarchy-meetingai instance was found".to_owned()),
         }
     };
     writeln!(pipe, "{command}").map_err(|error| error.to_string())
@@ -248,14 +248,14 @@ mod tests {
         // The function reads the environment, so only assert its shape when set.
         if control_socket().is_some() {
             let path = control_socket().unwrap();
-            assert!(path.ends_with("lennette-shortcut.sock"));
+            assert!(path.ends_with("nixarchy-meetingai-shortcut.sock"));
         }
     }
 
     #[test]
     fn instance_lock_exists_in_the_runtime_dir() {
         if let Some(path) = instance_lock_path() {
-            assert!(path.ends_with("lennette-instance.lock"));
+            assert!(path.ends_with("nixarchy-meetingai-instance.lock"));
         }
     }
 
@@ -264,7 +264,7 @@ mod tests {
         // Use a private lock file: the developer's own running app legitimately
         // holds the real one, and the test must not depend on that.
         let path = std::env::temp_dir().join(format!(
-            "lennette-lock-test-{}-{:?}",
+            "nixarchy-meetingai-lock-test-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

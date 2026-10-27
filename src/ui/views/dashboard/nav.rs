@@ -68,7 +68,7 @@ pub const NAV_ITEMS: &[NavItem] = &[
         route: Route::About,
         label: "About",
         icon: Icon::Info,
-        description: "What Lennette does and where to find the project.",
+        description: "What nixarchy-meetingai does and where to find the project.",
     },
 ];
 
@@ -88,7 +88,7 @@ impl Route {
             Route::Audio => "Audio & Speech",
             Route::Shortcuts => "Cursor & Shortcuts",
             Route::DevSpace => "AI Models & Keys",
-            Route::About => "About Lennette",
+            Route::About => "About nixarchy-meetingai",
             Route::Profiles => "Context profiles",
             Route::Responses => "Response settings",
         }

@@ -1,5 +1,5 @@
 //! Deterministic delayed-provider tests; no external keys or paid requests.
-use lennette::{
+use nixarchy_meetingai::{
     ai::{
         engine::{self, TurnContext},
         providers::ProviderConfig,

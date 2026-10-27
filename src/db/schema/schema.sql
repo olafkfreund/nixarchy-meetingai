@@ -1,4 +1,4 @@
--- Lennette local database.
+-- nixarchy-meetingai local database.
 --
 -- Conversations, messages, live-session transcripts, the document library and
 -- shared app settings. Triggers keep conversation timestamps in step with the
