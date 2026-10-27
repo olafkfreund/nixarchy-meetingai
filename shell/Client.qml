@@ -76,6 +76,11 @@ Item {
 
     function onEvent(ev) {
         switch (ev.event) {
+        case "settings": root.settings = ev.settings || ({}); break;
+        case "session.reset": lines.clear(); root.answering = false; root.suggestions = []; break;
+        case "history":
+            for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(String(ev.rows[h].who), "", String(ev.rows[h].text), false);
+            break;
         case "state": root.state = Object.assign({}, root.state, ev); break;
         case "transcript.partial": root.pushLine(ev, true); break;
         case "transcript.final": root.pushLine(ev, false); break;
@@ -101,6 +106,7 @@ Item {
         var cb = root.pending[msg.id];
         if (!cb) return;
         delete root.pending[msg.id];
+        if (msg.ok === false) { root.answering = false; root.addRow("error", "", String(msg.error || "request failed"), false); }
         cb(msg);
     }
 

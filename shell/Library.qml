@@ -205,6 +205,8 @@ Item {
                 Button {
                     text: "Set key"
                     visible: keyField.visible
+                    enabled: keyField.text !== ""
+                    opacity: enabled ? 1 : 0.5
                     onClicked: { root.client.send("settings.set", { key: "api_key", provider: prow.modelData.id, value: keyField.text }); keyField.text = ""; root.load(); }
                 }
                 Button {

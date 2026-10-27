@@ -49,6 +49,9 @@ class Handler(socketserver.StreamRequestHandler):
 
     def stream(self):
         time.sleep(0.3)
+        self.send({"event": "settings", "settings": settings})
+        self.send({"event": "session.reset"})
+        self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})
         self.send({"event": "transcript.final", "who": "system", "speaker": "Alex", "text": "What is the plan?", "t0": 0, "t1": 2})
         self.send({"event": "transcript.partial", "who": "mic", "speaker": "", "text": "We should", "t0": 2, "t1": 3})
         for who, speaker, text in [
@@ -73,6 +76,12 @@ class Handler(socketserver.StreamRequestHandler):
                 state["recording"] = False
             data = state if cmd == "state.get" else settings if cmd == "settings.get" else DATA.get(cmd, {})
             self.send({"id": req["id"], "ok": True, "data": data})
+            if cmd == "settings.set":
+                settings[req["args"]["key"]] = req["args"]["value"]
+                self.send({"event": "settings", "settings": settings})
+            elif cmd == "session.restore":
+                self.send({"event": "session.reset"})
+                self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})
             if cmd == "state.get":
                 threading.Thread(target=self.stream, daemon=True).start()
 

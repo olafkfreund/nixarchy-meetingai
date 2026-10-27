@@ -121,7 +121,7 @@ Item {
                         label: "Provider"
                         value: String(daemon.settings.chat_provider || "")
                         options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
-                        onChanged: function(v) { daemon.setSetting("chat_provider", v); root.loadModels(); }
+                        onChanged: function(v) { daemon.setSetting("chat_provider", v); daemon.setSetting("chat_model", ""); root.loadModels(); }
                     }
                     SearchableDropdown {   // typing filters the list
                         id: modelBox
@@ -207,7 +207,7 @@ Item {
                         textFormat: who === "answer" ? Text.MarkdownText : Text.PlainText
                         wrapMode: Text.Wrap
                         horizontalAlignment: who === "mic" ? Text.AlignRight : Text.AlignLeft
-                        text: who === "answer" || who === "error" ? body
+                        text: who === "answer" || who === "error" || who === "question" ? body
                             : (speaker !== "" ? speaker + ": " : (who === "mic" ? "You: " : "")) + body
                         color: who === "mic" ? Commons.Color.accent
                             : who === "error" ? Commons.Color.urgent
