@@ -31,11 +31,12 @@ Item {
     // The reply goes to cb({ok, data, error}); cb may be omitted.
     function send(cmd, args, cb) {
         if (!sock.connected) {
-            if (cb) cb({ ok: false, error: "daemon not running" });
+            var down = { ok: false, error: "daemon not running" };
+            if (cb) cb(down); else root.failed(down);
             return;
         }
         root.seq += 1;
-        if (cb) root.pending[root.seq] = cb;
+        root.pending[root.seq] = cb || null;
         sock.write(JSON.stringify({ id: root.seq, cmd: cmd, args: args || {} }) + "\n");
         sock.flush();
     }
@@ -99,15 +100,20 @@ Item {
         }
     }
 
+    function failed(msg) {
+        root.answering = false;
+        root.addRow("error", "", String(msg.error || "request failed"), false);
+    }
+
     function onLine(data) {
         var msg;
         try { msg = JSON.parse(data); } catch (e) { return; }
         if (msg.event !== undefined) { root.onEvent(msg); return; }
+        if (!(msg.id in root.pending)) return;
         var cb = root.pending[msg.id];
-        if (!cb) return;
         delete root.pending[msg.id];
-        if (msg.ok === false) { root.answering = false; root.addRow("error", "", String(msg.error || "request failed"), false); }
-        cb(msg);
+        // A caller with a callback shows its own error; otherwise surface it here.
+        if (cb) cb(msg); else if (msg.ok === false) root.failed(msg);
     }
 
     Socket {

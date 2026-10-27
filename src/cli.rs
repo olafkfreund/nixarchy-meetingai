@@ -172,10 +172,15 @@ mod tests {
         );
         drop(first);
         // Releasing returns the slot, so the app can start again after quitting.
-        assert!(
-            InstanceLock::acquire_at(&path).is_some(),
-            "the slot should be reusable"
-        );
+        // Other tests fork children in parallel; a child briefly holds a copy of
+        // the lock fd until its exec closes it, so allow that window to pass.
+        let reacquired = (0..100).any(|_| {
+            InstanceLock::acquire_at(&path).is_some() || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }
+        });
+        assert!(reacquired, "the slot should be reusable");
         let _ = std::fs::remove_file(&path);
     }
 
