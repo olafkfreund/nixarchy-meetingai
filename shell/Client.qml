@@ -77,7 +77,8 @@ Item {
     }
 
     function refreshCand() {
-        var id = root.shownCandidate;
+        // Not shownCandidate: inside onCurrentCandidateChanged that binding can still hold the old value.
+        var id = root.viewId !== "" ? root.viewId : root.currentCandidate;
         if (id === "") { root.cand = null; return; }
         root.send("candidate.get", { id: id }, function(r) { if (r.ok) root.cand = r.data; else if (id === root.viewId) { root.viewId = ""; root.refreshCand(); } });
     }
