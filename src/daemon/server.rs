@@ -88,10 +88,15 @@ async fn client(stream: UnixStream, daemon: Arc<Daemon>) {
             }
         };
         // In order on this connection; events still stream through `forward`.
+        let provider = (request.cmd == "models.list")
+            .then(|| request.args.get("provider").cloned())
+            .flatten();
         let result = daemon
             .handle(&request.cmd, request.args, request.origin.as_deref())
             .await;
-        let _ = out.send(protocol::reply(&request.id, result)).await;
+        let _ = out
+            .send(protocol::reply_for(&request.id, result, provider))
+            .await;
     }
     forward.abort();
     writer.abort();

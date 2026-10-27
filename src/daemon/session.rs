@@ -245,6 +245,8 @@ pub struct Daemon {
     chunking: AtomicBool,
     /// The session's candidate is local-only: only ollama and whisper-local may be used.
     local_only: AtomicBool,
+    /// Shown to the first client that connects, then cleared.
+    startup_notice: Mutex<Option<String>>,
     /// Serializes rolling-notes chunking and recap generation (no duplicate chunks).
     notes: tokio::sync::Mutex<()>,
     inner: Mutex<Inner>,
@@ -455,7 +457,7 @@ fn stays_local(config: &ProviderConfig) -> bool {
                         .parse::<std::net::IpAddr>()
                         .is_ok_and(|ip| ip.is_loopback())
             });
-    loopback && !config.model.to_lowercase().ends_with("-cloud")
+    loopback && config.id != "ollama-cloud" && !config.model.to_lowercase().ends_with("-cloud")
 }
 
 /// Loopback ollama: the one provider that may sit silent while a cold model loads.
@@ -464,7 +466,7 @@ fn loopback_ollama(config: &ProviderConfig) -> bool {
 }
 
 /// The Gemini API provider was replaced by `agy-sub`: move the settings over and delete its key.
-fn migrate_gemini(db: &Database, vault: &Vault) {
+fn migrate_gemini(db: &Database, vault: &Vault) -> Option<String> {
     for key in ["chat_provider", "live_provider"] {
         if crate::db::settings::get(db.connection(), key)
             .ok()
@@ -481,10 +483,11 @@ fn migrate_gemini(db: &Database, vault: &Vault) {
         .is_some()
         && credentials::remove(vault, Kind::Chat, "gemini").is_ok()
     {
-        tracing::warn!(
-            "removed the stored Gemini API key; Gemini now runs through Antigravity (agy-sub)"
-        );
+        let notice = "Removed the stored Gemini API key; Gemini now runs through Antigravity (sign in with `agy`).";
+        tracing::warn!("{notice}");
+        return Some(notice.to_owned());
     }
+    None
 }
 
 /// Lowercase with whitespace runs as one space; a soft hyphen (and the line break after it) vanishes.
@@ -573,7 +576,7 @@ impl Daemon {
         crate::core::install_tls_provider();
         let vault = Vault::open(&options.vault_dir).map_err(|e| e.to_string())?;
         let db = Database::open(&options.db_path).map_err(|e| e.to_string())?;
-        migrate_gemini(&db, &vault);
+        let startup_notice = migrate_gemini(&db, &vault);
         let settings = Settings::load(&db).unwrap_or_default();
         let active_profile_id = profiles::selected(db.connection())
             .ok()
@@ -588,6 +591,7 @@ impl Daemon {
             shutdown: Notify::new(),
             chunking: AtomicBool::new(false),
             local_only: AtomicBool::new(false),
+            startup_notice: Mutex::new(startup_notice),
             notes: tokio::sync::Mutex::new(()),
             inner: Mutex::new(Inner {
                 db,
@@ -637,7 +641,11 @@ impl Daemon {
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
-        self.tx.subscribe()
+        let receiver = self.tx.subscribe();
+        if let Some(text) = self.startup_notice.lock().take() {
+            self.emit("notice", json!({"text": text}));
+        }
+        receiver
     }
 
     fn emit(&self, name: &str, fields: Value) {
@@ -711,11 +719,15 @@ impl Daemon {
         let mut config = match credentials::load(&self.vault, Kind::Chat, id) {
             Ok(Some(c)) => c.to_config(),
             _ => ChatProvider::by_id(id)
-                .filter(|p| !p.requires_key)
+                .filter(|p| !p.requires_key || p.id == "ollama-cloud")
                 .map(|_| {
                     ProviderConfig::new(id, "", models::default_for(id).unwrap_or_default())
                 })?,
         };
+        if id == "ollama-cloud" && config.api_key.trim().is_empty() {
+            // The service environment is the other place the key may live; never logged.
+            config.api_key = std::env::var("OLLAMA_API_KEY").unwrap_or_default();
+        }
         if !model.is_empty() {
             config.model = model.to_owned();
         }
@@ -2374,7 +2386,8 @@ impl Daemon {
                 let has_key = credentials::load(&self.vault, Kind::Chat, p.id)
                     .ok()
                     .flatten()
-                    .is_some_and(|c| !c.api_key.trim().is_empty());
+                    .is_some_and(|c| !c.api_key.trim().is_empty())
+                    || (p.id == "ollama-cloud" && std::env::var_os("OLLAMA_API_KEY").is_some());
                 json!({"id": p.id, "name": p.name, "requires_key": p.requires_key, "has_key": has_key})
             })
             .collect()
@@ -3230,7 +3243,13 @@ mod routing_tests {
         let plan = plan_chain("claude-sub", "sonnet", false, |_| true);
         assert_eq!(
             ids(plan.clone()),
-            ["claude-sub", "agy-sub", "codex-sub", "ollama"]
+            [
+                "claude-sub",
+                "agy-sub",
+                "codex-sub",
+                "ollama-cloud",
+                "ollama"
+            ]
         );
         assert_eq!(plan[0].1, "sonnet");
         assert_eq!(plan[1].1, "");
@@ -3420,7 +3439,7 @@ mod routing_tests {
     #[test]
     fn live_never_uses_codex_or_agy() {
         let plan = plan_chain("claude-sub", "haiku", true, |_| true);
-        assert_eq!(ids(plan.clone()), ["claude-sub", "ollama"]);
+        assert_eq!(ids(plan.clone()), ["claude-sub", "ollama-cloud", "ollama"]);
         assert_eq!(plan[0].1, "haiku");
         // Even when codex is chosen for live, it is skipped.
         assert!(!ids(plan_chain("codex-sub", "", true, |_| true)).contains(&"codex-sub"));
@@ -3429,7 +3448,10 @@ mod routing_tests {
     #[test]
     fn missing_binary_falls_through_and_ollama_stays_last_automatically() {
         let plan = plan_chain("claude-sub", "sonnet", false, |id| id != "claude-sub");
-        assert_eq!(ids(plan), ["agy-sub", "codex-sub", "ollama"]);
+        assert_eq!(
+            ids(plan),
+            ["agy-sub", "codex-sub", "ollama-cloud", "ollama"]
+        );
         let plan = plan_chain("claude-sub", "", false, |id| id == "ollama");
         assert_eq!(ids(plan), ["ollama"]);
         // An explicit ollama is kept first.
@@ -3527,6 +3549,11 @@ mod command_tests {
             ("agy-sub", "agy-sub")
         );
         assert!(vault.get("provider:chat:gemini").unwrap().is_none());
+        // The first subscriber is told once.
+        let mut first = d.subscribe();
+        assert_eq!(first.try_recv().unwrap()["event"], "notice");
+        let _second = d.subscribe();
+        assert!(first.try_recv().is_err());
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -3892,6 +3919,9 @@ mod command_tests {
             assert!(!stays_local(&cfg(bad, "llama3")), "{bad}");
         }
         assert!(!stays_local(&cfg("", "gpt-oss:120b-cloud")));
+        let mut cloud = cfg("", "gpt-oss:120b");
+        cloud.id = "ollama-cloud".into();
+        assert!(!stays_local(&cloud));
     }
 
     #[test]

@@ -225,6 +225,37 @@ pub async fn agy_models() -> Result<Vec<String>, String> {
     Ok(models)
 }
 
+/// Models codex offers: the listed entries of `codex debug models`, `default` first.
+pub async fn codex_models() -> Result<Vec<String>, String> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        Command::new("codex")
+            .args(["debug", "models"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| "`codex debug models` timed out".to_owned())?
+    .map_err(|e| format!("could not run `codex debug models`: {e}"))?;
+    parse_codex_models(&output.stdout)
+}
+
+fn parse_codex_models(json: &[u8]) -> Result<Vec<String>, String> {
+    let value: Value = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+    let mut models = vec![CLI_DEFAULT_MODEL.to_owned()];
+    for row in value["models"].as_array().into_iter().flatten() {
+        if let Some(slug) = row["slug"].as_str().filter(|s| {
+            row["visibility"] == "list" && !s.starts_with('-') && !models.iter().any(|m| m == s)
+        }) {
+            models.push(slug.to_owned());
+        }
+    }
+    if models.len() == 1 {
+        return Err("`codex debug models` listed no models".into());
+    }
+    Ok(models)
+}
+
 /// Codex argv; the prompt arrives on stdin (`-`).
 pub fn codex_args(model: &str, dir: &Path, images: &[std::path::PathBuf]) -> Vec<String> {
     let mut args: Vec<String> = [
@@ -560,6 +591,14 @@ mod tests {
         assert!(deltas.starts_with("Kubernetes is an open-source"));
         // The result carries the same text the deltas add up to.
         assert_eq!(events.last(), Some(&CliEvent::Done(Some(deltas))));
+    }
+
+    #[test]
+    fn codex_catalog_lists_visible_models_after_default() {
+        let json = br#"{"models":[{"slug":"a","visibility":"list"},{"slug":"hidden","visibility":"hide"},{"slug":"b","visibility":"list"},{"slug":"a","visibility":"list"}]}"#;
+        assert_eq!(parse_codex_models(json).unwrap(), ["default", "a", "b"]);
+        assert!(parse_codex_models(br#"{"models":[]}"#).is_err());
+        assert!(parse_codex_models(b"nope").is_err());
     }
 
     #[test]

@@ -187,3 +187,15 @@ None yet.
   daemon start (logged, not shown in the UI yet). Tests that used `gemini`
   as a keyed provider now use `ollama` with a mock base URL or a
   `custom-test` id; no built-in provider requires a key any more.
+- **Steps 2–3:** Ollama models are filtered by `/api/show` `completion`
+  (8 at a time, cached per run; models without capabilities or whose show
+  fails are kept); the catalog cache key is now `v3`. Codex models come from
+  `codex debug models` (visibility `list`), with a static fallback.
+  `models.list` replies echo `provider` next to `ok`/`data` (data stays a
+  plain list). `ollama-cloud` uses the OpenAI-compatible wire at
+  `https://ollama.com/v1/chat/completions` (key from the vault or the
+  daemon's `OLLAMA_API_KEY`), sits before `ollama` in the typed and live
+  chains, and is never local; measured 0.4 s first token. Presets add
+  Together, LM Studio and vLLM (OpenRouter, Mistral, Groq, DeepSeek
+  existed); plain-http loopback presets use `auth: none`. The gemini-key
+  deletion notice goes to the first event subscriber only.

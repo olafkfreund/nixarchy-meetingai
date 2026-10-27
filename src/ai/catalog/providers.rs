@@ -55,6 +55,14 @@ pub const CHAT_PROVIDERS: &[ChatProvider] = &[
         requires_key: false,
     },
     ChatProvider {
+        id: "ollama-cloud",
+        name: "Ollama Cloud",
+        endpoint: "https://ollama.com/v1/chat/completions",
+        wire: ChatWire::OpenAi,
+        supports_images: true,
+        requires_key: true,
+    },
+    ChatProvider {
         id: "ollama",
         name: "Ollama (local)",
         endpoint: "http://127.0.0.1:11434/v1/chat/completions",
@@ -273,7 +281,13 @@ mod tests {
     fn only_current_providers_are_available() {
         assert_eq!(
             CHAT_PROVIDERS.iter().map(|p| p.id).collect::<Vec<_>>(),
-            ["claude-sub", "agy-sub", "codex-sub", "ollama"]
+            [
+                "claude-sub",
+                "agy-sub",
+                "codex-sub",
+                "ollama-cloud",
+                "ollama"
+            ]
         );
         assert_eq!(STT_PROVIDERS.len(), 2);
         let retired = ProviderConfig::new("openai", "k", "m");
