@@ -14,6 +14,7 @@ mkdir -p "$out" "$work/cfg"
 cp -rs "$tree"/* "$work/cfg/"
 rm -f "$work/cfg/shell.qml"
 for f in "$here"/*.qml; do ln -s "$f" "$work/cfg/$(basename "$f")"; done
+ln -s "$here/tests/geometry.js" "$work/cfg/geometry.js"
 ln -s "$here/tests/harness-$([ "$scenario" = r5 ] && echo r5 || echo live).qml" "$work/cfg/shell.qml"
 real_run=$XDG_RUNTIME_DIR
 export WAYLAND_DISPLAY=${XDG_RUNTIME_DIR:?}/${WAYLAND_DISPLAY:-wayland-1}
@@ -21,7 +22,7 @@ export XDG_RUNTIME_DIR="$work/run"
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/fake.log" $([ "$scenario" = r5 ] || echo --$scenario) --scale=$scale ${size:+--size=$size} &
 sleep 0.5
-timeout 30 quickshell -p "$work/cfg" 2> "$work/qs.err" &
+timeout 30 quickshell -p "$work/cfg" 2> "$work/qs.err" | tee "$work/qs.out" | grep -av "GEO {" &   # quickshell logs (console.log too) to stdout
 # Capture only the overlay card (it is centred on its full-screen layer on the
 # focused monitor): full-desktop frames would include whatever else is open.
 geom() {
@@ -56,5 +57,7 @@ for f in $frames; do
     grim -g "$g" "$out/crop-${f%:*}.png"
 done
 wait %2 || true
+# MEETINGAI_GEOMETRY=1: keep the geometry dumps for tests/check-geometry.py
+if [ "${MEETINGAI_GEOMETRY:-}" = 1 ]; then grep -a "GEO {" "$work/qs.out" > "$out/geometry.log" || true; fi
 if grep -E 'ERROR' "$work/qs.err"; then cat "$work/qs.err" >&2; exit 1; fi
 ls "$out"

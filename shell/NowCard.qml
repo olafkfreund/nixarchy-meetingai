@@ -11,38 +11,34 @@ Rectangle {
     id: root
 
     required property var daemon
-    required property real ts
-    required property real round
-    required property real padX
-    required property real padY
-    required property real leading
+    required property var theme
     required property string status
     required property var themedLinks
 
-    readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.implicitHeight + nowCol.spacing * 2 + root.padY * 2
+    readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.implicitHeight + nowCol.spacing * 2 + root.theme.padY * 2
 
-    radius: root.round
+    radius: root.theme.radius
     color: Qt.alpha(Commons.Color.accent, 0.12)
-    Rectangle { width: Style.space(4); height: parent.height - root.round; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
+    Rectangle { width: Style.space(4); height: parent.height - root.theme.radius; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
     Column {
         id: nowCol
-        x: root.padX; y: root.padY
-        width: parent.width - root.padX * 2
+        x: root.theme.padX; y: root.theme.padY
+        width: parent.width - root.theme.padX * 2
         spacing: Style.space(8)
         Row {
             id: nowHead
             spacing: Style.spacing.md
-            Text { textFormat: Text.PlainText; text: "Now"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-            Text { textFormat: Text.PlainText; text: root.status; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts }
-            Text {
+            UiText { textFormat: Text.PlainText; text: "Now"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
+            UiText { textFormat: Text.PlainText; text: root.status; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption }
+            UiText {
                 textFormat: Text.PlainText
                 visible: text !== ""
                 text: (root.daemon.now.provider + " " + root.daemon.now.model).trim()
                 color: Commons.Color.popups.text
-                font.pixelSize: Style.font.caption * root.ts
+                font.pixelSize: root.theme.caption
             }
         }
-        Text {
+        UiText {
             id: nowQ
             width: parent.width
             visible: root.daemon.now.question !== ""
@@ -52,18 +48,18 @@ Rectangle {
             elide: Text.ElideRight
             text: root.daemon.now.asker + " asked: " + root.daemon.now.question
             color: Commons.Color.popups.text
-            font.pixelSize: Style.font.body * root.ts
+            font.pixelSize: root.theme.body
             font.bold: true
         }
         Flickable {
             id: nowFlick
             width: parent.width
-            height: Math.max(0, Math.min(answerText.implicitHeight, root.height - nowHead.height - (nowQ.visible ? nowQ.implicitHeight : 0) - nowCol.spacing * 2 - root.padY * 2))
+            height: Math.max(0, Math.min(answerText.implicitHeight, root.height - nowHead.height - (nowQ.visible ? nowQ.implicitHeight : 0) - nowCol.spacing * 2 - root.theme.padY * 2))
             contentHeight: answerText.implicitHeight
             clip: true
             // Follow the tail while streaming; a finished answer is read from its top.
             Binding { target: nowFlick; property: "contentY"; value: root.daemon.answering ? Math.max(0, nowFlick.contentHeight - nowFlick.height) : 0; restoreMode: Binding.RestoreNone }
-            Text {
+            UiText {
                 id: answerText
                 width: parent.width
                 textFormat: Text.MarkdownText
@@ -71,8 +67,8 @@ Rectangle {
                 text: root.themedLinks(root.daemon.now.body)
                 color: Commons.Color.popups.text
                 linkColor: Commons.Color.accent
-                font.pixelSize: Style.font.subtitle * root.ts
-                lineHeight: root.leading
+                font.pixelSize: root.theme.subtitle
+                lineHeight: root.theme.leading
                 onLinkActivated: function(link) { Qt.openUrlExternally(link); }
             }
         }

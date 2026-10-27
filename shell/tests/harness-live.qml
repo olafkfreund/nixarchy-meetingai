@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Wayland
+import "geometry.js" as Geo
 
 // Overlay plus bar pill for tests/live-shots.sh, against fake-daemon.py --live.
 ShellRoot {
@@ -8,6 +9,7 @@ ShellRoot {
         id: overlay
         Component.onCompleted: overlay.open("{}")
     }
+    Timer { interval: 1500; repeat: true; running: Quickshell.env("MEETINGAI_GEOMETRY") === "1"; onTriggered: Geo.dump(overlay.geometryRoot(), overlay.ctl, "") }   // tests/check-geometry.py
     Timer { interval: 10000; running: true; onTriggered: overlay.lastOpen = true }   // team scenario: Last time drawer
     Timer { interval: 2000; running: overlay.iv; onTriggered: overlay.recordHook(false) }   // interviewer: the consent banner
     Timer { interval: 6000; running: overlay.iv; onTriggered: overlay.recordHook(true) }

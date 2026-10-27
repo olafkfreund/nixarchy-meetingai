@@ -12,12 +12,7 @@ Item {
     id: root
 
     required property var daemon
-    required property real ts
-    required property real round
-    required property real padX
-    required property real padY
-    required property real gap
-    required property real leading
+    required property var theme
     required property var themedLinks
     required property bool open
     signal toggled()
@@ -29,7 +24,7 @@ Item {
     Row {   // transcript toggle
         id: tbar
         anchors.top: parent.top
-        IconButton { ts: root.ts; iconText: root.open ? root.iDown : root.iRight; text: "Transcript"; tooltipText: root.open ? "Collapse the transcript" : "Expand the transcript"; onClicked: root.toggled() }
+        IconButton { ts: root.theme.ts; iconText: root.open ? root.iDown : root.iRight; text: "Transcript"; tooltipText: root.open ? "Collapse the transcript" : "Expand the transcript"; onClicked: root.toggled() }
     }
 
     Item {
@@ -38,14 +33,16 @@ Item {
         ListView {
             id: tlist
             anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
-            height: Math.min(contentHeight, parent.height)
+            // contentHeight is estimated from the delegates in view, which depend on height: read it one tick late
+            property real fitH: 0
+            height: Math.min(fitH, parent.height)
             clip: true
-            spacing: root.gap
+            spacing: root.theme.section
             model: root.daemon.transcript
             property bool follow: true
             // Exact bottom; positionViewAtEnd works from estimated delegate heights.
             function toEnd() { if (follow) contentY = originY + Math.max(0, contentHeight - height); }
-            onContentHeightChanged: Qt.callLater(toEnd)
+            onContentHeightChanged: Qt.callLater(function() { fitH = contentHeight; toEnd(); })
             onHeightChanged: Qt.callLater(toEnd)   // the NOW panel grows and shrinks the list
             onMovementEnded: follow = atYEnd
             delegate: Item {
@@ -66,17 +63,17 @@ Item {
                     id: bub
                     visible: row.bubble
                     x: row.mine ? row.width - width : 0
-                    width: Math.min(row.width * 0.8, Math.max(btxt.implicitWidth, blabel.implicitWidth) + root.padX * 2)
-                    height: bcol.implicitHeight + root.padY * 2
-                    radius: root.round
+                    width: Math.min(row.width * 0.8, Math.max(btxt.implicitWidth, blabel.implicitWidth) + root.theme.padX * 2)
+                    height: bcol.implicitHeight + root.theme.padY * 2
+                    radius: root.theme.radius
                     color: row.mine ? Qt.alpha(Commons.Color.accent, 0.22) : Qt.alpha(Commons.Color.foreground, 0.10)
                     Column {
                         id: bcol
-                        x: root.padX; y: root.padY
-                        width: parent.width - root.padX * 2
+                        x: root.theme.padX; y: root.theme.padY
+                        width: parent.width - root.theme.padX * 2
                         spacing: Style.space(4)
-                        Text { id: blabel; textFormat: Text.PlainText; text: row.label; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true }
-                        Text {
+                        UiText { id: blabel; textFormat: Text.PlainText; text: row.label; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true }
+                        UiText {
                             id: btxt
                             width: parent.width
                             textFormat: Text.PlainText
@@ -84,8 +81,8 @@ Item {
                             text: row.body
                             color: Commons.Color.popups.text
                             font.italic: row.partial
-                            font.pixelSize: Style.font.body * root.ts
-                            lineHeight: root.leading
+                            font.pixelSize: root.theme.body
+                            lineHeight: root.theme.leading
                         }
                     }
                 }
@@ -93,30 +90,30 @@ Item {
                     id: card2
                     visible: row.answer
                     width: parent.width
-                    height: ansCol.implicitHeight + root.padY * 2
-                    radius: root.round
+                    height: ansCol.implicitHeight + root.theme.padY * 2
+                    radius: root.theme.radius
                     color: Qt.alpha(Commons.Color.accent, 0.12)
-                    Rectangle { width: Style.space(4); height: parent.height - root.round; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
+                    Rectangle { width: Style.space(4); height: parent.height - root.theme.radius; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
                     Column {
                         id: ansCol
-                        x: root.padX; y: root.padY
-                        width: parent.width - root.padX * 2
+                        x: root.theme.padX; y: root.theme.padY
+                        width: parent.width - root.theme.padX * 2
                         spacing: Style.space(6)
-                        Text { textFormat: Text.PlainText; text: "Suggested answer"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
-                        Text {
+                        UiText { textFormat: Text.PlainText; text: "Suggested answer"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
+                        UiText {
                             width: parent.width
                             textFormat: Text.MarkdownText
                             wrapMode: Text.Wrap
                             text: root.themedLinks(row.body)
                             color: Commons.Color.popups.text
                             linkColor: Commons.Color.accent
-                            font.pixelSize: Style.font.body * root.ts
-                            lineHeight: root.leading
+                            font.pixelSize: root.theme.body
+                            lineHeight: root.theme.leading
                             onLinkActivated: function(link) { Qt.openUrlExternally(link); }
                         }
                     }
                 }
-                Text {
+                UiText {
                     id: err
                     visible: !row.answer && !row.bubble
                     width: parent.width
@@ -126,7 +123,7 @@ Item {
                     color: row.who === "error" ? Commons.Color.urgent : Commons.Color.popups.text
                     opacity: row.who === "notice" ? 0.6 : 1
                     font.italic: row.who === "notice"
-                    font.pixelSize: (row.who === "notice" ? Style.font.caption : Style.font.bodySmall) * root.ts
+                    font.pixelSize: (row.who === "notice" ? Style.font.caption : Style.font.bodySmall) * root.theme.ts
                 }
             }
         }

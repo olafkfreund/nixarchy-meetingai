@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 // ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 import QtQuick.Dialogs
 import qs.Commons
 import qs.Commons as Commons
@@ -14,7 +15,7 @@ Item {
     id: root
 
     required property var client
-    readonly property real ts: client.textScale
+    required property var theme
     property string tab: "restore"
     property string query: ""
     property var sessions: []
@@ -114,7 +115,7 @@ Item {
             spacing: Style.spacing.xs
             Repeater {
                 model: root.tabs
-                IconButton { ts: root.ts;
+                IconButton { ts: root.theme.ts;
                     required property string modelData
                     text: modelData.charAt(0).toUpperCase() + modelData.slice(1)
                     active: root.tab === modelData
@@ -125,7 +126,9 @@ Item {
 
         PanelSeparator {}
 
-        TextField {
+        Input {
+            objectName: "search"
+            ts: root.theme.ts
             width: parent.width
             placeholderText: "Search settings, chats, profiles"
             onTextChanged: { root.query = text; root.search(); }
@@ -137,28 +140,31 @@ Item {
             width: parent.width; height: parent.height - y - notesBox.height
             clip: true
             model: root.sessions.filter(function(s) { return root.match(s.title); })
-            delegate: Row {
+            delegate: RowLayout {
+                id: rrow
                 required property var modelData
                 width: ListView.view.width
-                spacing: Style.spacing.xs
-                Text {
-                    width: parent.width - Style.space(200)
+                height: root.theme.ctl + Style.spacing.xs
+                spacing: root.theme.gap
+                UiText {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
                     textFormat: Text.PlainText
                     elide: Text.ElideRight
-                    text: (parent.modelData.kind === "meeting" ? "Meeting · " : "Chat · ") + parent.modelData.title
+                    text: (rrow.modelData.kind === "meeting" ? "Meeting · " : "Chat · ") + rrow.modelData.title
                     color: Commons.Color.popups.text
-                    font.pixelSize: Style.font.body * root.ts
+                    font.pixelSize: root.theme.body
                 }
-                IconButton { ts: root.ts; text: "Restore"; onClicked: root.client.send("session.restore", { id: parent.modelData.id }) }
-                IconButton { ts: root.ts;
+                IconButton { objectName: "restore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Restore"; onClicked: root.client.send("session.restore", { id: rrow.modelData.id }) }
+                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
                     text: "Notes"
-                    visible: parent.modelData.kind === "meeting"
-                    onClicked: root.client.send("notes.get", { meeting: parent.modelData.id }, function(r) { root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; })
+                    visible: rrow.modelData.kind === "meeting"
+                    onClicked: root.client.send("notes.get", { meeting: rrow.modelData.id }, function(r) { root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; })
                 }
-                IconButton { ts: root.ts; text: "Delete"; onClicked: { root.client.send("session.delete", { id: parent.modelData.id }); root.load(); } }
+                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: { root.client.send("session.delete", { id: rrow.modelData.id }); root.load(); } }
             }
         }
-        Text {
+        UiText {
             id: notesBox
             visible: root.tab === "restore" && root.notes !== ""
             width: parent.width
@@ -168,27 +174,28 @@ Item {
             clip: true
             text: root.notes
             color: Commons.Color.popups.text
-            font.pixelSize: Style.font.body * root.ts
+            font.pixelSize: root.theme.body
         }
 
         component Field: TextArea {
             id: fld
             wrapMode: TextEdit.Wrap
             color: Commons.Color.popups.text
-            font.pixelSize: Style.font.body * root.ts
+            font.family: Style.font.family
+            font.pixelSize: root.theme.body
             background: BorderSurface {
                 color: Style.controlFill(fld.activeFocus, fld.hovered, Commons.Color.foreground, Commons.Color.accent)
                 borderSpec: Border.controlSpec(fld.activeFocus ? "focus" : (fld.hovered ? "hover-cursor" : "normal"), Commons.Color.foreground, Commons.Color.accent)
                 radius: Style.cornerRadius
             }
         }
-        component Hint: Text {
+        component Hint: UiText {
             width: parent.width
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             color: Commons.Color.popups.text
             opacity: 0.7
-            font.pixelSize: Style.font.caption * root.ts
+            font.pixelSize: root.theme.caption
         }
 
         Row {
@@ -196,7 +203,7 @@ Item {
             width: parent.width; height: parent.height - y
             spacing: Style.spacing.md
             Column {   // list + New
-                width: Math.max(Style.space(150), parent.width * 0.28); height: parent.height
+                width: Math.max(Style.space(150) * root.theme.ts, parent.width * 0.38); height: parent.height
                 spacing: Style.spacing.xs
                 ListView {
                     width: parent.width; height: Math.min(contentHeight, parent.height - newBtn.height - parent.spacing)   // New sits right under the list
@@ -204,14 +211,15 @@ Item {
                     model: root.profiles.filter(function(p) { return root.match(p.name); })
                     delegate: IconButton {
                         required property var modelData
-                        ts: root.ts
+                        ts: root.theme.ts
+                        leftAlign: true
                         width: ListView.view.width
                         text: modelData.name + (modelData.selected ? "  (in use)" : "")
                         active: root.cur && root.cur.name === modelData.name
                         onClicked: { root.selName = modelData.name; root.client.send("profiles.select", { name: modelData.name }, root.reload); }
                     }
                 }
-                IconButton { id: newBtn; ts: root.ts; text: "New"; onClicked: root.newProfile() }
+                IconButton { id: newBtn; ts: root.theme.ts; text: "New"; onClicked: root.newProfile() }
             }
             ScrollView {
                 id: editor
@@ -222,41 +230,43 @@ Item {
                 Column {
                     width: editor.availableWidth
                     spacing: Style.spacing.xs
-                    Row {
-                        spacing: Style.spacing.xs
-                        TextField { id: nameField; width: Style.space(200) }
-                        IconButton { ts: root.ts; text: "Rename"; enabled: root.cur !== null && nameField.text.trim() !== "" && nameField.text !== root.cur.name; opacity: enabled ? 1 : 0.5
+                    RowLayout {
+                        width: parent.width
+                        spacing: root.theme.gap
+                        Input { id: nameField; objectName: "profileName"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter }
+                        IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Rename"; enabled: root.cur !== null && nameField.text.trim() !== "" && nameField.text !== root.cur.name; opacity: enabled ? 1 : 0.5
                             onClicked: { var n = nameField.text.trim(), o = root.cur.name; root.selName = n; root.client.send("profiles.rename", { name: o, new_name: n }, root.reload); } }
-                        IconButton { ts: root.ts; text: "Delete"; onClicked: { root.client.send("profiles.delete", { name: root.cur.name }, root.reload); root.selName = ""; } }
+                        IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: { root.client.send("profiles.delete", { name: root.cur.name }, root.reload); root.selName = ""; } }
                     }
-                    Text { textFormat: Text.PlainText; text: "About me"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: Style.font.body * root.ts }
+                    UiText { textFormat: Text.PlainText; text: "About me"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
                     Hint { text: "Your role and experience; used in every answer." }
                     Field { id: aboutText; width: parent.width; height: Style.space(64) }
-                    Text { textFormat: Text.PlainText; text: "Meeting brief"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: Style.font.body * root.ts }
+                    UiText { textFormat: Text.PlainText; text: "Meeting brief"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
                     Hint { text: "What this meeting is about (role, company, agenda)." }
                     Field { id: briefText; width: parent.width; height: Style.space(64) }
-                    IconButton { ts: root.ts; text: "Save"; onClicked: root.saveProfile() }
-                    Text { textFormat: Text.PlainText; text: "Documents"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: Style.font.body * root.ts; topPadding: Style.spacing.xs }
+                    IconButton { ts: root.theme.ts; text: "Save"; onClicked: root.saveProfile() }
+                    UiText { textFormat: Text.PlainText; text: "Documents"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body; topPadding: Style.spacing.xs }
                     Hint { text: "CV, job description, runbooks (PDF, text, markdown). Newest first in the prompt." }
                     Repeater {
                         model: root.cur ? (root.cur.documents || []) : []
-                        Row {
+                        RowLayout {
                             id: drow
                             required property var modelData
-                            spacing: Style.spacing.xs
-                            Text {
-                                width: editor.availableWidth - Style.space(110)
-                                anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width
+                            spacing: root.theme.gap
+                            UiText {
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignVCenter
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
                                 text: drow.modelData.name + "  ·  " + drow.modelData.chars + " chars"
                                 color: Commons.Color.popups.text
-                                font.pixelSize: Style.font.body * root.ts
+                                font.pixelSize: root.theme.body
                             }
-                            IconButton { ts: root.ts; text: "Remove"; onClicked: root.client.send("profiles.detach", { name: root.cur.name, id: drow.modelData.id }, root.reload) }
+                            IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Remove"; onClicked: root.client.send("profiles.detach", { name: root.cur.name, id: drow.modelData.id }, root.reload) }
                         }
                     }
-                    IconButton { ts: root.ts; text: "Attach"; onClicked: attachDialog.open() }
+                    IconButton { ts: root.theme.ts; text: "Attach"; onClicked: attachDialog.open() }
                 }
             }
             FileDialog {
@@ -279,16 +289,20 @@ Item {
             Column {
                 width: candView.availableWidth
                 spacing: Style.spacing.xs
-                Row {
-                    spacing: Style.spacing.xs
+                UiText { textFormat: Text.PlainText; text: "Candidate"; color: Qt.darker(Commons.Color.popups.text, 1.4); font.bold: true; font.pixelSize: root.theme.caption }
+                RowLayout {
+                    width: parent.width
+                    spacing: root.theme.gap
                     Dropdown {
-                        label: "Candidate"
+                        objectName: "candidatePick"
+                        showLabel: false; rowHeight: root.theme.ctl
+                        Layout.fillWidth: true; Layout.preferredHeight: root.theme.ctl; Layout.alignment: Qt.AlignVCenter
                         value: String(root.client.shownCandidate)
                         options: root.client.candidates.map(function(c) { return { value: c.id, label: (c.name || "Unnamed") + (c.meeting_id ? " (interviewed)" : " (new)") }; })
                         onChanged: function(v) { root.pickCandidate(v, root.client.candidates.some(function(c) { return c.id === v && !c.meeting_id; })); }
                     }
-                    TextField { id: newCand; anchors.bottom: parent.bottom; width: Style.space(180); placeholderText: "Candidate name" }
-                    IconButton { ts: root.ts; anchors.bottom: parent.bottom; text: "New"; bordered: true; enabled: newCand.text.trim() !== ""; opacity: enabled ? 1 : 0.5
+                    Input { id: newCand; objectName: "candidateName"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; placeholderText: "Candidate name" }
+                    IconButton { objectName: "candidateNew"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "New"; bordered: true; enabled: newCand.text.trim() !== ""; opacity: enabled ? 1 : 0.5
                         onClicked: root.client.send("candidate.create", { name: newCand.text.trim() }, function(r) { root.fail(r); if (!r.ok) return; newCand.text = ""; root.client.refreshCandidates(); root.pickCandidate(r.data.id, true); }) }
                 }
                 Hint { visible: root.cand === null; text: "Pick or create a candidate to prepare the interview. Their data stays in this interview only." }
@@ -302,42 +316,45 @@ Item {
                     opacity: enabled ? 1 : 0.6
                     width: parent.width
                     spacing: Style.spacing.xs
-                    Row {
-                        spacing: Style.spacing.xs
-                        ToggleSwitch { id: lo; anchors.verticalCenter: parent.verticalCenter; checked: root.cand !== null && root.cand.candidate.local_only === true; onToggled: root.client.send("candidate.local_only", { id: root.cand.candidate.id, on: !checked }, function(r) { root.fail(r); root.client.refreshCand(); }) }
-                        Text { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "Local-only: speech-to-text and models stay on this machine"; color: Commons.Color.popups.text; font.pixelSize: Style.font.body * root.ts }
+                    RowLayout {
+                        width: parent.width
+                        spacing: root.theme.gap
+                        ToggleSwitch { id: lo; objectName: "localOnly"; Layout.alignment: Qt.AlignVCenter; checked: root.cand !== null && root.cand.candidate.local_only === true; onToggled: root.client.send("candidate.local_only", { id: root.cand.candidate.id, on: !checked }, function(r) { root.fail(r); root.client.refreshCand(); }) }
+                        UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; wrapMode: Text.Wrap; textFormat: Text.PlainText; text: "Local-only: speech-to-text and models stay on this machine"; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
                     }
-                    Text { textFormat: Text.PlainText; text: "Documents"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: Style.font.body * root.ts; topPadding: Style.spacing.xs }
+                    UiText { textFormat: Text.PlainText; text: "Documents"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body; topPadding: Style.spacing.xs }
                     Repeater {
                         model: root.cand ? root.cand.documents : []
-                        Text {
+                        UiText {
                             required property var modelData
                             width: parent.width
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                             text: modelData.kind.toUpperCase() + "  ·  " + modelData.name + "  ·  " + modelData.chars + " chars"
                             color: Commons.Color.popups.text
-                            font.pixelSize: Style.font.body * root.ts
+                            font.pixelSize: root.theme.body
                         }
                     }
                     Repeater {
                         model: [{ kind: "cv", title: "CV" }, { kind: "job", title: "Job description" }]
-                        Item {
+                        RowLayout {
                             id: arow
                             required property var modelData
-                            width: parent.width; height: Math.max(Style.spacing.controlHeight, abtn.implicitHeight)
-                            TextField { id: apath; anchors.left: parent.left; anchors.right: abtn.left; anchors.rightMargin: Style.spacing.xs; placeholderText: arow.modelData.title + " file path" }
-                            IconButton { id: abtn; anchors.right: parent.right; ts: root.ts; text: "Attach"; bordered: true; tooltipText: "Attach the " + arow.modelData.title; enabled: apath.text.trim() !== ""; opacity: enabled ? 1 : 0.5
+                            width: parent.width
+                            spacing: root.theme.gap
+                            Input { id: apath; objectName: "attachPath"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; placeholderText: arow.modelData.title + " file path" }
+                            IconButton { id: abtn; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Attach"; bordered: true; tooltipText: "Attach the " + arow.modelData.title; enabled: apath.text.trim() !== ""; opacity: enabled ? 1 : 0.5
                                 onClicked: root.client.send("candidate.attach", { id: root.cand.candidate.id, kind: arow.modelData.kind, path: apath.text.trim() }, function(r) { root.fail(r); if (r.ok) { apath.text = ""; root.client.refreshCand(); } }) }
                         }
                     }
-                    Row {
-                        spacing: Style.spacing.md
-                        IconButton { ts: root.ts; text: "Generate question bank"; bordered: true
+                    RowLayout {
+                        width: parent.width
+                        spacing: root.theme.gap
+                        IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Generate question bank"; bordered: true
                             onClicked: { root.genNote = "Generating..."; root.client.send("questions.generate", { candidate: root.cand.candidate.id }, function(r) { root.fail(r); root.genNote = r.ok && r.data.dropped > 0 ? r.data.dropped + " dropped (source not in documents)" : ""; root.client.refreshCand(); }); } }
-                        Text { anchors.verticalCenter: parent.verticalCenter; visible: root.genNote !== ""; textFormat: Text.PlainText; text: root.genNote; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: Style.font.caption * root.ts }
+                        UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; wrapMode: Text.Wrap; visible: root.genNote !== ""; textFormat: Text.PlainText; text: root.genNote; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: root.theme.caption }
                     }
-                    Text { textFormat: Text.PlainText; text: "Questions"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: Style.font.body * root.ts; topPadding: Style.spacing.xs }
+                    UiText { textFormat: Text.PlainText; text: "Questions"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body; topPadding: Style.spacing.xs }
                     Repeater {
                         model: root.cand ? root.cand.questions : []
                         Column {
@@ -346,29 +363,27 @@ Item {
                             required property int index
                             width: parent.width
                             spacing: Style.space(2)
-                            Item {
-                                width: parent.width; height: Style.spacing.controlHeight
-                                Row {
-                                    id: qbtns
-                                    anchors.right: parent.right
-                                    IconButton { ts: root.ts; iconText: String.fromCodePoint(0xf0143); enabled: qr.index > 0; opacity: enabled ? 1 : 0.4; tooltipText: "Move up"; onClicked: root.moveQuestion(qr.index, -1) }
-                                    IconButton { ts: root.ts; iconText: String.fromCodePoint(0xf0140); enabled: qr.index < root.cand.questions.length - 1; opacity: enabled ? 1 : 0.4; tooltipText: "Move down"; onClicked: root.moveQuestion(qr.index, 1) }
-                                    IconButton { ts: root.ts; iconText: String.fromCodePoint(0xf0156); tooltipText: "Delete question"; onClicked: root.client.send("questions.delete", { id: qr.modelData.id }, function(r) { root.fail(r); root.client.refreshCand(); }) }
-                                }
-                                TextField { id: qcomp; anchors.right: qbtns.left; anchors.rightMargin: Style.spacing.xs; width: Style.space(130); placeholderText: "Competency"; text: String(qr.modelData.competency || ""); onEditingFinished: { if (text !== String(qr.modelData.competency || "")) root.client.send("questions.update", { id: qr.modelData.id, competency: text }); } }
-                                TextField { anchors.left: parent.left; anchors.right: qcomp.left; anchors.rightMargin: Style.spacing.xs; text: qr.modelData.text; onEditingFinished: { if (text.trim() !== "" && text !== qr.modelData.text) root.client.send("questions.update", { id: qr.modelData.id, text: text.trim() }); } }
+                            RowLayout {
+                                width: parent.width
+                                spacing: root.theme.gap
+                                Input { objectName: "questionText"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; text: qr.modelData.text; onEditingFinished: { if (text.trim() !== "" && text !== qr.modelData.text) root.client.send("questions.update", { id: qr.modelData.id, text: text.trim() }); } }
+                                Input { id: qcomp; objectName: "questionCompetency"; ts: root.theme.ts; Layout.preferredWidth: Math.round(Style.space(170) * root.theme.ts); Layout.alignment: Qt.AlignVCenter; placeholderText: "Competency"; text: String(qr.modelData.competency || ""); onEditingFinished: { if (text !== String(qr.modelData.competency || "")) root.client.send("questions.update", { id: qr.modelData.id, competency: text }); } }
+                                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; iconText: String.fromCodePoint(0xf0143); enabled: qr.index > 0; opacity: enabled ? 1 : 0.4; tooltipText: "Move up"; onClicked: root.moveQuestion(qr.index, -1) }
+                                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; iconText: String.fromCodePoint(0xf0140); enabled: qr.index < root.cand.questions.length - 1; opacity: enabled ? 1 : 0.4; tooltipText: "Move down"; onClicked: root.moveQuestion(qr.index, 1) }
+                                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; iconText: String.fromCodePoint(0xf0156); tooltipText: "Delete question"; onClicked: root.client.send("questions.delete", { id: qr.modelData.id }, function(r) { root.fail(r); root.client.refreshCand(); }) }
                             }
                             Hint { text: "\u201c" + String(qr.modelData.source || "") + "\u201d"; font.italic: true }
                         }
                     }
-                    Item {
-                        width: parent.width; height: Math.max(Style.spacing.controlHeight, addBtn.implicitHeight)
-                        TextField { id: addQ; anchors.left: parent.left; anchors.right: addBtn.left; anchors.rightMargin: Style.spacing.xs; placeholderText: "Add a question" }
-                        IconButton { id: addBtn; anchors.right: parent.right; ts: root.ts; text: "Add"; bordered: true; enabled: addQ.text.trim() !== ""; opacity: enabled ? 1 : 0.5
+                    RowLayout {
+                        width: parent.width
+                        spacing: root.theme.gap
+                        Input { id: addQ; objectName: "addQuestion"; ts: root.theme.ts; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; placeholderText: "Add a question" }
+                        IconButton { id: addBtn; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Add"; bordered: true; enabled: addQ.text.trim() !== ""; opacity: enabled ? 1 : 0.5
                             onClicked: root.client.send("questions.add", { candidate: root.cand.candidate.id, text: addQ.text.trim() }, function(r) { root.fail(r); if (r.ok) { addQ.text = ""; root.client.refreshCand(); } }) }
                     }
                   }
-                    IconButton { ts: root.ts; text: root.confirmDelete ? "Click again to delete" : "Delete candidate data"; bordered: true; active: root.confirmDelete
+                    IconButton { ts: root.theme.ts; text: root.confirmDelete ? "Click again to delete" : "Delete candidate data"; bordered: true; active: root.confirmDelete
                         tooltipText: "Removes the candidate, documents, questions and the linked meeting"
                         onClicked: {
                             if (!root.confirmDelete) { root.confirmDelete = true; return; }
@@ -384,15 +399,16 @@ Item {
             visible: root.tab === "prompts"
             width: parent.width; height: parent.height - y
             spacing: Style.spacing.xs
-            Row {
+            Flow {
+                width: parent.width
                 spacing: Style.spacing.xs
                 Repeater {
                     model: ["general", "interview", "team_meeting", "interviewer"]
-                    IconButton { ts: root.ts; required property string modelData; text: modelData === "team_meeting" ? "Team" : modelData; active: root.promptMode === modelData; onClicked: root.promptMode = modelData }
+                    IconButton { ts: root.theme.ts; required property string modelData; text: modelData === "team_meeting" ? "Team" : modelData; active: root.promptMode === modelData; onClicked: root.promptMode = modelData }
                 }
                 Repeater {
                     model: root.promptKinds
-                    IconButton { ts: root.ts; required property string modelData; text: modelData; active: root.promptKind === modelData; onClicked: root.promptKind = modelData }
+                    IconButton { ts: root.theme.ts; required property string modelData; text: modelData; active: root.promptKind === modelData; onClicked: root.promptKind = modelData }
                 }
             }
             Hint { text: root.kindHelp[root.promptKind] || "" }
@@ -402,7 +418,8 @@ Item {
                     id: promptText
                     wrapMode: TextEdit.Wrap
                     color: Commons.Color.popups.text
-                    font.pixelSize: Style.font.body * root.ts
+                    font.family: Style.font.family
+                    font.pixelSize: root.theme.body
                     background: BorderSurface {
                         color: Style.controlFill(promptText.activeFocus, promptText.hovered, Commons.Color.foreground, Commons.Color.accent)
                         borderSpec: Border.controlSpec(promptText.activeFocus ? "focus" : (promptText.hovered ? "hover-cursor" : "normal"), Commons.Color.foreground, Commons.Color.accent)
@@ -410,11 +427,12 @@ Item {
                     }
                 }
             }
-            Row {
+            Flow {
                 id: promptBtns
+                width: parent.width
                 spacing: Style.spacing.xs
-                IconButton { ts: root.ts; text: "Save"; onClicked: root.client.send("prompts.set", { mode: root.promptMode, kind: root.promptKind, text: promptText.text }) }
-                IconButton { ts: root.ts; text: "Reset to default"; onClicked: root.client.send("prompts.reset", { mode: root.promptMode, kind: root.promptKind }, function() { root.loadPrompt(); }) }
+                IconButton { ts: root.theme.ts; text: "Save"; onClicked: root.client.send("prompts.set", { mode: root.promptMode, kind: root.promptKind, text: promptText.text }) }
+                IconButton { ts: root.theme.ts; text: "Reset to default"; onClicked: root.client.send("prompts.reset", { mode: root.promptMode, kind: root.promptKind }, function() { root.loadPrompt(); }) }
             }
         }
 
@@ -423,37 +441,45 @@ Item {
             width: parent.width; height: parent.height - y
             clip: true
             model: root.providers.filter(function(p) { return root.match(p.name || p.id); })
-            delegate: Row {
+            delegate: RowLayout {
                 id: prow
                 required property var modelData
                 width: ListView.view.width
-                spacing: Style.spacing.xs
-                Text {
-                    width: Style.space(220)
+                height: root.theme.ctl + Style.spacing.xs
+                spacing: root.theme.gap
+                UiText {
+                    Layout.preferredWidth: Math.round(Style.space(220) * root.theme.ts)
+                    Layout.fillWidth: !keyField.visible
+                    Layout.alignment: Qt.AlignVCenter
                     textFormat: Text.PlainText
+                    elide: Text.ElideRight
                     text: (prow.modelData.name || prow.modelData.id) + (prow.modelData.requires_key === false ? "" : (prow.modelData.has_key ? " · key set" : " · no key"))
                     color: Commons.Color.popups.text
-                    font.pixelSize: Style.font.body * root.ts
+                    font.pixelSize: root.theme.body
                 }
-                TextField {
+                Input {
                     id: keyField
+                    objectName: "apiKey"
+                    ts: root.theme.ts
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
                     visible: prow.modelData.requires_key !== false
                     echoMode: TextInput.Password
                     placeholderText: "API key"
                 }
-                IconButton { ts: root.ts;
+                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
                     text: "Set key"
                     visible: keyField.visible
                     enabled: keyField.text !== ""
                     opacity: enabled ? 1 : 0.5
                     onClicked: { root.client.send("settings.set", { key: "api_key", provider: prow.modelData.id, value: keyField.text }); keyField.text = ""; root.load(); }
                 }
-                IconButton { ts: root.ts;
+                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
                     text: "Models"
                     onClicked: root.client.send("models.list", { provider: prow.modelData.id }, function(r) { root.modelsText = r.ok ? (r.data || []).join(", ") : r.error; })
                 }
             }
-            footer: Text { text: root.modelsText; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts }
+            footer: UiText { text: root.modelsText; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption }
         }
 
         ListView {
@@ -462,37 +488,36 @@ Item {
             clip: true
             model: root.found
             header: root.settingsHeader
-            delegate: Item {   // label left, control right, both centred on the row
+            delegate: RowLayout {   // label left, control right, both centred on the row
                 id: srow
                 required property var modelData
                 width: ListView.view.width
-                height: Math.max(label.implicitHeight, ctl.height) + Style.spacing.sm
-                Text {
-                    id: label
-                    anchors.left: parent.left
-                    anchors.right: ctl.left
-                    anchors.rightMargin: Style.spacing.md
-                    anchors.verticalCenter: parent.verticalCenter
+                height: Math.max(root.theme.ctl, implicitHeight) + Style.spacing.sm
+                spacing: root.theme.gap
+                UiText {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                     text: root.labelOverrides[srow.modelData.key] || srow.modelData.label || srow.modelData.key
                     color: Commons.Color.popups.text
-                    font.pixelSize: Style.font.body * root.ts
+                    font.pixelSize: root.theme.body
                 }
                 Item {
-                    id: ctl
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(220)
-                    height: Style.spacing.controlHeight
+                    Layout.preferredWidth: Math.round(Style.space(220) * root.theme.ts)
+                    Layout.preferredHeight: root.theme.ctl
+                    Layout.alignment: Qt.AlignVCenter
                     ToggleSwitch {
+                        objectName: "settingToggle"
                         visible: typeof srow.modelData.value === "boolean"
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
                         checked: srow.modelData.value === true
                         onToggled: { root.client.setSetting(srow.modelData.key, !srow.modelData.value); root.search(); }
                     }
-                    TextField {
+                    Input {
+                        objectName: "settingField"
+                        ts: root.theme.ts
                         visible: typeof srow.modelData.value !== "boolean"
                         anchors.fill: parent
                         text: String(srow.modelData.value)

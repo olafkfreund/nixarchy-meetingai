@@ -10,30 +10,27 @@ Rectangle {
     id: root
 
     required property var daemon
-    required property real ts
-    required property real round
-    required property real padX
-    required property real padY
+    required property var theme
 
     readonly property string iRecord: String.fromCodePoint(0xf044b)
 
     visible: root.daemon.consentPrompt !== ""
-    height: ccol2.implicitHeight + root.padY * 2
-    radius: root.round
+    height: ccol2.implicitHeight + root.theme.padY * 2
+    radius: root.theme.radius
     color: Qt.alpha(Commons.Color.foreground, 0.10)
     border.width: Style.normalBorderWidth
     border.color: Commons.Color.popups.border
     Column {
         id: ccol2
-        x: root.padX; y: root.padY
-        width: parent.width - root.padX * 2
+        x: root.theme.padX; y: root.theme.padY
+        width: parent.width - root.theme.padX * 2
         spacing: Style.space(6)
-        Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.daemon.consentPrompt; color: Commons.Color.popups.text; font.pixelSize: Style.font.body * root.ts; font.bold: true }
-        Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.daemon.cand && root.daemon.cand.candidate.local_only ? "Local-only is on: audio and text stay on this machine." : "Recommended: turn on Local-only in the Candidate tab so nothing leaves this machine."; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: Style.font.caption * root.ts }
+        UiText { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.daemon.consentPrompt; color: Commons.Color.popups.text; font.pixelSize: root.theme.body; font.bold: true }
+        UiText { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.daemon.cand && root.daemon.cand.candidate.local_only ? "Local-only is on: audio and text stay on this machine." : "Recommended: turn on Local-only in the Candidate tab so nothing leaves this machine."; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: root.theme.caption }
         Row {
             spacing: Style.spacing.xs
-            IconButton { ts: root.ts; iconText: root.iRecord; text: "Recording is announced — start"; bordered: true; tooltipText: "Start recording; the candidate has been told"; onClicked: root.daemon.startRecording(true) }
-            IconButton { ts: root.ts; text: "Cancel"; bordered: true; tooltipText: "Do not record"; onClicked: root.daemon.consentPrompt = "" }
+            IconButton { ts: root.theme.ts; iconText: root.iRecord; text: "Recording is announced — start"; bordered: true; tooltipText: "Start recording; the candidate has been told"; onClicked: root.daemon.startRecording(true) }
+            IconButton { ts: root.theme.ts; text: "Cancel"; bordered: true; tooltipText: "Do not record"; onClicked: root.daemon.consentPrompt = "" }
         }
     }
 }

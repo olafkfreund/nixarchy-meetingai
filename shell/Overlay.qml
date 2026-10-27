@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 // ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
@@ -40,13 +41,8 @@ Item {
         var p = function(n) { return (n < 10 ? "0" : "") + n; };
         return Math.floor(t / 3600) + ":" + p(Math.floor(t / 60) % 60) + ":" + p(t % 60);
     }
-    readonly property real round: Math.max(Style.cornerRadius, 12)   // Hyprland rounding is 6
-    // Owner: roomier conversation. Bubble/card padding, gap between rows, reading line height.
-    readonly property real padX: Style.space(16)
-    readonly property real padY: Style.space(12)
-    readonly property real gap: Style.space(14)
-    readonly property real leading: 1.3
-    readonly property real ts: backend.textScale   // every font below is Style.font.x * ts
+    readonly property real ts: backend.textScale
+    Theme { id: metrics; ts: root.ts }   // the one metric: control height, padding, radius, font sizes
     readonly property bool team: backend.settings.meeting_mode === "team_meeting"
     readonly property bool iv: backend.settings.meeting_mode === "interviewer"
     readonly property bool panel: root.team || root.iv   // the card above NOW: Items (team) or Question bank (interviewer)
@@ -121,6 +117,8 @@ Item {
     function openModelPicker() { root.library = true; lib.tab = "settings"; }
     function showLibrary(tab) { root.library = true; lib.tab = tab; }
     function recordHook(consent) { backend.startRecording(consent); }
+    function geometryRoot() { return card; }   // tests/geometry.js walks this item
+    readonly property real ctl: metrics.ctl
 
     function close() {
         root.opened = false;
@@ -185,7 +183,7 @@ Item {
             x: root.geom.x; y: root.geom.y
             width: root.geom.w
             height: root.geom.h
-            radius: root.round
+            radius: metrics.radius
             color: root.solid
             border.color: Commons.Color.popups.border
             border.width: Style.normalBorderWidth
@@ -215,8 +213,7 @@ Item {
 
                 Header {
                     daemon: backend
-                    ts: root.ts
-                    round: root.round
+                    theme: metrics
                     team: root.team
                     iv: root.iv
                     library: root.library
@@ -231,22 +228,19 @@ Item {
                 }
                 Rectangle { width: parent.width; height: 1; color: Qt.alpha(Commons.Color.popups.border, 0.4) }
 
-                Text {
+                UiText {
                     visible: !backend.connected || backend.lastError !== ""
                     width: parent.width
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                     text: backend.connected ? backend.lastError : "The nixarchy-meetingai backend is not running."
                     color: Commons.Color.urgent
-                    font.pixelSize: Style.font.caption * root.ts
+                    font.pixelSize: metrics.caption
                 }
 
                 ConsentBanner {
                     daemon: backend
-                    ts: root.ts
-                    round: root.round
-                    padX: root.padX
-                    padY: root.padY
+                    theme: metrics
                     width: parent.width
                 }
 
@@ -255,6 +249,7 @@ Item {
                     settingsHeader: settingsControls
                     visible: root.library
                     client: backend
+                    theme: metrics
                     width: parent.width
                     height: parent.height - y
                 }
@@ -269,7 +264,7 @@ Item {
 
                     Composer {
                         id: composer
-                        ts: root.ts
+                        theme: metrics
                         anchors.bottom: parent.bottom
                         width: parent.width
                         team: root.team
@@ -290,12 +285,12 @@ Item {
                         anchors.bottom: composer.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
-                        Text {
+                        UiText {
                             visible: backend.suggestions.length > 0
                             textFormat: Text.PlainText
                             text: "Ask next"
                             color: Commons.Color.popups.text
-                            font.pixelSize: Style.font.caption * root.ts
+                            font.pixelSize: metrics.caption
                             font.bold: true
                             font.capitalization: Font.SmallCaps
                             font.letterSpacing: 1.5
@@ -308,8 +303,8 @@ Item {
                                 required property string modelData
                                 required property int index
                                 width: sugg.width
-                                height: Math.max(Style.spacing.controlHeight, stext.implicitHeight + root.padY * 2)
-                                radius: root.round
+                                height: Math.max(metrics.ctl, stext.implicitHeight + metrics.padY * 2)
+                                radius: metrics.radius
                                 color: sma.containsMouse ? Style.controlFill(false, true, Commons.Color.foreground, Commons.Color.accent) : "transparent"
                                 Rectangle {
                                     id: badge
@@ -318,16 +313,16 @@ Item {
                                     color: "transparent"   // monochrome badge: outline + number, no fill
                                     border.width: Style.normalBorderWidth
                                     border.color: Commons.Color.popups.text
-                                    Text {
+                                    UiText {
                                         anchors.centerIn: parent
                                         textFormat: Text.PlainText
                                         text: String(srow.index + 1)
                                         color: Commons.Color.popups.text
-                                        font.pixelSize: Style.font.body * root.ts
+                                        font.pixelSize: metrics.body
                                         font.bold: true
                                     }
                                 }
-                                Text {
+                                UiText {
                                     id: stext
                                     anchors.left: badge.right; anchors.leftMargin: Style.spacing.lg
                                     anchors.right: parent.right; anchors.rightMargin: Style.spacing.md
@@ -338,7 +333,7 @@ Item {
                                     elide: Text.ElideRight
                                     text: srow.modelData
                                     color: Commons.Color.popups.text
-                                    font.pixelSize: Style.font.subtitle * root.ts
+                                    font.pixelSize: metrics.subtitle
                                 }
                                 MouseArea { id: sma; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.pickSuggestion(srow.index + 1) }
                             }
@@ -351,11 +346,7 @@ Item {
                     NowCard {
                         id: nowPanel
                         daemon: backend
-                        ts: root.ts
-                        round: root.round
-                        padX: root.padX
-                        padY: root.padY
-                        leading: root.leading
+                        theme: metrics
                         status: root.status
                         themedLinks: root.themedLinks
                         // Team mode: only for a typed question, above the items.
@@ -370,11 +361,7 @@ Item {
                     ItemsPanel {
                         id: itemsPanel
                         daemon: backend
-                        ts: root.ts
-                        round: root.round
-                        padX: root.padX
-                        padY: root.padY
-                        leading: root.leading
+                        theme: metrics
                         iv: root.iv
                         lastOpen: root.lastOpen
                         lastTime: root.lastTime
@@ -390,12 +377,7 @@ Item {
                     Transcript {
                         id: transcript
                         daemon: backend
-                        ts: root.ts
-                        round: root.round
-                        padX: root.padX
-                        padY: root.padY
-                        gap: root.gap
-                        leading: root.leading
+                        theme: metrics
                         themedLinks: root.themedLinks
                         open: root.transcriptOpen
                         onToggled: root.transcriptOpen = !root.transcriptOpen
@@ -406,82 +388,88 @@ Item {
                 }
             }
 
-            Component {   // top of the Library's Settings tab
+            Component {   // top of the Library's Settings tab: captioned cells, one control tall each
                 id: settingsControls
                 Flow {
+                    id: sflow
+                    readonly property real cellW: Math.round(Style.space(240) * metrics.ts)
                     width: parent ? parent.width : 0
-                    spacing: Style.spacing.md
-                    bottomPadding: Style.spacing.md
-                    Dropdown {
-                        label: "Chat provider"
-                        value: String(backend.settings.chat_provider || "")
-                        options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
-                        onChanged: function(v) { backend.setSetting("chat_provider", v); backend.setSetting("chat_model", ""); root.loadModels(); }
+                    spacing: metrics.gap
+                    bottomPadding: metrics.gap
+                    Cell {
+                        theme: metrics; width: sflow.cellW; label: "Chat provider"
+                        Dropdown {
+                            objectName: "chatProvider"
+                            anchors.fill: parent; showLabel: false; rowHeight: metrics.ctl
+                            value: String(backend.settings.chat_provider || "")
+                            options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
+                            onChanged: function(v) { backend.setSetting("chat_provider", v); backend.setSetting("chat_model", ""); root.loadModels(); }
+                        }
                     }
-                    SearchableDropdown {   // typing filters the list
-                        id: modelBox
-                        label: "Chat model"
-                        value: String(backend.settings.chat_model || "")
-                        options: root.models.map(function(m) { return String(m); })
-                        triggerLabel: "default"
-                        onChanged: function(v) { backend.setSetting("chat_model", v); }
+                    Cell {
+                        theme: metrics; width: sflow.cellW; label: "Chat model"
+                        SearchableDropdown {   // typing filters the list
+                            objectName: "chatModel"
+                            anchors.fill: parent; showLabel: false; rowHeight: metrics.ctl
+                            value: String(backend.settings.chat_model || "")
+                            options: root.models.map(function(m) { return String(m); })
+                            triggerLabel: "default"
+                            onChanged: function(v) { backend.setSetting("chat_model", v); }
+                        }
                     }
-                    Item {
-                        width: Style.space(200); height: modelBox.height
-                        TextField {   // a model id the list does not have
-                            id: customModel
-                            anchors.bottom: parent.bottom
-                            width: parent.width
+                    Cell {
+                        theme: metrics; width: sflow.cellW; label: "Other model id"
+                        Input {   // a model id the list does not have
+                            objectName: "customModel"
+                            ts: metrics.ts
+                            anchors.fill: parent
                             placeholderText: "or type a model id"
                             onAccepted: { if (text.trim() !== "") backend.setSetting("chat_model", text.trim()); text = ""; }
                         }
                     }
-                    Dropdown {   // automatic answers while a call is recorded
-                        label: "Live answers provider"
-                        value: String(backend.settings.live_provider || "")
-                        options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
-                        onChanged: function(v) { backend.setSetting("live_provider", v); backend.setSetting("live_model", ""); root.loadModels(); }
-                    }
-                    SearchableDropdown {
-                        label: "Live answers model"
-                        value: String(backend.settings.live_model || "")
-                        options: root.liveModels.map(function(m) { return String(m); })
-                        triggerLabel: "default"
-                        onChanged: function(v) { backend.setSetting("live_model", v); }
-                    }
-                    Dropdown {
-                        label: "Pace"
-                        value: String(backend.settings.response_pace || "Balanced")
-                        options: root.paces
-                        onChanged: function(v) { backend.setSetting("response_pace", v); }
-                    }
-                    Item {
-                        width: ncRow.width; height: modelBox.height
-                        Row {
-                            id: ncRow
-                            anchors.bottom: parent.bottom
-                            height: Style.spacing.controlHeight
-                            spacing: Style.spacing.xs
-                            ToggleSwitch { id: noContext; anchors.verticalCenter: parent.verticalCenter; checked: root.noContext; onToggled: root.noContext = !root.noContext }
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                textFormat: Text.PlainText
-                                text: "No context"
-                                color: Commons.Color.popups.text
-                                font.pixelSize: Style.font.caption * root.ts
-                            }
+                    Cell {   // automatic answers while a call is recorded
+                        theme: metrics; width: sflow.cellW; label: "Live answers provider"
+                        Dropdown {
+                            objectName: "liveProvider"
+                            anchors.fill: parent; showLabel: false; rowHeight: metrics.ctl
+                            value: String(backend.settings.live_provider || "")
+                            options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
+                            onChanged: function(v) { backend.setSetting("live_provider", v); backend.setSetting("live_model", ""); root.loadModels(); }
                         }
                     }
-                    Item {   // overlay text size, 80..160 % (Ctrl+= / Ctrl+- / Ctrl+0)
-                        width: Style.space(260); height: modelBox.height
-                        Text {
-                            textFormat: Text.PlainText
-                            text: "Text size " + Math.round(backend.textScale * 100) + "%"
-                            color: Commons.Color.popups.text
-                            font.pixelSize: Style.font.caption * root.ts
+                    Cell {
+                        theme: metrics; width: sflow.cellW; label: "Live answers model"
+                        SearchableDropdown {
+                            objectName: "liveModel"
+                            anchors.fill: parent; showLabel: false; rowHeight: metrics.ctl
+                            value: String(backend.settings.live_model || "")
+                            options: root.liveModels.map(function(m) { return String(m); })
+                            triggerLabel: "default"
+                            onChanged: function(v) { backend.setSetting("live_model", v); }
                         }
+                    }
+                    Cell {
+                        theme: metrics; width: sflow.cellW; label: "Pace"
+                        Dropdown {
+                            objectName: "pace"
+                            anchors.fill: parent; showLabel: false; rowHeight: metrics.ctl
+                            value: String(backend.settings.response_pace || "Balanced")
+                            options: root.paces
+                            onChanged: function(v) { backend.setSetting("response_pace", v); }
+                        }
+                    }
+                    Cell {
+                        theme: metrics; width: sflow.cellW; label: "No context"
+                        RowLayout {
+                            anchors.fill: parent
+                            ToggleSwitch { objectName: "noContext"; Layout.alignment: Qt.AlignVCenter; checked: root.noContext; onToggled: root.noContext = !root.noContext }
+                        }
+                    }
+                    Cell {   // overlay text size, 80..160 % (Ctrl+= / Ctrl+- / Ctrl+0)
+                        theme: metrics; width: sflow.cellW; label: "Text size " + Math.round(backend.textScale * 100) + "%"
                         PanelSlider {
-                            anchors.bottom: parent.bottom
+                            objectName: "textSize"
+                            anchors.verticalCenter: parent.verticalCenter
                             width: parent.width
                             minimum: 80; maximum: 160; step: 10; integer: true
                             value: Math.round(backend.textScale * 100)
@@ -502,17 +490,17 @@ Item {
                 color: root.solid
                 border.color: Commons.Color.popups.border
                 border.width: Style.normalBorderWidth
-                radius: root.round
+                radius: metrics.radius
                 ScrollView {
                     anchors.fill: parent
                     anchors.margins: Style.spacing.md
-                    Text {
+                    UiText {
                         width: card.width - Style.space(120)
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                         text: root.previewText
                         color: Commons.Color.popups.text
-                        font.pixelSize: Style.font.body * root.ts
+                        font.pixelSize: metrics.body
                     }
                 }
                 IconButton { ts: root.ts; anchors.top: parent.top; anchors.right: parent.right; text: "Close"; tooltipText: "Close the preview"; onClicked: root.previewText = "" }

@@ -12,4 +12,5 @@ Button {
     foreground: Commons.Color.popups.text
     fontSize: Style.font.body * ts
     iconSize: Style.font.title * ts
+    implicitHeight: Math.round(Style.spacing.controlHeight * ts)   // one height with or without an icon (= Theme.ctl)
 }

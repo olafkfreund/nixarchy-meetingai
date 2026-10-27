@@ -4,6 +4,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
+import QtQuick.Layouts
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -13,7 +14,7 @@ import qs.Ui
 Item {
     id: root
 
-    property real ts: 1
+    required property var theme
     // Nerd Font Material Design glyphs (nf-md-*)
     readonly property string iBulb: String.fromCodePoint(0xf0336)
     readonly property string iAttach: String.fromCodePoint(0xf03e2)
@@ -62,44 +63,56 @@ Item {
                     id: chip
                     required property var modelData
                     required property int index
-                    IconButton { ts: root.ts;
+                    IconButton { ts: root.theme.ts;
                         text: chip.modelData.label
                         bordered: true
                         onClicked: if (chip.modelData.kind === "text") root.preview(chip.modelData.text)
                     }
-                    PanelActionButton {
-                        iconText: "\u00d7"
-                        fontSize: Style.font.icon * root.ts
+                    IconButton {
+                        ts: root.theme.ts
+                        text: "\u00d7"
+                        tooltipText: "Remove"
                         onClicked: root.chips = root.chips.filter(function(c, i) { return i !== chip.index; })
                     }
                 }
             }
         }
 
-        Row {   // series: only in team mode; "New series..." reveals a name field
+        RowLayout {   // series: only in team mode; "New series..." reveals a name field
             visible: root.team
-            spacing: Style.spacing.md
+            width: parent.width
+            spacing: root.theme.gap
+            UiText { Layout.alignment: Qt.AlignVCenter; textFormat: Text.PlainText; text: "Series"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true }
             Dropdown {
                 id: seriesBox
+                objectName: "seriesPick"
                 enabled: !root.seriesLocked
-                label: "Series"
+                showLabel: false
+                rowHeight: root.theme.ctl
+                Layout.preferredWidth: Math.round(Style.space(240) * root.theme.ts)
+                Layout.preferredHeight: root.theme.ctl
+                Layout.alignment: Qt.AlignVCenter
                 value: root.seriesId
                 options: [{ value: "", label: "No series" }].concat(root.seriesList.map(function(s) { return { value: String(s.id), label: String(s.name) }; })).concat([{ value: "__new", label: "New series..." }])
                 onChanged: function(v) { if (v === "__new") newName.visible = true; else { newName.visible = false; root.seriesPicked(v); } }
             }
-            TextField {
+            Input {
                 id: newName
+                objectName: "seriesName"
+                ts: root.theme.ts
                 visible: false
-                anchors.bottom: parent.bottom
-                width: Style.space(200)
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
                 placeholderText: "Series name"
                 onAccepted: { if (text.trim() !== "") root.seriesCreated(text.trim()); text = ""; visible = false; }
             }
+            Item { Layout.fillWidth: !newName.visible }
         }
 
         IconButton {   // quick action, above the field
-            ts: root.ts
+            ts: root.theme.ts
             iconText: root.iBulb
+            objectName: "quick"
             text: "What should I say?"
             tooltipText: "Ask for a suggested reply to the latest question"
             onClicked: root.quick()
@@ -107,15 +120,15 @@ Item {
 
         Rectangle {   // one rounded field: attach and screenshot on the left, send on the right
             width: parent.width
-            height: Math.max(field.height, Style.spacing.controlHeight) + Style.spacing.xs * 2
-            radius: Math.max(Style.cornerRadius, 12)
+            height: Math.max(field.height, root.theme.ctl) + Style.spacing.xs * 2
+            radius: root.theme.radius
             color: Style.controlFill(input.activeFocus, input.hovered, Commons.Color.foreground, Commons.Color.accent)
             border.width: Style.normalBorderWidth
             border.color: Qt.alpha(Commons.Color.popups.border, input.activeFocus ? 1 : 0.5)
 
-            IconButton { id: attach; ts: root.ts; x: Style.spacing.xs; anchors.bottom: parent.bottom; anchors.bottomMargin: Style.spacing.xs; iconText: root.iAttach; tooltipText: "Attach a file"; onClicked: files.open() }
-            IconButton { id: shot; ts: root.ts; anchors.left: attach.right; anchors.bottom: attach.bottom; iconText: root.iCamera; tooltipText: "Capture a screenshot region"; onClicked: root.screenshot() }
-            IconButton { id: send; ts: root.ts; anchors.right: parent.right; anchors.rightMargin: Style.spacing.xs; anchors.bottom: attach.bottom; iconText: root.iSend; active: !root.empty; tooltipText: "Send (Enter)"; onClicked: root.send() }
+            IconButton { id: attach; objectName: "attach"; ts: root.theme.ts; x: Style.spacing.xs; anchors.bottom: parent.bottom; anchors.bottomMargin: Style.spacing.xs; iconText: root.iAttach; tooltipText: "Attach a file"; onClicked: files.open() }
+            IconButton { id: shot; objectName: "shot"; ts: root.theme.ts; anchors.left: attach.right; anchors.bottom: attach.bottom; iconText: root.iCamera; tooltipText: "Capture a screenshot region"; onClicked: root.screenshot() }
+            IconButton { id: send; objectName: "send"; ts: root.theme.ts; anchors.right: parent.right; anchors.rightMargin: Style.spacing.xs; anchors.bottom: attach.bottom; iconText: root.iSend; active: !root.empty; tooltipText: "Send (Enter)"; onClicked: root.send() }
 
             ScrollView {
                 id: field
@@ -128,8 +141,9 @@ Item {
                     wrapMode: TextEdit.Wrap
                     placeholderText: "Ask about the meeting"
                     color: Commons.Color.popups.text
+                    font.family: Style.font.family
                     placeholderTextColor: Qt.alpha(Commons.Color.popups.text, 0.5)
-                    font.pixelSize: Style.font.body * root.ts
+                    font.pixelSize: root.theme.body
                     background: null
                     Keys.onPressed: function(e) {
                         if (root.empty && e.key >= Qt.Key_1 && e.key <= Qt.Key_3 && !(e.modifiers & ~Qt.KeypadModifier)) {
@@ -153,7 +167,7 @@ Item {
         }
     }
 
-    FontMetrics { id: fm; font.pixelSize: Style.font.body * root.ts }
+    FontMetrics { id: fm; font.pixelSize: root.theme.body }
 
     FileDialog {
         id: files

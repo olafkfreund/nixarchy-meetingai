@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 // qmllint disable missing-property
 // ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
+import QtQuick.Layouts
 import qs.Commons
 import qs.Commons as Commons
 
@@ -10,8 +11,7 @@ Item {
     id: root
 
     required property var daemon
-    required property real ts
-    required property real round
+    required property var theme
     required property bool team
     required property bool iv
     required property bool library
@@ -33,7 +33,7 @@ Item {
     readonly property string iVolumeOff: String.fromCodePoint(0xf0581)
     readonly property string iCog: String.fromCodePoint(0xf0493)
 
-    height: hdrLeft.height
+    height: Math.max(hdrLeft.height, hdrRight.height)   // the segmented box is taller than a button; both rows centre on it
     MouseArea {   // drag the header to move the card; double-click resets size and position
         anchors.fill: parent
         cursorShape: pressed ? Qt.ClosedHandCursor : Qt.ArrowCursor
@@ -44,48 +44,52 @@ Item {
     }
     Row {
         id: hdrLeft
+        anchors.verticalCenter: parent.verticalCenter
         spacing: Style.spacing.xs
-        IconButton { ts: root.ts; iconText: root.daemon.recording ? root.iStop : root.iRecord; active: root.daemon.recording; tooltipText: root.daemon.recording ? "Stop recording" : "Start recording"; onClicked: { if (root.daemon.recording) root.daemon.send("record.stop", {}); else root.daemon.startRecording(false); } }
-        Text {
+        IconButton { ts: root.theme.ts; iconText: root.daemon.recording ? root.iStop : root.iRecord; active: root.daemon.recording; tooltipText: root.daemon.recording ? "Stop recording" : "Start recording"; onClicked: { if (root.daemon.recording) root.daemon.send("record.stop", {}); else root.daemon.startRecording(false); } }
+        UiText {
             anchors.verticalCenter: parent.verticalCenter
             visible: root.daemon.recording
             textFormat: Text.PlainText
             text: root.elapsed
             color: Commons.Color.popups.text
-            font.pixelSize: Style.font.body * root.ts
+            font.pixelSize: root.theme.body
             leftPadding: Style.spacing.xs; rightPadding: Style.spacing.xs
         }
         // Brightness follows the live level; a struck-out glyph means muted.
-        IconButton { ts: root.ts; visible: root.daemon.recording; iconText: root.daemon.state.mic !== false ? root.iMic : root.iMicOff; opacity: root.daemon.state.mic !== false ? 0.4 + 0.6 * root.daemon.micLevel : 0.5; tooltipText: root.daemon.state.mic !== false ? "Mute microphone" : "Unmute microphone"; onClicked: root.daemon.send("record.toggle_mic", {}) }
-        IconButton { ts: root.ts; visible: root.daemon.recording; iconText: root.daemon.state.system !== false ? root.iVolume : root.iVolumeOff; opacity: root.daemon.state.system !== false ? 0.4 + 0.6 * root.daemon.systemLevel : 0.5; tooltipText: root.daemon.state.system !== false ? "Mute system audio" : "Unmute system audio"; onClicked: root.daemon.send("record.toggle_system", {}) }
+        IconButton { ts: root.theme.ts; visible: root.daemon.recording; iconText: root.daemon.state.mic !== false ? root.iMic : root.iMicOff; opacity: root.daemon.state.mic !== false ? 0.4 + 0.6 * root.daemon.micLevel : 0.5; tooltipText: root.daemon.state.mic !== false ? "Mute microphone" : "Unmute microphone"; onClicked: root.daemon.send("record.toggle_mic", {}) }
+        IconButton { ts: root.theme.ts; visible: root.daemon.recording; iconText: root.daemon.state.system !== false ? root.iVolume : root.iVolumeOff; opacity: root.daemon.state.system !== false ? 0.4 + 0.6 * root.daemon.systemLevel : 0.5; tooltipText: root.daemon.state.system !== false ? "Mute system audio" : "Unmute system audio"; onClicked: root.daemon.send("record.toggle_system", {}) }
     }
-    Row {
+    RowLayout {
+        id: hdrRight
         anchors.right: parent.right
-        spacing: Style.spacing.md
-        Text {   // which profile's context is in use
-            anchors.verticalCenter: parent.verticalCenter
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: root.theme.gap
+        UiText {   // which profile's context is in use
+            Layout.alignment: Qt.AlignVCenter
             visible: root.profileName !== ""
             textFormat: Text.PlainText
             text: root.profileName
             elide: Text.ElideRight
-            width: Math.min(implicitWidth, Style.space(160))
+            Layout.maximumWidth: Style.space(160)
             color: Commons.Color.popups.text
             opacity: 0.7
-            font.pixelSize: Style.font.caption * root.ts
+            font.pixelSize: root.theme.caption
         }
         Rectangle {   // segmented control
-            width: seg.width + Style.space(4); height: seg.height + Style.space(4)
-            radius: root.round
+            Layout.alignment: Qt.AlignVCenter
+            implicitWidth: seg.width + Style.space(4); implicitHeight: seg.height + Style.space(4)
+            radius: root.theme.radius
             color: Qt.alpha(Commons.Color.foreground, 0.08)
             Row {
                 id: seg
                 anchors.centerIn: parent
-                IconButton { ts: root.ts; text: "General"; radius: root.round; active: root.daemon.settings.meeting_mode !== "interview" && !root.team && !root.iv; tooltipText: "General meeting"; onClicked: root.daemon.setSetting("meeting_mode", "general") }
-                IconButton { ts: root.ts; text: "Interview"; radius: root.round; active: root.daemon.settings.meeting_mode === "interview"; tooltipText: "Interview mode"; onClicked: root.daemon.setSetting("meeting_mode", "interview") }
-                IconButton { ts: root.ts; text: "Team"; radius: root.round; active: root.team; tooltipText: "Team meeting: items and series"; onClicked: root.daemon.setSetting("meeting_mode", "team_meeting") }
-                IconButton { ts: root.ts; text: "Interviewer"; radius: root.round; active: root.iv; tooltipText: "Interviewer: question bank and evidence notes for a candidate"; onClicked: root.daemon.setSetting("meeting_mode", "interviewer") }
+                IconButton { ts: root.theme.ts; text: "General"; radius: root.theme.radius; active: root.daemon.settings.meeting_mode !== "interview" && !root.team && !root.iv; tooltipText: "General meeting"; onClicked: root.daemon.setSetting("meeting_mode", "general") }
+                IconButton { ts: root.theme.ts; text: "Interview"; radius: root.theme.radius; active: root.daemon.settings.meeting_mode === "interview"; tooltipText: "Interview mode"; onClicked: root.daemon.setSetting("meeting_mode", "interview") }
+                IconButton { ts: root.theme.ts; text: "Team"; radius: root.theme.radius; active: root.team; tooltipText: "Team meeting: items and series"; onClicked: root.daemon.setSetting("meeting_mode", "team_meeting") }
+                IconButton { ts: root.theme.ts; text: "Interviewer"; radius: root.theme.radius; active: root.iv; tooltipText: "Interviewer: question bank and evidence notes for a candidate"; onClicked: root.daemon.setSetting("meeting_mode", "interviewer") }
             }
         }
-        IconButton { ts: root.ts; iconText: root.iCog; active: root.library; tooltipText: "Settings"; onClicked: root.settingsClicked() }
+        IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; iconText: root.iCog; active: root.library; tooltipText: "Settings"; onClicked: root.settingsClicked() }
     }
 }
