@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 // ^ qs.Commons / qs.Ui expose nested QtObjects (Style.spacing, Color.popups) the linter cannot type
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -17,7 +18,8 @@ Item {
     property string tab: "restore"
     property string query: ""
     property var sessions: []
-    property var profiles: []
+    readonly property var profiles: client.profiles
+    property string selName: ""   // the profile being edited
     property var providers: []
     property var found: []        // settings.search results: { key, label, value }
     property string promptMode: "general"
@@ -26,21 +28,47 @@ Item {
     property Component settingsHeader: null   // controls shown above the Settings list
 
     readonly property var tabs: ["restore", "profiles", "prompts", "providers", "settings"]
-    readonly property var promptKinds: ["answer", "follow_up", "recap"]
+    readonly property var promptKinds: ["answer", "live_answer", "follow_up", "recap"]
+    readonly property var kindHelp: ({
+        answer: "Used for questions you type: how the model answers you.",
+        live_answer: "Used for automatic answers during a call: one sentence to say, then short talking points.",
+        follow_up: "Used to suggest the next questions to ask (Ask next).",
+        recap: "Used to write the meeting notes when a recording stops."
+    })
+    readonly property var cur: {
+        var m = root.profiles.filter(function(p) { return p.name === root.selName; });
+        if (m.length) return m[0];
+        m = root.profiles.filter(function(p) { return p.selected; });
+        return m.length ? m[0] : (root.profiles.length ? root.profiles[0] : null);
+    }
+    onCurChanged: { aboutText.text = cur ? String(cur.personal_context || "") : ""; briefText.text = cur ? String(cur.meeting_context || "") : ""; nameField.text = cur ? cur.name : ""; }
+    function reload() { root.client.refreshProfiles(); }
+    function newProfile() {
+        var names = root.profiles.map(function(p) { return p.name; }), n = "New profile", i = 1;
+        while (names.indexOf(n) >= 0) n = "New profile " + (++i);
+        root.selName = n;
+        root.client.send("profiles.save", { name: n, personal_context: "", meeting_context: "" }, function() { root.client.send("profiles.select", { name: n }, root.reload); });
+    }
+    function saveProfile() {
+        if (!cur) return;
+        var a = aboutText.text, b = briefText.text;
+        root.client.send("profiles.save", { name: cur.name, personal_context: a, meeting_context: b }, root.reload);
+        if (cur.selected) { root.client.setSetting("personal_context", a); root.client.setSetting("meeting_context", b); }
+    }
     property string promptKind: "answer"
 
     function match(s) { return root.query === "" || String(s).toLowerCase().indexOf(root.query.toLowerCase()) >= 0; }
 
     function load() {
         root.client.send("session.list", {}, function(r) { if (r.ok) root.sessions = r.data || []; });
-        root.client.send("profiles.list", {}, function(r) { if (r.ok) root.profiles = r.data || []; });
+        root.reload();
         root.client.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
         root.search();
         root.loadPrompt();
     }
 
     function search() {
-        root.client.send("settings.search", { query: root.query }, function(r) { if (r.ok) root.found = r.data || []; });
+        root.client.send("settings.search", { query: root.query }, function(r) { if (r.ok) root.found = (r.data || []).filter(function(f) { return String(f.key).indexOf("overlay_") !== 0; }); });
     }
 
     function loadPrompt() {
@@ -124,28 +152,101 @@ Item {
             font.pixelSize: Style.font.body * root.ts
         }
 
-        ListView {
+        component Field: TextArea {
+            id: fld
+            wrapMode: TextEdit.Wrap
+            color: Commons.Color.popups.text
+            font.pixelSize: Style.font.body * root.ts
+            background: BorderSurface {
+                color: Style.controlFill(fld.activeFocus, fld.hovered, Commons.Color.foreground, Commons.Color.accent)
+                borderSpec: Border.controlSpec(fld.activeFocus ? "focus" : (fld.hovered ? "hover-cursor" : "normal"), Commons.Color.foreground, Commons.Color.accent)
+                radius: Style.cornerRadius
+            }
+        }
+        component Hint: Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: Commons.Color.popups.text
+            opacity: 0.7
+            font.pixelSize: Style.font.caption * root.ts
+        }
+
+        Row {
             visible: root.tab === "profiles"
             width: parent.width; height: parent.height - y
-            clip: true
-            model: root.profiles.filter(function(p) { return root.match(p.name); })
-            delegate: Row {
-                required property var modelData
-                width: ListView.view.width
+            spacing: Style.spacing.md
+            Column {   // list + New
+                width: Math.max(Style.space(150), parent.width * 0.28); height: parent.height
                 spacing: Style.spacing.xs
-                Text {
-                    width: parent.width - Style.space(100)
-                    textFormat: Text.PlainText
-                    text: parent.modelData.name
-                    color: Commons.Color.popups.text
-                    font.pixelSize: Style.font.body * root.ts
+                ListView {
+                    width: parent.width; height: parent.height - newBtn.height - parent.spacing
+                    clip: true
+                    model: root.profiles.filter(function(p) { return root.match(p.name); })
+                    delegate: IconButton {
+                        required property var modelData
+                        ts: root.ts
+                        width: ListView.view.width
+                        text: modelData.name + (modelData.selected ? "  (in use)" : "")
+                        active: root.cur && root.cur.name === modelData.name
+                        onClicked: { root.selName = modelData.name; root.client.send("profiles.select", { name: modelData.name }, root.reload); }
+                    }
                 }
-                IconButton { ts: root.ts; text: "Delete"; onClicked: { root.client.send("profiles.delete", { name: parent.modelData.name }); root.load(); } }
+                IconButton { id: newBtn; ts: root.ts; text: "New"; onClicked: root.newProfile() }
             }
-            footer: Row {
-                spacing: Style.spacing.xs
-                TextField { id: profileName; placeholderText: "Profile name" }
-                IconButton { ts: root.ts; text: "Save current"; onClicked: { root.client.send("profiles.save", { name: profileName.text }); root.load(); } }
+            ScrollView {
+                id: editor
+                visible: root.cur !== null
+                width: parent.width - parent.children[0].width - parent.spacing; height: parent.height
+                contentWidth: availableWidth
+                clip: true
+                Column {
+                    width: editor.availableWidth
+                    spacing: Style.spacing.xs
+                    Row {
+                        spacing: Style.spacing.xs
+                        TextField { id: nameField; width: Style.space(200) }
+                        IconButton { ts: root.ts; text: "Rename"; enabled: root.cur !== null && nameField.text.trim() !== "" && nameField.text !== root.cur.name; opacity: enabled ? 1 : 0.5
+                            onClicked: { var n = nameField.text.trim(), o = root.cur.name; root.selName = n; root.client.send("profiles.rename", { name: o, new_name: n }, root.reload); } }
+                        IconButton { ts: root.ts; text: "Delete"; onClicked: { root.client.send("profiles.delete", { name: root.cur.name }, root.reload); root.selName = ""; } }
+                    }
+                    Text { textFormat: Text.PlainText; text: "About me"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: Style.font.body * root.ts }
+                    Hint { text: "Your role and experience; used in every answer." }
+                    Field { id: aboutText; width: parent.width; height: Style.space(64) }
+                    Text { textFormat: Text.PlainText; text: "Meeting brief"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: Style.font.body * root.ts }
+                    Hint { text: "What this meeting is about (role, company, agenda)." }
+                    Field { id: briefText; width: parent.width; height: Style.space(64) }
+                    IconButton { ts: root.ts; text: "Save"; onClicked: root.saveProfile() }
+                    Text { textFormat: Text.PlainText; text: "Documents"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: Style.font.body * root.ts; topPadding: Style.spacing.xs }
+                    Hint { text: "CV, job description, runbooks (PDF, text, markdown). Newest first in the prompt." }
+                    Repeater {
+                        model: root.cur ? (root.cur.documents || []) : []
+                        Row {
+                            id: drow
+                            required property var modelData
+                            spacing: Style.spacing.xs
+                            Text {
+                                width: editor.availableWidth - Style.space(110)
+                                anchors.verticalCenter: parent.verticalCenter
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                                text: drow.modelData.name + "  ·  " + drow.modelData.chars + " chars"
+                                color: Commons.Color.popups.text
+                                font.pixelSize: Style.font.body * root.ts
+                            }
+                            IconButton { ts: root.ts; text: "Remove"; onClicked: root.client.send("profiles.detach", { name: root.cur.name, id: drow.modelData.id }, root.reload) }
+                        }
+                    }
+                    IconButton { ts: root.ts; text: "Attach"; onClicked: attachDialog.open() }
+                }
+            }
+            FileDialog {
+                id: attachDialog
+                nameFilters: ["Documents (*.pdf *.txt *.md)"]
+                onAccepted: {
+                    var p = decodeURIComponent(String(selectedFile).replace(/^file:\/\//, ""));
+                    root.client.send("profiles.attach", { name: root.cur.name, path: p }, function(r) { if (!r.ok) root.client.lastError = String(r.error); root.reload(); });
+                }
             }
         }
 
@@ -164,8 +265,9 @@ Item {
                     IconButton { ts: root.ts; required property string modelData; text: modelData; active: root.promptKind === modelData; onClicked: root.promptKind = modelData }
                 }
             }
+            Hint { text: root.kindHelp[root.promptKind] || "" }
             ScrollView {
-                width: parent.width; height: parent.height - Style.space(80)
+                width: parent.width; height: parent.height - y - promptBtns.height - parent.spacing
                 TextArea {
                     id: promptText
                     wrapMode: TextEdit.Wrap
@@ -178,7 +280,12 @@ Item {
                     }
                 }
             }
-            IconButton { ts: root.ts; text: "Save"; onClicked: root.client.send("prompts.set", { mode: root.promptMode, kind: root.promptKind, text: promptText.text }) }
+            Row {
+                id: promptBtns
+                spacing: Style.spacing.xs
+                IconButton { ts: root.ts; text: "Save"; onClicked: root.client.send("prompts.set", { mode: root.promptMode, kind: root.promptKind, text: promptText.text }) }
+                IconButton { ts: root.ts; text: "Reset to default"; onClicked: root.client.send("prompts.reset", { mode: root.promptMode, kind: root.promptKind }, function() { root.loadPrompt(); }) }
+            }
         }
 
         ListView {

@@ -13,6 +13,7 @@ Item {
     readonly property bool connected: sock.connected
     property var state: ({})
     property var settings: ({})
+    property var profiles: []   // profiles.list rows; refreshProfiles() reloads them
     readonly property bool recording: state.recording === true
     readonly property real textScale: Math.max(0.8, Math.min(1.6, (Number(settings.text_scale) || 100) / 100))   // overlay font multiplier
     readonly property bool reduceMotion: settings.reduce_motion === true
@@ -50,6 +51,11 @@ Item {
     function refresh() {
         root.send("state.get", {}, function(r) { if (r.ok) root.state = r.data || {}; });
         root.send("settings.get", {}, function(r) { if (r.ok) root.settings = r.data || {}; });
+        root.refreshProfiles();
+    }
+
+    function refreshProfiles() {
+        root.send("profiles.list", {}, function(r) { if (r.ok) root.profiles = r.data || []; });
     }
 
     function setSetting(key, value) {
