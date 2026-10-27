@@ -548,3 +548,29 @@ In parallel:
 - **(c)** notes coverage by line id, in its own worktree.
 
 Step 8 follows once these are merged.
+- **Step 7 (wave 3):**
+  - `platform/shortcuts/{mod,control,commands}.rs` and `features/mod.rs`
+    stay until step 8, because the GPUI app still uses them.
+  - Rolling notes always consolidate on stop; the `auto_recap` setting is
+    no longer read.
+  - Interval auto-screenshot (`tick_auto_capture`) is not ported. Send-time
+    screenshots work, controlled by `use_image_on_send`.
+  - After stop, `record.start` is refused until the final flush ends
+    ("Finishing the previous transcript").
+  - `providers.list` returns chat providers only. Speech keys are set with
+    `settings.set{key:"api_key",provider:"deepgram-stt"}`.
+  - Socket paths over 108 bytes fail (`SUN_LEN`); the normal
+    `/run/user/<uid>` is fine.
+- **Wave 3b:**
+  - Answers and errors are rows in the client's single ListModel (role
+    `who` = mic, system, answer or error).
+  - The model picker is a `SearchableDropdown` plus a `TextField` for free
+    ids (`SearchableDropdown` cannot expose its typed text).
+  - The bar menu loads in the smoke test but has **not been seen
+    rendered**; check it in step 12.
+- **Wave 3c:** coverage is tracked by `meeting_lines` rowid (arrival
+  order), with the column `meeting_note_chunks.last_line` added by a
+  guarded `ALTER`.
+- **Step 8 additions:** also remove settings nothing reads once GPUI is
+  gone: `auto_recap`, `auto_screenshot`, `screenshot_interval`, and any
+  other setting with no reader outside `src/ui` (list them in the PR).
