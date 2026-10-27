@@ -136,3 +136,27 @@ step, runs the probe, and does step 9.
 ## Deviations log (recorded with the implementation commit)
 
 None yet.
+
+## Owner change (2026-10-27): Gemini through agy, not the Gemini CLI
+
+- The owner chose **agy** (Antigravity CLI, Google subscription) as the
+  Gemini route. `gemini-sub` (Gemini CLI) is dropped; the HM module does
+  not install `gemini-cli`.
+- **Why it was slow:** agy starts every MCP server in the user's
+  `~/.gemini` config on each call (14 here, including `go run …@latest`
+  and `npx -y`). With a private config that has no MCP servers, a full
+  answer takes 6.8–8.1 s instead of ~40 s (measured, gemini-3.8-flash-low).
+- **`agy-sub`:** the daemon runs agy with a private `HOME` overlay in a
+  0700 temp dir: `.gemini/*` and `.gemini/config/*` symlinked from the
+  real home **except** `config/mcp_config*` and `settings.json*`, which are
+  replaced by an empty MCP config and `{}`; `.config`, `.local`, `.cache`
+  symlinked. This also guarantees no tools reach the call. Flags: `--mode
+  plan --output-format stream-json --print-timeout`, keys unset, model from
+  `agy models`.
+- **Chains:** `agy-sub` takes `gemini-sub`'s place in the typed chain
+  (claude-sub → agy-sub → opencode → codex-sub → ollama-cloud → ollama).
+  It joins the live chain only if its measured first token is ≤ 4 s;
+  otherwise it serves typed questions, notes, recaps and question banks.
+- Plan step 4 becomes: the agy adapter with the private-HOME overlay, a
+  recorded stream fixture and parser tests, `agy models` discovery, and the
+  probe measurement that decides the live chain.
