@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: none (issues are disabled on olafkfreund/mixarchy-meetingai)
 author: olafkfreund
 reviews: research agent (PipeWire, Hyprland, xdph, notifications, existing tools), 2026-10-27; local checks on p620
