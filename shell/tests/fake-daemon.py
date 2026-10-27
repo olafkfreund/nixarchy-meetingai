@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
+
+--team is a team meeting in a series: items (with drafts), one earlier_item event, last_time. It runs on --live's paced stream.
 
 --live plays a paced meeting instead: recording on, words arriving as
 partials, a question from the other side, a streamed answer (with a link), 3 suggestions, levels events, and a
@@ -25,7 +27,8 @@ import time
 sock_path, log_path = sys.argv[1], sys.argv[2]
 auto = "--auto" in sys.argv
 k8s = "--k8s" in sys.argv
-live = "--live" in sys.argv or k8s
+team = "--team" in sys.argv
+live = "--live" in sys.argv or k8s or team
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 state = {"recording": live, "since": int(time.time() * 1000) - 754_000 if live else 0, "mic": True, "system": True}
@@ -45,6 +48,8 @@ DATA = {
         {"key": "auto_record_on_call", "label": "Take notes automatically when a call starts", "value": auto},
         {"key": "reduce_motion", "label": "Reduce motion", "value": False},
     ],
+    "series.list": [],
+    "items.list": [],
     "notes.get": {"text": "## Summary\nfake"},
 }
 settings.update(overlay_x=-1, overlay_y=-1, overlay_w=-1, overlay_h=-1)
@@ -105,7 +110,18 @@ def profiles_cmd(cmd, a):
 
 
 if live:
-    settings["meeting_mode"] = "interview"
+    settings["meeting_mode"] = "team_meeting" if team else "interview"
+if team:
+    state["series"] = "s1"
+    DATA["series.list"] = [{"id": "s1", "name": "Weekly platform sync", "created_at": "2026-10-01 09:00:00"}]
+    ITEMS = [
+        {"id": "i1", "meeting_id": "m2", "series_id": "s1", "kind": "action", "text": "Pad the migration by two days", "owner": "Sam", "due": "Tuesday", "status": "open", "source_line": 3, "origin_item": None, "draft": 1, "created_at": "2026-10-27 10:02:00"},
+        {"id": "i2", "meeting_id": "m2", "series_id": "s1", "kind": "decision", "text": "Ship next Tuesday if QA signs off", "owner": None, "due": None, "status": "open", "source_line": 2, "origin_item": None, "draft": 1, "created_at": "2026-10-27 10:03:00"},
+        {"id": "i3", "meeting_id": "m2", "series_id": "s1", "kind": "question", "text": "Who owns the lag alert?", "owner": None, "due": None, "status": "open", "source_line": 5, "origin_item": None, "draft": 0, "created_at": "2026-10-27 10:04:00"},
+        {"id": "i4", "meeting_id": "m2", "series_id": "s1", "kind": "action", "text": "Share the QA checklist", "owner": "Alex", "due": None, "status": "done", "source_line": 4, "origin_item": None, "draft": 0, "created_at": "2026-10-27 10:05:00"},
+    ]
+    DATA["items.list"] = ITEMS
+    DATA["last_time.get"] = {"meeting": "m1", "title": "Platform sync, 20 Oct", "started_at": "2026-10-20 10:00:00", "recap": "## Recap\nAgreed to **review the Kafka migration** this week.", "items": [{"id": "e1", "kind": "action", "text": "Write the migration runbook", "status": "open"}]}
 LOCK = threading.Lock()
 PROVIDER = {"provider": "claude-sub", "model": "haiku"}
 
@@ -164,6 +180,8 @@ class Handler(socketserver.StreamRequestHandler):
         threading.Thread(target=self.levels, daemon=True).start()
         if k8s:
             return self.stream_k8s()
+        if team:
+            return self.stream_team()
         self.say("system", "Priya", "Thanks for joining. Can you walk us through how you would design the ingestion pipeline?", 740, 0.05)
         self.say("mic", "", "Sure. I would start with an event queue in front of the workers so producers never block.", 748, 0.05)
         self.say("system", "Priya", "Okay. And how would you handle a consumer that falls behind for an hour?", 756)
@@ -179,6 +197,13 @@ class Handler(socketserver.StreamRequestHandler):
         self.say("mic", "", "Good question. First I would make the lag visible", 766, 0.3)
         time.sleep(1.2)
         self.typed("What should I say?")
+
+    def stream_team(self):
+        self.send({"event": "items.updated", "meeting": "m2"})
+        self.say("system", "Priya", "Did anyone finish the migration runbook from last week?", 740, 0.05)
+        self.say("mic", "", "Almost, I will send it today.", 748, 0.05)
+        time.sleep(0.5)
+        self.send({"event": "earlier_item", "item": {"id": "e1", "kind": "action", "text": "Write the migration runbook", "created_at": "2026-10-20 10:00:00", "status": "open"}, "quote": "I will send it today.", "line": 2, "meeting": "m-team"})
 
     def stream_k8s(self):
         question = "Explain k8s and how it is working?"

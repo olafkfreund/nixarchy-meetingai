@@ -26,6 +26,9 @@ Item {
     property string lastError: ""
     property real micLevel: 0     // 0..1, from the daemon's levels events
     property real systemLevel: 0
+    property var items: []         // items.list rows of the current meeting (team mode)
+    property var series: []        // series.list rows
+    property var earlierItem: null // { item, quote, line, meeting } while the "Earlier task?" callout shows
     signal notesUpdated(var meeting)
 
     readonly property int maxLines: 500
@@ -52,6 +55,21 @@ Item {
         root.send("state.get", {}, function(r) { if (r.ok) root.state = r.data || {}; });
         root.send("settings.get", {}, function(r) { if (r.ok) root.settings = r.data || {}; });
         root.refreshProfiles();
+        root.refreshSeries();
+    }
+
+    function refreshSeries() {
+        root.send("series.list", {}, function(r) { if (r.ok) root.series = r.data || []; });
+    }
+
+    function refreshItems(meeting) {
+        root.send("items.list", { meeting: meeting }, function(r) { if (r.ok) root.items = r.data || []; });
+    }
+
+    // Optimistic: the daemon's items.updated refetch settles it.
+    function updateItem(id, fields) {
+        root.items = root.items.map(function(i) { return i.id === id ? Object.assign({}, i, fields) : i; });
+        root.send("items.update", Object.assign({ id: id }, fields));
     }
 
     function refreshProfiles() {
@@ -95,7 +113,7 @@ Item {
     function onEvent(ev) {
         switch (ev.event) {
         case "settings": root.settings = ev.settings || ({}); break;
-        case "session.reset": lines.clear(); root.answering = false; root.suggestions = []; root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" }); break;
+        case "session.reset": lines.clear(); root.answering = false; root.suggestions = []; root.items = []; root.earlierItem = null; root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" }); break;
         case "history":
             for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(ev.rows[h].who === "question" ? "asked" : String(ev.rows[h].who), "", String(ev.rows[h].text), false);
             break;
@@ -119,6 +137,8 @@ Item {
         case "answer.error": root.answering = false; root.addRow("error", "", String(ev.message || ev.error || "answer failed"), false); break;
         case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
         case "notice": root.addRow("notice", "", String(ev.text || ""), false); break;
+        case "items.updated": root.refreshItems(ev.meeting); break;
+        case "earlier_item": root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting }; break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
         case "error": root.lastError = String(ev.message || ""); break;
         }

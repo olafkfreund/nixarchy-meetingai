@@ -8,6 +8,7 @@ ShellRoot {
         id: overlay
         Component.onCompleted: overlay.open("{}")
     }
+    Timer { interval: 10000; running: true; onTriggered: overlay.lastOpen = true }   // team scenario: Last time drawer
     Timer { interval: 16000; running: true; onTriggered: overlay.showLibrary("settings") }
     QtObject {   // stand-in for the shell's Bar host
         id: barStub

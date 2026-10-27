@@ -58,6 +58,22 @@ Item {
     readonly property string iCog: String.fromCodePoint(0xf0493)
     readonly property string iDown: String.fromCodePoint(0xf0140)
     readonly property string iRight: String.fromCodePoint(0xf0142)
+    readonly property string iCheck: String.fromCodePoint(0xf012c)
+    readonly property string iClose: String.fromCodePoint(0xf0156)
+    readonly property string iAction: String.fromCodePoint(0xf0139)
+    readonly property string iDecision: String.fromCodePoint(0xf023b)
+    readonly property string iQuestion: String.fromCodePoint(0xf02d7)
+    readonly property var kinds: [{ kind: "action", title: "Actions", glyph: root.iAction }, { kind: "decision", title: "Decisions", glyph: root.iDecision }, { kind: "question", title: "Questions", glyph: root.iQuestion }]
+    readonly property bool team: daemon.settings.meeting_mode === "team_meeting"
+    readonly property string seriesId: String(daemon.state.series || "")
+    property bool lastOpen: false
+    property var lastTime: null   // last_time.get reply for the current series
+    function loadLastTime() {
+        root.lastTime = null;
+        if (root.team && root.seriesId !== "") daemon.send("last_time.get", { series: root.seriesId }, function(r) { if (r.ok) root.lastTime = r.data; });
+    }
+    onTeamChanged: loadLastTime()
+    onSeriesIdChanged: loadLastTime()
     property var liveModels: []
     // Card geometry. Settings overlay_x/y/w/h (-1 = default, centred) persist it; `live` overrides while dragging.
     readonly property real minW: 520
@@ -259,8 +275,9 @@ Item {
                             Row {
                                 id: seg
                                 anchors.centerIn: parent
-                                IconButton { ts: root.ts; text: "General"; radius: root.round; active: daemon.settings.meeting_mode !== "interview"; tooltipText: "General meeting"; onClicked: daemon.setSetting("meeting_mode", "general") }
+                                IconButton { ts: root.ts; text: "General"; radius: root.round; active: daemon.settings.meeting_mode !== "interview" && !root.team; tooltipText: "General meeting"; onClicked: daemon.setSetting("meeting_mode", "general") }
                                 IconButton { ts: root.ts; text: "Interview"; radius: root.round; active: daemon.settings.meeting_mode === "interview"; tooltipText: "Interview mode"; onClicked: daemon.setSetting("meeting_mode", "interview") }
+                                IconButton { ts: root.ts; text: "Team"; radius: root.round; active: root.team; tooltipText: "Team meeting: items and series"; onClicked: daemon.setSetting("meeting_mode", "team_meeting") }
                             }
                         }
                         IconButton { ts: root.ts; iconText: root.iCog; active: root.library; tooltipText: "Settings"; onClicked: { root.library = !root.library; lib.tab = "settings"; } }
@@ -300,6 +317,11 @@ Item {
                         ts: root.ts
                         anchors.bottom: parent.bottom
                         width: parent.width
+                        team: root.team
+                        seriesList: daemon.series
+                        seriesId: root.seriesId
+                        onSeriesPicked: function(id) { daemon.send("session.new", id === "" ? {} : { series: id }); }
+                        onSeriesCreated: function(name) { daemon.send("series.create", { name: name }, function(r) { if (!r.ok) return; daemon.refreshSeries(); daemon.send("session.new", { series: r.data.id }); }); }
                         onSubmit: function(text, chips) { root.submit(text, chips); }
                         onPreview: function(text) { root.previewText = text; }
                         onScreenshot: daemon.send("screenshot.capture", { region: true })
@@ -372,6 +394,7 @@ Item {
                     readonly property real avail: height - below - tbar.height
                     Rectangle {
                         id: nowPanel
+                        visible: !root.team
                         anchors.bottom: sugg.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
@@ -435,6 +458,137 @@ Item {
                         }
                     }
 
+                    // Team meeting: replaces NOW. Last time drawer, "Earlier task?" callout, items by kind.
+                    Rectangle {
+                        id: itemsPanel
+                        visible: root.team
+                        anchors.bottom: sugg.top
+                        anchors.bottomMargin: Style.spacing.md
+                        width: parent.width
+                        height: root.transcriptOpen ? Math.min(want, convo.avail * 0.7) : Math.max(want, convo.avail)
+                        readonly property real want: icol.implicitHeight + root.padY * 2
+                        radius: root.round
+                        color: Qt.alpha(Commons.Color.accent, 0.12)
+                        Rectangle { width: Style.space(4); height: parent.height - root.round; anchors.verticalCenter: parent.verticalCenter; x: Style.spacing.xs; radius: width / 2; color: Commons.Color.accent }
+                        Flickable {
+                            x: root.padX; y: root.padY
+                            width: parent.width - root.padX * 2
+                            height: parent.height - root.padY * 2
+                            contentHeight: icol.implicitHeight
+                            clip: true
+                            Column {
+                                id: icol
+                                width: parent.width
+                                spacing: Style.space(8)
+                                Row {
+                                    spacing: Style.spacing.md
+                                    Text { anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: "Items"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
+                                    IconButton { ts: root.ts; visible: root.lastTime !== null && root.lastTime.meeting !== undefined; iconText: root.lastOpen ? root.iDown : root.iRight; text: "Last time"; tooltipText: "Recap and open items of the previous meeting in this series"; onClicked: root.lastOpen = !root.lastOpen }
+                                }
+                                Column {   // Last time drawer
+                                    visible: root.lastOpen && root.lastTime !== null
+                                    width: parent.width
+                                    spacing: Style.space(4)
+                                    Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.lastTime ? String(root.lastTime.title || "") + " · " + String(root.lastTime.started_at || "") : ""; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true }
+                                    Text { width: parent.width; textFormat: Text.MarkdownText; wrapMode: Text.Wrap; text: root.lastTime ? String(root.lastTime.recap || "") : ""; color: Commons.Color.popups.text; font.pixelSize: Style.font.body * root.ts; lineHeight: root.leading }
+                                    Repeater {
+                                        model: root.lastTime ? (root.lastTime.items || []) : []
+                                        Text { required property var modelData; width: icol.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "- " + modelData.text; color: Commons.Color.popups.text; opacity: 0.8; font.pixelSize: Style.font.body * root.ts }
+                                    }
+                                }
+                                Rectangle {   // Earlier task?
+                                    id: callout
+                                    visible: daemon.earlierItem !== null
+                                    width: parent.width
+                                    height: ccol.implicitHeight + root.padY * 2
+                                    radius: root.round
+                                    color: Qt.alpha(Commons.Color.foreground, 0.10)
+                                    border.width: Style.normalBorderWidth
+                                    border.color: Commons.Color.popups.border
+                                    readonly property var it: daemon.earlierItem ? daemon.earlierItem.item : ({})
+                                    function resolve(fields) { if (fields) daemon.updateItem(callout.it.id, fields); daemon.earlierItem = null; }
+                                    Column {
+                                        id: ccol
+                                        x: root.padX; y: root.padY
+                                        width: parent.width - root.padX * 2
+                                        spacing: Style.space(6)
+                                        Text { textFormat: Text.PlainText; text: "Earlier task?"; color: Commons.Color.popups.text; font.pixelSize: Style.font.caption * root.ts; font.bold: true; font.capitalization: Font.SmallCaps; font.letterSpacing: 1.5 }
+                                        Text { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(callout.it.text || "") + "  (" + String(callout.it.created_at || "").slice(0, 10) + ")"; color: Commons.Color.popups.text; font.pixelSize: Style.font.body * root.ts; font.bold: true }
+                                        Text { width: parent.width; visible: daemon.earlierItem !== null && daemon.earlierItem.quote !== ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: daemon.earlierItem ? "\u201c" + daemon.earlierItem.quote + "\u201d" : ""; color: Commons.Color.popups.text; opacity: 0.8; font.italic: true; font.pixelSize: Style.font.body * root.ts }
+                                        Row {
+                                            spacing: Style.spacing.xs
+                                            IconButton { ts: root.ts; text: "Discussed"; bordered: true; tooltipText: "It came up again; link it to this meeting"; onClicked: callout.resolve({ origin_item: daemon.earlierItem.meeting }) }
+                                            IconButton { ts: root.ts; iconText: root.iCheck; text: "Done"; bordered: true; tooltipText: "Mark the earlier item done"; onClicked: callout.resolve({ status: "done" }) }
+                                            IconButton { ts: root.ts; text: "Not related"; bordered: true; tooltipText: "Dismiss"; onClicked: callout.resolve(null) }
+                                        }
+                                    }
+                                }
+                                Text {
+                                    visible: daemon.items.length === 0
+                                    textFormat: Text.PlainText
+                                    text: "Nothing captured yet"
+                                    color: Commons.Color.popups.text
+                                    opacity: 0.6
+                                    font.italic: true
+                                    font.pixelSize: Style.font.body * root.ts
+                                }
+                                Repeater {
+                                    model: root.kinds
+                                    Column {
+                                        id: grp
+                                        required property var modelData
+                                        readonly property var rows: daemon.items.filter(function(i) { return i.kind === grp.modelData.kind; })
+                                        visible: rows.length > 0
+                                        width: icol.width
+                                        spacing: Style.space(4)
+                                        Text { textFormat: Text.PlainText; text: grp.modelData.title; color: Commons.Color.popups.text; opacity: 0.7; font.pixelSize: Style.font.caption * root.ts; font.bold: true }
+                                        Repeater {
+                                            model: grp.rows
+                                            Item {
+                                                id: irow
+                                                required property var modelData
+                                                readonly property bool open: modelData.status === "open"
+                                                width: grp.width
+                                                height: Math.max(Style.spacing.controlHeight, itext.implicitHeight + Style.space(4))
+                                                opacity: open ? 1 : 0.5
+                                                Text { id: glyph; anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; text: grp.modelData.glyph; color: Commons.Color.popups.text; font.pixelSize: root.iconPx }
+                                                Row {
+                                                    id: acts
+                                                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                                                    IconButton { ts: root.ts; iconText: root.iCheck; active: irow.modelData.status === "done"; tooltipText: irow.modelData.status === "done" ? "Reopen" : "Mark done"; onClicked: daemon.updateItem(irow.modelData.id, { status: irow.modelData.status === "done" ? "open" : "done" }) }
+                                                    IconButton { ts: root.ts; iconText: root.iClose; active: irow.modelData.status === "dropped"; tooltipText: irow.modelData.status === "dropped" ? "Reopen" : "Drop"; onClicked: daemon.updateItem(irow.modelData.id, { status: irow.modelData.status === "dropped" ? "open" : "dropped" }) }
+                                                }
+                                                Text {   // owner, due, source line
+                                                    id: meta
+                                                    anchors.right: acts.left; anchors.rightMargin: Style.spacing.md; anchors.verticalCenter: parent.verticalCenter
+                                                    textFormat: Text.PlainText
+                                                    text: [irow.modelData.owner, irow.modelData.due, irow.modelData.source_line ? "line " + irow.modelData.source_line : ""].filter(function(x) { return x; }).join(" · ")
+                                                    color: Commons.Color.popups.text
+                                                    opacity: 0.7
+                                                    font.pixelSize: Style.font.caption * root.ts
+                                                }
+                                                TextInput {   // inline edit; a draft is shown italic
+                                                    id: itext
+                                                    anchors.left: glyph.right; anchors.leftMargin: Style.spacing.md
+                                                    anchors.right: meta.left; anchors.rightMargin: Style.spacing.md
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    wrapMode: TextInput.Wrap
+                                                    text: irow.modelData.text
+                                                    color: Commons.Color.popups.text
+                                                    selectionColor: Commons.Color.accent
+                                                    font.pixelSize: Style.font.body * root.ts
+                                                    font.italic: irow.modelData.draft === true || irow.modelData.draft === 1
+                                                    font.strikeout: irow.modelData.status !== "open"
+                                                    onEditingFinished: { if (text.trim() !== "" && text !== irow.modelData.text) daemon.updateItem(irow.modelData.id, { text: text.trim() }); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     Row {   // transcript toggle
                         id: tbar
                         anchors.top: parent.top
@@ -444,7 +598,7 @@ Item {
                     // Transcript and archived answers in one virtualized list (capped at 500 rows by Client).
                     Item {
                         visible: root.transcriptOpen
-                        anchors { top: tbar.bottom; left: parent.left; right: parent.right; bottom: nowPanel.top; bottomMargin: Style.spacing.md }
+                        anchors { top: tbar.bottom; left: parent.left; right: parent.right; bottom: root.team ? itemsPanel.top : nowPanel.top; bottomMargin: Style.spacing.md }
                         ListView {
                             id: tlist
                             anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
