@@ -236,3 +236,13 @@ commit and reverts alone.
   `models::label`, `models::is_known_provider`,
   `titling::name_untitled_meetings`, `Preset::docs`, which leaves
   `db::meetings::untitled` without a caller.
+  Second re-review: `CustomProvider::header`, the Anthropic text join,
+  `models_endpoint`, id extraction, title prompt building and the test
+  server were reworded again. Also changed: title cleanup strips a
+  trailing quote after a full stop and cuts on characters; the title
+  prompt uses a `<transcript>` tag; ids are de-duplicated across pages
+  before the 10,000 cap; a non-array `data` falls back to `models`; an
+  Anthropic reply without `content` reports "no content blocks". The
+  `--copies` count is a lower bound: it cannot see code deleted in the
+  removal commit and retyped later, so the reviewer's text comparison
+  is the real check.

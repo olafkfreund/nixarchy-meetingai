@@ -5,14 +5,26 @@ const TITLE_INSTRUCTION: &str = "Give this conversation a title of two to six pl
 
 fn title_prompt(body: &str) -> String {
     let total = body.chars().count();
-    let text = if total > 6_000 {
-        let head: String = body.chars().take(3_000).collect();
-        let tail: String = body.chars().skip(total - 3_000).collect();
-        format!("{head}\n[transcript elided]\n{tail}")
+    let mut prompt = String::with_capacity(TITLE_INSTRUCTION.len() + body.len().min(7_000) + 64);
+    prompt.push_str(TITLE_INSTRUCTION);
+    prompt.push_str("\n\n<transcript>\n");
+    if total > 6_000 {
+        let opening_end = body
+            .char_indices()
+            .nth(3_000)
+            .map_or(body.len(), |(i, _)| i);
+        let closing_start = body
+            .char_indices()
+            .nth(total - 3_000)
+            .map_or(body.len(), |(i, _)| i);
+        prompt.push_str(&body[..opening_end]);
+        prompt.push_str("\n[transcript elided]\n");
+        prompt.push_str(&body[closing_start..]);
     } else {
-        body.to_owned()
-    };
-    format!("{TITLE_INSTRUCTION}\n\n<transcript>\n{text}\n</transcript>")
+        prompt.push_str(body);
+    }
+    prompt.push_str("\n</transcript>");
+    prompt
 }
 
 /// Removes markdown decoration: leading `#`/`*`/whitespace, trailing `*`.
@@ -33,6 +45,13 @@ fn strip_markdown(line: &str) -> &str {
     &line[start..end]
 }
 
+fn is_placeholder(title: &str) -> bool {
+    title
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .eq("new conversation".chars())
+}
+
 fn clean_title(reply: &str) -> Option<String> {
     let line = reply.lines().find(|l| !l.trim().is_empty())?;
     let mut title = strip_markdown(line.trim()).trim();
@@ -47,7 +66,7 @@ fn clean_title(reply: &str) -> Option<String> {
     title = title.trim_end_matches('.').trim();
     // a closing quote can sit behind the full stop, as in `"Plan".`
     title = title.trim_matches(is_quote).trim();
-    if title.is_empty() || title.eq_ignore_ascii_case("new conversation") {
+    if title.is_empty() || is_placeholder(title) {
         return None;
     }
     if title.chars().count() <= 42 {
@@ -108,13 +127,13 @@ mod tests {
 
     #[test]
     fn transcript_keeps_both_ends() {
-        let body = format!("BEGIN{}END", "a".repeat(8_000));
+        let body = format!("BEGIN{}END", "x".repeat(7_500));
         let prompt = title_prompt(&body);
         assert!(
             prompt.contains("BEGIN")
                 && prompt.contains("END")
                 && prompt.contains("[transcript elided]")
         );
-        assert!(prompt.len() < 7_000);
+        assert!(prompt.len() < 6_800);
     }
 }

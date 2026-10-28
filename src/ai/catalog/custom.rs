@@ -93,17 +93,23 @@ impl CustomProvider {
             let value: serde_json::Value = serde_json::from_str(response)
                 .map_err(|_| "The provider returned invalid JSON.".to_owned())?;
             if self.request_format == "anthropic" && self.response_path == "/content/0/text" {
-                value
+                let blocks = value
                     .get("content")
                     .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| "The response has no content blocks.".to_owned())?
-                    .iter()
-                    .filter(|block| {
-                        block.get("type").and_then(serde_json::Value::as_str) == Some("text")
-                    })
-                    .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                    .ok_or_else(|| "The response has no content blocks.".to_owned())?;
+                let mut joined = String::new();
+                for block in blocks {
+                    let is_text =
+                        block.get("type").and_then(serde_json::Value::as_str) == Some("text");
+                    let piece = block.get("text").and_then(serde_json::Value::as_str);
+                    if let (true, Some(piece)) = (is_text, piece) {
+                        if !joined.is_empty() {
+                            joined.push('\n');
+                        }
+                        joined.push_str(piece);
+                    }
+                }
+                joined
             } else {
                 value
                     .pointer(&self.response_path)
@@ -121,13 +127,15 @@ impl CustomProvider {
     }
 
     pub fn header(&self, key: &str) -> Option<(String, String)> {
-        let value = match self.auth.as_str() {
-            "none" => return None,
-            "bearer" => format!("Bearer {key}"),
-            "token" => format!("Token {key}"),
-            _ => key.to_owned(),
+        let scheme = match self.auth.as_str() {
+            "bearer" => Some("Bearer"),
+            "token" => Some("Token"),
+            _ => None,
         };
-        Some((self.auth_header.clone(), value))
+        (self.auth != "none").then(|| {
+            let value = scheme.map_or_else(|| key.to_owned(), |word| format!("{word} {key}"));
+            (self.auth_header.clone(), value)
+        })
     }
 }
 
@@ -196,5 +204,23 @@ mod tests {
         assert_eq!(p.header("secret").unwrap().1, "secret");
         p.auth = "none".into();
         assert!(p.header("secret").is_none());
+    }
+
+    #[test]
+    fn header_follows_the_auth_mode() {
+        let mut p = CustomProvider::default();
+        assert_eq!(
+            p.header("k1"),
+            Some(("Authorization".into(), "Bearer k1".into()))
+        );
+        p.auth = "token".into();
+        assert_eq!(p.header("k1").unwrap().1, "Token k1");
+        p.auth = "header".into();
+        p.auth_header = "X-Api-Key".into();
+        assert_eq!(p.header("k1"), Some(("X-Api-Key".into(), "k1".into())));
+        p.auth = "mystery".into();
+        assert_eq!(p.header("k1").unwrap().1, "k1");
+        p.auth = "none".into();
+        assert_eq!(p.header("k1"), None);
     }
 }

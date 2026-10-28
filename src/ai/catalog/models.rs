@@ -53,14 +53,14 @@ struct SavedModels {
 }
 
 fn cache_key(config: &ProviderConfig) -> String {
-    let scope = serde_json::to_vec(&serde_json::json!([
+    let identity = serde_json::to_vec(&serde_json::json!([
         config.id,
         config.endpoint(),
         config.api_key
     ]))
-    .expect("scope serializes");
+    .expect("identity serializes");
     let mut key = String::from("model_catalog:v3:");
-    for byte in Sha256::digest(scope) {
+    for byte in Sha256::digest(identity) {
         write!(key, "{byte:02x}").expect("writing to a String");
     }
     key
@@ -94,11 +94,13 @@ fn models_endpoint(config: &ProviderConfig) -> Result<String, String> {
         let origin = endpoint.split("/v1/").next().unwrap_or(&endpoint);
         return Ok(format!("{}/api/tags", origin.trim_end_matches('/')));
     }
-    let prefix = endpoint
-        .trim_end_matches('/')
-        .strip_suffix("/chat/completions")
-        .ok_or_else(|| format!("The chat endpoint does not lead to a model catalogue.{KEEP}"))?;
-    Ok(format!("{prefix}/models"))
+    let mut tail = endpoint.trim_end_matches('/').rsplitn(3, '/');
+    match (tail.next(), tail.next(), tail.next()) {
+        (Some("completions"), Some("chat"), Some(prefix)) => Ok(format!("{prefix}/models")),
+        _ => Err(format!(
+            "The chat endpoint does not lead to a model catalogue.{KEEP}"
+        )),
+    }
 }
 
 /// How the next page of a listing is requested.
@@ -183,13 +185,17 @@ fn produces_text(row: &Value) -> bool {
 }
 
 fn row_id(row: &Value) -> Option<String> {
-    let raw = ["model", "id", "name"].iter().find_map(|field| {
-        row.get(*field)
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-    })?;
-    let trimmed = raw.trim();
-    let id = trimmed.strip_prefix("models/").unwrap_or(trimmed);
+    let mut raw = None;
+    for field in ["model", "id", "name"] {
+        if let Some(Value::String(text)) = row.get(field)
+            && !text.trim().is_empty()
+        {
+            raw = Some(text.trim());
+            break;
+        }
+    }
+    let raw = raw?;
+    let id = raw.strip_prefix("models/").unwrap_or(raw);
     usable_id(id).then(|| id.to_owned())
 }
 
@@ -467,26 +473,27 @@ mod tests {
         String::from_utf8_lossy(&data).into_owned()
     }
 
-    /// Serves the canned replies in order on loopback; stops waiting for a client after 5 s.
+    /// Serves the canned replies in order on loopback; gives up on a missing client after 5 s.
     fn server(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
         let url = format!(
             "http://{}/v3/chat/completions",
             listener.local_addr().unwrap()
         );
+        let (sender, arrivals) = std::sync::mpsc::channel();
+        // Detached on purpose: it may stay blocked in accept once the test is over.
+        std::thread::spawn(move || {
+            while let Ok((stream, _)) = listener.accept() {
+                if sender.send(stream).is_err() {
+                    break;
+                }
+            }
+        });
         let worker = std::thread::spawn(move || {
             let mut seen = Vec::new();
             for (status, body) in replies {
-                let deadline = Instant::now() + Duration::from_secs(5);
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(_) if Instant::now() < deadline => {
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(_) => return seen,
-                    }
+                let Ok(mut stream) = arrivals.recv_timeout(Duration::from_secs(5)) else {
+                    return seen;
                 };
                 seen.push(read_request(&mut stream));
                 let reply = format!(
