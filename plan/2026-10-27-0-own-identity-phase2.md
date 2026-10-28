@@ -1,5 +1,5 @@
 ---
-status: approved
+status: draft
 issue: 3
 spec: spec/2026-10-27-0-own-identity-mit.md
 coders:        # owner asked 2026-10-28 for agy and codex to share the coding
@@ -103,11 +103,29 @@ and lock files, which are handled in step 11, not rewritten). Largest:
     MIT, `Cargo.toml`/`nix/package.nix` `license`, README Licence line.
     Close #3.
 
-Each step: its own branch off main and PR, the full suite (`cargo test
---workspace`, clippy `-D warnings`, `cargo fmt --check`, `checks.shell`),
-`origin-lines.sh` 0 for the module, CI green, merged before the next step.
-Steps 3, 6 and 10 are deployed to p620 and checked with the owner before
-the next step starts.
+Each step: its own worktree and branch off main and PR, the full suite
+(`cargo test --workspace`, clippy `-D warnings`, `cargo fmt --check`,
+`checks.shell`), `origin-lines.sh` 0 for the module, CI green.
+
+**Three teams in parallel** (owner, 2026-10-28). Every step keeps its
+module's public interface unchanged, so modules can be rewritten at the
+same time without breaking each other. Each team works its lane in order:
+
+| Team | Lane (in order) |
+|---|---|
+| Claude (`coder`) | 0, then 1, 3, 6, 10 |
+| Codex | 4, 5, 8 |
+| agy | 2, 7, 9 |
+
+- Step 0 merges first; the lanes start after it.
+- Step 11 starts when steps 1–10 are merged; step 12 last.
+- Merges are serialised by the lead: rebase on main, full suite, CI
+  green, merge one PR at a time. A conflict in a shared file (`mod.rs`,
+  `Cargo.toml`) is resolved by the lead in the later PR.
+- Each step is reviewed by the two teams that did not write it (read-only)
+  plus the Opus review.
+- Steps 3, 6 and 10 are deployed to p620 and checked with the owner before
+  they merge; the other lanes do not wait for that.
 
 ## Implementation split
 
