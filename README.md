@@ -361,6 +361,29 @@ true
 
 
 
+## programs\.nixarchy-meetingai\.echoCancel\.enable
+
+
+
+Load PipeWire’s WebRTC echo canceller with the default sink’s monitor as the reference and
+expose the result as the ` meetingai-echo-cancel-source ` source, which the daemon records as the
+microphone when present\. The system default source is not changed\.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+
+```nix
+true
+```
+
+
+
 ## programs\.nixarchy-meetingai\.extraEnvironment
 
 

@@ -147,3 +147,12 @@ is reported, not replaced.
 ## Deviations log
 
 None yet.
+- **Step 2:** the module arguments were checked by loading the drop-in
+  into an isolated PipeWire 1.6.9 with the stock config: it creates
+  `meetingai-echo-cancel-source` and a sink it always makes, named
+  `meetingai-echo-cancel-sink` so it is recognisable. Mic capture goes
+  through `parec` for Pulse source names (echo-cancel source by default,
+  else `@DEFAULT_SOURCE@`); explicit `cpal:` devices and legacy names keep
+  CPAL; no Pulse server → CPAL. `Microphone::level()` is 0 on the parec
+  path (no callers). A parec failure on the default path is a start error,
+  not a CPAL fallback.

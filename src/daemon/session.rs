@@ -3532,6 +3532,24 @@ mod routing_tests {
     }
 
     #[tokio::test]
+    async fn muted_mic_is_zeroed_and_the_remote_channel_kept() {
+        let root = std::env::temp_dir().join(format!("nixarchy-mute-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let d = Daemon::new(Options {
+            db_path: root.join("t.db"),
+            vault_dir: root.clone(),
+            capture: false,
+        })
+        .unwrap();
+        let mut frames = [0.5, -0.5, 0.25, -0.25];
+        d.route_audio(&mut frames);
+        assert_eq!(frames, [0.5, -0.5, 0.25, -0.25]);
+        d.inner.lock().mic = false;
+        d.route_audio(&mut frames);
+        assert_eq!(frames, [0.0, -0.5, 0.0, -0.25]);
+    }
+
+    #[tokio::test]
     async fn profiles_documents_live_prompt_reset_and_overlay_settings() {
         let root = std::env::temp_dir().join(format!("nixarchy-r5-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();

@@ -17,7 +17,58 @@ use std::time::Duration;
 use cpal::FromSample;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+use crate::audio::system_audio::SystemAudio;
 use crate::audio::{LinearResampler, SAMPLE_RATE, rms};
+
+/// The echo-cancelled virtual source written by the Home Manager module.
+pub const ECHO_CANCEL_SOURCE: &str = "meetingai-echo-cancel-source";
+
+/// Which capture path serves a requested input device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Backend {
+    /// CPAL, with the requested device (None = host default).
+    Cpal(Option<String>),
+    /// `parec` on a Pulse/PipeWire source name.
+    Pulse(String),
+}
+
+/// Pick the capture path. `sources` are the non-monitor Pulse source names.
+///
+/// An explicit `cpal:` device keeps CPAL. Otherwise the echo-cancelled source is
+/// the default when present, then the server's default source. With no Pulse
+/// server (no sources) everything stays on CPAL, as before.
+pub fn choose_backend(requested: Option<&str>, sources: &[String]) -> Backend {
+    let requested = requested
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "default");
+    match requested {
+        Some(name) if name.starts_with("cpal:") => Backend::Cpal(Some(name.to_owned())),
+        // A bare name that is not a Pulse source is a legacy CPAL device name.
+        Some(name) if sources.iter().any(|source| source == name) => {
+            Backend::Pulse(name.to_owned())
+        }
+        Some(name) => Backend::Cpal(Some(name.to_owned())),
+        None if sources.is_empty() => Backend::Cpal(None),
+        None if sources.iter().any(|source| source == ECHO_CANCEL_SOURCE) => {
+            Backend::Pulse(ECHO_CANCEL_SOURCE.to_owned())
+        }
+        None => Backend::Pulse("@DEFAULT_SOURCE@".to_owned()),
+    }
+}
+
+/// Non-monitor Pulse source names, empty when there is no server.
+fn pulse_source_names() -> Vec<String> {
+    std::process::Command::new("pactl")
+        .args(["--format=json", "list", "sources"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| super::devices::parse_sources(&String::from_utf8_lossy(&out.stdout)).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|device| device.id)
+        .collect()
+}
 
 /// How long startup may take before it is treated as a failure.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -83,12 +134,34 @@ pub struct Microphone {
     stop: Option<std_mpsc::Sender<()>>,
     worker: Option<thread::JoinHandle<()>>,
     device_name: String,
+    /// Set when the mic is a Pulse/PipeWire source recorded with `parec`.
+    pulse: Option<SystemAudio>,
 }
 
 impl Microphone {
     /// Start capturing from the named device, or the system default.
     pub fn start(device: Option<&str>) -> Result<Self, AudioError> {
-        Self::start_device(device, false)
+        match choose_backend(device, &pulse_source_names()) {
+            Backend::Pulse(source) => Self::start_pulse(&source),
+            Backend::Cpal(name) => Self::start_device(name.as_deref(), false),
+        }
+    }
+
+    fn start_pulse(source: &str) -> Result<Self, AudioError> {
+        let pulse =
+            SystemAudio::start_input(source).map_err(|e| AudioError::Startup(e.to_string()))?;
+        Ok(Self {
+            buffer: Arc::new(Mutex::new(Buffer {
+                samples: VecDeque::new(),
+                capacity: 0,
+                dropped: 0,
+                failure: None,
+            })),
+            stop: None,
+            worker: None,
+            device_name: source.to_owned(),
+            pulse: Some(pulse),
+        })
     }
 
     fn start_device(device: Option<&str>, loopback: bool) -> Result<Self, AudioError> {
@@ -123,6 +196,7 @@ impl Microphone {
                 stop: Some(stop_tx),
                 worker: Some(worker),
                 device_name,
+                pulse: None,
             }),
             Ok(Err(error)) => {
                 let _ = worker.join();
@@ -145,6 +219,9 @@ impl Microphone {
 
     /// Drain up to `limit` mono 16 kHz samples.
     pub fn take(&self, limit: usize) -> Vec<f32> {
+        if let Some(pulse) = &self.pulse {
+            return pulse.take(limit);
+        }
         self.buffer
             .lock()
             .map(|mut buffer| buffer.take(limit))
@@ -153,6 +230,9 @@ impl Microphone {
 
     /// Current level of the most recent audio, for meters.
     pub fn level(&self) -> f32 {
+        if self.pulse.is_some() {
+            return 0.0; // shortcut: no meter on the parec path, add if a UI needs it
+        }
         self.buffer
             .lock()
             .map(|buffer| {
@@ -170,6 +250,9 @@ impl Microphone {
 
     /// Frames dropped because the consumer fell behind.
     pub fn dropped(&self) -> u64 {
+        if let Some(pulse) = &self.pulse {
+            return pulse.dropped();
+        }
         self.buffer
             .lock()
             .map(|buffer| buffer.dropped)
@@ -178,6 +261,9 @@ impl Microphone {
 
     /// Whether the worker is still alive.
     pub fn is_running(&self) -> bool {
+        if let Some(pulse) = &self.pulse {
+            return pulse.is_running();
+        }
         self.worker
             .as_ref()
             .is_some_and(|worker| !worker.is_finished())
@@ -185,6 +271,9 @@ impl Microphone {
     }
 
     pub fn failure(&self) -> Option<String> {
+        if let Some(pulse) = &self.pulse {
+            return pulse.failure();
+        }
         self.buffer
             .lock()
             .ok()
@@ -405,6 +494,58 @@ mod tests {
         assert_eq!(buffer.samples.len(), 3);
         assert_eq!(buffer.take(100).len(), 3);
         assert!(buffer.samples.is_empty());
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn echo_cancel_source_is_the_default_when_present() {
+        let sources = names(&["alsa_input.pci", ECHO_CANCEL_SOURCE]);
+        assert_eq!(
+            choose_backend(None, &sources),
+            Backend::Pulse(ECHO_CANCEL_SOURCE.into())
+        );
+        assert_eq!(
+            choose_backend(Some("default"), &sources),
+            Backend::Pulse(ECHO_CANCEL_SOURCE.into())
+        );
+    }
+
+    #[test]
+    fn default_source_is_used_without_echo_cancel() {
+        assert_eq!(
+            choose_backend(None, &names(&["alsa_input.pci"])),
+            Backend::Pulse("@DEFAULT_SOURCE@".into())
+        );
+    }
+
+    #[test]
+    fn no_pulse_server_stays_on_cpal() {
+        assert_eq!(choose_backend(None, &[]), Backend::Cpal(None));
+    }
+
+    #[test]
+    fn explicit_cpal_device_keeps_cpal() {
+        let sources = names(&[ECHO_CANCEL_SOURCE]);
+        assert_eq!(
+            choose_backend(Some("cpal:id:alsa:x"), &sources),
+            Backend::Cpal(Some("cpal:id:alsa:x".into()))
+        );
+    }
+
+    #[test]
+    fn named_source_is_pulse_and_unknown_bare_name_is_legacy_cpal() {
+        let sources = names(&["alsa_input.usb", ECHO_CANCEL_SOURCE]);
+        assert_eq!(
+            choose_backend(Some("alsa_input.usb"), &sources),
+            Backend::Pulse("alsa_input.usb".into())
+        );
+        assert_eq!(
+            choose_backend(Some("Old Device"), &sources),
+            Backend::Cpal(Some("Old Device".into()))
+        );
     }
 
     #[test]

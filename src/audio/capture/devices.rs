@@ -60,6 +60,21 @@ pub fn parse_sources(json: &str) -> Result<Vec<Device>, String> {
         .collect())
 }
 
+/// Microphones by Pulse source name: the echo-cancelled source first and marked
+/// default when present, else the server's default source.
+pub fn pulse_inputs(json: &str, default_source: Option<&str>) -> Result<Vec<Device>, String> {
+    use crate::audio::microphone::ECHO_CANCEL_SOURCE;
+    let mut devices = parse_sources(json)?;
+    match devices.iter().position(|d| d.id == ECHO_CANCEL_SOURCE) {
+        Some(index) => {
+            devices.swap(0, index);
+            mark_default(&mut devices, Some(ECHO_CANCEL_SOURCE));
+        }
+        None => mark_default(&mut devices, default_source),
+    }
+    Ok(devices)
+}
+
 /// Parse `pactl --format=json list sinks`.
 pub fn parse_sinks(json: &str) -> Result<Vec<Device>, String> {
     let sinks: Vec<PactlSink> =
@@ -115,16 +130,23 @@ fn pactl(args: &[&str]) -> Result<String, String> {
 }
 
 fn enumerate_linux() -> Result<Devices, String> {
-    // Use the same backend and identifiers as Microphone::start. Pulse source
-    // names cannot be passed to CPAL's ALSA device selector.
-    let inputs = crate::audio::microphone::input_devices()
-        .into_iter()
-        .map(|d| Device {
-            id: d.id,
-            name: d.name,
-            is_default: d.is_default,
-        })
-        .collect();
+    // Same ids as Microphone::start: Pulse source names, or `cpal:` ids when
+    // there is no Pulse server.
+    let default_source = pactl(&["get-default-source"])
+        .ok()
+        .and_then(|text| text.lines().next().map(str::to_owned));
+    let inputs = pactl(&["--format=json", "list", "sources"])
+        .and_then(|text| pulse_inputs(&text, default_source.as_deref()))
+        .unwrap_or_else(|_| {
+            crate::audio::microphone::input_devices()
+                .into_iter()
+                .map(|d| Device {
+                    id: d.id,
+                    name: d.name,
+                    is_default: d.is_default,
+                })
+                .collect()
+        });
     let outputs_result =
         pactl(&["--format=json", "list", "sinks"]).and_then(|text| parse_sinks(&text));
     let error = outputs_result.as_ref().err().cloned();
@@ -163,6 +185,27 @@ mod tests {
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id, "alsa_input.pci-0000_00_1f.3.analog-stereo");
         assert_eq!(devices[0].name, "Built-in Audio Analog Stereo");
+    }
+
+    #[test]
+    fn echo_cancel_source_is_listed_first_and_default() {
+        let json = r#"[
+          {"name":"alsa_input.pci","description":"Built-in","monitor_of_sink":null},
+          {"name":"alsa_output.pci.monitor","description":"Monitor","monitor_of_sink":"alsa_output.pci"},
+          {"name":"meetingai-echo-cancel-source","description":"Meeting AI echo-cancelled mic","monitor_of_sink":null}
+        ]"#;
+        let devices = pulse_inputs(json, Some("alsa_input.pci")).unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].id, "meetingai-echo-cancel-source");
+        assert_eq!(devices[0].name, "Meeting AI echo-cancelled mic");
+        assert!(devices[0].is_default && !devices[1].is_default);
+    }
+
+    #[test]
+    fn default_source_is_marked_without_echo_cancel() {
+        let devices =
+            pulse_inputs(SOURCES, Some("alsa_input.pci-0000_00_1f.3.analog-stereo")).unwrap();
+        assert!(devices[0].is_default);
     }
 
     #[test]
