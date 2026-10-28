@@ -318,13 +318,12 @@ impl Settings {
     pub fn load(database: &Database) -> Result<Self> {
         let map = store::all(database.connection())?;
         let defaults = Self::default();
-        let get = |key: &str| map.get(key).map(String::as_str);
+        let get = |key: &str| map.get(key).map(|value| &value[..]);
         let text = |key: &str, fallback: &str| get(key).unwrap_or(fallback).to_owned();
         let flag = |key: &str, fallback: bool| get(key).map_or(fallback, |v| v == "true");
-        let number = |key: &str, fallback: u32| {
-            get(key)
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(fallback)
+        let number = |key: &str, fallback: u32| match get(key).map(str::parse::<u32>) {
+            Some(Ok(value)) => value,
+            _ => fallback,
         };
         let int = |key: &str| {
             get(key)
@@ -632,15 +631,18 @@ mod tests {
     #[test]
     fn single_key_update_preserves_previously_saved_settings() {
         let database = database();
-        let settings = Settings {
-            reduce_motion: true,
+        Settings {
+            capture_delay_seconds: 12,
             ..Settings::default()
-        };
-        settings.save(&database).unwrap();
-        Settings::set(&database, "capture_delay_seconds", "7").unwrap();
-        let reloaded = Settings::load(&database).unwrap();
-        assert!(reloaded.reduce_motion);
-        assert_eq!(reloaded.capture_delay_seconds, 7);
+        }
+        .save(&database)
+        .unwrap();
+        Settings::set(&database, "reduce_motion", "true").unwrap();
+        let after = Settings::load(&database).unwrap();
+        assert_eq!(
+            (after.capture_delay_seconds, after.reduce_motion),
+            (12, true)
+        );
     }
 
     #[test]
