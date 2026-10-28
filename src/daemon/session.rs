@@ -2522,13 +2522,34 @@ impl Daemon {
             meetings::list(c, 40)
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .map(|r| json!({"id": r.id, "kind": "meeting", "title": r.title})),
+                .map(|r| {
+                    json!({"id": r.id, "kind": "meeting", "title": r.title, "started_at": r.started_at})
+                }),
         );
         if for_agent {
             let hidden = candidates::local_only_ids(c).map_err(|e| e.to_string())?;
             list.retain(|v| !v["id"].as_str().is_some_and(|id| hidden.contains(id)));
         }
         Ok(Value::Array(list))
+    }
+
+    /// Read-only archive search for agents; local-only interviews never appear.
+    fn meetings_search(&self, a: protocol::MeetingsSearch) -> Result<Value, String> {
+        let query = a.query.trim();
+        if query.is_empty() {
+            return Err("query is empty".into());
+        }
+        let limit = a.limit.unwrap_or(10).clamp(1, 50);
+        let g = self.inner.lock();
+        let c = g.db.connection();
+        let hidden = candidates::local_only_ids(c).map_err(|e| e.to_string())?;
+        let found = meetings::search(c, query, limit + hidden.len()).map_err(|e| e.to_string())?;
+        Ok(found
+            .into_iter()
+            .filter(|r| !hidden.contains(&r.id))
+            .take(limit)
+            .map(|r| json!({"id": r.id, "title": r.title, "started_at": r.started_at}))
+            .collect())
     }
 
     fn session_delete(&self, id: &str) -> Result<Value, String> {
@@ -3428,6 +3449,7 @@ impl Daemon {
             "last_time.get" => self.last_time(&parse::<protocol::SeriesArg>(args)?.series),
             "session.restore" => self.session_restore(&parse::<protocol::IdArg>(args)?.id),
             "session.list" => self.session_list(false),
+            "meetings.search" => self.meetings_search(parse(args)?),
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
             "record.start" => {
                 let a = parse::<protocol::RecordStart>(args)?;
@@ -4689,6 +4711,53 @@ mod command_tests {
         assert!(candidates::get(g.db.connection(), &cand).unwrap().is_none());
         assert!(g.sources.is_empty() && g.candidate.is_none());
         assert!(!d.local_only.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn meetings_search_finds_notes_and_speech_and_hides_interviews() {
+        let d = daemon();
+        let (a, b, hid) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let mk = |t: &str| meetings::start(c, t, "", "en", None, Default::default()).unwrap();
+            let (a, b, hid) = (mk("Alpha"), mk("Beta"), mk("Ada"));
+            meetings::index_notes(c, &a, "ship the zebra release").unwrap();
+            meetings::add_line(c, &b, "me", None, "the quokka plan", 0.0, 1.0).unwrap();
+            meetings::add_line(c, &hid, "me", None, "secret quokka", 0.0, 1.0).unwrap();
+            let cand = candidates::create(c, "Ada").unwrap();
+            candidates::link_meeting(c, &cand.id, &hid).unwrap();
+            candidates::set_local_only(c, &cand.id, true).unwrap();
+            (a, b, hid)
+        };
+        let find = |q: &str, limit: Value| {
+            let d = &d;
+            let args = json!({"query": q, "limit": limit});
+            async move { d.handle("meetings.search", args, None).await }
+        };
+        let hits = find("zebra", Value::Null).await.unwrap();
+        assert_eq!(hits[0]["id"], json!(a));
+        assert!(hits[0]["started_at"].is_string() && hits[0]["title"] == "Alpha");
+        let hits = find("quokka", Value::Null).await.unwrap();
+        let ids: Vec<_> = hits
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["id"].clone())
+            .collect();
+        assert_eq!(ids, vec![json!(b)]);
+        assert!(!ids.contains(&json!(hid)));
+        assert_eq!(
+            find("a", json!(0)).await.unwrap().as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(find("  ", Value::Null).await.unwrap_err(), "query is empty");
+        let list = d.handle("session.list", json!({}), None).await.unwrap();
+        assert!(
+            list.as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["id"] == json!(a) && v["started_at"].is_string())
+        );
     }
 
     #[tokio::test]

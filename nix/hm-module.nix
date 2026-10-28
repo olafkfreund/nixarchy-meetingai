@@ -290,6 +290,16 @@ in
       '';
     };
 
+    skills.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Link the `meetingai` agent skill into {file}`~/.claude/skills`, {file}`~/.agents/skills` (Codex)
+        and {file}`~/.gemini/antigravity/skills` (agy), so they can read your meetings through `ctl`.
+        Existing files at those paths make activation fail.
+      '';
+    };
+
     callDetection.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -338,6 +348,14 @@ in
     ];
 
     home.packages = [ cfg.package ];
+
+    home.file = lib.mkIf cfg.skills.enable (
+      lib.genAttrs [
+        ".claude/skills/meetingai"
+        ".agents/skills/meetingai"
+        ".gemini/antigravity/skills/meetingai"
+      ] (_: { source = "${cfg.package}/share/nixarchy-meetingai/skills/meetingai"; })
+    );
 
     xdg.configFile = lib.mkMerge [
       (lib.mkIf (cfg.plugin.enable && !hasPlugins) {
