@@ -483,7 +483,7 @@ fn plan_chain(
 /// Local-only data may only go to a loopback endpoint (localhost, 127.0.0.0/8, ::1) and never to
 /// an ollama cloud model. An empty `base_url` means the provider's default, which is loopback.
 fn stays_local(config: &ProviderConfig) -> bool {
-    let loopback = config.base_url.is_empty()
+    let loopback = (config.base_url.is_empty() && config.id != "openai-compatible-stt")
         || reqwest::Url::parse(&config.base_url)
             .ok()
             .and_then(|u| u.host_str().map(str::to_owned))
@@ -511,12 +511,14 @@ fn apply_ollama_url(config: &mut ProviderConfig, url: Option<String>) {
 }
 
 /// A key from a file; a missing or unreadable file means no key (warned once, never the content).
-fn read_key_file(path: Option<std::ffi::OsString>) -> Option<String> {
+fn read_key_file(path: Option<std::ffi::OsString>, provider: &str) -> Option<String> {
     static WARNED: std::sync::Once = std::sync::Once::new();
     let path = path?;
     let text = std::fs::read_to_string(&path)
         .inspect_err(|error| {
-            WARNED.call_once(|| tracing::warn!(%error, ?path, "cannot read the Ollama key file"));
+            WARNED.call_once(
+                || tracing::warn!(%error, ?path, %provider, "cannot read the provider key file"),
+            );
         })
         .ok()?;
     Some(text.trim().to_owned()).filter(|k| !k.is_empty())
@@ -524,12 +526,24 @@ fn read_key_file(path: Option<std::ffi::OsString>) -> Option<String> {
 
 /// The Ollama Cloud key given outside the app: the Nix key file, then `OLLAMA_API_KEY`.
 fn external_ollama_key() -> Option<String> {
-    read_key_file(std::env::var_os("NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE")).or_else(|| {
+    read_key_file(
+        std::env::var_os("NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE"),
+        "Ollama",
+    )
+    .or_else(|| {
         std::env::var("OLLAMA_API_KEY")
             .ok()
             .map(|k| k.trim().to_owned())
             .filter(|k| !k.is_empty())
     })
+}
+
+fn apply_deepgram_key(config: &mut ProviderConfig, path: Option<std::ffi::OsString>) {
+    if config.api_key.trim().is_empty()
+        && let Some(key) = read_key_file(path, "Deepgram")
+    {
+        config.api_key = key;
+    }
 }
 
 fn locked_error(key: &str) -> String {
@@ -960,15 +974,31 @@ impl Daemon {
         } else {
             &s.speech_provider
         };
-        if local && id != "whisper-local" {
+        if local && id != "whisper-local" && id != "openai-compatible-stt" {
             return None;
         }
         let mut config = match credentials::load(&self.vault, Kind::Speech, id) {
             Ok(Some(c)) => c.to_config(),
             _ => SttProvider::by_id(id)
-                .filter(|p| !p.requires_key())
+                .filter(|p| {
+                    !p.requires_key()
+                        || (id == "deepgram-stt"
+                            && std::env::var_os("NIXARCHY_MEETINGAI_DEEPGRAM_KEY_FILE").is_some())
+                })
                 .map(|p| ProviderConfig::new(id, "", p.default_model))?,
         };
+        if id == "deepgram-stt" {
+            apply_deepgram_key(
+                &mut config,
+                std::env::var_os("NIXARCHY_MEETINGAI_DEEPGRAM_KEY_FILE"),
+            );
+            if s.deepgram_region == "eu" {
+                config.base_url = "https://api.eu.deepgram.com/v1/listen".into();
+            }
+        }
+        if id == "openai-compatible-stt" {
+            config.base_url.clone_from(&s.speech_base_url);
+        }
         config.language.clone_from(&s.speech_language);
         if !s.speech_model.is_empty() {
             config.model.clone_from(&s.speech_model);
@@ -1783,8 +1813,11 @@ impl Daemon {
             }
             g.settings = Settings::load(&g.db).unwrap_or_default();
             let local = self.local_now(g);
-            if local && !matches!(g.settings.speech_provider.as_str(), "" | "whisper-local") {
-                return Err("local_only: this interview is local-only. Choose whisper-local for speech-to-text.".into());
+            if local && self.speech_config(&g.settings, true).is_none() {
+                return Err(
+                    "local_only: this interview needs a ready loopback speech-to-text provider."
+                        .into(),
+                );
             }
             // Any session with a candidate is an interview, whatever the mode button says.
             if g.candidate.is_some() || g.settings.meeting_mode == MeetingMode::Interviewer {
@@ -1795,7 +1828,7 @@ impl Daemon {
             }
             let speech = if self.capture {
                 Some(self.speech_config(&g.settings, local).ok_or(if local {
-                    "local_only: whisper-local must be running on this machine (loopback address)."
+                    "local_only: speech-to-text must be ready on a loopback address."
                 } else {
                     "Speech-to-text is not ready. Start whisper-server or add a Deepgram key."
                 })?)
@@ -4463,11 +4496,40 @@ mod command_tests {
         std::fs::write(dir.join("ollama"), "fake-key-123\n").unwrap();
         std::fs::write(dir.join("empty"), "\n").unwrap();
         let f = |n: &str| Some(dir.join(n).into_os_string());
-        assert_eq!(read_key_file(f("ollama")).as_deref(), Some("fake-key-123"));
-        assert_eq!(read_key_file(f("empty")), None);
-        assert_eq!(read_key_file(f("missing")), None);
-        assert_eq!(read_key_file(None), None);
+        assert_eq!(
+            read_key_file(f("ollama"), "Ollama").as_deref(),
+            Some("fake-key-123")
+        );
+        assert_eq!(read_key_file(f("empty"), "Ollama"), None);
+        assert_eq!(read_key_file(f("missing"), "Ollama"), None);
+        assert_eq!(read_key_file(None, "Ollama"), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn deepgram_vault_key_wins_and_file_only_is_ready() {
+        let path = std::env::temp_dir().join(format!("nm-deepgram-{}", std::process::id()));
+        std::fs::write(&path, "file-key\n").unwrap();
+        let mut saved = ProviderConfig::new("deepgram-stt", "vault-key", "nova-3");
+        apply_deepgram_key(&mut saved, Some(path.clone().into_os_string()));
+        assert_eq!(saved.api_key, "vault-key");
+        let mut file_only = ProviderConfig::new("deepgram-stt", "", "nova-3");
+        apply_deepgram_key(&mut file_only, Some(path.clone().into_os_string()));
+        assert_eq!(file_only.api_key, "file-key");
+        assert!(file_only.speech_usable());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn compatible_speech_is_local_only_on_loopback() {
+        let mut config = ProviderConfig::new("openai-compatible-stt", "", "parakeet");
+        assert!(!config.speech_usable());
+        assert!(!stays_local(&config));
+        config.base_url = "http://127.0.0.1:8000".into();
+        assert!(config.speech_usable());
+        assert!(stays_local(&config));
+        config.base_url = "https://speech.example.com".into();
+        assert!(!stays_local(&config));
     }
 
     #[test]

@@ -361,6 +361,56 @@ true
 
 
 
+## programs\.nixarchy-meetingai\.deepgram\.keyFile
+
+
+
+Path to a Deepgram key file, read by the daemon at runtime\. A vault key takes precedence\.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+
+```nix
+null
+```
+
+
+
+*Example:*
+
+```nix
+"/run/agenix/deepgram"
+```
+
+
+
+## programs\.nixarchy-meetingai\.deepgram\.region
+
+
+
+Deepgram API region; EU requests opt out of model improvement\.
+
+
+
+*Type:*
+one of “us”, “eu”
+
+
+
+*Default:*
+
+```nix
+"us"
+```
+
+
+
 ## programs\.nixarchy-meetingai\.extraEnvironment
 
 
@@ -905,6 +955,27 @@ null
 
 
 
+## programs\.nixarchy-meetingai\.settings\.speechBaseUrl
+
+
+
+Base URL for OpenAI-compatible speech; must be set for that provider\.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+
+```nix
+null
+```
+
+
+
 ## programs\.nixarchy-meetingai\.settings\.speechLanguage
 
 
@@ -951,7 +1022,7 @@ null
 
 
 
-Speech-to-text provider (` whisper-local ` or ` deepgram-stt `)\.
+Speech-to-text provider (` whisper-local `, ` deepgram-stt `, or ` openai-compatible-stt `)\.
 
 
 

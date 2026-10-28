@@ -70,7 +70,9 @@
           (python3.withPackages (ps: [ ps.pillow ]))
         ];
       shellTestEnv = pkgs: {
-        OMARCHY_SHELL_TREE = "${nixarchy.packages.${pkgs.stdenv.hostPlatform.system}.omarchy}/share/omarchy/shell";
+        OMARCHY_SHELL_TREE = "${
+          nixarchy.packages.${pkgs.stdenv.hostPlatform.system}.omarchy
+        }/share/omarchy/shell";
         QMLLINT = "${pkgs.qt6.qtdeclarative}/bin/qmllint";
         QT_QML = "${pkgs.qt6.qtdeclarative}";
         QUICKSHELL_QML = "${pkgs.quickshell}/lib/qt-6/qml";
@@ -177,6 +179,8 @@
               logLevel = "debug";
               extraEnvironment.FOO = "bar";
               ollamaCloud.keyFile = "/run/agenix/ollama-cloud";
+              deepgram.keyFile = "/run/agenix/deepgram";
+              deepgram.region = "eu";
               ollama.url = "http://127.0.0.1:12345";
               settings = {
                 enforce = true;
@@ -326,7 +330,9 @@
           hm-settings-file = assertThat "hm-settings-file" (
             builtins.fromJSON full.xdg.configFile."nixarchy-meetingai/settings.json".text
             == builtins.fromJSON (builtins.readFile ./tests/fixtures/nix-settings.json)
-            && !(minimal.xdg.configFile ? "nixarchy-meetingai/settings.json")
+            &&
+              (builtins.fromJSON minimal.xdg.configFile."nixarchy-meetingai/settings.json".text)
+              .values.deepgram_region == "us"
           ) "settings.json differs from tests/fixtures/nix-settings.json";
           hm-service-options = assertThat "hm-service-options" (
             lib.hasInfix "--port 9000 -t 4 --no-gpu" (toString fullWhisper.Service.ExecStart)
@@ -335,12 +341,19 @@
             && builtins.elem "RUST_LOG=nixarchy_meetingai=debug" fullDaemon.Environment
             && builtins.elem "FOO=bar" fullDaemon.Environment
             && builtins.elem "NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE=/run/agenix/ollama-cloud" fullDaemon.Environment
+            && builtins.elem "NIXARCHY_MEETINGAI_DEEPGRAM_KEY_FILE=/run/agenix/deepgram" fullDaemon.Environment
+            && !(lib.hasInfix "DEEPGRAM_KEY=" (toString fullDaemon.Environment))
             && !(fullDaemon ? LoadCredential)
             && (svc full).nixarchy-meetingai.Unit.Wants == [ "nixarchy-meetingai-whisper.service" ]
             && builtins.length (svc full).nixarchy-meetingai.Unit.X-Restart-Triggers == 2
-            && builtins.elem "NIXARCHY_MEETINGAI_WHISPER_URL=http://[::1]:8178" (svc ipv6).nixarchy-meetingai.Service.Environment
-            && lib.hasInfix "--host :: --port" (toString (svc ipv6).nixarchy-meetingai-whisper.Service.ExecStart)
-            && lib.hasInfix "'--prompt=100%%$$HOME'" (toString (svc ipv6).nixarchy-meetingai-whisper.Service.ExecStart)
+            && builtins.elem "NIXARCHY_MEETINGAI_WHISPER_URL=http://[::1]:8178" (svc ipv6)
+            .nixarchy-meetingai.Service.Environment
+            && lib.hasInfix "--host :: --port" (
+              toString (svc ipv6).nixarchy-meetingai-whisper.Service.ExecStart
+            )
+            && lib.hasInfix "'--prompt=100%%$$HOME'" (
+              toString (svc ipv6).nixarchy-meetingai-whisper.Service.ExecStart
+            )
             && builtins.elem "NIXARCHY_MEETINGAI_OLLAMA_URL=http://127.0.0.1:12345" fullDaemon.Environment
             && (svc full).nixarchy-meetingai.Install.WantedBy == [ ]
           ) "service options not applied";

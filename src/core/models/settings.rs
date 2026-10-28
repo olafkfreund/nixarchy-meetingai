@@ -223,6 +223,8 @@ pub struct Settings {
     pub speech_provider: String,
     pub speech_model: String,
     pub speech_language: String,
+    pub speech_base_url: String,
+    pub deepgram_region: String,
     pub response_length: ResponseLength,
     pub response_language: String,
     pub smart_follow_ups: bool,
@@ -267,6 +269,8 @@ impl Default for Settings {
             speech_provider: "whisper-local".into(),
             speech_model: String::new(),
             speech_language: String::new(),
+            speech_base_url: String::new(),
+            deepgram_region: "us".into(),
             response_length: ResponseLength::Auto,
             response_language: "Auto".into(),
             smart_follow_ups: true,
@@ -358,6 +362,13 @@ impl Settings {
             speech_provider: text(keys::SPEECH_PROVIDER, &defaults.speech_provider),
             speech_model: text(keys::SPEECH_MODEL, &defaults.speech_model),
             speech_language: text("speech_language", &defaults.speech_language),
+            speech_base_url: text("speech_base_url", ""),
+            deepgram_region: if get("deepgram_region") == Some("eu") {
+                "eu"
+            } else {
+                "us"
+            }
+            .into(),
             response_length: get("response_length")
                 .map(ResponseLength::parse)
                 .unwrap_or_default(),
@@ -446,6 +457,8 @@ impl Settings {
             (keys::OUTPUT_DEVICE, self.output_device.clone()),
             (keys::SPEECH_PROVIDER, self.speech_provider.clone()),
             (keys::SPEECH_MODEL, self.speech_model.clone()),
+            ("speech_base_url", self.speech_base_url.clone()),
+            ("deepgram_region", self.deepgram_region.clone()),
             ("response_length", self.response_length.label().into()),
             ("response_language", self.response_language.clone()),
             (
@@ -623,6 +636,8 @@ mod tests {
             speech_provider: "deepgram-stt".into(),
             speech_model: "nova-3".into(),
             speech_language: "en-US".into(),
+            speech_base_url: "http://127.0.0.1:8000".into(),
+            deepgram_region: "eu".into(),
             response_length: ResponseLength::Medium,
             response_language: "Hindi".into(),
             smart_follow_ups: false,
