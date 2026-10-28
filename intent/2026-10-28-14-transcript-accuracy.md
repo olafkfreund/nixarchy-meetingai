@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 14
 author: olafkfreund
 ---
@@ -85,3 +85,10 @@ the notes and recaps are built from them:
 3. **Default engine when a Deepgram key is present:** Deepgram online, or
    Parakeet local with Deepgram as an opt-in? Recommended: Parakeet local by
    default (privacy, no cost), Deepgram one switch away.
+
+## Answers (owner approved the intent with the recommendations, 2026-10-28)
+
+1. Whisper is removed; the OpenAI-compatible connection can reach any
+   whisper server someone runs themselves.
+2. PipeWire WebRTC echo-cancel in this module, on by default.
+3. Parakeet local is the default engine; Deepgram one switch away.
