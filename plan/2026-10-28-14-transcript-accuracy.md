@@ -166,3 +166,8 @@ is reported, not replaced.
   build. The replay runs 4 requests in flight with prompts built ahead,
   like live, and uses the live retry helper. The synthetic fixtures feed
   step 1's Rust tests; no separate CI job.
+- Step 1: the gate analyzes 1 ms envelopes in the existing 50 ms capture blocks rather than emitting 20 ms blocks. It holds one block for lookahead, adding 50 ms of gate-only output latency so a quiet owner onset can restore the preceding block. The gate remains off by default.
+- **Step 1:** the gate analyses 1 ms envelopes inside the existing 50 ms
+  capture blocks instead of emitting 20 ms blocks; it holds one block for
+  lookahead (50 ms extra latency, gate on only) so a quiet owner onset can
+  restore the block before it. Off by default.

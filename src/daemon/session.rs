@@ -1768,7 +1768,7 @@ impl Daemon {
         title: String,
         new: bool,
     ) -> Result<Value, String> {
-        let (stop, speech, device, output_device, system) = {
+        let (stop, speech, device, output_device, system, echo_gate) = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
             if g.finishing_meeting.is_some() && g.recording.is_none() {
@@ -1833,6 +1833,7 @@ impl Daemon {
                 Some(g.settings.input_device.clone()).filter(|d| !d.is_empty()),
                 Some(g.settings.output_device.clone()).filter(|d| !d.is_empty()),
                 g.system,
+                g.settings.echo_gate,
             )
         };
         let opened = if self.capture {
@@ -1841,6 +1842,7 @@ impl Daemon {
                 system_audio: system,
                 output_device,
                 speech: speech.clone(),
+                echo_gate,
             };
             tokio::task::spawn_blocking(move || {
                 let (session, events) = ListenSession::start(&config);
