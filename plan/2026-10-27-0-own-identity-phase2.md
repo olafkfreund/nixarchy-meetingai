@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 3
 spec: spec/2026-10-27-0-own-identity-mit.md
 reviewers: []
