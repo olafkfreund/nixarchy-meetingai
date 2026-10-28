@@ -2,6 +2,7 @@
 
 pub mod capture;
 pub mod dsp;
+pub mod echo_gate;
 
 pub use capture::devices;
 pub use capture::microphone;
