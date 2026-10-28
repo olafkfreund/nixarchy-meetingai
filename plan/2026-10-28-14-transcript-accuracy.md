@@ -171,3 +171,10 @@ is reported, not replaced.
   capture blocks instead of emitting 20 ms blocks; it holds one block for
   lookahead (50 ms extra latency, gate on only) so a quiet owner onset can
   restore the block before it. Off by default.
+- **Step 4:** echo needs a run of 3 consecutive words plus content-word
+  containment ≥ 0.6 (stop words ignored), so short owner replies survive;
+  mic lines are held until 3 s after they arrive (audio clock) and while
+  an overlapping system chunk is open or in flight (15 s cap); `accept`
+  returns released lines, `tick`/`flush` release the rest. The step 0
+  replay now prints request and released-line records separately and
+  flushes at the end; `score.py` reads them.

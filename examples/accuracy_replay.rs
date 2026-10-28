@@ -1,8 +1,8 @@
 //! Replays a stereo 16 kHz WAV (left = mic, right = system) through the daemon's batch path
 //! (`BatchChunks` + `transcribe_with_retry` + `LineFilter`, up to 4 requests in flight, prompts
 //! built before earlier results are filtered, as in the live loop). Prints one JSON line per
-//! inference request: `{"channel","start","end","text","latency","kept"}`; `kept` is false for
-//! lines the filter dropped and for empty text. Driven by `tools/accuracy/score.py`.
+//! inference request `{"kind":"request","latency"}` and one per line the filter keeps
+//! `{"kind":"line","channel","start","end","text"}`, released as the filter decides. Driven by `tools/accuracy/score.py`.
 //! Usage: accuracy_replay FILE.wav (--url URL | --fake TEXT) [--model M] [--language L] [--glossary G]
 use futures_util::StreamExt;
 use nixarchy_meetingai::ai::providers::ProviderConfig;
@@ -14,14 +14,24 @@ use std::time::Instant;
 
 type Done = Result<(TranscriptLine, f64), String>;
 
-fn report(filter: &mut LineFilter, done: Done) -> Result<(), String> {
-    let (line, latency) = done?;
-    let kept = !line.text.is_empty() && filter.accept(&line);
+fn print_line(line: &TranscriptLine) {
     println!(
         "{}",
-        serde_json::json!({"channel": line.channel, "start": line.start, "end": line.end,
-            "text": line.text, "latency": latency, "kept": kept})
+        serde_json::json!({"kind": "line", "channel": line.channel, "start": line.start,
+            "end": line.end, "text": line.text})
     );
+}
+
+/// One request finished: print its latency, then whatever the filter releases now.
+fn report(filter: &mut LineFilter, done: Done) -> Result<(), String> {
+    let (line, latency) = done?;
+    println!(
+        "{}",
+        serde_json::json!({"kind": "request", "latency": latency})
+    );
+    if !line.text.is_empty() {
+        filter.accept(&line).iter().for_each(print_line);
+    }
     Ok(())
 }
 
@@ -95,5 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(done) = requests.next().await {
         report(&mut filter, done)?;
     }
+    // End of the recording: held mic lines are judged now, as the live loop does on stop.
+    filter.flush().iter().for_each(print_line);
     Ok(())
 }
