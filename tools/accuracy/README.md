@@ -17,7 +17,7 @@ silence; use speakers, not headphones, to measure echo bleed. Write the referenc
 
 ## Score
 
-With an OpenAI-compatible speech server running (`--url` is its base URL, `--model` its model name):
+With an OpenAI-compatible speech server running (`--url` is its base URL and `--model`, its model name, is required; for whisper.cpp's `whisper-server` start it with `--inference-path /v1/audio/transcriptions`):
 
     python3 -I tools/accuracy/score.py tools/accuracy/data/set1.wav tools/accuracy/data/set1.txt --url http://127.0.0.1:8178 --model large-v3-turbo
 

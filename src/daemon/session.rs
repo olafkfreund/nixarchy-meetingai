@@ -54,7 +54,7 @@ use crate::{
     },
 };
 
-/// Names and terms from the profile and meeting brief for whisper to spell right:
+/// Names and terms from the profile and meeting brief for the speech engine to spell right:
 /// capitalised words, acronyms and words with digits, first-seen order, <= 200 chars.
 fn glossary(personal: &str, meeting: &str) -> String {
     let mut out = String::new();
@@ -64,7 +64,7 @@ fn glossary(personal: &str, meeting: &str) -> String {
         .chain(meeting.split_whitespace())
     {
         let word = raw.trim_matches(|c: char| !c.is_alphanumeric());
-        // shortcut: sentence-initial words count as terms too; harmless as a whisper hint.
+        // shortcut: sentence-initial words count as terms too; harmless as a hint.
         let term = word.chars().count() >= 2
             && word.chars().all(char::is_alphanumeric)
             && (word.starts_with(char::is_uppercase) || word.chars().any(|c| c.is_ascii_digit()));
@@ -597,15 +597,43 @@ fn migrate_gemini(db: &Database, vault: &Vault) -> Option<String> {
     None
 }
 
-/// whisper.cpp is gone: a saved `whisper-local` becomes `parakeet-local`, once.
+/// whisper.cpp is gone: a saved `whisper-local` becomes `parakeet-local`, and a user who never
+/// stored a provider (the old default was whisper) is told once, tracked by a marker setting.
+/// An old `ggml-*` speech model name is cleared so no other engine is sent it.
 fn migrate_whisper(db: &Database) -> Option<String> {
-    let stored = crate::db::settings::get(db.connection(), "speech_provider")
-        .ok()
-        .flatten();
-    if stored.as_deref() != Some("whisper-local") {
+    const MARKER: &str = "whisper_notice_shown";
+    let get = |key| {
+        crate::db::settings::get(db.connection(), key)
+            .ok()
+            .flatten()
+    };
+    let stored = get("speech_provider");
+    let notify = match stored.as_deref() {
+        Some("whisper-local") => {
+            crate::db::settings::set(db.connection(), "speech_provider", "parakeet-local").ok()?;
+            true
+        }
+        // Only an existing user (some meeting or conversation) needs telling; a fresh install does not.
+        None if get(MARKER).is_none() => ["meetings", "conversations"].iter().any(|table| {
+            db.connection()
+                .query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| {
+                    r.get::<_, bool>(0)
+                })
+                .unwrap_or(false)
+        }),
+        _ => false,
+    };
+    if !notify {
+        // A fresh install is marked silently so a later first meeting is not told about whisper.
+        if stored.is_none() {
+            let _ = crate::db::settings::set(db.connection(), MARKER, "1");
+        }
         return None;
     }
-    crate::db::settings::set(db.connection(), "speech_provider", "parakeet-local").ok()?;
+    if get("speech_model").is_some_and(|m| m.starts_with("ggml-")) {
+        crate::db::settings::set(db.connection(), "speech_model", "").ok()?;
+    }
+    crate::db::settings::set(db.connection(), MARKER, "1").ok()?;
     Some("Speech now uses Parakeet locally; whisper was removed.".to_owned())
 }
 
@@ -4624,15 +4652,45 @@ mod command_tests {
 
     #[test]
     fn saved_whisper_local_migrates_once_with_a_notice() {
+        use crate::db::settings::{get, set};
         let db = Database::open_in_memory().unwrap();
-        assert_eq!(migrate_whisper(&db), None);
-        crate::db::settings::set(db.connection(), "speech_provider", "whisper-local").unwrap();
+        set(db.connection(), "speech_provider", "whisper-local").unwrap();
+        set(db.connection(), "speech_model", "ggml-large-v3-turbo").unwrap();
         assert!(migrate_whisper(&db).unwrap().contains("Parakeet"));
         assert_eq!(
             Settings::load(&db).unwrap().speech_provider,
             "parakeet-local"
         );
+        assert_eq!(
+            get(db.connection(), "speech_model").unwrap().as_deref(),
+            Some("")
+        );
         assert_eq!(migrate_whisper(&db), None);
+    }
+
+    #[test]
+    fn an_unset_provider_gets_the_notice_once_without_being_written() {
+        use crate::db::settings::{get, set};
+        let db = Database::open_in_memory().unwrap();
+        // A fresh install: no notice, marked silently, and a meeting made later stays quiet.
+        assert_eq!(migrate_whisper(&db), None);
+        db.connection()
+            .execute("INSERT INTO meetings (id, title) VALUES ('m', 't')", [])
+            .unwrap();
+        assert_eq!(migrate_whisper(&db), None);
+        // An existing user with no stored provider is told once, nothing is written.
+        let db = Database::open_in_memory().unwrap();
+        db.connection()
+            .execute("INSERT INTO meetings (id, title) VALUES ('m', 't')", [])
+            .unwrap();
+        assert!(migrate_whisper(&db).is_some());
+        assert_eq!(get(db.connection(), "speech_provider").unwrap(), None);
+        assert_eq!(migrate_whisper(&db), None);
+        // A deliberate choice is left alone, with no notice.
+        let other = Database::open_in_memory().unwrap();
+        set(other.connection(), "speech_provider", "deepgram-stt").unwrap();
+        set(other.connection(), "speech_model", "ggml-small").unwrap();
+        assert_eq!(migrate_whisper(&other), None);
     }
 
     #[test]

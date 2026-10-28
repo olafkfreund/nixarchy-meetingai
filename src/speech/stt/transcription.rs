@@ -70,7 +70,7 @@ pub async fn transcribe(
     transcribe_with_prompt(config, wav, language, "").await
 }
 
-/// Like [`transcribe`], with a whisper `prompt` (recent text and glossary).
+/// Like [`transcribe`], with a `prompt` (glossary and recent text); only OpenAI-compatible servers use it.
 pub async fn transcribe_with_prompt(
     config: &ProviderConfig,
     wav: Vec<u8>,
@@ -103,7 +103,7 @@ async fn transcribe_inner(
     config: &ProviderConfig,
     wav: Vec<u8>,
     language: Option<&str>,
-    _prompt: &str,
+    prompt: &str,
 ) -> Result<String, SttError> {
     let language =
         language.or_else(|| (!config.language.is_empty()).then_some(config.language.as_str()));
@@ -208,6 +208,9 @@ async fn transcribe_inner(
         let mut form = reqwest::multipart::Form::new()
             .part("file", file)
             .text("model", config.model.clone());
+        if !prompt.is_empty() {
+            form = form.text("prompt", prompt.to_owned());
+        }
         if let Some(language) =
             language.filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("auto"))
         {
@@ -571,7 +574,7 @@ impl LiveTurns {
 /// Optional hints for batch providers; the daemon fills `glossary` from the profile.
 #[derive(Debug, Clone, Default)]
 pub struct SttHints {
-    /// Names and terms (profile and meeting context) that whisper should spell right.
+    /// Names and terms (profile and meeting context) that the engine should spell right (OpenAI-compatible prompt).
     pub glossary: String,
 }
 
@@ -588,7 +591,7 @@ impl LiveTranscriber {
         Self::connect_config_with(config, SttHints::default()).await
     }
 
-    /// Like [`connect_config`](Self::connect_config); hints help batch (whisper) providers.
+    /// Like [`connect_config`](Self::connect_config); hints help OpenAI-compatible providers.
     pub async fn connect_config_with(
         config: &ProviderConfig,
         hints: SttHints,

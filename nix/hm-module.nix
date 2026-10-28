@@ -125,7 +125,7 @@ in
   imports = map (
     name:
     lib.mkRemovedOptionModule [ "programs" "nixarchy-meetingai" "whisper" name ]
-      "whisper.cpp was replaced by Parakeet (in-process); see programs.nixarchy-meetingai.parakeet.* — or use speechProvider = \"openai-compatible-stt\" with your own server (settings.speechBaseUrl), or Deepgram (deepgram.keyFile)."
+      "whisper.cpp was replaced by Parakeet (in-process); see programs.nixarchy-meetingai.parakeet.* — or use settings.speechProvider = \"openai-compatible-stt\" with your own server (settings.speechBaseUrl), or Deepgram (deepgram.keyFile)."
   ) [ "enable" "host" "port" "threads" "extraArgs" "model" "package" ];
 
   options.programs.nixarchy-meetingai = {
@@ -324,6 +324,14 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [
+      {
+        assertion = cfg.settings.speechProvider != "whisper-local";
+        message = "programs.nixarchy-meetingai: settings.speechProvider = \"whisper-local\" was removed: whisper.cpp was replaced by Parakeet (in-process). Use \"parakeet-local\", \"deepgram-stt\" or \"openai-compatible-stt\".";
+      }
+      {
+        assertion = cfg.parakeet.enable || (cfg.settings.speechProvider != null && cfg.settings.speechProvider != "parakeet-local");
+        message = "programs.nixarchy-meetingai: parakeet.enable = false needs settings.speechProvider = \"deepgram-stt\" or \"openai-compatible-stt\" (the default provider is parakeet-local).";
+      }
       {
         assertion = !(cfg.settings.extra ? api_key);
         message = "programs.nixarchy-meetingai: settings.extra.api_key would put a secret in the Nix store; use ollamaCloud.keyFile or the app.";

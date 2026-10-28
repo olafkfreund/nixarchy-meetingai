@@ -173,7 +173,7 @@ only as long as you need it, and make hiring decisions yourself.
 | --- | --- | --- |
 | Parakeet (default, `parakeet-local`) | in the daemon, on the CPU | NVIDIA Parakeet TDT 0.6B v3; about 1.1 GB RAM while loaded; 25 European languages, detected automatically |
 | Deepgram (`deepgram-stt`) | cloud | a key in Providers, or an agenix file: `deepgram.keyFile = config.age.secrets.api-deepgram.path;` (a key in Providers wins); `deepgram.region = "eu"` uses `api.eu.deepgram.com` and opts out of model improvement |
-| OpenAI-compatible (`openai-compatible-stt`) | your server | any server with `/v1/audio/transcriptions` (a whisper server, vLLM, Groq, OpenAI): `settings.speechProvider = "openai-compatible-stt"`, `settings.speechBaseUrl` and `settings.speechModel` |
+| OpenAI-compatible (`openai-compatible-stt`) | your server | any server with `/v1/audio/transcriptions` (a whisper server, vLLM, Groq, OpenAI): `settings.speechProvider = "openai-compatible-stt"`, `settings.speechBaseUrl` and `settings.speechModel` (required). whisper.cpp's `whisper-server` works when started with `--inference-path /v1/audio/transcriptions` |
 
 whisper.cpp was removed in favour of Parakeet; the `whisper.*` options now
 fail with a message saying so. A saved `whisper-local` choice becomes

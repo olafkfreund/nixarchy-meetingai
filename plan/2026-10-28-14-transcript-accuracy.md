@@ -236,3 +236,13 @@ is reported, not replaced.
   the not-ready reason says so. **Pending decision:** `echo_gate` stays off;
   the evaluation set is not recorded yet. Not done here: final real-set
   numbers and the p620 deploy.
+- **Step 7 review fixes:** HM assertions refuse `settings.speechProvider =
+  "whisper-local"` and `parakeet.enable = false` with Parakeet as the
+  effective provider (both in the flake `wrong` list). The migration also
+  shows its notice once to users who never stored a provider (marker setting
+  `whisper_notice_shown`, no provider value written; only when a meeting or
+  conversation already exists, a fresh install is marked silently) and clears an old `ggml-*` `speech_model`. The OpenAI multipart
+  path sends the glossary/recent-text `prompt` form field when non-empty.
+  The two network tests are back against `openai-compatible-stt` (the retry
+  test stays gone: nothing retries now). README notes `whisper-server` needs
+  `--inference-path /v1/audio/transcriptions` and `--model`.

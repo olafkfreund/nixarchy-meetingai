@@ -220,7 +220,12 @@
             pkgs.writeText name (if cond then "ok" else throw "${name}: ${msg}");
           fullDaemon = (svc full).nixarchy-meetingai.Service;
           sysPkgs = self.packages.${pkgs.stdenv.hostPlatform.system};
-          noParakeet = evalHm { programs.nixarchy-meetingai.parakeet.enable = false; };
+          noParakeet = evalHm {
+            programs.nixarchy-meetingai = {
+              parakeet.enable = false;
+              settings.speechProvider = "deepgram-stt";
+            };
+          };
         in
         {
           # The QML suite (lint, smoke, keys, every live-shots scenario with geometry checks, contrast) in a headless sway.
@@ -291,6 +296,14 @@
               evaluates = extra: (builtins.tryEval (evalHm extra).home.username).success;
               wrong = [
                 { programs.nixarchy-meetingai.whisper.enable = false; }
+                { programs.nixarchy-meetingai.settings.speechProvider = "whisper-local"; }
+                { programs.nixarchy-meetingai.parakeet.enable = false; }
+                {
+                  programs.nixarchy-meetingai = {
+                    parakeet.enable = false;
+                    settings.speechProvider = "parakeet-local";
+                  };
+                }
                 { programs.nixarchy-meetingai.settings.extra.api_key = "fake-key"; }
                 { programs.nixarchy-meetingai.ollama.url = "http://10.0.0.5:11434"; }
                 { programs.nixarchy-meetingai.settings.speechBaseUrl = "http://10.0.0.5:8000"; }
