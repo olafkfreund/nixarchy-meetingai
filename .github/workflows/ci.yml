@@ -28,6 +28,16 @@ jobs:
       - name: Format
         run: nix develop --command cargo fmt --all -- --check
 
+  origin-lines:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # git blame needs the history
+      - name: Lines still by the original authors (#3, informational)
+        run: |
+          { echo '### Original-author lines left (#3)'; echo '```'; bash tools/origin-lines.sh; echo 'following moved and copied lines:'; bash tools/origin-lines.sh --copies --total; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
   nix:
     runs-on: ubuntu-latest
     steps:
