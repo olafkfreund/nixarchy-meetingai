@@ -5,17 +5,15 @@ Never send the recordings to a cloud engine unless you chose that engine for the
 
 ## Record the real set (owner only, with everyone's consent)
 
-Record a call where you and the other side both speak, including some double talk and silence:
+Tell everyone on the call it is being recorded for evaluation. Start a normal recording in the app
+(not a local-only interview: the tap is refused there), then:
 
     tools/accuracy/record.sh tools/accuracy/data/set1.wav 120
 
-Left channel = default microphone, right = the default output's monitor. Use speakers (not headphones) to
-measure echo bleed. Write `tools/accuracy/data/set1.txt`, one line per utterance, `me:` or `them:`,
-optional `[silence]` markers:
-
-    them: can you hear me
-    me: yes loud and clear
-    [silence]
+This calls `nixarchy-meetingai ctl record.tap`, which copies exactly what the transcriber receives
+(left = mic, right = system, after mute) into a 0600 WAV. Ctrl-C stops early. Include double talk and
+silence; use speakers, not headphones, to measure echo bleed. Write the reference next to it, see
+`ref.example.txt` (`me:` / `them:` lines, `[silence mm:ss-mm:ss]` spans).
 
 ## Score
 
@@ -23,11 +21,11 @@ With the local whisper-server running:
 
     python3 -I tools/accuracy/score.py tools/accuracy/data/set1.wav tools/accuracy/data/set1.txt --url http://127.0.0.1:8178/inference
 
-Prints bleed lines (mic words that belong to `them:`), lost owner words, invented lines, mean latency per chunk.
+Prints bleed lines (decided on words unique to one side), lost owner words, remote words on the mic channel, invented lines on silence spans, lines of mostly unknown words, and inference latency per chunk. Extra flags: `--model`, `--language`, `--glossary`.
 
 ## Without audio (CI, tests)
 
     python3 -I tools/accuracy/synthetic.py tools/accuracy/data
-    python3 -I tools/accuracy/score.py tools/accuracy/data/echo.wav ref.txt --fake "hello there"
+    python3 -I tools/accuracy/score.py tools/accuracy/data/echo.wav tools/accuracy/ref.example.txt --fake "hello there"
 
 `--fake TEXT` returns TEXT for every chunk instead of calling an engine.

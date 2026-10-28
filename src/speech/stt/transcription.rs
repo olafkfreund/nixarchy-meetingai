@@ -899,7 +899,7 @@ impl Drop for LiveTranscriber {
 }
 
 /// Loopback providers (whisper-server) may be restarting: retry transient failures.
-async fn transcribe_with_retry(
+pub async fn transcribe_with_retry(
     config: &ProviderConfig,
     samples: &[f32],
     prompt: &str,

@@ -154,3 +154,15 @@ is reported, not replaced.
   text and < ½ in `me:`; invented: < ½ of its words anywhere in the
   reference); `[silence]` markers are parsed but unused. `score.py` calls
   `cargo run --example`, so it runs inside `devenv shell`.
+- **Step 0 review fixes** (Codex, Opus): recording no longer uses two
+  `parec` processes (channels were unaligned and the live mic does not go
+  through parec): a socket-only command `record.tap {path, seconds}` /
+  `{stop}` writes the exact interleaved frames the transcriber receives
+  (after `route_audio`) to a 0600 WAV, only during a running recording and
+  never for a local-only interview; not exposed over MCP. `record.sh`
+  wraps it. `score.py`: lost owner words by counts (not set membership),
+  bleed decided on words unique to one side, `[silence mm:ss-mm:ss]`
+  spans for invented-on-silence, latency over every request, release
+  build. The replay runs 4 requests in flight with prompts built ahead,
+  like live, and uses the live retry helper. The synthetic fixtures feed
+  step 1's Rust tests; no separate CI job.
