@@ -47,6 +47,28 @@ and lock files, which are handled in step 11, not rewritten). Largest:
 `ai/catalog/models.rs` 581, `tests/provider_flow.rs` 538,
 `ai/chat/session.rs` 528, `ai/chat/engine.rs` 509.
 
+## Owner decisions after approval (2026-10-28, asked and answered)
+
+- **Dead code is deleted, not rewritten:** `core/composer.rs` and the
+  `audio/dsp` items used only by their own tests (`Segmenter`,
+  `VadConfig`, `FlushReason`, `Segment`, `downmix`, `process`,
+  `is_passthrough`). An exception to "interface unchanged" for items
+  nothing outside their file calls.
+- **New default prompt texts:** the default listen-slot prompts, the
+  response style and the older upgrade texts are the original authors'
+  prose; we write new ones. Prompts a user edited are kept; unedited old
+  defaults are recognised by SHA-256 digest and switch to the new text.
+  No old prompt text stays in the code.
+
+## Merging so the count is honest
+
+The old file is removed in its own commit, and the new file added in a
+later commit; the PR is merged with a merge commit (never squash), so
+`git blame` does not match identical lines (blank lines, `}`, `pub mod
+x;`, schema columns) back to the old file. This makes the count easy to
+game, so the reviewer's check for copied identifiers and comments, and
+`--copies`, stay the real guard.
+
 ## Repo traps
 
 - In-file `#[cfg(test)]` tests are original code too: they go with the
