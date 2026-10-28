@@ -120,9 +120,19 @@ pub(super) fn open(path: &Path) -> Result<Connection> {
         ));
     } else {
         let key: [u8; 32] = rand::random();
-        let mut key_file = open_private(&key_path, true)?;
-        key_file.write_all(&key)?;
-        key_file.sync_all()?;
+        let temp = side(&key_path, &format!(".tmp{}", uuid::Uuid::new_v4()));
+        let written = (|| -> Result<()> {
+            let mut key_file = open_private(&temp, true)?;
+            key_file.write_all(&key)?;
+            key_file.sync_all()?;
+            fs::hard_link(&temp, &key_path)?;
+            fs::remove_file(&temp)?;
+            Ok(())
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        written?;
         sync_parent(&key_path)?;
         key
     };
@@ -162,19 +172,17 @@ mod tests {
             Default::default(),
         )
         .unwrap();
-        meetings::add_line(db.connection(), &meeting, "me", None, secret, 0.0, 1.0).unwrap();
-        drop(db);
+        meetings::add_line(db.connection(), &meeting, "me", Some(2), secret, 0.0, 1.0).unwrap();
         for file in [&path, &side(&path, "-wal")] {
-            if file.exists() {
-                let bytes = fs::read(file).unwrap();
-                assert!(!bytes.starts_with(b"SQLite format 3\0"));
-                assert!(
-                    !bytes
-                        .windows(secret.len())
-                        .any(|part| part == secret.as_bytes())
-                );
-            }
+            let bytes = fs::read(file).unwrap();
+            assert!(!bytes.starts_with(b"SQLite format 3\0"));
+            assert!(
+                !bytes
+                    .windows(secret.len())
+                    .any(|part| part == secret.as_bytes())
+            );
         }
+        drop(db);
         let plain = Connection::open(&path).unwrap();
         assert!(
             plain
@@ -187,15 +195,9 @@ mod tests {
             conversations::messages(db.connection(), &conversation).unwrap()[0].content,
             secret
         );
-        let who: String = db
-            .connection()
-            .query_row(
-                "SELECT who FROM meeting_lines WHERE meeting_id=?1",
-                [&meeting],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(who, "me");
+        let line = &meetings::lines(db.connection(), &meeting).unwrap()[0];
+        assert_eq!(line.who, "me");
+        assert_eq!(line.speaker, Some(2));
     }
 
     #[test]

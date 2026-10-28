@@ -107,14 +107,17 @@ pub fn seed_listen_modes(connection: &rusqlite::Connection) -> Result<()> {
         {
             continue;
         }
-        let mut query = connection.prepare(
-            "SELECT id, prompt FROM system_prompts WHERE listen_slot = ?1 AND name = ?2",
-        )?;
-        let rows = query.query_map(rusqlite::params![seed.slot, seed.name], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })?;
-        for row in rows {
-            let (id, prompt) = row?;
+        let matching = {
+            let mut query = connection.prepare(
+                "SELECT id, prompt FROM system_prompts WHERE listen_slot = ?1 AND name = ?2",
+            )?;
+            query
+                .query_map(rusqlite::params![seed.slot, seed.name], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, prompt) in matching {
             let digest: String = Sha256::digest(prompt.as_bytes())
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
