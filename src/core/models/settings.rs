@@ -267,7 +267,7 @@ impl Default for Settings {
             use_image_on_send: false,
             input_device: String::new(),
             output_device: String::new(),
-            speech_provider: "whisper-local".into(),
+            speech_provider: "parakeet-local".into(),
             speech_model: String::new(),
             speech_language: String::new(),
             speech_base_url: String::new(),
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn defaults_load_when_nothing_is_stored() {
         let settings = Settings::load(&database()).unwrap();
-        assert_eq!(settings.speech_provider, "whisper-local");
+        assert_eq!(settings.speech_provider, "parakeet-local");
         assert!(!settings.auto_record_on_call);
         assert_eq!(settings.recap_prompt_general, RECAP_PROMPT_GENERAL);
         assert_eq!(settings.meeting_mode, MeetingMode::General);

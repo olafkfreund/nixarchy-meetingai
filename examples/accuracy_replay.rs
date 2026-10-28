@@ -1,5 +1,5 @@
 //! Replays a stereo 16 kHz WAV (left = mic, right = system) through the daemon's batch path
-//! (`BatchChunks` + `transcribe_with_retry` + `LineFilter`, up to 4 requests in flight, prompts
+//! (`BatchChunks` + `transcribe_chunk` + `LineFilter`, up to 4 requests in flight, prompts
 //! built before earlier results are filtered, as in the live loop). Prints one JSON line per
 //! inference request `{"kind":"request","latency"}` and one per line the filter keeps
 //! `{"kind":"line","channel","start","end","text"}`, released as the filter decides. Driven by `tools/accuracy/score.py`.
@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use nixarchy_meetingai::ai::providers::ProviderConfig;
 use nixarchy_meetingai::speech::stt::filter::LineFilter;
 use nixarchy_meetingai::speech::stt::transcription::{
-    BatchChunks, TranscriptLine, transcribe_with_retry,
+    BatchChunks, TranscriptLine, transcribe_chunk,
 };
 use std::time::Instant;
 
@@ -61,7 +61,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("need a 16-bit stereo 16 kHz WAV".into());
     }
     let pcm: Vec<i16> = reader.samples::<i16>().collect::<Result<_, _>>()?;
-    let mut config = ProviderConfig::new("whisper-local", "", value("--model").unwrap_or_default());
+    let mut config = ProviderConfig::new(
+        "openai-compatible-stt",
+        "",
+        value("--model").unwrap_or_default(),
+    );
     config.language = value("--language").unwrap_or_default();
     if let Some(url) = &url {
         config.base_url = url.clone();
@@ -86,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let began = Instant::now();
             let text = match fake {
                 Some(text) => text,
-                None => transcribe_with_retry(&config, &samples, &prompt)
+                None => transcribe_chunk(&config, &samples, &prompt)
                     .await
                     .map_err(|e| format!("{e} (lost audio {start:.1}s..{end:.1}s)"))?,
             };

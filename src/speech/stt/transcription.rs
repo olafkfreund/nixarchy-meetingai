@@ -47,9 +47,7 @@ fn client() -> reqwest::Client {
 pub fn extract_transcript(provider: &SttProvider, value: &Value) -> Option<String> {
     let text = match provider.wire {
         SttWire::InProcess => None,
-        SttWire::WhisperServer | SttWire::OpenAiMultipart => {
-            value.get("text").and_then(Value::as_str).map(str::to_owned)
-        }
+        SttWire::OpenAiMultipart => value.get("text").and_then(Value::as_str).map(str::to_owned),
         SttWire::RawAudio => value
             .pointer("/results/channels/0/alternatives/0/transcript")
             .and_then(Value::as_str)
@@ -105,7 +103,7 @@ async fn transcribe_inner(
     config: &ProviderConfig,
     wav: Vec<u8>,
     language: Option<&str>,
-    prompt: &str,
+    _prompt: &str,
 ) -> Result<String, SttError> {
     let language =
         language.or_else(|| (!config.language.is_empty()).then_some(config.language.as_str()));
@@ -185,11 +183,8 @@ async fn transcribe_inner(
             .map(|t| t.trim().to_owned())
             .map_err(SttError::Protocol);
     }
-    if matches!(
-        provider.wire,
-        SttWire::WhisperServer | SttWire::OpenAiMultipart
-    ) {
-        if provider.wire == SttWire::OpenAiMultipart && !config.speech_usable() {
+    if provider.wire == SttWire::OpenAiMultipart {
+        if !config.speech_usable() {
             return Err(SttError::NotConfigured);
         }
         let endpoint = if config.base_url.is_empty() {
@@ -197,41 +192,29 @@ async fn transcribe_inner(
         } else {
             &config.base_url
         };
-        let endpoint = if provider.wire == SttWire::OpenAiMultipart {
-            let url = reqwest::Url::parse(endpoint)
-                .map_err(|e| SttError::Protocol(format!("invalid speech base URL: {e}")))?;
-            if url.query().is_some() || url.fragment().is_some() {
-                return Err(SttError::Protocol(
-                    "speech base URL must not contain a query string or fragment".into(),
-                ));
-            }
-            let base = endpoint.trim_end_matches('/');
-            let base = base.strip_suffix("/v1").unwrap_or(base);
-            format!("{base}/v1/audio/transcriptions")
-        } else {
-            endpoint.to_owned()
-        };
+        let url = reqwest::Url::parse(endpoint)
+            .map_err(|e| SttError::Protocol(format!("invalid speech base URL: {e}")))?;
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(SttError::Protocol(
+                "speech base URL must not contain a query string or fragment".into(),
+            ));
+        }
+        let base = endpoint.trim_end_matches('/');
+        let base = base.strip_suffix("/v1").unwrap_or(base);
+        let endpoint = format!("{base}/v1/audio/transcriptions");
         let file = reqwest::multipart::Part::bytes(wav)
             .file_name("audio.wav")
             .mime_str("audio/wav")?;
-        let mut form = reqwest::multipart::Form::new().part("file", file);
-        if provider.wire == SttWire::OpenAiMultipart {
-            form = form.text("model", config.model.clone());
-        } else {
-            form = form
-                .text("response_format", "json")
-                .text("temperature", "0");
-        }
-        if provider.wire == SttWire::WhisperServer && !prompt.is_empty() {
-            form = form.text("prompt", prompt.to_owned());
-        }
+        let mut form = reqwest::multipart::Form::new()
+            .part("file", file)
+            .text("model", config.model.clone());
         if let Some(language) =
             language.filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("auto"))
         {
             form = form.text("language", language.to_owned());
         }
         let mut request = client().post(endpoint).multipart(form);
-        if provider.wire == SttWire::OpenAiMultipart && !config.api_key.is_empty() {
+        if !config.api_key.is_empty() {
             request = request.bearer_auth(&config.api_key);
         }
         let response = request.send().await?;
@@ -716,7 +699,7 @@ impl LiveTranscriber {
                     let prompt = filter.prompt(channel, &hints.glossary);
                     in_flight.push_back((channel, start));
                     requests.push_back(async move {
-                        let text = transcribe_with_retry(&config, &samples, &prompt)
+                        let text = transcribe_chunk(&config, &samples, &prompt)
                             .await
                             .map_err(|e| format!("{e} (lost audio {start:.1}s..{end:.1}s)"))?;
                         if text.is_empty() {
@@ -1021,38 +1004,13 @@ impl Drop for LiveTranscriber {
     }
 }
 
-/// Loopback providers (whisper-server) may be restarting: retry transient failures.
-pub async fn transcribe_with_retry(
+/// Transcribe one chunk of samples (language from the config).
+pub async fn transcribe_chunk(
     config: &ProviderConfig,
     samples: &[f32],
     prompt: &str,
 ) -> Result<String, SttError> {
-    let loopback = SttProvider::by_id(&config.id).is_some_and(|p| p.wire == SttWire::WhisperServer)
-        && reqwest::Url::parse(if config.base_url.is_empty() {
-            "http://127.0.0.1"
-        } else {
-            &config.base_url
-        })
-        .ok()
-        .and_then(|u| {
-            u.host_str()
-                .map(|h| matches!(h, "localhost" | "127.0.0.1" | "[::1]"))
-        })
-        .unwrap_or(false);
-    let mut delays = [250u64, 1000, 3000].into_iter();
-    loop {
-        let result = transcribe_with_prompt(config, to_wav(samples)?, None, prompt).await;
-        let transient = matches!(
-            result,
-            Err(SttError::Request(_) | SttError::Status { status: 500.., .. })
-        );
-        match delays.next() {
-            Some(ms) if loopback && transient => {
-                tokio::time::sleep(std::time::Duration::from_millis(ms)).await
-            }
-            _ => return result,
-        }
-    }
+    transcribe_with_prompt(config, to_wav(samples)?, None, prompt).await
 }
 
 /// Encode samples as WAV, shared by batch transcription and local chunks.

@@ -217,3 +217,22 @@ is reported, not replaced.
   returns released lines, `tick`/`flush` release the rest. The step 0
   replay now prints request and released-line records separately and
   flushes at the end; `score.py` reads them.
+- **Step 7 (redone on main fe61632, after steps 0-6 merged; the first
+  attempt on a step-5 branch is superseded):** whisper removed: provider
+  `whisper-local`, `SttWire::WhisperServer`, `apply_whisper_url`, the
+  loopback retry (`transcribe_with_retry`, which only retried whisper; the
+  live loop and `accuracy_replay` now call `transcribe_chunk`), the whisper
+  service and `whisper.*` options (`mkRemovedOptionModule`, naming
+  `parakeet.*`, `openai-compatible-stt` and `deepgram.keyFile`),
+  `nix/whisper-model.nix`, `whisper-model-*` packages, `docs/whisper-bench.md`,
+  `tools/whisper-bench.sh`, the SetupCard whisper command. The OpenAI
+  multipart path is kept and no longer shares branches with whisper (the
+  `prompt` argument is unused now: Parakeet, Deepgram and OpenAI ignore it).
+  `accuracy_replay` uses `openai-compatible-stt` (`--url` is a base URL now;
+  `tools/accuracy/README.md` updated). Default `speech_provider` is
+  `parakeet-local`; `migrate_whisper` rewrites a saved `whisper-local` at
+  daemon start and appends its notice to the startup notice. New
+  `parakeet.enable` (default true) gates `NIXARCHY_MEETINGAI_PARAKEET_DIR`;
+  the not-ready reason says so. **Pending decision:** `echo_gate` stays off;
+  the evaluation set is not recorded yet. Not done here: final real-set
+  numbers and the p620 deploy.

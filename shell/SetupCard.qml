@@ -24,7 +24,6 @@ Rectangle {
     readonly property bool needSpeech: !root.down && root.ready.speech === false
     readonly property bool needed: root.down || root.needChat || root.needSpeech
     readonly property string startCmd: "systemctl --user start nixarchy-meetingai"
-    readonly property string whisperCmd: "systemctl --user status nixarchy-meetingai-whisper"
 
     visible: root.needed
     height: col.implicitHeight + root.theme.padY * 2
@@ -77,7 +76,6 @@ Rectangle {
             spacing: root.theme.gap / 2
             Title { text: "Check speech-to-text" }
             Body { text: String(root.hints.speech || "Speech-to-text is not ready.") }
-            CommandRow { theme: root.theme; cmd: root.whisperCmd }
         }
     }
 }

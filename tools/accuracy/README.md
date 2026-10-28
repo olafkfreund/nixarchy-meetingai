@@ -17,9 +17,9 @@ silence; use speakers, not headphones, to measure echo bleed. Write the referenc
 
 ## Score
 
-With the local whisper-server running:
+With an OpenAI-compatible speech server running (`--url` is its base URL, `--model` its model name):
 
-    python3 -I tools/accuracy/score.py tools/accuracy/data/set1.wav tools/accuracy/data/set1.txt --url http://127.0.0.1:8178/inference
+    python3 -I tools/accuracy/score.py tools/accuracy/data/set1.wav tools/accuracy/data/set1.txt --url http://127.0.0.1:8178 --model large-v3-turbo
 
 Prints bleed lines (decided on words unique to one side), lost owner words, remote words on the mic channel, invented lines on silence spans, lines of mostly unknown words, and inference latency per chunk. Extra flags: `--model`, `--language`, `--glossary`.
 
