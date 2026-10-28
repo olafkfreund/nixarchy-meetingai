@@ -32,7 +32,8 @@ fn main() {
     let load = t.elapsed().as_secs_f64();
     let rss_loaded = peak_rss_mb();
 
-    let chunk = a.get(4).and_then(|t| t.parse::<usize>().ok()).unwrap_or(0) * wave.sample_rate() as usize;
+    let chunk =
+        a.get(4).and_then(|t| t.parse::<usize>().ok()).unwrap_or(0) * wave.sample_rate() as usize;
     let samples = wave.samples();
     let chunk = if chunk == 0 { samples.len() } else { chunk };
     let (mut text, mut ntok, mut nts, mut dec) = (String::new(), 0, 0, 0.0);
@@ -53,6 +54,13 @@ fn main() {
         text.push(' ');
     }
     println!("{}", &text[..text.len().min(400)]);
-    println!("words={} tokens={ntok} timestamps={nts} first={first:?}", text.split_whitespace().count());
-    println!("audio={secs:.1}s load={load:.2}s decode={dec:.2}s RTF={:.4} rss_after_load={rss_loaded:.0}MB peak_rss={:.0}MB", dec / secs, peak_rss_mb());
+    println!(
+        "words={} tokens={ntok} timestamps={nts} first={first:?}",
+        text.split_whitespace().count()
+    );
+    println!(
+        "audio={secs:.1}s load={load:.2}s decode={dec:.2}s RTF={:.4} rss_after_load={rss_loaded:.0}MB peak_rss={:.0}MB",
+        dec / secs,
+        peak_rss_mb()
+    );
 }
