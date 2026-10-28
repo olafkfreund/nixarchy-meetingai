@@ -146,4 +146,28 @@ is reported, not replaced.
 
 ## Deviations log
 
+- **Step 0:** the replay is `examples/accuracy_replay.rs`, which runs
+  `BatchChunks` → provider → `LineFilter` in sequence rather than the
+  spawned live task (same components, latency measured per chunk); this
+  made `BatchChunk`/`BatchChunks` `pub`. JSON lines also carry `latency`.
+  `score.py` scores by words (bleed: > ½ of a mic line's words in `them:`
+  text and < ½ in `me:`; invented: < ½ of its words anywhere in the
+  reference); `[silence]` markers are parsed but unused. `score.py` calls
+  `cargo run --example`, so it runs inside `devenv shell`.
+- **Step 0 review fixes** (Codex, Opus): recording no longer uses two
+  `parec` processes (channels were unaligned and the live mic does not go
+  through parec): a socket-only command `record.tap {path, seconds}` /
+  `{stop}` writes the exact interleaved frames the transcriber receives
+  (after `route_audio`) to a 0600 WAV, only during a running recording and
+  never for a local-only interview; not exposed over MCP. `record.sh`
+  wraps it. `score.py`: lost owner words by counts (not set membership),
+  bleed decided on words unique to one side, `[silence mm:ss-mm:ss]`
+  spans for invented-on-silence, latency over every request, release
+  build. The replay runs 4 requests in flight with prompts built ahead,
+  like live, and uses the live retry helper. The synthetic fixtures feed
+  step 1's Rust tests; no separate CI job.
 - Step 1: the gate analyzes 1 ms envelopes in the existing 50 ms capture blocks rather than emitting 20 ms blocks. It holds one block for lookahead, adding 50 ms of gate-only output latency so a quiet owner onset can restore the preceding block. The gate remains off by default.
+- **Step 1:** the gate analyses 1 ms envelopes inside the existing 50 ms
+  capture blocks instead of emitting 20 ms blocks; it holds one block for
+  lookahead (50 ms extra latency, gate on only) so a quiet owner onset can
+  restore the block before it. Off by default.
