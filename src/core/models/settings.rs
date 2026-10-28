@@ -223,6 +223,7 @@ pub struct Settings {
     pub speech_provider: String,
     pub speech_model: String,
     pub speech_language: String,
+    pub echo_gate: bool,
     pub response_length: ResponseLength,
     pub response_language: String,
     pub smart_follow_ups: bool,
@@ -267,6 +268,7 @@ impl Default for Settings {
             speech_provider: "whisper-local".into(),
             speech_model: String::new(),
             speech_language: String::new(),
+            echo_gate: false,
             response_length: ResponseLength::Auto,
             response_language: "Auto".into(),
             smart_follow_ups: true,
@@ -304,6 +306,7 @@ mod keys {
     pub const OUTPUT_DEVICE: &str = "output_device";
     pub const SPEECH_PROVIDER: &str = "speech_provider";
     pub const SPEECH_MODEL: &str = "speech_model";
+    pub const ECHO_GATE: &str = "echo_gate";
     pub const SMART_FOLLOW_UPS: &str = "smart_follow_ups";
     pub const SMART_FOLLOW_UPS_PROMPT: &str = "smart_follow_ups_prompt";
     pub const RECAP_PROMPT_GENERAL: &str = "recap_prompt_general";
@@ -358,6 +361,7 @@ impl Settings {
             speech_provider: text(keys::SPEECH_PROVIDER, &defaults.speech_provider),
             speech_model: text(keys::SPEECH_MODEL, &defaults.speech_model),
             speech_language: text("speech_language", &defaults.speech_language),
+            echo_gate: flag(keys::ECHO_GATE, defaults.echo_gate),
             response_length: get("response_length")
                 .map(ResponseLength::parse)
                 .unwrap_or_default(),
@@ -446,6 +450,7 @@ impl Settings {
             (keys::OUTPUT_DEVICE, self.output_device.clone()),
             (keys::SPEECH_PROVIDER, self.speech_provider.clone()),
             (keys::SPEECH_MODEL, self.speech_model.clone()),
+            (keys::ECHO_GATE, self.echo_gate.to_string()),
             ("response_length", self.response_length.label().into()),
             ("response_language", self.response_language.clone()),
             (
@@ -623,6 +628,7 @@ mod tests {
             speech_provider: "deepgram-stt".into(),
             speech_model: "nova-3".into(),
             speech_language: "en-US".into(),
+            echo_gate: true,
             response_length: ResponseLength::Medium,
             response_language: "Hindi".into(),
             smart_follow_ups: false,

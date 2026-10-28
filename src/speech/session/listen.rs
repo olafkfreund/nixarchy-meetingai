@@ -15,6 +15,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::ai::providers::ProviderConfig;
+use crate::audio::echo_gate::{EchoGate, FRAME as ECHO_FRAME};
 use crate::audio::microphone::{AudioError, Microphone};
 
 use crate::speech::transcription::{self, TranscriptLine};
@@ -46,7 +47,17 @@ impl CaptureFrames {
         true
     }
 
+    #[cfg(test)]
     fn next(&mut self, finishing: bool, quiet: [bool; 2]) -> Option<Vec<f32>> {
+        self.next_sized(finishing, quiet, FRAME_SAMPLES)
+    }
+
+    fn next_sized(
+        &mut self,
+        finishing: bool,
+        quiet: [bool; 2],
+        frame_samples: usize,
+    ) -> Option<Vec<f32>> {
         let available = if !self.remote_enabled {
             self.microphone.len()
         } else if finishing {
@@ -58,14 +69,14 @@ impl CaptureFrames {
             if available == 0 {
                 return None;
             }
-            available.min(FRAME_SAMPLES)
+            available.min(frame_samples)
         } else {
-            if self.microphone.len() < FRAME_SAMPLES && !quiet[0]
-                || self.remote_enabled && self.remote.len() < FRAME_SAMPLES && !quiet[1]
+            if self.microphone.len() < frame_samples && !quiet[0]
+                || self.remote_enabled && self.remote.len() < frame_samples && !quiet[1]
             {
                 return None;
             }
-            FRAME_SAMPLES
+            frame_samples
         };
         Some(
             (0..frames)
@@ -114,6 +125,8 @@ pub struct SessionConfig {
     pub output_device: Option<String>,
     /// Speech provider used by the live network task.
     pub speech: Option<ProviderConfig>,
+    /// Suppress system audio that strongly matches the microphone channel.
+    pub echo_gate: bool,
 }
 
 /// A running capture session.
@@ -123,6 +136,7 @@ pub struct ListenSession {
     started: std::time::Instant,
     sent_samples: usize,
     frames: CaptureFrames,
+    echo_gate: Option<EchoGate>,
     last_audio: [std::time::Instant; 2],
     elapsed: Duration,
     output_device: Option<String>,
@@ -185,6 +199,7 @@ impl ListenSession {
                 remote_enabled,
                 ..Default::default()
             },
+            echo_gate: config.echo_gate.then(EchoGate::default),
             last_audio: [std::time::Instant::now(); 2],
             elapsed: Duration::ZERO,
             output_device: config.output_device.clone(),
@@ -196,6 +211,9 @@ impl ListenSession {
     pub fn set_system_audio(&mut self, enabled: bool) -> Vec<SessionEvent> {
         if !enabled {
             self.frames.set_remote(false);
+            if let Some(gate) = &mut self.echo_gate {
+                gate.reset();
+            }
             self.system.take();
             return vec![SessionEvent::Started {
                 device: self
@@ -212,6 +230,9 @@ impl ListenSession {
             Ok(system) => {
                 let device = format!("microphone + {}", system.source());
                 self.frames.set_remote(true);
+                if let Some(gate) = &mut self.echo_gate {
+                    gate.reset();
+                }
                 self.last_audio[1] = std::time::Instant::now();
                 self.system = Some(system);
                 vec![SessionEvent::Started { device }]
@@ -286,10 +307,18 @@ impl ListenSession {
             ));
             return events;
         }
-        while self.sent_samples + FRAME_SAMPLES <= due {
-            let Some(samples) = self.frames.next(false, quiet) else {
+        let frame_size = if self.echo_gate.is_some() {
+            ECHO_FRAME
+        } else {
+            FRAME_SAMPLES
+        };
+        while self.sent_samples + frame_size <= due {
+            let Some(mut samples) = self.frames.next_sized(false, quiet, frame_size) else {
                 break;
             };
+            if let Some(gate) = &mut self.echo_gate {
+                gate.process(&mut samples);
+            }
             self.sent_samples += samples.len() / 2;
             events.push(SessionEvent::Audio(samples));
         }
@@ -325,7 +354,15 @@ impl ListenSession {
                     "The final audio exceeded the capture buffer.".into(),
                 ));
             }
-            while let Some(samples) = self.frames.next(true, [false; 2]) {
+            let frame_size = if self.echo_gate.is_some() {
+                ECHO_FRAME
+            } else {
+                FRAME_SAMPLES
+            };
+            while let Some(mut samples) = self.frames.next_sized(true, [false; 2], frame_size) {
+                if let Some(gate) = &mut self.echo_gate {
+                    gate.process(&mut samples);
+                }
                 events.push(SessionEvent::Audio(samples));
             }
             microphone.stop();
@@ -509,12 +546,30 @@ mod tests {
     }
 
     #[test]
+    fn disabled_gate_keeps_interleaved_samples() {
+        let config = SessionConfig::default();
+        assert!(!config.echo_gate);
+        let mut frames = CaptureFrames {
+            remote_enabled: true,
+            ..Default::default()
+        };
+        let mic = vec![0.251; FRAME_SAMPLES];
+        let remote = vec![1.0; FRAME_SAMPLES];
+        assert!(frames.push(&mic, &remote));
+        assert_eq!(
+            frames.next_sized(false, [false; 2], FRAME_SAMPLES).unwrap(),
+            interleave(&mic, &remote, FRAME_SAMPLES)
+        );
+    }
+
+    #[test]
     fn missing_device_fails_with_a_readable_message() {
         let config = SessionConfig {
             device: Some("cpal:nixarchy-meetingai-no-such-device".into()),
             system_audio: false,
             output_device: None,
             speech: None,
+            echo_gate: false,
         };
         let (session, events) = ListenSession::start(&config);
         assert!(!session.is_capturing());
@@ -535,6 +590,7 @@ mod tests {
             system_audio: false,
             output_device: None,
             speech: None,
+            echo_gate: false,
         };
         let (mut session, _) = ListenSession::start(&config);
         let events = session.stop();
@@ -559,6 +615,7 @@ mod tests {
             system_audio: false,
             output_device: None,
             speech: None,
+            echo_gate: false,
         };
         let (mut session, _) = ListenSession::start(&config);
         assert!(session.pump().is_empty());
