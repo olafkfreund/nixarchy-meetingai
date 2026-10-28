@@ -1,0 +1,10 @@
+#!/bin/sh
+# Test-only stand-in for Hyprland's hyprctl, on PATH only inside the private headless session.
+# The Omarchy shell asks for these options at start; answer with Omarchy's defaults
+# (default/hypr/looknfeel.lua) so the screenshots use the real rounding and gaps.
+case "$*" in
+  "-j getoption decoration:rounding") echo '{"option":"decoration:rounding","int":0,"set":true}' ;;
+  "-j getoption general:gaps_out") echo '{"option":"general:gaps_out","css":"10 10 10 10","set":true}' ;;
+  "-j getoption animations:enabled") echo '{"option":"animations:enabled","int":1,"bool":true,"set":true}' ;;
+  *) echo "hyprctl (test stand-in): unsupported: $*" >&2; exit 1 ;;
+esac

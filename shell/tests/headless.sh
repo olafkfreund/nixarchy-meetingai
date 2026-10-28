@@ -36,5 +36,6 @@ else
     [ -n "$sock" ] || { cat "$work/sway.log" >&2; echo "FAIL: headless sway did not start" >&2; exit 1; }
     export WAYLAND_DISPLAY=$sock
     unset HYPRLAND_INSTANCE_SIGNATURE DISPLAY   # never talk to the owner's real compositor
+    PATH="$repo/shell/tests/bin:$PATH"   # a hyprctl that answers with Omarchy's defaults
     HEADLESS=1
 fi

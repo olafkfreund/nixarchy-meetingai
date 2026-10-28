@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main] # a branch with a PR is tested by the pull_request run; one run per commit
   pull_request:
   workflow_dispatch:
 
