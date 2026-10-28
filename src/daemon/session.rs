@@ -2206,27 +2206,43 @@ impl Daemon {
     // ----- dictation ----------------------------------------------------
 
     fn dictate_start(self: &Arc<Self>) -> Result<Value, String> {
+        // Opening the microphone runs pactl, so do it without the daemon lock.
+        let (meeting, device) = {
+            let g = self.inner.lock();
+            if g.dictation.is_some() {
+                return Err("Dictation is already running.".into());
+            }
+            if self
+                .speech_config(&g.settings, self.local_now(&g))
+                .is_none()
+            {
+                return Err("Speech-to-text is not ready; dictation needs it.".into());
+            }
+            let meeting = g
+                .recording
+                .as_ref()
+                .is_some_and(|r| !r.stop.load(Ordering::Relaxed));
+            if g.recording.is_some() && !meeting {
+                return Err("Wait for the previous meeting transcript to finish.".into());
+            }
+            (
+                meeting,
+                Some(g.settings.input_device.clone()).filter(|d| !d.is_empty()),
+            )
+        };
+        let microphone = if meeting {
+            None
+        } else {
+            Some(
+                Microphone::start(device.as_deref())
+                    .map_err(|e| format!("Could not start dictation: {e}"))?,
+            )
+        };
         let mut guard = self.inner.lock();
         let g = &mut *guard;
         if g.dictation.is_some() {
             return Err("Dictation is already running.".into());
         }
-        if self.speech_config(&g.settings, self.local_now(g)).is_none() {
-            return Err("Speech-to-text is not ready; dictation needs it.".into());
-        }
-        let meeting = g
-            .recording
-            .as_ref()
-            .is_some_and(|r| !r.stop.load(Ordering::Relaxed));
-        if g.recording.is_some() && !meeting {
-            return Err("Wait for the previous meeting transcript to finish.".into());
-        }
-        let microphone = if meeting {
-            None
-        } else {
-            let device = Some(g.settings.input_device.as_str()).filter(|d| !d.is_empty());
-            Some(Microphone::start(device).map_err(|e| format!("Could not start dictation: {e}"))?)
-        };
         g.pending_question = None;
         g.pending_created = None;
         g.pending_since = None;
@@ -3588,6 +3604,24 @@ mod routing_tests {
         );
         assert_eq!(plan[0].1, "sonnet");
         assert_eq!(plan[1].1, "");
+    }
+
+    #[tokio::test]
+    async fn muted_mic_is_zeroed_and_the_remote_channel_kept() {
+        let root = std::env::temp_dir().join(format!("nixarchy-mute-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let d = Daemon::new(Options {
+            db_path: root.join("t.db"),
+            vault_dir: root.clone(),
+            capture: false,
+        })
+        .unwrap();
+        let mut frames = [0.5, -0.5, 0.25, -0.25];
+        d.route_audio(&mut frames);
+        assert_eq!(frames, [0.5, -0.5, 0.25, -0.25]);
+        d.inner.lock().mic = false;
+        d.route_audio(&mut frames);
+        assert_eq!(frames, [0.0, -0.5, 0.0, -0.25]);
     }
 
     #[tokio::test]

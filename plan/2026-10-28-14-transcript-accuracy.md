@@ -146,6 +146,23 @@ is reported, not replaced.
 
 ## Deviations log
 
+- Step 2: a saved `cpal:` input device keeps CPAL and so runs without echo
+  cancelling (the user's explicit choice is kept). The picker still lists and
+  selects it, labelled "(no echo cancelling)", and Listen start emits one
+  notice suggesting "Meeting AI echo-cancelled mic".
+- Step 2: the parec mic falls back to `@DEFAULT_SOURCE@` when the chosen
+  source delivers no samples within 500 ms. The drop-in module entry carries
+  `flags = [ ifexists nofail ]`. `pactl list sources` has a 2 s timeout and
+  dictation start opens the mic outside the daemon lock.
+- **Step 2:** the module arguments were checked by loading the drop-in
+  into an isolated PipeWire 1.6.9 with the stock config: it creates
+  `meetingai-echo-cancel-source` and a sink it always makes, named
+  `meetingai-echo-cancel-sink` so it is recognisable. Mic capture goes
+  through `parec` for Pulse source names (echo-cancel source by default,
+  else `@DEFAULT_SOURCE@`); explicit `cpal:` devices and legacy names keep
+  CPAL; no Pulse server → CPAL. `Microphone::level()` is 0 on the parec
+  path (no callers). A parec failure on the default path is a start error,
+  not a CPAL fallback.
 - **Step 0:** the replay is `examples/accuracy_replay.rs`, which runs
   `BatchChunks` → provider → `LineFilter` in sequence rather than the
   spawned live task (same components, latency measured per chunk); this

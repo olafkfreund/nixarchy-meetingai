@@ -220,6 +220,8 @@
             imports = [ stubPlugins ];
             programs.nixarchy.plugins."nixarchy.meeting-mode".src = "/user/meeting-mode";
           };
+          echoOff = evalHm { programs.nixarchy-meetingai.echoCancel.enable = false; };
+          echoFile = "pipewire/pipewire.conf.d/60-meetingai-echo-cancel.conf";
           svc = c: c.systemd.user.services;
           assertThat =
             name: cond: msg:
@@ -259,6 +261,12 @@
           package = sysPkgs.default;
           plugin = sysPkgs.plugin;
           hm-module = pkgs.writeText "hm-module-check" (builtins.toJSON (builtins.attrNames (svc minimal)));
+          hm-echo-cancel = assertThat "hm-echo-cancel" (
+            minimal.xdg.configFile ? ${echoFile}
+            && !(echoOff.xdg.configFile ? ${echoFile})
+            && lib.hasInfix "meetingai-echo-cancel-source" minimal.xdg.configFile.${echoFile}.text
+            && lib.hasInfix "flags = [ ifexists nofail ]" minimal.xdg.configFile.${echoFile}.text
+          ) "echo-cancel conf must exist with echoCancel on and be absent when off";
           hm-plugin-nixarchy = assertThat "hm-plugin-nixarchy" (
             withPlugins.programs.nixarchy.plugins."nixarchy.meetingai".src
             == self.packages.${pkgs.stdenv.hostPlatform.system}.plugin
