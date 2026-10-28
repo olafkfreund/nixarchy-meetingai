@@ -270,10 +270,16 @@ them.
 `programs.nixarchy-meetingai.skills.enable` (default on) installs a `meetingai`
 skill for Claude Code, Codex and agy. Ask "show me my latest meeting notes",
 "what did we agree about X" or "search my meetings for Y"; the agent reads them
-read-only through `nixarchy-meetingai ctl`. What it reads goes to that agent's
+read-only through `nixarchy-meetingai ctl --agent`, which the app enforces:
+it refuses every command except reads and never shows local-only interviews. What it reads goes to that agent's
 own provider. The skill links into `~/.claude/skills`, `~/.agents/skills` and
 `~/.gemini/antigravity/skills`; an existing file at one of those paths makes
 activation fail, so move it first or set `skills.enable = false`.
+
+The agent flag is chosen by the caller: any program running as you can reach
+the daemon without it. It keeps an agent that follows the skill read-only and
+away from local-only interviews; it is not a sandbox for software you do not
+trust.
 
 ## Nix options
 

@@ -3306,10 +3306,27 @@ impl Daemon {
         args: Value,
         origin: Option<&str>,
     ) -> Result<Value, String> {
-        if origin != Some("mcp") {
+        if !matches!(origin, Some("mcp" | "agent")) {
             return self.dispatch(cmd, args).await;
         }
-        tracing::info!(origin = "mcp", cmd);
+        // `ctl --agent`: the skill's read-only commands and nothing else.
+        if origin == Some("agent")
+            && !matches!(
+                cmd,
+                "session.list"
+                    | "meetings.search"
+                    | "notes.get"
+                    | "items.list"
+                    | "series.list"
+                    | "last_time.get"
+                    | "transcript.get"
+                    | "now.get"
+                    | "state.get"
+            )
+        {
+            return Err("not allowed for agents".into());
+        }
+        tracing::info!(origin, cmd);
         // Agents cannot give the candidate's consent, and cannot read a local-only interview.
         let mut args = args;
         if cmd == "record.start"
@@ -4757,6 +4774,67 @@ mod command_tests {
                 .unwrap()
                 .iter()
                 .any(|v| v["id"] == json!(a) && v["started_at"].is_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_origin_is_read_only_and_keeps_interviews_local() {
+        let d = daemon();
+        let (meeting, other) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let cand = candidates::create(c, "Ada").unwrap();
+            let m = meetings::start(c, "Ada", "", "en", None, Default::default()).unwrap();
+            candidates::link_meeting(c, &cand.id, &m).unwrap();
+            candidates::set_local_only(c, &cand.id, true).unwrap();
+            let o = meetings::start(c, "Team", "", "en", None, Default::default()).unwrap();
+            (m, o)
+        };
+        let agent = |cmd: &'static str, args: Value| {
+            let d = &d;
+            async move { d.handle(cmd, args, Some("agent")).await }
+        };
+        let list = agent("session.list", json!({})).await.unwrap();
+        let ids: Vec<_> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].clone())
+            .collect();
+        assert!(ids.contains(&json!(other)) && !ids.contains(&json!(meeting)));
+        for cmd in ["notes.get", "transcript.get", "items.list"] {
+            let err = agent(cmd, json!({"meeting": meeting})).await.unwrap_err();
+            assert!(err.contains("local-only"), "{cmd}: {err}");
+            assert!(agent(cmd, json!({"meeting": other})).await.is_ok(), "{cmd}");
+        }
+        for cmd in [
+            "settings.set",
+            "session.delete",
+            "record.start",
+            "chat.send",
+        ] {
+            let err = agent(cmd, json!({"id": meeting})).await.unwrap_err();
+            assert_eq!(err, "not allowed for agents", "{cmd}");
+        }
+        // The live session is local-only: no meeting argument means the live one.
+        d.local_only.store(true, Ordering::Relaxed);
+        for cmd in ["now.get", "transcript.get"] {
+            let err = agent(cmd, json!({})).await.unwrap_err();
+            assert!(err.contains("local-only"), "{cmd}: {err}");
+        }
+        d.local_only.store(false, Ordering::Relaxed);
+        // Without an origin nothing changes.
+        let own = d.handle("session.list", json!({}), None).await.unwrap();
+        assert!(
+            own.as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["id"] == json!(meeting))
+        );
+        assert!(
+            d.handle("notes.get", json!({"meeting": meeting}), None)
+                .await
+                .is_ok()
         );
     }
 
