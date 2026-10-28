@@ -61,10 +61,26 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
-    fn scratch() -> std::path::PathBuf {
+    /// A temp directory removed on drop, even when a test fails.
+    struct Scratch(std::path::PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch() -> Scratch {
         let dir = std::env::temp_dir().join(format!("nixarchy-files-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     #[test]
@@ -86,7 +102,8 @@ mod tests {
 
     #[test]
     fn existing_content_survives_and_create_new_refuses() {
-        let path = scratch().join("f");
+        let _dir = scratch();
+        let path = _dir.join("f");
         std::fs::write(&path, "keep me").unwrap();
         let mut text = String::new();
         open_private(&path, false)
@@ -101,7 +118,8 @@ mod tests {
     #[test]
     fn mode_becomes_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let path = scratch().join("f");
+        let _dir = scratch();
+        let path = _dir.join("f");
         std::fs::write(&path, "").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         open_private(&path, false).unwrap();
@@ -111,7 +129,8 @@ mod tests {
 
     #[test]
     fn second_lock_waits_for_the_first() {
-        let path = scratch().join("lock");
+        let _dir = scratch();
+        let path = _dir.join("lock");
         let first = lock(&path).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let other = path.clone();

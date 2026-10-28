@@ -158,7 +158,11 @@ pub fn import(path: &Path) -> Result<Attachment, String> {
         }
     };
     if text.trim().is_empty() {
-        return Err("That file has no readable text. Scanned PDFs need OCR first.".into());
+        return Err(if extension == "pdf" {
+            "That file has no readable text. Scanned PDFs need OCR first.".into()
+        } else {
+            "That file has no text.".into()
+        });
     }
     Ok(Attachment::text(id, name, text))
 }
@@ -188,11 +192,33 @@ fn encode_image(bytes: &[u8]) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    fn temp(ext: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+    /// A temp file path that is removed on drop, even when a test fails.
+    struct Temp(std::path::PathBuf);
+
+    impl std::ops::Deref for Temp {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for Temp {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn temp(ext: &str) -> Temp {
+        Temp(std::env::temp_dir().join(format!(
             "nixarchy-meetingai-context-{}.{ext}",
             uuid::Uuid::new_v4()
-        ))
+        )))
     }
 
     fn text_item(id: &str, chars: usize) -> Attachment {
@@ -309,8 +335,7 @@ mod tests {
         std::fs::write(&path, [0xffu8, 0, 0x7f, 0]).unwrap();
         assert!(import(&path).is_err());
         std::fs::write(&path, " ").unwrap();
-        assert!(import(&path).unwrap_err().contains("OCR"));
-        std::fs::remove_file(&path).unwrap();
+        assert!(import(&path).unwrap_err().contains("no text"));
     }
 
     #[test]
@@ -323,7 +348,6 @@ mod tests {
             "{:?}",
             a.text
         );
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -336,7 +360,6 @@ mod tests {
         assert!(a.image.is_some() && a.text.is_empty());
         std::fs::write(&path, "not a picture").unwrap();
         assert!(import(&path).is_err());
-        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -347,6 +370,5 @@ mod tests {
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(MAX_FILE_BYTES as u64 + 1).unwrap();
         assert!(import(&path).unwrap_err().contains("10 MB"));
-        std::fs::remove_file(&path).unwrap();
     }
 }

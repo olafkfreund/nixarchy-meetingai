@@ -87,6 +87,28 @@ mod tests {
         url
     }
 
+    /// Serve `chunks` once as a chunked response, so there is no Content-Length.
+    async fn serve_chunked(chunks: &'static [&'static [u8]]) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut scratch = [0u8; 1024];
+            let _ = socket.read(&mut scratch).await;
+            let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+            let _ = socket.write_all(head.as_bytes()).await;
+            for chunk in chunks {
+                let _ = socket
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .await;
+                let _ = socket.write_all(chunk).await;
+                let _ = socket.write_all(b"\r\n").await;
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+        url
+    }
+
     async fn fetch(url: &str) -> reqwest::Response {
         chat_client().get(url).send().await.unwrap()
     }
@@ -119,5 +141,24 @@ mod tests {
     async fn empty_body_is_empty() {
         let url = serve(b"", None).await;
         assert!(read_body(fetch(&url).await, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn chunked_body_over_the_limit_is_refused() {
+        let url = serve_chunked(&[b"abcd", b"efgh"]).await;
+        let response = fetch(&url).await;
+        assert!(response.content_length().is_none());
+        assert!(matches!(
+            read_body(response, 7).await,
+            Err(BodyError::TooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn chunked_body_under_the_limit_is_accepted() {
+        let url = serve_chunked(&[b"abcd", b"efg"]).await;
+        let response = fetch(&url).await;
+        assert!(response.content_length().is_none());
+        assert_eq!(read_body(response, 8).await.unwrap(), b"abcdefg");
     }
 }
