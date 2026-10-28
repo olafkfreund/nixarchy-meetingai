@@ -55,7 +55,7 @@ def score(records, me, them, silence):
 def main(argv):
     if len(argv) < 3:
         sys.exit(__doc__)
-    wav, ref, rest = argv[0], argv[1], argv[2:]
+    wav, ref, rest = str(Path(argv[0]).resolve()), argv[1], argv[2:]
     me, them, silence = parse_reference(Path(ref).read_text())
     run = subprocess.run(
         ["cargo", "run", "-q", "--release", "--example", "accuracy_replay", "--", wav, *rest],

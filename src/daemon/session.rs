@@ -2054,8 +2054,10 @@ impl Daemon {
 
     fn tap_audio(&self, samples: &[f32]) {
         let mut g = self.inner.lock();
+        // Local-only can begin mid-tap (interview start, candidate switch): close it at once.
+        let local = g.tap.is_some() && self.local_now(&g);
         if let Some(tap) = g.tap.as_mut()
-            && !tap.write(samples)
+            && (local || !tap.write(samples))
             && let Some(tap) = g.tap.take()
         {
             tap.finish();
@@ -2080,6 +2082,9 @@ impl Daemon {
         }
         if self.local_now(&g) {
             return Err("local_only: record.tap is refused during a local-only interview".into());
+        }
+        if g.tap.is_some() {
+            return Err("record.tap is already running; stop it first".into());
         }
         let path = args["path"]
             .as_str()
@@ -4602,6 +4607,19 @@ mod command_tests {
         d.local_only.store(true, Ordering::Relaxed);
         let err = d.handle("record.tap", tap, None).await.unwrap_err();
         assert!(err.starts_with("local_only: "), "{err}");
+        // A running tap closes when the session turns local-only, and a second tap is refused.
+        d.local_only.store(false, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("tap-s-{}.wav", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let args = json!({"path": path, "seconds": 5});
+        d.handle("record.tap", args.clone(), None).await.unwrap();
+        let err = d.handle("record.tap", args, None).await.unwrap_err();
+        assert!(err.contains("already running"), "{err}");
+        d.local_only.store(true, Ordering::Relaxed);
+        d.tap_audio(&[0.0, 0.0]);
+        assert!(d.inner.lock().tap.is_none());
+        assert!(hound::WavReader::open(&path).is_ok());
+        std::fs::remove_file(&path).unwrap();
         d.inner.lock().recording = None;
     }
 

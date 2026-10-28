@@ -9,5 +9,5 @@ case $secs in '' | *[!0-9]*) echo "SECONDS must be a whole number" >&2; exit 2 ;
 ctl=${NIXARCHY_MEETINGAI:-nixarchy-meetingai}
 trap '"$ctl" ctl record.tap "{\"stop\":true}" >/dev/null; exit 130' INT TERM
 echo "Tapping the running recording for ${secs}s -> $out"
-"$ctl" ctl record.tap "$(printf '{"path":"%s","seconds":%s}' "$out" "$secs")"
+"$ctl" ctl record.tap "$(jq -n --arg p "$out" --argjson s "$secs" '{path:$p,seconds:$s}')"
 sleep "$secs"

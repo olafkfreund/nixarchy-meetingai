@@ -13,16 +13,18 @@ pub struct Tap {
 
 impl Tap {
     pub fn create(path: &Path, seconds: u64) -> Result<Self, String> {
+        if !path.is_absolute() || path.extension().is_none_or(|e| e != "wav") {
+            return Err("record.tap needs an absolute path ending in .wav".into());
+        }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(path)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("{}: {e}", path.display()))?;
         let spec = hound::WavSpec {
             channels: 2,
             sample_rate: 16_000,
@@ -70,6 +72,9 @@ mod tests {
         assert!(tap.write(&[0.5, -0.5, 2.0, -2.0]));
         assert!(!tap.write(&vec![0.0; 40_000]));
         tap.finish();
+        assert!(Tap::create(&path, 1).is_err(), "never overwrites");
+        assert!(Tap::create(Path::new("rel.wav"), 1).is_err());
+        assert!(Tap::create(&path.with_extension("txt"), 1).is_err());
         assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         let mut r = hound::WavReader::open(&path).unwrap();
         assert_eq!((r.spec().channels, r.spec().sample_rate), (2, 16_000));

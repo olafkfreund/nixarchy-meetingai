@@ -27,19 +27,25 @@ fn report(filter: &mut LineFilter, done: Done) -> Result<(), String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let value = |flag: &str| {
-        args.iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1))
-            .cloned()
-    };
+    let (mut wav, mut flags) = (None, std::collections::HashMap::new());
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg.starts_with("--") {
+            let value = args.next().ok_or(format!("{arg} needs a value"))?;
+            flags.insert(arg, value);
+        } else if wav.is_none() {
+            wav = Some(arg);
+        } else {
+            return Err(format!("unexpected argument {arg}").into());
+        }
+    }
+    let value = |flag: &str| flags.get(flag).cloned();
     let (url, fake) = (value("--url"), value("--fake"));
     if url.is_none() == fake.is_none() {
         return Err("give exactly one of --url URL or --fake TEXT".into());
     }
     let glossary = value("--glossary").unwrap_or_default();
-    let mut reader = hound::WavReader::open(args.first().ok_or("missing WAV path")?)?;
+    let mut reader = hound::WavReader::open(wav.ok_or("missing WAV path")?)?;
     let spec = reader.spec();
     if spec.channels != 2 || spec.sample_rate != 16_000 || spec.bits_per_sample != 16 {
         return Err("need a 16-bit stereo 16 kHz WAV".into());
