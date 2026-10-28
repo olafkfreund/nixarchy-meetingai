@@ -169,3 +169,14 @@ commit and reverts alone.
   with `--all`); the 10,560 above was a hand estimate. The fixture
   database is 296 KB (SQLCipher page size), above the 200 KB aim. Step 0
   was done by the lead after the `coder` produced no output in an hour.
+- **Step 0 review fixes** (Codex, agy, Opus): the synthetic fixture key
+  is committed (`.gitignore` exception). `origin-lines.sh` stops on a
+  failed blame instead of counting 0, reads `ls-files -z`, and has
+  `--copies` (`git blame -M -C -C`, so pasted original code still counts;
+  CI prints both, 11,497 today). `old_data.rs` also checks transcript
+  lines, the notes search index, that a fresh database has the same
+  schema (columns, indexes, triggers) as the old one, that `Settings`
+  keys are unchanged (a renamed key fails), and that an old plaintext
+  database (`history-plain.db`) is encrypted and kept. "Settings file"
+  in step 0 means the settings rows in the database, which is where the
+  app keeps them.
