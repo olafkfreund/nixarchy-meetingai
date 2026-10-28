@@ -1,6 +1,6 @@
 //! Shared HTTP clients and a size-capped body reader for provider traffic.
 
-use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -51,16 +51,17 @@ pub(crate) async fn read_body(
     {
         return Err(BodyError::TooLarge);
     }
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| BodyError::Request(e.without_url()))?;
-        if chunk.len() > limit - body.len() {
-            return Err(BodyError::TooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+    response
+        .bytes_stream()
+        .map_err(|e| BodyError::Request(e.without_url()))
+        .try_fold(Vec::new(), |mut acc, piece| async move {
+            if piece.len() > limit - acc.len() {
+                return Err(BodyError::TooLarge);
+            }
+            acc.extend_from_slice(&piece);
+            Ok(acc)
+        })
+        .await
 }
 
 #[cfg(test)]

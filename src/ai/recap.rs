@@ -231,7 +231,7 @@ async fn ask(config: &ProviderConfig, system: String, user: String) -> Result<St
         system: Some(system),
         images: Vec::new(),
     };
-    // Nobody holds the sender, so this turn can only end by finishing or timing out.
+    // `_keep` holds the sender but never signals, so this turn only ends by finishing or timing out.
     let (_keep, cancel) = tokio::sync::watch::channel(false);
     let client = engine::http_client();
     let history = [Message::user(user)];

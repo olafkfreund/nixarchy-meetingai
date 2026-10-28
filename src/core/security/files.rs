@@ -9,43 +9,44 @@ use std::path::Path;
 /// Symlinks and non-regular files are refused. With `create_new` an existing
 /// file is an error. On Unix the file ends up mode `0600`.
 pub(crate) fn open_private(path: &Path, create_new: bool) -> io::Result<File> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(io::Error::other(format!(
-                "refusing to open symlink {}",
-                path.display()
-            )));
+    let refuse = |what: &str| io::Error::other(format!("{}: {what}", path.display()));
+
+    // Pre-check by name; the fstat after opening catches a swap in between.
+    if let Ok(found) = std::fs::symlink_metadata(path) {
+        let kind = found.file_type();
+        if kind.is_symlink() {
+            return Err(refuse("is a symbolic link"));
         }
-        Ok(meta) if !meta.is_file() => {
-            return Err(io::Error::other(format!(
-                "{} is not a regular file",
-                path.display()
-            )));
+        if !kind.is_file() {
+            return Err(refuse("is not a regular file"));
         }
-        Ok(_) | Err(_) => {}
     }
-    let mut options = OpenOptions::new();
-    options.read(true).write(true);
+
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).truncate(false);
     if create_new {
-        options.create_new(true);
+        opts.create_new(true);
     } else {
-        options.create(true).truncate(false);
+        opts.create(true);
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-        // Closes the window between the check above and this open.
+        opts.mode(0o600);
         #[cfg(target_os = "linux")]
-        options.custom_flags(libc::O_NOFOLLOW);
+        opts.custom_flags(libc::O_NOFOLLOW);
     }
-    let file = options.open(path)?;
+
+    let handle = opts.open(path)?;
+    if !handle.metadata()?.is_file() {
+        return Err(refuse("is not a regular file"));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        handle.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    Ok(file)
+    Ok(handle)
 }
 
 /// Open (creating if needed) and exclusively lock `path`; the lock lasts until the file drops.
