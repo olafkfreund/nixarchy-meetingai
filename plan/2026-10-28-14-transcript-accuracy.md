@@ -145,5 +145,15 @@ by a fresh Opus agent given this plan and the diff; a review not obtained
 is reported, not replaced.
 
 ## Deviations log
-
-None yet.
+- **Step 3 decision: in-process.** The official `sherpa-onnx` crate
+  2.0.1 with `features = ["shared"]` and `SHERPA_ONNX_LIB_DIR` pointing at
+  a `symlinkJoin` of nixpkgs `sherpa-onnx` 1.13.8 and `onnxruntime` links
+  without any build-time download (the default `static` feature downloads
+  and fails in the sandbox). On p620 (CPU, 4 threads): load 2.3–3.7 s,
+  1.1 GB idle, RTF 0.08 on 30 s chunks, peak 1.7 GB over a 60-minute file;
+  one-pass decode of very long audio fails, so 30 s chunks are required;
+  token timestamps come back on an 80 ms grid. The fallback service was
+  not needed. Step 5 adds a flake check running a tiny decode (crate 2.0.1
+  against library 1.13.8 may break on a nixpkgs bump) and updates the
+  package's cargo hash. Not measured: cold-disk load, two channels at
+  once, real meeting audio (step 5 / evaluation set).
