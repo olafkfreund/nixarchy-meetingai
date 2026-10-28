@@ -28,16 +28,19 @@ pub fn save(
     tx.commit().map_err(|e| e.to_string())
 }
 pub fn load(c: &Connection, id: &str) -> Result<Option<SavedContext>, String> {
-    let json: Option<String> = c
-        .query_row(
-            "SELECT context_json FROM conversation_state WHERE conversation_id=?1",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-    json.map(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
-        .transpose()
+    let mut statement = c
+        .prepare("SELECT context_json FROM conversation_state WHERE conversation_id=?1")
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement.query([id]).map_err(|error| error.to_string())?;
+    match rows.next().map_err(|error| error.to_string())? {
+        None => Ok(None),
+        Some(row) => {
+            let stored: String = row.get(0).map_err(|error| error.to_string())?;
+            serde_json::from_str(&stored)
+                .map(Some)
+                .map_err(|error| error.to_string())
+        }
+    }
 }
 pub fn meeting_chat(c: &Connection, meeting: &str) -> crate::db::Result<Option<String>> {
     Ok(c.query_row("SELECT c.id FROM conversations c JOIN meeting_conversations mc ON mc.conversation_id=c.id WHERE mc.meeting_id=?1 ORDER BY c.updated_at DESC,c.rowid DESC LIMIT 1",[meeting],|r|r.get(0)).optional()?)
@@ -48,8 +51,8 @@ mod tests {
     use crate::db::{Database, conversations, meetings};
     #[test]
     fn linked_context_disappears_with_chat() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let meeting = meetings::start(c, "Call", "", "en", None, Default::default()).unwrap();
         let chat = conversations::create(c, "Context", 5).unwrap();
         let context = SavedContext {
@@ -67,8 +70,8 @@ mod tests {
 
     #[test]
     fn saved_context_is_replaced_and_unknown_chat_is_rejected() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let chat = conversations::create(c, "Choices", 8).unwrap();
         let mut context = SavedContext {
             response_length: "brief".into(),

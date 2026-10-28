@@ -27,7 +27,12 @@ pub fn recap(c: &Connection, id: &str) -> Result<Option<Recap>> {
     .optional()?)
 }
 pub fn begin_recap(c: &Connection, id: &str) -> Result<()> {
-    c.execute("INSERT INTO meeting_recaps(meeting_id,status) VALUES(?1,'pending') ON CONFLICT(meeting_id) DO UPDATE SET status='pending',error='',updated_at=datetime('now')",[id])?;
+    if c.execute(
+        "UPDATE meeting_recaps SET status='pending',error='',updated_at=datetime('now') WHERE meeting_id=?1",
+        [id],
+    )? == 0 {
+        c.execute("INSERT INTO meeting_recaps(meeting_id) VALUES(?1)", [id])?;
+    }
     Ok(())
 }
 pub fn finish_recap(
@@ -35,11 +40,15 @@ pub fn finish_recap(
     id: &str,
     result: std::result::Result<&str, &str>,
 ) -> Result<()> {
-    let (status, content, error) = match result {
-        Ok(text) => ("ready", text, ""),
-        Err(message) => ("failed", "", message),
+    let failed = result.is_err();
+    let (content, error) = match result {
+        Ok(body) => (body, ""),
+        Err(reason) => ("", reason),
     };
-    c.execute("UPDATE meeting_recaps SET status=?2,content=?3,error=?4,updated_at=datetime('now') WHERE meeting_id=?1",params![id,status,content,error])?;
+    c.execute(
+        "UPDATE meeting_recaps SET content=?2,error=?3,status=CASE WHEN ?4 THEN 'failed' ELSE 'ready' END,updated_at=datetime('now') WHERE meeting_id=?1",
+        params![id, content, error, failed],
+    )?;
     Ok(())
 }
 
@@ -107,10 +116,13 @@ pub fn finish(c: &Connection, meeting_id: &str, duration_seconds: i64) -> Result
     Ok(())
 }
 pub fn reopen(c: &Connection, id: &str) -> Result<()> {
-    if c.execute("UPDATE meetings SET ended_at=NULL WHERE id=?1", [id])? == 0 {
-        return Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
-    }
-    Ok(())
+    c.query_row(
+        "UPDATE meetings SET ended_at=NULL WHERE id=?1 RETURNING id",
+        [id],
+        |_| Ok(()),
+    )
+    .optional()?
+    .ok_or(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
 }
 pub fn rename(c: &Connection, meeting_id: &str, title: &str) -> Result<()> {
     c.execute(
@@ -120,22 +132,17 @@ pub fn rename(c: &Connection, meeting_id: &str, title: &str) -> Result<()> {
     Ok(())
 }
 pub fn untitled(c: &Connection, limit: usize) -> Result<Vec<(String, String)>> {
-    let mut s=c.prepare("SELECT id FROM meetings WHERE substr(title,1,10)='Session · ' ORDER BY started_at DESC,rowid DESC LIMIT ?1")?;
-    let ids = s
-        .query_map([limit as i64], |r| r.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut out = Vec::new();
-    for id in ids {
-        let count: i64 = c.query_row(
-            "SELECT count(*) FROM meeting_lines WHERE meeting_id=?1",
-            [&id],
-            |r| r.get(0),
-        )?;
-        if count >= 2 {
-            out.push((id.clone(), transcript_excerpt(c, &id, 6000)?))
-        }
-    }
-    Ok(out)
+    let mut statement = c.prepare(
+        "WITH newest AS (SELECT id,started_at,rowid AS ordinal FROM meetings WHERE instr(title,'Session · ')=1 ORDER BY started_at DESC,rowid DESC LIMIT ?1)
+         SELECT id FROM newest WHERE (SELECT count(*) FROM meeting_lines WHERE meeting_id=newest.id)>=2 ORDER BY started_at DESC,ordinal DESC",
+    )?;
+    statement
+        .query_map([limit as i64], |row| row.get::<_, String>(0))?
+        .map(|found| {
+            let id = found?;
+            Ok((id.clone(), transcript_excerpt(c, &id, 6000)?))
+        })
+        .collect()
 }
 pub fn delete(c: &Connection, meeting_id: &str) -> Result<()> {
     let tx = c.unchecked_transaction()?;
@@ -275,68 +282,57 @@ pub fn format_lines(lines: &[LineRecord]) -> String {
 }
 
 pub fn transcript_excerpt(c: &Connection, meeting_id: &str, max_chars: usize) -> Result<String> {
-    let total:i64=c.query_row(
-        "SELECT coalesce(sum(length(text)+length(CASE WHEN who='me' THEN 'You' WHEN speaker IS NULL THEN 'Them' ELSE 'Speaker '||(speaker+1) END)+3),0) FROM meeting_lines WHERE meeting_id=?1",
-        [meeting_id],|r|r.get(0))?;
+    let total: i64 = c.query_row(
+        "SELECT coalesce(sum(length(text)+3+length(CASE WHEN who='me' THEN 'You' WHEN speaker IS NOT NULL THEN 'Speaker ' || (speaker+1) ELSE 'Them' END)),0) FROM meeting_lines WHERE meeting_id=?1",
+        [meeting_id],
+        |row| row.get(0),
+    )?;
     let marker = "\n[Middle omitted; excerpts from the start and end]\n";
-    let clipped = total as usize > max_chars;
-    let head = if clipped { max_chars / 2 } else { max_chars };
-    let tail = if clipped { max_chars / 2 } else { 0 };
-    let first = excerpt_side(c, meeting_id, head, false)?;
-    if !clipped {
-        return Ok(first);
+    if total as usize <= max_chars {
+        return read_excerpt(c, meeting_id, max_chars, false);
     }
-    let last = excerpt_side(c, meeting_id, tail, true)?;
-    Ok(format!("{first}{marker}{last}"))
+    let beginning = read_excerpt(c, meeting_id, max_chars / 2, false)?;
+    let ending = read_excerpt(c, meeting_id, max_chars / 2, true)?;
+    Ok([beginning.as_str(), marker, ending.as_str()].concat())
 }
-fn excerpt_side(c: &Connection, meeting_id: &str, budget: usize, reverse: bool) -> Result<String> {
-    let order = if reverse {
-        "start_time DESC,rowid DESC"
+fn read_excerpt(c: &Connection, meeting_id: &str, budget: usize, from_end: bool) -> Result<String> {
+    let sql = if from_end {
+        "SELECT CASE WHEN who='me' THEN 'You' WHEN speaker IS NOT NULL THEN 'Speaker ' || (speaker+1) ELSE 'Them' END,
+                length(text),substr(text,-?2)
+         FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time DESC,rowid DESC"
     } else {
-        "start_time,rowid"
+        "SELECT CASE WHEN who='me' THEN 'You' WHEN speaker IS NOT NULL THEN 'Speaker ' || (speaker+1) ELSE 'Them' END,
+                length(text),substr(text,1,?2)
+         FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time,rowid"
     };
-    let mut s=c.prepare(&format!("SELECT rowid,who,speaker,length(text) FROM meeting_lines WHERE meeting_id=?1 ORDER BY {order}"))?;
-    let mut rows = s.query([meeting_id])?;
-    let mut parts: Vec<String> = Vec::new();
-    let mut left = budget;
-    while left > 0 {
-        let Some(r) = rows.next()? else { break };
-        let rowid: i64 = r.get(0)?;
-        let who: String = r.get(1)?;
-        let speaker: Option<i64> = r.get(2)?;
-        let size: i64 = r.get(3)?;
-        let prefix = format!("{}: ", label(&who, speaker));
-        let line_len = prefix.chars().count() + size as usize + 1;
-        let take = left.min(line_len);
-        let segment = if reverse {
-            let body: String = c.query_row(
-                "SELECT substr(text,-?2) FROM meeting_lines WHERE rowid=?1",
-                params![rowid, take as i64],
-                |r| r.get(0),
-            )?;
-            let full = format!("{prefix}{body}\n");
-            full.chars()
-                .rev()
-                .take(take)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect()
+    let mut statement = c.prepare(sql)?;
+    let mut rows = statement.query(params![meeting_id, budget as i64])?;
+    let mut remaining = budget;
+    let mut pieces = Vec::new();
+    while remaining > 0 {
+        let Some(row) = rows.next()? else { break };
+        let tag: String = row.get(0)?;
+        let text_len: i64 = row.get(1)?;
+        let text: String = row.get(2)?;
+        let length = tag.chars().count() + text_len as usize + 3;
+        let fragment = format!("{tag}: {text}\n");
+        let count = remaining.min(length);
+        if from_end {
+            pieces.push(
+                fragment
+                    .chars()
+                    .skip(fragment.chars().count() - count)
+                    .collect::<String>(),
+            );
         } else {
-            let body: String = c.query_row(
-                "SELECT substr(text,1,?2) FROM meeting_lines WHERE rowid=?1",
-                params![rowid, take as i64],
-                |r| r.get(0),
-            )?;
-            format!("{prefix}{body}\n").chars().take(take).collect()
-        };
-        left -= take;
-        parts.push(segment);
+            pieces.push(fragment.chars().take(count).collect());
+        }
+        remaining -= count;
     }
-    if reverse {
-        parts.reverse()
+    if from_end {
+        pieces.reverse();
     }
-    Ok(parts.concat())
+    Ok(pieces.concat())
 }
 pub fn name_speaker(c: &Connection, meeting_id: &str, key: &str, name: &str) -> Result<()> {
     c.execute("INSERT INTO meeting_speakers(meeting_id,speaker_key,name) VALUES(?1,?2,?3) ON CONFLICT(meeting_id,speaker_key) DO UPDATE SET name=excluded.name",params![meeting_id,key,name])?;
@@ -359,8 +355,8 @@ mod tests {
 
     #[test]
     fn archive_search_and_lifecycle() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let id = start(
             c,
             "Orchid review",
@@ -370,11 +366,13 @@ mod tests {
             Default::default(),
         )
         .unwrap();
-        add_line(c, &id, "me", None, "Café %_ shipment", 4.0, 5.0).unwrap();
+        add_line(c, &id, "me", None, "Piñata %_ shipment", 4.0, 5.0).unwrap();
         add_line(c, &id, "them", Some(1), "Earlier", 1.0, 2.0).unwrap();
         let other = start(c, "Other", "", "en", None, Default::default()).unwrap();
-        for q in ["ORCHID", "saffron", "%_", "Café"] {
-            assert_eq!(search(c, q, 10).unwrap()[0].id, id);
+        for q in ["ORCHID", "saffron", "%_", "Piñata"] {
+            let found = search(c, q, 10).unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].id, id);
         }
         assert!(search(c, "%_missing", 10).unwrap().is_empty());
         assert_eq!(lines(c, &id).unwrap()[0].text, "Earlier");
@@ -421,7 +419,7 @@ mod tests {
         assert_eq!(speaker_names(c, &id).unwrap()["two"], "Bea");
         index_notes(c, &id, "zebra approval").unwrap();
         assert_eq!(search(c, "zebra", 10).unwrap()[0].id, id);
-        for q in ["\"", "-", "(", "AND OR NOT *"] {
+        for q in ["'", "+", ")", "NEAR / *"] {
             search(c, q, 10).unwrap();
         }
         begin_recap(c, &id).unwrap();
@@ -440,8 +438,8 @@ mod tests {
 
     #[test]
     fn bounded_transcript_and_chunks() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let id = start(c, "Session · 09:00", "", "en", None, Default::default()).unwrap();
         for n in 0..1000 {
             let text = format!("line-{n} {}", "界".repeat(500));
@@ -488,13 +486,13 @@ mod tests {
         assert_eq!(format_duration(0), "00:00");
         assert_eq!(format_duration(63), "01:03");
         assert_eq!(format_duration(3700), "61:40");
-        assert_eq!(format_duration(-5), "00:00");
+        assert_eq!(format_duration(-42), "00:00");
     }
 
     #[test]
     fn notes_search_finds_only_the_indexed_meeting_and_delete_removes_it() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let older = start(c, "Old", "", "en", None, Default::default()).unwrap();
         let newer = start(c, "New", "", "en", None, Default::default()).unwrap();
         index_notes(c, &older, "maple decision").unwrap();
@@ -502,7 +500,7 @@ mod tests {
         let found = search(c, "cedar", 10).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, newer);
-        for query in ["\"", "-", "(", "AND OR NOT *"] {
+        for query in ["'", "+", ")", "NEAR / *"] {
             search(c, query, 10).unwrap();
         }
         delete(c, &newer).unwrap();
@@ -512,8 +510,8 @@ mod tests {
 
     #[test]
     fn recent_lines_keep_the_last_three_in_time_order() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let id = start(c, "Call", "", "en", None, Default::default()).unwrap();
         for n in [4, 1, 3, 2] {
             add_line(
@@ -540,8 +538,8 @@ mod tests {
 
     #[test]
     fn renamed_meeting_and_replaced_speaker_are_visible() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let id = start(c, "Before", "", "en", None, Default::default()).unwrap();
         rename(c, &id, "After").unwrap();
         let listed = list(c, 10).unwrap();
@@ -555,8 +553,8 @@ mod tests {
 
     #[test]
     fn untitled_limit_applies_before_skipping_short_transcripts() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let ready = start(c, "Session · 10:00", "", "en", None, Default::default()).unwrap();
         add_line(c, &ready, "me", None, "first", 0.0, 1.0).unwrap();
         add_line(c, &ready, "them", None, "second", 1.0, 2.0).unwrap();
@@ -571,8 +569,8 @@ mod tests {
 
     #[test]
     fn recap_retries_keep_previous_content_until_a_new_result() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let id = start(c, "Review", "", "en", None, Default::default()).unwrap();
         assert!(recap(c, &id).unwrap().is_none());
         begin_recap(c, &id).unwrap();
@@ -598,5 +596,41 @@ mod tests {
         );
         finish_recap(c, "absent", Ok("late")).unwrap();
         assert!(recap(c, "absent").unwrap().is_none());
+        finish_recap(c, &id, Err("")).unwrap();
+        assert_eq!(recap(c, &id).unwrap().unwrap().status, "failed");
+    }
+
+    #[test]
+    fn format_lines_uses_app_speaker_labels() {
+        let utterances = [
+            LineRecord {
+                id: "1".into(),
+                who: "me".into(),
+                speaker: Some(9),
+                text: "hello".into(),
+                start_time: 0.0,
+                end_time: 1.0,
+            },
+            LineRecord {
+                id: "2".into(),
+                who: "other".into(),
+                speaker: None,
+                text: "welcome".into(),
+                start_time: 1.0,
+                end_time: 2.0,
+            },
+            LineRecord {
+                id: "3".into(),
+                who: "other".into(),
+                speaker: Some(2),
+                text: "next".into(),
+                start_time: 2.0,
+                end_time: 3.0,
+            },
+        ];
+        assert_eq!(
+            format_lines(&utterances),
+            "You: hello\nThem: welcome\nSpeaker 3: next\n"
+        );
     }
 }

@@ -72,9 +72,10 @@ mod tests {
     use crate::db::Database;
     #[test]
     fn file_lifecycle() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let id = insert(c, "draft.pdf", "application/pdf", 11, 1, "text").unwrap();
+        assert_eq!(list(c).unwrap().len(), 1);
         assert_eq!(list(c).unwrap()[0].name, "draft.pdf");
         rename(c, &id, "final.pdf").unwrap();
         assert_eq!(list(c).unwrap()[0].name, "final.pdf");
@@ -90,8 +91,8 @@ mod tests {
 
     #[test]
     fn files_list_newest_first_with_their_stored_fields() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let first = insert(c, "notes.txt", "text/plain", 17, 0, "draft").unwrap();
         let second = insert(c, "slides.pdf", "application/pdf", 2048, 12, "agenda").unwrap();
         let files = list(c).unwrap();

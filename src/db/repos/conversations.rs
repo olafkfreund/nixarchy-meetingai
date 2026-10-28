@@ -46,9 +46,9 @@ pub fn search(c: &Connection, query: &str, limit: usize) -> Result<Vec<Conversat
     let mut s = c.prepare(
         "SELECT c.id,c.title,c.created_at,c.updated_at,
             (SELECT count(*) FROM messages m WHERE m.conversation_id=c.id),
-            COALESCE((SELECT substr(m.content,1,320) FROM messages m
-              WHERE m.conversation_id=c.id AND trim(m.content)<>''
-              ORDER BY m.timestamp DESC,m.rowid DESC LIMIT 1),'')
+            COALESCE(substr((SELECT content FROM messages
+              WHERE conversation_id=c.id AND length(trim(content))>0
+              ORDER BY timestamp DESC,rowid DESC LIMIT 1),1,320),'')
          FROM conversations c
          WHERE ?1='' OR instr(lower(c.title),lower(?1))>0
            OR EXISTS(SELECT 1 FROM messages m WHERE m.conversation_id=c.id
@@ -146,23 +146,34 @@ pub fn require_conversation(c: &Connection, id: &str) -> Result<()> {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        append_message, create, delete, list, messages, recent_messages, require_conversation,
+        search, title_from, update_message,
+    };
     use crate::db::Database;
     #[test]
     fn search_and_preview() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let old = create(c, "Archive", 1).unwrap();
-        append_message(c, &old, "user", "Café %_ PLAN", 2).unwrap();
+        append_message(c, &old, "user", "Niño %_ PLAN", 2).unwrap();
         for n in 0..211 {
-            create(c, &format!("Recent {n}"), n + 3).unwrap();
+            create(c, &format!("Fresh thread #{n}"), n + 3).unwrap();
         }
-        assert!(!list(c, 200).unwrap().iter().any(|r| r.id == old));
-        for q in ["PLAN", "%_", "Café"] {
-            assert_eq!(search(c, q, 500).unwrap()[0].id, old)
+        let recent = list(c, 200).unwrap();
+        assert_eq!(recent.len(), 200);
+        assert_ne!(recent.last().unwrap().id, old);
+        for q in ["PLAN", "%_", "Niño"] {
+            let matches = search(c, q, 500).unwrap();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].id, old);
         }
-        assert!(search(c, "' OR 1=1 --", 500).unwrap().is_empty());
-        assert_eq!(search(c, "  ", 1).unwrap().len(), 1);
+        assert!(
+            search(c, "'; DROP TABLE messages; --", 500)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(search(c, "\t\n", 1).unwrap().len(), 1);
         let other = create(c, "Other", 300).unwrap();
         append_message(c, &other, "user", "other body", 301).unwrap();
         append_message(c, &old, "assistant", "answer", 302).unwrap();
@@ -178,13 +189,13 @@ mod tests {
     }
     #[test]
     fn message_order_and_shortening() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let id = create(c, "Thread", 0).unwrap();
         for n in 0..100 {
             append_message(c, &id, "user", &format!("note {n}"), n).unwrap();
         }
-        let big = format!("START{}END", "é".repeat(600_000));
+        let big = format!("START{}END", "界".repeat(600_000));
         let mid = append_message(c, &id, "assistant", &big, 100).unwrap();
         let recent = recent_messages(c, &id, 3).unwrap();
         assert_eq!(recent[0].content, "note 98");
@@ -202,8 +213,8 @@ mod tests {
     fn title_and_presence() {
         assert_eq!(title_from(" \n "), "New conversation");
         assert_eq!(title_from(" Short "), "Short");
-        let title = title_from(&"a".repeat(80));
-        assert_eq!(title.chars().count(), 61);
+        let title = title_from(&"z".repeat(73));
+        assert_eq!(title, format!("{}…", "z".repeat(60)));
         assert!(title.ends_with('…'));
         let db = Database::in_memory().unwrap();
         assert!(require_conversation(db.connection(), "missing").is_err());
@@ -211,14 +222,14 @@ mod tests {
 
     #[test]
     fn archive_search_is_case_insensitive_and_literal() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let archived = create(c, "Notes", 1).unwrap();
         append_message(c, &archived, "user", "Résumé %_ cobalt", 2).unwrap();
         for n in 0..205 {
             create(c, &format!("Newer {n}"), n + 3).unwrap();
         }
-        assert!(!list(c, 200).unwrap().iter().any(|row| row.id == archived));
+        assert_ne!(list(c, 200).unwrap().last().unwrap().id, archived);
         for query in ["COBALT", "%_", "Résumé"] {
             let found = search(c, query, 500).unwrap();
             assert_eq!(found.len(), 1);
@@ -229,8 +240,8 @@ mod tests {
 
     #[test]
     fn one_message_moves_an_older_conversation_to_the_top() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let older = create(c, "Earlier", 10).unwrap();
         create(c, "Later", 20).unwrap();
         append_message(c, &older, "assistant", "follow-up", 30).unwrap();
@@ -242,8 +253,8 @@ mod tests {
 
     #[test]
     fn recent_messages_shortens_a_million_multibyte_characters() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let id = create(c, "Long reply", 0).unwrap();
         for n in 0..101 {
             append_message(c, &id, "user", &format!("small-{n}"), n).unwrap();

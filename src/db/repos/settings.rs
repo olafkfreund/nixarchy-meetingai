@@ -61,18 +61,11 @@ pub fn update_prompt(c: &Connection, id: i64, name: &str, prompt: &str) -> Resul
     Ok(())
 }
 pub fn delete_prompt(c: &Connection, id: i64) -> Result<()> {
-    let slot: Option<i64> = c
-        .query_row(
-            "SELECT listen_slot FROM system_prompts WHERE id=?1",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
     let tx = c.unchecked_transaction()?;
-    if let Some(n) = slot {
-        set(&tx, &format!("deleted_listen_slot_{n}"), "true")?;
-    }
+    tx.execute(
+        "INSERT INTO app_settings(key,value) SELECT 'deleted_listen_slot_' || listen_slot,'true' FROM system_prompts WHERE id=?1 AND listen_slot IS NOT NULL ON CONFLICT(key) DO UPDATE SET value='true',updated_at=datetime('now')",
+        [id],
+    )?;
     tx.execute("DELETE FROM system_prompts WHERE id=?1", [id])?;
     tx.commit()?;
     Ok(())
@@ -84,8 +77,8 @@ mod tests {
     use crate::db::Database;
     #[test]
     fn settings_and_prompts() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         assert_eq!(get(c, "ui_scale").unwrap(), None);
         set(c, "ui_scale", "small").unwrap();
         set(c, "ui_scale", "large").unwrap();
@@ -131,8 +124,8 @@ mod tests {
 
     #[test]
     fn custom_prompts_follow_slotted_prompts_in_name_order() {
-        let db = Database::in_memory().unwrap();
-        let c = db.connection();
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
         let z = create_prompt(c, "Zulu custom", "last").unwrap();
         let a = create_prompt(c, "Alpha custom", "first").unwrap();
         let prompts = prompts(c).unwrap();
