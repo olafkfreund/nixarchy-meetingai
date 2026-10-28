@@ -234,3 +234,7 @@ commit and reverts alone.
   revision/eviction methods and `is_empty`, `ChatSession::{rename,
   delete}`; `build_body`, `parse_sse_line`, `ChatEvent` made private.
   `--copies` leaves 31 lines in `cli.rs`/`opencode.rs`, outside this step.
+  Re-review (ready): also changed, all harmless: `fail` treats a
+  whitespace-only partial answer as no answer; the shortening notice is
+  4 characters longer; redaction also replaces the trimmed key; a
+  trailing `\r` is stripped from a final unterminated stream line.
