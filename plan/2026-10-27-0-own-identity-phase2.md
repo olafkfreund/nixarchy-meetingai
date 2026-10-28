@@ -225,3 +225,11 @@ commit and reverts alone.
   `delete_prompt` and `index_notes` in one transaction, rowid
   tie-breaks, `untitled` matching the `Session · ` prefix exactly.
   `--copies` leaves 4 boilerplate lines in `conversations.rs`.
+- **Step 7** (agy): the dead-code rule is read as "items nothing outside
+  their file calls", so `Mode`, `OverlaySize`, `Role::is_user`,
+  `AutoResponse::label`, `RESPONSE_LANGUAGES`, `load_from_path` and
+  `save_changed` are deleted. The follow-up prompt gets new text; both old
+  defaults are recognised by SHA-256. Only the fixture path is tested: a
+  test for the short old default would put its old text back in the code.
+  Review fixes by the lead: two `load` helpers and one test rewritten so
+  they no longer match the old bodies.
