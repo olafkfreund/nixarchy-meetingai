@@ -399,14 +399,14 @@ Deepgram API region; EU requests opt out of model improvement\.
 
 
 *Type:*
-one of “us”, “eu”
+null or one of “us”, “eu”
 
 
 
 *Default:*
 
 ```nix
-"us"
+null
 ```
 
 

@@ -176,7 +176,16 @@ async fn transcribe_inner(
             &config.base_url
         };
         let endpoint = if provider.wire == SttWire::OpenAiMultipart {
-            format!("{}/v1/audio/transcriptions", endpoint.trim_end_matches('/'))
+            let url = reqwest::Url::parse(endpoint)
+                .map_err(|e| SttError::Protocol(format!("invalid speech base URL: {e}")))?;
+            if url.query().is_some() || url.fragment().is_some() {
+                return Err(SttError::Protocol(
+                    "speech base URL must not contain a query string or fragment".into(),
+                ));
+            }
+            let base = endpoint.trim_end_matches('/');
+            let base = base.strip_suffix("/v1").unwrap_or(base);
+            format!("{base}/v1/audio/transcriptions")
         } else {
             endpoint.to_owned()
         };
@@ -194,8 +203,8 @@ async fn transcribe_inner(
         if provider.wire == SttWire::WhisperServer && !prompt.is_empty() {
             form = form.text("prompt", prompt.to_owned());
         }
-        if provider.wire == SttWire::WhisperServer
-            && let Some(language) = language.filter(|v| !v.is_empty())
+        if let Some(language) =
+            language.filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("auto"))
         {
             form = form.text("language", language.to_owned());
         }
@@ -1038,6 +1047,7 @@ mod tests {
                     .contains("authorization: bearer test-key")
             );
             assert!(text.contains("name=\"model\"\r\n\r\nparakeet"));
+            assert!(text.contains("name=\"language\"\r\n\r\nen"));
             assert!(text.contains("name=\"file\"; filename=\"audio.wav\""));
             assert!(text.contains("Content-Type: audio/wav"));
             assert!(text.contains("RIFFtest"));
@@ -1048,7 +1058,8 @@ mod tests {
             "test-key",
             "parakeet",
         );
-        config.base_url = format!("http://127.0.0.1:{port}");
+        config.base_url = format!("http://127.0.0.1:{port}/v1///");
+        config.language = "en".into();
         assert_eq!(
             super::transcribe(&config, b"RIFFtest".to_vec(), None)
                 .await
@@ -1056,6 +1067,22 @@ mod tests {
             "hello"
         );
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn openai_multipart_rejects_query_and_fragment_in_base_url() {
+        let mut config =
+            crate::ai::providers::ProviderConfig::new("openai-compatible-stt", "", "parakeet");
+        for suffix in ["?token=secret", "#fragment"] {
+            config.base_url = format!("http://127.0.0.1:8000/v1{suffix}");
+            let error = super::transcribe(&config, b"RIFFtest".to_vec(), None)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("query string or fragment"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

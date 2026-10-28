@@ -293,6 +293,7 @@
                 }
                 { programs.nixarchy-meetingai.settings.extra.api_key = "fake-key"; }
                 { programs.nixarchy-meetingai.ollama.url = "http://10.0.0.5:11434"; }
+                { programs.nixarchy-meetingai.settings.speechBaseUrl = "http://10.0.0.5:8000"; }
                 {
                   programs.nixarchy-meetingai.ollamaCloud = {
                     keyFile = "/run/fake";
@@ -306,6 +307,10 @@
               && lib.all (c: !evaluates c) wrong
               && evaluates { programs.nixarchy-meetingai.ollama.url = "https://ollama.example.com"; }
               && evaluates { programs.nixarchy-meetingai.ollama.url = "http://[::1]:11434"; }
+              && evaluates { programs.nixarchy-meetingai.settings.speechBaseUrl = "http://127.0.0.1:8000/v1"; }
+              && evaluates {
+                programs.nixarchy-meetingai.settings.speechBaseUrl = "https://speech.example.com/v1";
+              }
               && evaluates {
                 programs.nixarchy-meetingai = {
                   whisper.enable = false;
@@ -330,9 +335,7 @@
           hm-settings-file = assertThat "hm-settings-file" (
             builtins.fromJSON full.xdg.configFile."nixarchy-meetingai/settings.json".text
             == builtins.fromJSON (builtins.readFile ./tests/fixtures/nix-settings.json)
-            &&
-              (builtins.fromJSON minimal.xdg.configFile."nixarchy-meetingai/settings.json".text)
-              .values.deepgram_region == "us"
+            && !(minimal.xdg.configFile ? "nixarchy-meetingai/settings.json")
           ) "settings.json differs from tests/fixtures/nix-settings.json";
           hm-service-options = assertThat "hm-service-options" (
             lib.hasInfix "--port 9000 -t 4 --no-gpu" (toString fullWhisper.Service.ExecStart)

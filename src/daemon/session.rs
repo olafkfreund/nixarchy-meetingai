@@ -512,13 +512,20 @@ fn apply_ollama_url(config: &mut ProviderConfig, url: Option<String>) {
 
 /// A key from a file; a missing or unreadable file means no key (warned once, never the content).
 fn read_key_file(path: Option<std::ffi::OsString>, provider: &str) -> Option<String> {
-    static WARNED: std::sync::Once = std::sync::Once::new();
+    static WARNED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(String, std::ffi::OsString)>>,
+    > = std::sync::OnceLock::new();
     let path = path?;
     let text = std::fs::read_to_string(&path)
         .inspect_err(|error| {
-            WARNED.call_once(
-                || tracing::warn!(%error, ?path, %provider, "cannot read the provider key file"),
-            );
+            if WARNED
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .insert((provider.into(), path.clone()))
+            {
+                tracing::warn!(%error, ?path, %provider, "cannot read the provider key file");
+            }
         })
         .ok()?;
     Some(text.trim().to_owned()).filter(|k| !k.is_empty())
@@ -786,9 +793,9 @@ impl Daemon {
                     "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama."
                 }),
                 "speech": (!speech).then_some(if local {
-                    "Local-only is on: speech-to-text must be whisper on this machine. Check nixarchy-meetingai-whisper.service."
+                    "Local-only is on: start whisper-server or configure openai-compatible-stt with a reachable loopback base URL."
                 } else {
-                    "Speech-to-text is not ready. Check nixarchy-meetingai-whisper.service, or add a Deepgram key in Providers."
+                    "Speech-to-text is not ready. Check whisper-server, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
                 }),
             },
         })
@@ -1830,7 +1837,7 @@ impl Daemon {
                 Some(self.speech_config(&g.settings, local).ok_or(if local {
                     "local_only: speech-to-text must be ready on a loopback address."
                 } else {
-                    "Speech-to-text is not ready. Start whisper-server or add a Deepgram key."
+                    "Speech-to-text is not ready. Start whisper-server, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
                 })?)
             } else {
                 None
@@ -4102,7 +4109,7 @@ mod command_tests {
                     .unwrap();
             }
         };
-        // Deepgram without a key: speech is not ready and the hint points at the unit and Providers.
+        // Deepgram without a key: speech is not ready and the hint covers each provider.
         set("speech_provider", "deepgram-stt").await;
         set("chat_provider", "ollama").await;
         let st = d.handle("state.get", json!({}), None).await.unwrap();
@@ -4110,10 +4117,9 @@ mod command_tests {
         assert_eq!(st["hints"]["chat"], Value::Null);
         assert_eq!(st["ready"]["speech"], false);
         let hint = st["hints"]["speech"].as_str().unwrap();
-        assert!(
-            hint.contains("nixarchy-meetingai-whisper.service"),
-            "{hint}"
-        );
+        assert!(hint.contains("whisper-server"), "{hint}");
+        assert!(hint.contains("Deepgram key"), "{hint}");
+        assert!(hint.contains("openai-compatible-stt base URL"), "{hint}");
         // The default local whisper needs no key.
         set("speech_provider", "whisper-local").await;
         let st = d.handle("state.get", json!({}), None).await.unwrap();

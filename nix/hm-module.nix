@@ -34,6 +34,12 @@ let
     lib.match "(https://.*|http://(localhost|127\\.0\\.0\\.1|[[]::1[]])(:[0-9]+)?(/.*)?)" (
       lib.toLower cfg.ollama.url
     ) != null;
+  speechBaseUrlOk =
+    cfg.settings.speechBaseUrl == null
+    ||
+      lib.match "(https://.*|http://(localhost|127\\.0\\.0\\.1|[[]::1[]])(:[0-9]+)?(/.*)?)" (
+        lib.toLower cfg.settings.speechBaseUrl
+      ) != null;
 
   # nixarchy (when imported) installs plugins; without it the plugin goes to omarchy's folder.
   hasPlugins = lib.hasAttrByPath [ "programs" "nixarchy" "plugins" ] options;
@@ -246,11 +252,13 @@ in
     };
 
     deepgram.region = lib.mkOption {
-      type = lib.types.enum [
-        "us"
-        "eu"
-      ];
-      default = "us";
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "us"
+          "eu"
+        ]
+      );
+      default = null;
       description = "Deepgram API region; EU requests opt out of model improvement.";
     };
 
@@ -358,6 +366,10 @@ in
       {
         assertion = ollamaUrlOk;
         message = "programs.nixarchy-meetingai: ollama.url must be https, or http on localhost, 127.0.0.1 or [::1].";
+      }
+      {
+        assertion = speechBaseUrlOk;
+        message = "programs.nixarchy-meetingai: settings.speechBaseUrl must be https, or http on localhost, 127.0.0.1 or [::1].";
       }
       {
         assertion = cfg.ollamaCloud.keyFile == null || cfg.ollamaCloud.environmentFile == null;
