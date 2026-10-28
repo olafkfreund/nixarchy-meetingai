@@ -282,57 +282,30 @@ pub fn format_lines(lines: &[LineRecord]) -> String {
 }
 
 pub fn transcript_excerpt(c: &Connection, meeting_id: &str, max_chars: usize) -> Result<String> {
-    let total: i64 = c.query_row(
-        "SELECT coalesce(sum(length(text)+3+length(CASE WHEN who='me' THEN 'You' WHEN speaker IS NOT NULL THEN 'Speaker ' || (speaker+1) ELSE 'Them' END)),0) FROM meeting_lines WHERE meeting_id=?1",
-        [meeting_id],
-        |row| row.get(0),
+    let mut statement = c.prepare(
+        "SELECT who,speaker,text FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time,rowid",
     )?;
-    let marker = "\n[Middle omitted; excerpts from the start and end]\n";
-    if total as usize <= max_chars {
-        return read_excerpt(c, meeting_id, max_chars, false);
+    let lines = statement
+        .query_map([meeting_id], |r| {
+            let (who, speaker, text): (String, Option<i64>, String) =
+                (r.get(0)?, r.get(1)?, r.get(2)?);
+            Ok(format!("{}: {text}\n", label(&who, speaker)))
+        })?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    let total: usize = lines.iter().map(|l| l.chars().count()).sum();
+    if total <= max_chars {
+        return Ok(lines.concat());
     }
-    let beginning = read_excerpt(c, meeting_id, max_chars / 2, false)?;
-    let ending = read_excerpt(c, meeting_id, max_chars / 2, true)?;
-    Ok([beginning.as_str(), marker, ending.as_str()].concat())
-}
-fn read_excerpt(c: &Connection, meeting_id: &str, budget: usize, from_end: bool) -> Result<String> {
-    let sql = if from_end {
-        "SELECT CASE WHEN who='me' THEN 'You' WHEN speaker IS NOT NULL THEN 'Speaker ' || (speaker+1) ELSE 'Them' END,
-                length(text),substr(text,-?2)
-         FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time DESC,rowid DESC"
-    } else {
-        "SELECT CASE WHEN who='me' THEN 'You' WHEN speaker IS NOT NULL THEN 'Speaker ' || (speaker+1) ELSE 'Them' END,
-                length(text),substr(text,1,?2)
-         FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time,rowid"
-    };
-    let mut statement = c.prepare(sql)?;
-    let mut rows = statement.query(params![meeting_id, budget as i64])?;
-    let mut remaining = budget;
-    let mut pieces = Vec::new();
-    while remaining > 0 {
-        let Some(row) = rows.next()? else { break };
-        let tag: String = row.get(0)?;
-        let text_len: i64 = row.get(1)?;
-        let text: String = row.get(2)?;
-        let length = tag.chars().count() + text_len as usize + 3;
-        let fragment = format!("{tag}: {text}\n");
-        let count = remaining.min(length);
-        if from_end {
-            pieces.push(
-                fragment
-                    .chars()
-                    .skip(fragment.chars().count() - count)
-                    .collect::<String>(),
-            );
-        } else {
-            pieces.push(fragment.chars().take(count).collect());
-        }
-        remaining -= count;
-    }
-    if from_end {
-        pieces.reverse();
-    }
-    Ok(pieces.concat())
+    let half = max_chars / 2;
+    let head: String = lines.iter().flat_map(|l| l.chars()).take(half).collect();
+    let tail: String = lines
+        .iter()
+        .flat_map(|l| l.chars())
+        .skip(total - half)
+        .collect();
+    Ok(format!(
+        "{head}\n[Middle omitted; excerpts from the start and end]\n{tail}"
+    ))
 }
 pub fn name_speaker(c: &Connection, meeting_id: &str, key: &str, name: &str) -> Result<()> {
     c.execute("INSERT INTO meeting_speakers(meeting_id,speaker_key,name) VALUES(?1,?2,?3) ON CONFLICT(meeting_id,speaker_key) DO UPDATE SET name=excluded.name",params![meeting_id,key,name])?;

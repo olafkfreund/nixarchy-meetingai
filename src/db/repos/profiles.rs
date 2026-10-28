@@ -59,9 +59,16 @@ pub fn select(c: &Connection, id: Option<&str>) -> Result<(), String> {
     };
     settings::set(c, SELECTED_KEY, chosen).map_err(|error| error.to_string())
 }
+fn valid_name(name: &str) -> bool {
+    match name.chars().count() {
+        0 => false,
+        1..=80 => !name.chars().any(char::is_control),
+        _ => false,
+    }
+}
 pub fn save(c: &Connection, p: &Profile) -> Result<(), String> {
     let cleaned = p.name.trim();
-    if cleaned.is_empty() || cleaned.chars().count() > 80 || cleaned.chars().any(char::is_control) {
+    if !valid_name(cleaned) {
         return Err("Profile name must be 1 to 80 characters without control characters.".into());
     }
     for context in [&p.personal_context, &p.meeting_context] {
@@ -91,32 +98,34 @@ pub fn delete(c: &Connection, id: &str) -> db::Result<()> {
     tx.commit()?;
     Ok(())
 }
-pub fn migrate_legacy(c: &Connection) -> db::Result<()> {
+fn legacy_contexts(c: &Connection) -> db::Result<Option<(String, String)>> {
     if settings::get(c, MIGRATED_KEY)?.is_some() {
-        return Ok(());
+        return Ok(None);
     }
-    let old = ["personal_context", "meeting_context"]
-        .map(|key| settings::get(c, key))
-        .into_iter()
-        .collect::<db::Result<Vec<_>>>()?;
-    if old
-        .iter()
-        .all(|value| value.as_deref().unwrap_or("").trim().is_empty())
-    {
-        return Ok(());
+    let personal = settings::get(c, "personal_context")?.unwrap_or_default();
+    let meeting = settings::get(c, "meeting_context")?.unwrap_or_default();
+    if personal.trim().is_empty() && meeting.trim().is_empty() {
+        return Ok(None);
     }
-    let [personal, meeting] = [
-        old[0].as_deref().unwrap_or(""),
-        old[1].as_deref().unwrap_or(""),
-    ];
-    let personal: String = personal.chars().take(16_000).collect();
-    let meeting: String = meeting.chars().take(16_000).collect();
+    let cut = |text: String| text.chars().take(16_000).collect::<String>();
+    Ok(Some((cut(personal), cut(meeting))))
+}
+pub fn migrate_legacy(c: &Connection) -> db::Result<()> {
+    let Some((personal, meeting)) = legacy_contexts(c)? else {
+        return Ok(());
+    };
     let tx = c.unchecked_transaction()?;
-    tx.execute("INSERT INTO context_profiles(id,name,personal_context,meeting_context) VALUES('legacy-precontext','My profile',?1,?2) ON CONFLICT(id) DO NOTHING",params![personal,meeting])?;
-    tx.execute("INSERT INTO app_settings(key,value) VALUES(?1,'legacy-precontext') ON CONFLICT(key) DO NOTHING",[SELECTED_KEY])?;
     tx.execute(
         "INSERT INTO app_settings(key,value) VALUES(?1,'true')",
         [MIGRATED_KEY],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO context_profiles(id,name,personal_context,meeting_context) VALUES('legacy-precontext','My profile',?1,?2)",
+        params![personal, meeting],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO app_settings(key,value) VALUES(?1,'legacy-precontext')",
+        [SELECTED_KEY],
     )?;
     tx.commit()?;
     Ok(())
