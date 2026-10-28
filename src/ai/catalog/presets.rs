@@ -1,5 +1,3 @@
-//! Explicit connection templates, reviewed against provider docs on 2026-10-24.
-//! These create ordinary custom credentials; keys and model choices remain editable.
 use super::custom::CustomProvider;
 use crate::core::credentials::{Credential, Kind};
 
@@ -10,7 +8,6 @@ pub struct Preset {
     pub model: &'static str,
     pub wire: &'static str,
     pub images: bool,
-    pub docs: &'static str,
 }
 
 pub const PRESETS: &[Preset] = &[
@@ -21,7 +18,6 @@ pub const PRESETS: &[Preset] = &[
         model: "gpt-4.1-mini",
         wire: "openai",
         images: true,
-        docs: "https://developers.openai.com/api/reference/resources/chat",
     },
     Preset {
         name: "Anthropic",
@@ -30,7 +26,6 @@ pub const PRESETS: &[Preset] = &[
         model: "claude-sonnet-5-5",
         wire: "anthropic",
         images: true,
-        docs: "https://platform.claude.com/docs/en/api/messages/create",
     },
     Preset {
         name: "Groq",
@@ -39,7 +34,6 @@ pub const PRESETS: &[Preset] = &[
         model: "openai/gpt-oss-20b",
         wire: "openai",
         images: false,
-        docs: "https://console.groq.com/docs/openai",
     },
     Preset {
         name: "OpenRouter",
@@ -48,7 +42,6 @@ pub const PRESETS: &[Preset] = &[
         model: "openai/gpt-4.1-mini",
         wire: "openai",
         images: true,
-        docs: "https://openrouter.ai/docs/api_reference/overview",
     },
     Preset {
         name: "Mistral",
@@ -57,7 +50,6 @@ pub const PRESETS: &[Preset] = &[
         model: "mistral-small-latest",
         wire: "openai",
         images: true,
-        docs: "https://docs.mistral.ai/api/endpoint/chat",
     },
     Preset {
         name: "DeepSeek",
@@ -66,7 +58,6 @@ pub const PRESETS: &[Preset] = &[
         model: "deepseek-flash",
         wire: "openai",
         images: false,
-        docs: "https://api-docs.deepseek.com/",
     },
     Preset {
         name: "Together",
@@ -75,9 +66,7 @@ pub const PRESETS: &[Preset] = &[
         model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         wire: "openai",
         images: false,
-        docs: "https://docs.together.ai/docs/openai-api-compatibility",
     },
-    // Local servers: loopback http, no key.
     Preset {
         name: "LM Studio",
         speech: false,
@@ -85,7 +74,6 @@ pub const PRESETS: &[Preset] = &[
         model: "local-model",
         wire: "openai",
         images: false,
-        docs: "https://lmstudio.ai/docs/app/api/endpoints/openai",
     },
     Preset {
         name: "vLLM",
@@ -94,7 +82,6 @@ pub const PRESETS: &[Preset] = &[
         model: "served-model",
         wire: "openai",
         images: false,
-        docs: "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html",
     },
     Preset {
         name: "OpenAI",
@@ -103,7 +90,6 @@ pub const PRESETS: &[Preset] = &[
         model: "whisper-1",
         wire: "multipart-wav",
         images: false,
-        docs: "https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create",
     },
     Preset {
         name: "Groq",
@@ -112,12 +98,30 @@ pub const PRESETS: &[Preset] = &[
         model: "whisper-large-v3-turbo",
         wire: "multipart-wav",
         images: false,
-        docs: "https://console.groq.com/docs/speech-to-text",
     },
 ];
 
 impl Preset {
     pub fn draft(&self) -> Credential {
+        let response_path = match (self.speech, self.wire) {
+            (true, _) => "/text",
+            (false, "anthropic") => "/content/0/text",
+            (false, _) => "/choices/0/message/content",
+        };
+        let custom = CustomProvider {
+            name: self.name.into(),
+            auth: if self.endpoint.starts_with("http://") {
+                "none"
+            } else {
+                "bearer"
+            }
+            .into(),
+            request_format: self.wire.into(),
+            response_path: response_path.into(),
+            streaming: !self.speech,
+            supports_images: self.images,
+            ..Default::default()
+        };
         Credential {
             kind: if self.speech {
                 Kind::Speech
@@ -128,28 +132,7 @@ impl Preset {
             api_key: String::new(),
             model: self.model.into(),
             base_url: self.endpoint.into(),
-            custom: Some(CustomProvider {
-                name: self.name.into(),
-                // Loopback http presets (LM Studio, vLLM) run without a key.
-                auth: if self.endpoint.starts_with("http://") {
-                    "none"
-                } else {
-                    "bearer"
-                }
-                .into(),
-                request_format: self.wire.into(),
-                response_path: if self.speech {
-                    "/text"
-                } else if self.wire == "anthropic" {
-                    "/content/0/text"
-                } else {
-                    "/choices/0/message/content"
-                }
-                .into(),
-                streaming: !self.speech,
-                supports_images: self.images,
-                ..Default::default()
-            }),
+            custom: Some(custom),
         }
     }
 }
@@ -157,21 +140,23 @@ impl Preset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn templates_validate_and_stay_separate_from_retired_provider_ids() {
-        for preset in PRESETS {
-            let mut draft = preset.draft();
-            assert!(draft.provider.starts_with("custom-"));
-            assert!(draft.api_key.is_empty());
-            draft.api_key = "test-key".into();
-            draft.validate().unwrap();
-            assert!(
-                draft.base_url.starts_with("https://")
-                    || draft.base_url.starts_with("http://127.0.0.1:")
+    fn drafts_are_distinct_and_ready_for_keys() {
+        for template in PRESETS {
+            let mut first = template.draft();
+            assert_ne!(first.provider, template.draft().provider);
+            assert!(first.provider.starts_with("custom-"));
+            assert!(first.api_key.is_empty());
+            assert!(super::super::providers::endpoint_allowed(&first.base_url));
+            assert_eq!(
+                first.to_config().custom.unwrap().streaming,
+                !template.speech
             );
-            assert!(preset.docs.starts_with("https://"));
-            assert_eq!(draft.to_config().speech_streaming(), !preset.speech);
-            assert_ne!(draft.provider, preset.draft().provider);
+            let streaming = first.to_config().speech_streaming();
+            assert_eq!(streaming, !template.speech);
+            first.api_key = "sample-secret".into();
+            assert!(first.validate().is_ok(), "{}", template.name);
         }
     }
 }

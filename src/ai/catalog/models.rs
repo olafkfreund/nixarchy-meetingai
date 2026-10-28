@@ -1,66 +1,37 @@
-//! Model catalog.
-//!
-//! Known model ids per provider, so the overlay offers real choices instead of a
-//! placeholder. A user-entered id always wins, so new models work without a
-//! release.
+use super::providers::{ChatProvider, ChatWire, ProviderConfig};
+use crate::core::network::BodyError;
+use reqwest::{
+    StatusCode, Url,
+    header::{HeaderName, HeaderValue},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt::Write as _,
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use super::providers::ChatProvider;
-
-/// Suggested models for one provider.
-pub struct ModelList {
-    pub provider: &'static str,
-    pub models: &'static [&'static str],
-}
-
-/// Bundled suggestions. Ordered with the fastest and cheapest first, matching
-/// how people pick a model for quick answers.
-const EMPTY_CATALOG: &str = "This account's catalog has no text-chat models. Your saved key and configured model have been kept.";
-
-pub const MODELS: &[ModelList] = &[
-    ModelList {
-        provider: "agy-sub",
-        models: &["gemini-3.8-flash-low"],
-    },
-    // Ollama's real list comes from /api/tags; this is only the starting choice.
-    ModelList {
-        provider: "ollama",
-        models: &["llama3.2"],
-    },
-    ModelList {
-        provider: "claude-sub",
-        models: &["sonnet", "opus", "haiku"],
-    },
-    // "default" lets the CLI choose; any other id is passed with -m.
-    ModelList {
-        provider: "codex-sub",
-        models: &[
-            super::super::chat::cli::CLI_DEFAULT_MODEL,
+fn suggestions(id: &str) -> &'static [&'static str] {
+    match id {
+        "claude-sub" => &["sonnet", "opus", "haiku"],
+        "agy-sub" => &["gemini-3.8-flash-low"],
+        "codex-sub" => &[
+            crate::ai::chat::cli::CLI_DEFAULT_MODEL,
             "gpt-6.1-sol",
             "gpt-6-sol",
             "gpt-5.6-sol",
         ],
-    },
-    // OpenCode has no static default: its free models run out and the real list comes from
-    // `opencode serve`, so it joins automatic chains only once a model was picked.
-    // The real list comes from ollama.com/api/tags.
-    ModelList {
-        provider: "ollama-cloud",
-        models: &["gpt-oss:120b"],
-    },
-];
-
-/// Suggested models for a provider, empty when unknown.
-pub fn for_provider(provider_id: &str) -> &'static [&'static str] {
-    MODELS
-        .iter()
-        .find(|list| list.provider == provider_id)
-        .map(|list| list.models)
-        .unwrap_or(&[])
+        "ollama-cloud" => &["gpt-oss:120b"],
+        "ollama" => &["llama3.2"],
+        _ => &[],
+    }
 }
 
-/// The default model for a provider: the first suggestion.
 pub fn default_for(provider_id: &str) -> Option<&'static str> {
-    for_provider(provider_id).first().copied()
+    suggestions(provider_id).first().copied()
 }
 
 /// Whether `model` can run on `provider_id`: OpenCode ids are `provider/model`; agy ids must be
@@ -75,212 +46,276 @@ pub fn valid_for(provider_id: &str, model: &str, agy_known: &[String]) -> bool {
     }
 }
 
-/// A display label for the overlay button.
-///
-/// Falls back to the provider's default so the control names a real model rather
-/// than saying "Select a model".
-pub fn label(configured: Option<&str>, provider_id: Option<&str>) -> String {
-    if let Some(model) = configured.map(str::trim).filter(|model| !model.is_empty()) {
-        return model.to_owned();
-    }
-    match provider_id {
-        Some(provider) => default_for(provider)
-            .map(str::to_owned)
-            .unwrap_or_else(|| provider.to_owned()),
-        // No provider at all: say so plainly rather than "No model", which reads
-        // like a picker that failed.
-        None => "Add a provider".to_owned(),
-    }
+#[derive(Serialize, Deserialize)]
+struct SavedModels {
+    fetched_at: u64,
+    models: Vec<String>,
 }
 
-/// Whether a provider id is known to the catalog.
-pub fn is_known_provider(provider_id: &str) -> bool {
-    ChatProvider::by_id(provider_id).is_some()
+fn cache_key(config: &ProviderConfig) -> String {
+    let identity = serde_json::to_vec(&serde_json::json!([
+        config.id,
+        config.endpoint(),
+        config.api_key
+    ]))
+    .expect("identity serializes");
+    let mut key = String::from("model_catalog:v3:");
+    for byte in Sha256::digest(identity) {
+        write!(key, "{byte:02x}").expect("writing to a String");
+    }
+    key
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn models_are_checked_against_their_provider() {
-        use super::valid_for;
-        assert!(valid_for("opencode", "openai/gpt-a", &[]));
-        assert!(!valid_for("opencode", "gpt-a", &[]));
-        assert!(!valid_for("opencode", "/gpt-a", &[]));
-        let known = ["gemini-3.8-flash-low".to_owned()];
-        assert!(valid_for("agy-sub", "gemini-3.8-flash-low", &known));
-        assert!(!valid_for("agy-sub", "gemini-2.5-flash", &known));
-        assert!(valid_for("agy-sub", "anything", &[]));
-        assert!(valid_for("ollama", "llama3.2", &[]));
-        assert_eq!(default_for("opencode"), None);
-    }
-
-    use super::*;
-
-    #[test]
-    fn every_provider_has_models() {
-        // OpenCode has no static list on purpose (see MODELS).
-        for provider in super::super::providers::CHAT_PROVIDERS
-            .iter()
-            .filter(|p| p.id != "opencode")
-        {
-            assert!(
-                !for_provider(provider.id).is_empty(),
-                "{} has no suggested models",
-                provider.id
-            );
-        }
-    }
-
-    #[test]
-    fn show_capabilities_decide_whether_a_model_can_chat() {
-        let chat = serde_json::json!({"capabilities":["completion","tools"]});
-        let embed = serde_json::json!({"capabilities":["embedding"]});
-        let old = serde_json::json!({"details":{}});
-        assert!(has_completion(&chat));
-        assert!(!has_completion(&embed));
-        assert!(has_completion(&old));
-    }
-
-    #[test]
-    fn unknown_provider_is_empty_not_a_panic() {
-        assert!(for_provider("nope").is_empty());
-        assert_eq!(default_for("nope"), None);
-    }
-
-    #[test]
-    fn label_prefers_the_configured_model() {
-        assert_eq!(label(Some("gpt-4o"), Some("agy-sub")), "gpt-4o");
-        assert_eq!(label(None, Some("agy-sub")), "gemini-3.8-flash-low");
-        assert_eq!(label(Some("   "), Some("agy-sub")), "gemini-3.8-flash-low");
-        assert_eq!(label(None, None), "Add a provider");
-    }
-
-    #[test]
-    fn models_are_unique_within_a_provider() {
-        for list in MODELS {
-            let mut seen = std::collections::HashSet::new();
-            for model in list.models {
-                assert!(
-                    seen.insert(*model),
-                    "duplicate {model} in {}",
-                    list.provider
-                );
-            }
-        }
-    }
-}
-
-/// Six-hour provider/account/endpoint-scoped cache. Only model IDs and timestamps
-/// are persisted; credentials remain in the encrypted vault.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CachedModels {
-    pub fetched_at: u64,
-    pub models: Vec<String>,
-}
-impl CachedModels {
-    pub fn fresh(&self) -> bool {
-        now().saturating_sub(self.fetched_at) < 6 * 60 * 60 && !self.models.is_empty()
-    }
-}
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+fn now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
 }
 
-pub fn cache_key(config: &super::providers::ProviderConfig) -> String {
-    use sha2::{Digest, Sha256};
-    let scope =
-        serde_json::to_vec(&(&config.id, config.endpoint(), &config.api_key)).expect("cache scope");
-    format!(
-        "model_catalog:v3:{}",
-        Sha256::digest(scope)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
+fn cached(db: &crate::db::Database, key: &str) -> Option<Vec<String>> {
+    let raw = crate::db::settings::get(db.connection(), key).ok()??;
+    let entry: SavedModels = serde_json::from_str(&raw).ok()?;
+    let age = now_seconds().saturating_sub(entry.fetched_at);
+    (!entry.models.is_empty() && age < 6 * 60 * 60).then_some(entry.models)
 }
 
-pub fn cached(
-    path: Option<&std::path::Path>,
-    config: &super::providers::ProviderConfig,
-) -> Option<CachedModels> {
-    let db = crate::db::Database::open(path?).ok()?;
-    let raw = crate::db::settings::get(db.connection(), &cache_key(config)).ok()??;
-    serde_json::from_str(&raw).ok()
-}
+const KEEP: &str = " Saved credentials and models remain available.";
+const EMPTY: &str =
+    "The model catalogue has no usable models. Saved credentials and models remain available.";
+const INCOMPLETE: &str =
+    "Model catalogue pagination did not complete. Saved credentials and models remain available.";
 
-/// Model-list endpoint shares the exact origin and API prefix of chat, including
-/// custom gateways. Never send a key to a second vendor as a fallback.
-pub fn models_endpoint(config: &super::providers::ProviderConfig) -> Result<String, String> {
-    let endpoint = config.endpoint().ok_or("Unknown provider")?;
+fn models_endpoint(config: &ProviderConfig) -> Result<String, String> {
+    let endpoint = config
+        .endpoint()
+        .ok_or_else(|| format!("This provider has no model endpoint.{KEEP}"))?;
     if matches!(config.id.as_str(), "ollama" | "ollama-cloud") {
         let origin = endpoint.split("/v1/").next().unwrap_or(&endpoint);
         return Ok(format!("{}/api/tags", origin.trim_end_matches('/')));
     }
-    let prefix = endpoint
-        .trim_end_matches('/')
-        .strip_suffix("/chat/completions")
-        .ok_or("The custom chat endpoint must end in /chat/completions to discover models.")?;
-    Ok(format!("{prefix}/models"))
+    let mut tail = endpoint.trim_end_matches('/').rsplitn(3, '/');
+    match (tail.next(), tail.next(), tail.next()) {
+        (Some("completions"), Some("chat"), Some(prefix)) => Ok(format!("{prefix}/models")),
+        _ => Err(format!(
+            "The chat endpoint does not lead to a model catalogue.{KEEP}"
+        )),
+    }
 }
 
-fn supports_chat(row: &serde_json::Value) -> bool {
-    let outputs = row
-        .pointer("/modalities/output")
-        .or_else(|| row.pointer("/capabilities/output"))
-        .or_else(|| row.get("output_modalities"))
-        .and_then(serde_json::Value::as_array);
-    if let Some(outputs) = outputs.filter(|items| !items.is_empty()) {
-        return outputs.iter().any(|item| item.as_str() == Some("text"));
-    }
-    if let Some(methods) = row
-        .get("supportedGenerationMethods")
-        .and_then(serde_json::Value::as_array)
-        .filter(|items| !items.is_empty())
-    {
-        return methods
-            .iter()
-            .any(|method| matches!(method.as_str(), Some("generateContent" | "generateMessage")));
-    }
-    true
+/// How the next page of a listing is requested.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PageCursor {
+    /// `nextPageToken` in the reply, sent back as `pageToken`.
+    Token(String),
+    /// `next_cursor` in the reply, sent back as `cursor`.
+    Cursor(String),
 }
 
-fn page_models(value: &serde_json::Value) -> Result<Vec<String>, String> {
-    let rows = value
-        .get("data")
-        .or_else(|| value.get("models"))
-        .and_then(serde_json::Value::as_array)
-        .ok_or("The provider did not return a model list.")?;
-    let mut models: Vec<_> = rows
+impl PageCursor {
+    fn apply(&self, url: &mut Url) {
+        let (name, value) = match self {
+            Self::Token(v) => ("pageToken", v),
+            Self::Cursor(v) => ("cursor", v),
+        };
+        url.query_pairs_mut().append_pair(name, value);
+    }
+}
+
+fn non_empty_str<'a>(body: &'a Value, field: &str) -> Option<&'a str> {
+    body.get(field)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// Reads the continuation of a page; `Ok(None)` means it was the last one.
+fn next_cursor(body: &Value) -> Result<Option<PageCursor>, String> {
+    let more = body.get("has_more").and_then(Value::as_bool);
+    match (
+        non_empty_str(body, "nextPageToken"),
+        more,
+        non_empty_str(body, "next_cursor"),
+    ) {
+        (Some(token), _, _) => Ok(Some(PageCursor::Token(token.to_owned()))),
+        (None, Some(false), _) => Ok(None),
+        (None, _, Some(cursor)) => Ok(Some(PageCursor::Cursor(cursor.to_owned()))),
+        (None, Some(true), None) => Err(format!(
+            "The model catalogue announces another page but gives no cursor.{KEEP}"
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn usable_id(id: &str) -> bool {
+    (1..=240).contains(&id.len()) && id.chars().all(|c| !c.is_control())
+}
+
+fn modalities(row: &Value) -> Vec<String> {
+    const PATHS: [&str; 3] = [
+        "/modalities/output",
+        "/capabilities/output",
+        "/output_modalities",
+    ];
+    PATHS
         .iter()
-        .filter(|row| supports_chat(row))
-        .filter_map(|row| {
-            ["model", "id", "name"].iter().find_map(|field| {
-                row.get(field)
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|id| !id.trim().is_empty())
-            })
+        .find_map(|path| row.pointer(path))
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|m| m.as_str().map(str::to_owned))
+                .collect()
         })
-        .map(str::trim)
-        .map(|id| id.strip_prefix("models/").unwrap_or(id))
-        .filter(|id| !id.is_empty() && id.len() <= 240 && !id.chars().any(char::is_control))
-        .take(2000)
-        .map(str::to_owned)
-        .collect();
-    models.sort();
-    models.dedup();
-    Ok(models)
+        .unwrap_or_default()
 }
 
-pub fn parse_models(value: &serde_json::Value) -> Result<Vec<String>, String> {
-    let models = page_models(value)?;
-    if models.is_empty() {
-        Err(EMPTY_CATALOG.into())
-    } else {
-        Ok(models)
+fn produces_text(row: &Value) -> bool {
+    let output = modalities(row);
+    if !output.is_empty() {
+        return output.iter().any(|m| m == "text");
     }
+    match row
+        .get("supportedGenerationMethods")
+        .and_then(Value::as_array)
+    {
+        Some(methods) if !methods.is_empty() => methods
+            .iter()
+            .any(|m| matches!(m.as_str(), Some("generateContent" | "generateMessage"))),
+        _ => true,
+    }
+}
+
+fn row_id(row: &Value) -> Option<String> {
+    let mut raw = None;
+    for field in ["model", "id", "name"] {
+        if let Some(Value::String(text)) = row.get(field)
+            && !text.trim().is_empty()
+        {
+            raw = Some(text.trim());
+            break;
+        }
+    }
+    let raw = raw?;
+    let id = raw.strip_prefix("models/").unwrap_or(raw);
+    usable_id(id).then(|| id.to_owned())
+}
+
+/// The text-capable model ids of one page (the first 2,000 usable ones).
+fn parse_models(page: &Value) -> Result<BTreeSet<String>, String> {
+    let rows = ["data", "models"]
+        .iter()
+        .find_map(|field| page.get(*field).and_then(Value::as_array))
+        .ok_or_else(|| format!("The model response contains no model list.{KEEP}"))?;
+    Ok(rows
+        .iter()
+        .filter(|row| produces_text(row))
+        .filter_map(row_id)
+        .take(2_000)
+        .collect())
+}
+
+fn status_error(status: StatusCode) -> String {
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        format!("Model catalogue access was denied.{KEEP}")
+    } else if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
+        format!("This endpoint has no model catalogue; keep using your model or enter an id.{KEEP}")
+    } else if status.is_client_error() {
+        format!(
+            "The model catalogue rejected the request (HTTP {}).{KEEP}",
+            status.as_u16()
+        )
+    } else {
+        format!(
+            "The model catalogue returned HTTP {}.{KEEP}",
+            status.as_u16()
+        )
+    }
+}
+
+fn body_error_text(error: &BodyError) -> String {
+    if matches!(error, BodyError::TooLarge) {
+        format!("The model catalogue is too large.{KEEP}")
+    } else {
+        format!("The model catalogue response could not be read.{KEEP}")
+    }
+}
+
+fn auth_headers(config: &ProviderConfig) -> Result<Vec<(HeaderName, HeaderValue)>, String> {
+    let bad = || format!("The saved credentials cannot be sent as a header.{KEEP}");
+    let pair = match &config.custom {
+        Some(custom) => custom.header(&config.api_key),
+        None if config.api_key.is_empty() => None,
+        None => Some((
+            "Authorization".to_owned(),
+            format!("Bearer {}", config.api_key),
+        )),
+    };
+    let Some((name, value)) = pair else {
+        return Ok(Vec::new());
+    };
+    let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| bad())?;
+    let mut value = HeaderValue::from_str(&value).map_err(|_| bad())?;
+    value.set_sensitive(true);
+    Ok(vec![(name, value)])
+}
+
+async fn get_page(
+    client: &reqwest::Client,
+    url: Url,
+    headers: &[(HeaderName, HeaderValue)],
+    budget: usize,
+) -> Result<Vec<u8>, String> {
+    let mut request = client.get(url).timeout(Duration::from_secs(15));
+    for (name, value) in headers {
+        request = request.header(name.clone(), value.clone());
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|_| format!("The model catalogue could not be reached.{KEEP}"))?;
+    if !response.status().is_success() {
+        return Err(status_error(response.status()));
+    }
+    crate::core::network::read_body(response, budget)
+        .await
+        .map_err(|e| body_error_text(&e))
+}
+
+async fn fetch(config: &ProviderConfig) -> Result<Vec<String>, String> {
+    let base = Url::parse(&models_endpoint(config)?)
+        .map_err(|_| format!("The model catalogue URL is invalid.{KEEP}"))?;
+    let headers = auth_headers(config)?;
+    let client = crate::ai::engine::http_client();
+    let mut ids = BTreeSet::new();
+    let mut requested = HashSet::new();
+    let mut cursor: Option<PageCursor> = None;
+    let mut follow_ups = 0;
+    let mut read = 0usize;
+    loop {
+        let mut url = base.clone();
+        if let Some(c) = &cursor {
+            c.apply(&mut url);
+        }
+        let budget = (32 * 1024 * 1024usize)
+            .saturating_sub(read)
+            .min(4 * 1024 * 1024);
+        let body = get_page(&client, url, &headers, budget).await?;
+        read += body.len();
+        let page: Value = serde_json::from_slice(&body)
+            .map_err(|_| format!("The model catalogue is not valid JSON.{KEEP}"))?;
+        ids.extend(parse_models(&page)?);
+        let Some(next) = next_cursor(&page)? else {
+            break;
+        };
+        follow_ups += 1;
+        if ids.len() > 10_000 || follow_ups > 50 || !requested.insert(next.clone()) {
+            return Err(INCOMPLETE.to_owned());
+        }
+        cursor = Some(next);
+    }
+    if ids.is_empty() {
+        return Err(EMPTY.to_owned());
+    }
+    Ok(ids.into_iter().collect())
 }
 
 /// Whether an `/api/show` reply says the model can generate text (embedding-only models cannot).
@@ -349,440 +384,411 @@ async fn completion_only(
 }
 
 pub async fn discover(
-    path: Option<std::path::PathBuf>,
-    config: super::providers::ProviderConfig,
+    path: Option<PathBuf>,
+    config: ProviderConfig,
     force: bool,
 ) -> Result<Vec<String>, String> {
-    if super::providers::ChatProvider::by_id(&config.id)
-        .is_some_and(|p| p.wire == super::providers::ChatWire::Cli)
-    {
-        if config.id == "opencode"
-            && let Ok(models) = crate::ai::chat::opencode::models().await
-        {
-            return Ok(models);
-        }
-        if config.id == "codex-sub"
-            && let Ok(models) = crate::ai::chat::cli::codex_models().await
-        {
-            return Ok(models);
-        }
-        if config.id == "agy-sub"
-            && let Ok(models) = crate::ai::chat::cli::agy_models().await
-        {
-            return Ok(models);
-        }
-        return Ok(for_provider(&config.id)
-            .iter()
-            .map(|m| (*m).to_owned())
-            .collect());
+    if ChatProvider::by_id(&config.id).is_some_and(|p| p.wire == ChatWire::Cli) {
+        let live = match config.id.as_str() {
+            "opencode" => crate::ai::chat::opencode::models().await,
+            "codex-sub" => crate::ai::chat::cli::codex_models().await,
+            "agy-sub" => crate::ai::chat::cli::agy_models().await,
+            _ => Err("No live list".into()),
+        };
+        return Ok(live.unwrap_or_else(|_| {
+            suggestions(&config.id)
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect()
+        }));
     }
-    if !force
-        && let Some(cache) = cached(path.as_deref(), &config)
-        && cache.fresh()
-    {
-        return Ok(cache.models);
+    let db = path
+        .as_ref()
+        .and_then(|p| crate::db::Database::open(p).ok());
+    let key = cache_key(&config);
+    if !force && let Some(models) = db.as_ref().and_then(|db| cached(db, &key)) {
+        return Ok(models);
     }
-    let models = tokio::time::timeout(std::time::Duration::from_secs(30), fetch_catalog(&config))
-        .await
-        .map_err(|_| "Model refresh timed out. Your saved key and models have been kept.")??;
+    let fetched = tokio::select! {
+        result = fetch(&config) => result?,
+        () = tokio::time::sleep(Duration::from_secs(30)) => {
+            return Err(format!("Model catalogue refresh timed out.{KEEP}"));
+        }
+    };
     let models = if config.id == "ollama" {
-        completion_only(&config, models).await
+        completion_only(&config, fetched).await
     } else {
-        models
+        fetched
     };
     if models.is_empty() {
-        return Err(EMPTY_CATALOG.into());
+        return Err(EMPTY.into());
     }
-    if let Some(path) = path
-        && let Ok(db) = crate::db::Database::open(path)
-    {
-        let entry = CachedModels {
-            fetched_at: now(),
+    if let Some(db) = &db {
+        let saved = SavedModels {
+            fetched_at: now_seconds(),
             models: models.clone(),
         };
-        let _ = crate::db::settings::set(
-            db.connection(),
-            &cache_key(&config),
-            &serde_json::to_string(&entry).expect("catalog JSON"),
-        );
-    }
-    Ok(models)
-}
-
-async fn fetch_catalog(config: &super::providers::ProviderConfig) -> Result<Vec<String>, String> {
-    let client = crate::ai::engine::http_client();
-    let endpoint = models_endpoint(config)?;
-    let mut continuation: Option<(&str, String)> = None;
-    let mut cursors = std::collections::HashSet::new();
-    let mut models = Vec::new();
-    let mut total_bytes = 0;
-    loop {
-        let mut url = reqwest::Url::parse(&endpoint)
-            .map_err(|_| "The model catalog endpoint is not a valid URL.")?;
-        if let Some((parameter, cursor)) = &continuation {
-            url.query_pairs_mut().append_pair(parameter, cursor);
+        if let Ok(value) = serde_json::to_string(&saved) {
+            let _ = crate::db::settings::set(db.connection(), &key, &value);
         }
-        let mut request = client.get(url);
-        if let Some(custom) = &config.custom {
-            if let Some((name, value)) = custom.header(&config.api_key) {
-                request = request.header(name, value);
-            }
-        } else if !config.api_key.is_empty() {
-            request = request.bearer_auth(&config.api_key);
-        }
-        let response = request
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
-            .await
-            .map_err(|_| {
-                "Could not reach the model catalog. Check your connection or retry.".to_owned()
-            })?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(match status.as_u16() {
-            401 | 403 => format!("The provider denied model-list access (HTTP {}). Check this key's catalog permissions. Your saved key has been kept.", status.as_u16()),
-            404 | 405 => "This endpoint does not offer a model catalog. You can keep using your configured model or enter a custom model ID.".into(),
-            _ => format!("Model refresh returned HTTP {}. Retry later; your saved key and models have been kept.", status.as_u16()),
-        });
-        }
-        let bytes = crate::core::network::read_body(response, 4 * 1024 * 1024)
-            .await
-            .map_err(|error| match error {
-                crate::core::network::BodyError::TooLarge => "The model catalog is too large.",
-                _ => "Could not read the model catalog.",
-            })?;
-        total_bytes += bytes.len();
-        if bytes.len() > 4 * 1024 * 1024 || total_bytes > 32 * 1024 * 1024 {
-            return Err("The model catalog is too large.".into());
-        }
-        let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|_| "The model catalog was not valid JSON.")?;
-        models.extend(page_models(&value)?);
-        continuation = if let Some(token) = value
-            .get("nextPageToken")
-            .and_then(serde_json::Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            Some(("pageToken", token.to_owned()))
-        } else if value.get("has_more").and_then(serde_json::Value::as_bool) != Some(false) {
-            value
-                .get("next_cursor")
-                .and_then(serde_json::Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(|token| ("cursor", token.to_owned()))
-        } else {
-            None
-        };
-        if continuation.is_none() {
-            if value.get("has_more").and_then(serde_json::Value::as_bool) == Some(true) {
-                return Err(
-                    "The model catalog is missing its next-page cursor. Retry refresh.".into(),
-                );
-            }
-            break;
-        }
-        if models.len() > 10_000 || cursors.len() >= 50 || !cursors.insert(continuation.clone()) {
-            return Err(
-                "The model catalog pagination did not complete. Saved models are still available."
-                    .into(),
-            );
-        }
-    }
-    models.sort();
-    models.dedup();
-    if models.is_empty() {
-        return Err(EMPTY_CATALOG.into());
     }
     Ok(models)
 }
 
 #[cfg(test)]
-mod discovery_tests {
-    use super::super::providers::ProviderConfig;
+mod tests {
     use super::*;
+    use serde_json::json;
     use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Instant;
 
-    #[test]
-    fn catalog_uses_canonical_model_ids_and_output_modalities() {
-        let catalog = serde_json::json!({"data":[
-            {"model":"chat-model", "modalities":{"output":["text"]}},
-            {"model":"audio-only", "modalities":{"output":["audio"]}},
-            {"model":"unknown-output", "modalities":{"output":[]}},
-            {"model":"canonical-name", "id":"internal-database-id"}
-        ]});
-        assert_eq!(
-            parse_models(&catalog).unwrap(),
-            ["canonical-name", "chat-model", "unknown-output"]
-        );
-        assert_eq!(
-            parse_models(&serde_json::json!({"models":[{"name":"llama3.2:latest"}]})).unwrap(),
-            ["llama3.2:latest"]
-        );
-        assert_eq!(
-            parse_models(&serde_json::json!({"models":[
-                {"name":"models/gemini-chat", "supportedGenerationMethods":["generateContent"]},
-                {"name":"models/embedding", "supportedGenerationMethods":["embedContent"]}
-            ]}))
-            .unwrap(),
-            ["gemini-chat"]
-        );
+    /// Reads one request (head plus any declared body), giving up after two seconds.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut data = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while Instant::now() < deadline {
+            if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&data[..end]).to_ascii_lowercase();
+                let wanted = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if data.len() >= end + 4 + wanted {
+                    break;
+                }
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => data.extend_from_slice(&chunk[..n]),
+                Err(_) => {}
+            }
+        }
+        String::from_utf8_lossy(&data).into_owned()
     }
 
-    /// A keyed OpenAI-style provider; the catalog has none built in.
-    fn openai_config(key: &str, model: &str) -> ProviderConfig {
-        let mut config = ProviderConfig::new("custom-test", key, model);
+    /// Serves the canned replies in order on loopback; gives up on a missing client after 5 s.
+    fn server(replies: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/v3/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        let (sender, arrivals) = std::sync::mpsc::channel();
+        // Detached on purpose: it may stay blocked in accept once the test is over.
+        std::thread::spawn(move || {
+            while let Ok((stream, _)) = listener.accept() {
+                if sender.send(stream).is_err() {
+                    break;
+                }
+            }
+        });
+        let worker = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for (status, body) in replies {
+                let Ok(mut stream) = arrivals.recv_timeout(Duration::from_secs(5)) else {
+                    return seen;
+                };
+                seen.push(read_request(&mut stream));
+                let reply = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+            }
+            seen
+        });
+        (url, worker)
+    }
+
+    fn gateway(url: String) -> ProviderConfig {
+        let mut config = ProviderConfig::new("custom-catalogue", "fixture-token", "chosen-model");
         config.custom = Some(crate::ai::catalog::custom::CustomProvider::default());
+        config.base_url = url;
         config
     }
 
-    fn catalog_server(
-        pages: Vec<(u16, serde_json::Value)>,
-    ) -> (ProviderConfig, std::thread::JoinHandle<Vec<String>>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let mut config = openai_config("saved-list-key", "my-custom-model");
-        config.base_url = format!(
-            "http://{}/v1/chat/completions",
-            listener.local_addr().unwrap()
-        );
-        let server = std::thread::spawn(move || {
-            let mut requests = vec![];
-            for (status, page) in pages {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(
-                                std::time::Instant::now() < deadline,
-                                "Catalog page was never requested"
-                            );
-                            std::thread::sleep(std::time::Duration::from_millis(5));
-                        }
-                        Err(error) => panic!("{error}"),
-                    }
-                };
-                // Winsock can inherit the listener's nonblocking mode. Switch
-                // accepted sockets back before the blocking HTTP read/write.
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                    .unwrap();
-                let mut request = vec![];
-                let mut buffer = [0; 4096];
-                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let n = stream.read(&mut buffer).unwrap();
-                    assert!(n > 0);
-                    request.extend_from_slice(&buffer[..n]);
-                }
-                requests.push(String::from_utf8(request).unwrap().to_lowercase());
-                let body = page.to_string();
-                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-            }
-            requests
-        });
-        (config, server)
-    }
-
-    #[tokio::test]
-    async fn pagination_keep_auth_on_the_configured_endpoint() {
-        for google in [false, true] {
-            let pages = if google {
-                vec![
-                    (
-                        200,
-                        serde_json::json!({"models":[{"name":"models/a"}], "nextPageToken":"second"}),
-                    ),
-                    (200, serde_json::json!({"models":[{"name":"models/b"}]})),
-                ]
-            } else {
-                vec![
-                    (
-                        200,
-                        serde_json::json!({"data":[{"model":"a"}], "has_more":true,"next_cursor":"second"}),
-                    ),
-                    (
-                        200,
-                        serde_json::json!({"data":[{"model":"b"}], "has_more":false,"next_cursor":null}),
-                    ),
-                ]
-            };
-            let (config, server) = catalog_server(pages);
-            assert_eq!(discover(None, config, false).await.unwrap(), ["a", "b"]);
-            let requests = server.join().unwrap();
-            assert!(
-                requests
-                    .iter()
-                    .all(|r| r.contains("authorization: bearer saved-list-key"))
-            );
-            assert!(requests[1].starts_with(if google {
-                "get /v1/models?pagetoken=second "
-            } else {
-                "get /v1/models?cursor=second "
-            }));
-        }
-    }
-
-    #[tokio::test]
-    async fn repeated_cursors_and_denied_access_do_not_overwrite_saved_models() {
-        for denied in [false, true] {
-            let pages = if denied {
-                vec![(403, serde_json::json!({"error":"forbidden"}))]
-            } else {
-                vec![
-                    (
-                        200,
-                        serde_json::json!({"data":[{"model":"a"}], "has_more":true,"next_cursor":"same"}),
-                    ),
-                    (
-                        200,
-                        serde_json::json!({"data":[{"model":"b"}], "has_more":true,"next_cursor":"same"}),
-                    ),
-                ]
-            };
-            let (config, server) = catalog_server(pages);
-            let directory = std::env::temp_dir().join(format!(
-                "nixarchy-meetingai-catalog-failure-{}",
-                uuid::Uuid::new_v4()
-            ));
-            std::fs::create_dir_all(&directory).unwrap();
-            let path = directory.join("cache.db");
-            let db = crate::db::Database::open(&path).unwrap();
-            crate::db::settings::set(
-                db.connection(),
-                &cache_key(&config),
-                &serde_json::to_string(&CachedModels {
-                    fetched_at: now(),
-                    models: vec!["previous-model".into()],
-                })
-                .unwrap(),
-            )
-            .unwrap();
-            let error = discover(Some(path.clone()), config.clone(), true)
-                .await
-                .unwrap_err();
-            assert!(error.contains(if denied { "denied" } else { "pagination" }));
-            server.join().unwrap();
-            assert_eq!(
-                cached(Some(&path), &config).unwrap().models,
-                ["previous-model"]
-            );
-            drop(db);
-            std::fs::remove_dir_all(directory).unwrap();
-        }
+    fn temp_db_path(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.db");
+        (dir, path)
     }
 
     #[test]
-    fn endpoint_and_cache_scope_follow_the_actual_account_and_gateway() {
-        let mut config = openai_config("key-a", "m");
-        config.base_url = "https://api.example.test/v1/chat/completions".into();
+    fn models_are_checked_against_their_provider() {
+        use super::valid_for;
+        assert!(valid_for("opencode", "openai/gpt-a", &[]));
+        assert!(!valid_for("opencode", "gpt-a", &[]));
+        assert!(!valid_for("opencode", "/gpt-a", &[]));
+        let known = ["gemini-3.8-flash-low".to_owned()];
+        assert!(valid_for("agy-sub", "gemini-3.8-flash-low", &known));
+        assert!(!valid_for("agy-sub", "gemini-2.5-flash", &known));
+        assert!(valid_for("agy-sub", "anything", &[]));
+        assert!(valid_for("ollama", "llama3.2", &[]));
+        assert_eq!(default_for("opencode"), None);
+    }
+
+    #[test]
+    fn show_capabilities_decide_whether_a_model_can_chat() {
+        let chat = serde_json::json!({"capabilities":["completion","tools"]});
+        let embed = serde_json::json!({"capabilities":["embedding"]});
+        let old = serde_json::json!({"details":{}});
+        assert!(has_completion(&chat));
+        assert!(!has_completion(&embed));
+        assert!(has_completion(&old));
+    }
+
+    #[test]
+    fn suggestions_are_complete_and_unique() {
+        for provider in super::super::providers::CHAT_PROVIDERS
+            .iter()
+            .filter(|p| p.id != "opencode")
+        {
+            let list = suggestions(provider.id);
+            assert!(!list.is_empty());
+            let unique: HashSet<_> = list.iter().collect();
+            assert_eq!(unique.len(), list.len());
+        }
+        assert!(suggestions("retired-chat").is_empty());
+        assert_eq!(default_for("retired-chat"), None);
+    }
+
+    #[test]
+    fn page_rows_are_filtered_and_normalised() {
+        let page = json!({"data":[
+            {"model":"alpha", "id":"wrong", "modalities":{"output":["text"]}},
+            {"id":"voice", "capabilities":{"output":["audio"]}},
+            {"id":"beta", "output_modalities":[]},
+            {"id":"alpha"}, {"id":" "}, {"id":"pic", "output_modalities":["image"]}
+        ]});
+        let ids: Vec<_> = parse_models(&page).unwrap().into_iter().collect();
+        assert_eq!(ids, ["alpha", "beta"]);
+        let google = json!({"models":[
+            {"name":"models/gamma", "supportedGenerationMethods":["generateContent"]},
+            {"name":"models/delta", "supportedGenerationMethods":["countTokens"]}
+        ]});
+        let ids: Vec<_> = parse_models(&google).unwrap().into_iter().collect();
+        assert_eq!(ids, ["gamma"]);
+        assert!(parse_models(&json!({})).is_err());
+        assert!(parse_models(&json!({"data":[]})).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_page_keeps_its_first_two_thousand_ids() {
+        let rows: Vec<_> = (0..2_500)
+            .map(|i| json!({"id": format!("m{i:04}")}))
+            .collect();
+        let ids = parse_models(&json!({"data": rows})).unwrap();
+        assert_eq!(ids.len(), 2_000);
+        assert!(ids.contains("m1999") && !ids.contains("m2000"));
+    }
+
+    #[test]
+    fn cursors_follow_the_three_reply_styles() {
+        assert_eq!(
+            next_cursor(&json!({"nextPageToken":"t","has_more":false})).unwrap(),
+            Some(PageCursor::Token("t".into()))
+        );
+        assert_eq!(
+            next_cursor(&json!({"next_cursor":"c"})).unwrap(),
+            Some(PageCursor::Cursor("c".into()))
+        );
+        assert_eq!(
+            next_cursor(&json!({"has_more":false,"next_cursor":"c"})).unwrap(),
+            None
+        );
+        assert_eq!(next_cursor(&json!({"data":[]})).unwrap(), None);
+        assert!(next_cursor(&json!({"has_more":true})).is_err());
+        let mut url = Url::parse("http://host/models").unwrap();
+        PageCursor::Cursor("c 1".into()).apply(&mut url);
+        assert_eq!(url.query(), Some("cursor=c+1"));
+    }
+
+    #[test]
+    fn endpoint_and_scope() {
+        let mut config = ProviderConfig::new("custom-gateway", "secret-one", "model");
+        config.custom = Some(crate::ai::catalog::custom::CustomProvider::default());
+        config.base_url = "https://gateway.example/v2/chat/completions/".into();
         assert_eq!(
             models_endpoint(&config).unwrap(),
-            "https://api.example.test/v1/models"
+            "https://gateway.example/v2/models"
         );
-        let scope = cache_key(&config);
-        config.api_key = "key-b".into();
-        assert_ne!(scope, cache_key(&config));
-        assert!(!cache_key(&config).contains("key-b"));
-        config.base_url = "http://127.0.0.1:1234/v1/chat/completions".into();
+        let first = cache_key(&config);
+        assert!(!first.contains("secret-one"));
+        config.api_key = "secret-two".into();
+        assert_ne!(first, cache_key(&config));
+        config.base_url = "http://localhost:9000/v1/chat/completions".into();
         assert_eq!(
             models_endpoint(&config).unwrap(),
-            "http://127.0.0.1:1234/v1/models"
+            "http://localhost:9000/v1/models"
         );
-        config.base_url = "http://127.0.0.1:1234/custom".into();
+        config.base_url = "https://gateway.example/reply".into();
         assert!(models_endpoint(&config).is_err());
-        let ollama = ProviderConfig::new("ollama", "", "m");
         assert_eq!(
-            models_endpoint(&ollama).unwrap(),
+            models_endpoint(&ProviderConfig::new("ollama", "", "m")).unwrap(),
             "http://127.0.0.1:11434/api/tags"
         );
     }
 
     #[test]
-    fn lists_are_normalized_and_malformed_or_empty_catalogs_fail() {
-        assert_eq!(parse_models(&serde_json::json!({"data":[{"id":"b"},{"id":"a"},{"id":"b"},{"id":""},{"id":"image", "modalities":{"output":["image"]}}]})).unwrap(), ["a", "b"]);
-        assert_eq!(
-            parse_models(&serde_json::json!({"models":[{"name":"models/gemini-test"}]})).unwrap(),
-            ["gemini-test"]
-        );
-        assert!(parse_models(&serde_json::json!({"data":[]})).is_err());
-        assert!(parse_models(&serde_json::json!({"error":"bad key"})).is_err());
+    fn cache_key_is_pinned() {
+        let mut config = ProviderConfig::new("custom-pin", "pin-key", "m");
+        config.custom = Some(crate::ai::catalog::custom::CustomProvider::default());
+        config.base_url = "https://pin.example/v1/chat/completions".into();
+        let json = br#"["custom-pin","https://pin.example/v1/chat/completions","pin-key"]"#;
+        let hex: String = Sha256::digest(json)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(cache_key(&config), format!("model_catalog:v3:{hex}"));
+        assert_eq!(cache_key(&config).len(), "model_catalog:v3:".len() + 64);
     }
 
     #[tokio::test]
-    async fn live_discovery_authenticates_then_reuses_persistent_cache_without_network() {
-        let directory = std::env::temp_dir().join(format!(
-            "nixarchy-meetingai-models-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("catalog.db");
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut config = openai_config("catalog-test-key", "custom-model");
-        config.base_url = format!(
-            "http://{}/v1/chat/completions",
-            listener.local_addr().unwrap()
-        );
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                .unwrap();
-            let mut bytes = vec![];
-            let mut buffer = [0; 4096];
-            while !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
-                let n = stream.read(&mut buffer).unwrap();
-                assert!(n > 0);
-                bytes.extend_from_slice(&buffer[..n]);
+    async fn both_pagination_styles_keep_auth_and_sort_ids() {
+        for (first, query) in [
+            (
+                r#"{"data":[{"id":"zeta"}],"nextPageToken":"two"}"#,
+                "pageToken=two",
+            ),
+            (
+                r#"{"data":[{"id":"zeta"}],"has_more":true,"next_cursor":"two"}"#,
+                "cursor=two",
+            ),
+        ] {
+            let (url, requests) = server(vec![
+                (200, first.into()),
+                (
+                    200,
+                    r#"{"data":[{"id":"alpha"},{"id":"zeta"}],"has_more":false}"#.into(),
+                ),
+            ]);
+            assert_eq!(fetch(&gateway(url)).await.unwrap(), ["alpha", "zeta"]);
+            let requests = requests.join().unwrap();
+            assert_eq!(requests.len(), 2);
+            for request in &requests {
+                assert!(request.starts_with("GET /v3/models"));
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer fixture-token")
+                );
             }
-            let body = r#"{"data":[{"id":"live-chat-b"},{"id":"live-chat-a"}]}"#;
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
-            String::from_utf8(bytes).unwrap()
-        });
-        assert_eq!(
-            discover(Some(path.clone()), config.clone(), false)
+            assert!(requests[1].contains(query));
+        }
+    }
+
+    #[tokio::test]
+    async fn has_more_false_stops_paging_despite_a_cursor() {
+        let (url, requests) = server(vec![(
+            200,
+            r#"{"data":[{"id":"solo"}],"has_more":false,"next_cursor":"unused"}"#.into(),
+        )]);
+        assert_eq!(fetch(&gateway(url)).await.unwrap(), ["solo"]);
+        assert_eq!(requests.join().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn too_many_ids_across_pages_is_an_incomplete_listing() {
+        let replies = (0..6)
+            .map(|page| {
+                let rows: Vec<_> = (0..2_000)
+                    .map(|i| json!({"id": format!("p{page}-{i}")}))
+                    .collect();
+                let body = json!({"data": rows, "next_cursor": format!("c{page}")});
+                (200, body.to_string())
+            })
+            .collect();
+        let (url, requests) = server(replies);
+        let error = fetch(&gateway(url)).await.unwrap_err();
+        assert!(error.contains("pagination"), "{error}");
+        requests.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn refresh_failure_preserves_the_saved_row() {
+        let looping = |id: &str| {
+            (
+                200,
+                format!(r#"{{"data":[{{"id":"{id}"}}],"next_cursor":"loop"}}"#),
+            )
+        };
+        let cases = [
+            (vec![(403, "{}".to_owned())], "denied"),
+            (vec![looping("one"), looping("two")], "pagination"),
+        ];
+        for (replies, wording) in cases {
+            let (url, requests) = server(replies);
+            let config = gateway(url);
+            let (dir, path) = temp_db_path("catalogue-failure");
+            let db = crate::db::Database::open(&path).unwrap();
+            let key = cache_key(&config);
+            let saved = r#"{"fetched_at":1,"models":["saved-choice"]}"#;
+            crate::db::settings::set(db.connection(), &key, saved).unwrap();
+            drop(db);
+            let error = discover(Some(path.clone()), config, true)
                 .await
-                .unwrap(),
-            ["live-chat-a", "live-chat-b"]
+                .unwrap_err();
+            assert!(error.contains(wording), "{error}");
+            let db = crate::db::Database::open(&path).unwrap();
+            let stored = crate::db::settings::get(db.connection(), &key).unwrap();
+            assert_eq!(stored.as_deref(), Some(saved));
+            drop(db);
+            requests.join().unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_catalogue_is_an_error_not_an_empty_list() {
+        let (url, requests) = server(vec![(200, r#"{"data":[]}"#.into())]);
+        let error = discover(None, gateway(url), true).await.unwrap_err();
+        assert!(error.contains("no usable models"), "{error}");
+        requests.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_reuses_fresh_cache_and_does_not_replace_stale_on_failure() {
+        let (url, requests) = server(vec![(
+            200,
+            r#"{"data":[{"id":"omega"},{"id":"beta"}]}"#.into(),
+        )]);
+        let config = gateway(url);
+        let (dir, path) = temp_db_path("catalogue-cache");
+        let listed = discover(Some(path.clone()), config.clone(), false).await;
+        assert_eq!(listed.unwrap(), ["beta", "omega"]);
+        let request = requests.join().unwrap().pop().unwrap();
+        assert!(request.starts_with("GET /v3/models"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer fixture-token")
         );
-        let request = server.join().unwrap().to_lowercase();
-        assert!(request.starts_with("get /v1/models "));
-        assert!(request.contains("authorization: bearer catalog-test-key"));
-        // The listener has closed. A second discovery can only succeed from disk.
-        assert_eq!(
-            discover(Some(path.clone()), config.clone(), false)
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
+        let again = discover(Some(path.clone()), config.clone(), false).await;
+        assert_eq!(again.unwrap(), ["beta", "omega"]);
         let db = crate::db::Database::open(&path).unwrap();
-        let raw = crate::db::settings::get(db.connection(), &cache_key(&config))
+        let key = cache_key(&config);
+        let fresh = crate::db::settings::get(db.connection(), &key)
             .unwrap()
             .unwrap();
-        assert!(!raw.contains("catalog-test-key"));
-        assert!(cached(Some(&path), &config).unwrap().fresh());
-        let stale = CachedModels {
-            fetched_at: 0,
-            models: vec!["stale-model".into()],
-        };
-        crate::db::settings::set(
-            db.connection(),
-            &cache_key(&config),
-            &serde_json::to_string(&stale).unwrap(),
-        )
-        .unwrap();
-        assert!(!cached(Some(&path), &config).unwrap().fresh());
-        assert!(
-            discover(Some(path.clone()), config.clone(), false)
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            cached(Some(&path), &config).unwrap().models,
-            ["stale-model"]
-        );
+        assert!(!fresh.contains("fixture-token"));
+        let entry: SavedModels = serde_json::from_str(&fresh).unwrap();
+        assert!(entry.fetched_at <= now_seconds() && now_seconds() - entry.fetched_at < 6 * 3600);
+        let old = r#"{"fetched_at":1,"models":["prior-choice"]}"#;
+        crate::db::settings::set(db.connection(), &key, old).unwrap();
         drop(db);
-        std::fs::remove_dir_all(directory).unwrap();
+        assert!(discover(Some(path.clone()), config, false).await.is_err());
+        let db = crate::db::Database::open(&path).unwrap();
+        let stored = crate::db::settings::get(db.connection(), &key).unwrap();
+        assert_eq!(stored.as_deref(), Some(old));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
