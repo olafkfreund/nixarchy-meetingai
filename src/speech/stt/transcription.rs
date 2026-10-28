@@ -601,7 +601,11 @@ impl LiveTranscriber {
                     }
                     result = requests.next(), if !requests.is_empty() => {
                         match result {
-                            Some(Ok(Some(line))) => { if filter.accept(&line) { let _ = sender.send(LiveEvent::Transcript(line)).await; } }
+                            Some(Ok(Some(line))) => {
+                                for line in filter.accept(&line) {
+                                    let _ = sender.send(LiveEvent::Transcript(line)).await;
+                                }
+                            }
                             Some(Ok(None)) => {}
                             Some(Err(error)) => { let _ = sender.send(LiveEvent::Failed(error)).await; break; }
                             None => {}
@@ -611,6 +615,9 @@ impl LiveTranscriber {
                 };
                 for channel in chunks.started.drain(..) {
                     let _ = sender.send(LiveEvent::SpeechStarted { channel }).await;
+                }
+                for line in filter.tick(chunks.now()) {
+                    let _ = sender.send(LiveEvent::Transcript(line)).await;
                 }
                 for (channel, start, end, samples) in ready {
                     if requests.len() >= 4 {
@@ -641,7 +648,7 @@ impl LiveTranscriber {
                     while let Some(result) = requests.next().await {
                         match result {
                             Ok(Some(line)) => {
-                                if filter.accept(&line) {
+                                for line in filter.accept(&line) {
                                     let _ = sender.send(LiveEvent::Transcript(line)).await;
                                 }
                             }
@@ -651,6 +658,9 @@ impl LiveTranscriber {
                                 break;
                             }
                         }
+                    }
+                    for line in filter.flush() {
+                        let _ = sender.send(LiveEvent::Transcript(line)).await;
                     }
                     break;
                 }
@@ -885,6 +895,9 @@ impl BatchChunks {
     }
     fn finish(&mut self) -> Vec<BatchChunk> {
         (0..2).filter_map(|c| self.take(c)).collect()
+    }
+    fn now(&self) -> f64 {
+        self.position as f64 / 16000.0
     }
 }
 
