@@ -6,6 +6,7 @@
     "calendar_enabled": "true",
     "chat_model": "opus",
     "chat_provider": "claude-sub",
+    "deepgram_region": "eu",
     "live_model": "haiku",
     "live_provider": "claude-sub",
     "mcp_allow_record": "false",

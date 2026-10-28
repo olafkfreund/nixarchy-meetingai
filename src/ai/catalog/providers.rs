@@ -105,6 +105,8 @@ pub enum SttWire {
     RawAudio,
     /// Multipart `POST /inference` to a local `whisper-server`; no key.
     WhisperServer,
+    /// OpenAI-compatible multipart transcription.
+    OpenAiMultipart,
 }
 
 /// A speech-to-text provider definition.
@@ -134,6 +136,13 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
         wire: SttWire::WhisperServer,
         default_model: "ggml-large-v3-turbo",
     },
+    SttProvider {
+        id: "openai-compatible-stt",
+        name: "OpenAI-compatible speech",
+        endpoint: "",
+        wire: SttWire::OpenAiMultipart,
+        default_model: "",
+    },
 ];
 
 impl SttProvider {
@@ -142,7 +151,7 @@ impl SttProvider {
     }
 
     pub fn requires_key(&self) -> bool {
-        self.wire != SttWire::WhisperServer
+        self.wire == SttWire::RawAudio
     }
 }
 
@@ -217,16 +226,21 @@ impl ProviderConfig {
                 && (custom.auth == "none" || !self.api_key.trim().is_empty())
                 && custom.validate(true).is_ok()
         } else {
-            SttProvider::by_id(&self.id)
-                .is_some_and(|p| !p.requires_key() || !self.api_key.trim().is_empty())
+            SttProvider::by_id(&self.id).is_some_and(|p| {
+                (!p.requires_key() || !self.api_key.trim().is_empty())
+                    && (p.wire != SttWire::OpenAiMultipart
+                        || (endpoint_allowed(&self.base_url) && !self.model.trim().is_empty()))
+            })
         }
     }
 
     pub fn speech_streaming(&self) -> bool {
         match &self.custom {
             Some(custom) => custom.streaming,
-            // whisper-server is batch-only.
-            None => SttProvider::by_id(&self.id).is_none_or(|p| p.wire != SttWire::WhisperServer),
+            // Multipart providers are batch-only.
+            None => SttProvider::by_id(&self.id).is_none_or(|p| {
+                !matches!(p.wire, SttWire::WhisperServer | SttWire::OpenAiMultipart)
+            }),
         }
     }
 
@@ -298,7 +312,7 @@ mod tests {
                 "ollama"
             ]
         );
-        assert_eq!(STT_PROVIDERS.len(), 2);
+        assert_eq!(STT_PROVIDERS.len(), 3);
         let retired = ProviderConfig::new("openai", "k", "m");
         assert!(!retired.is_usable());
         assert!(retired.endpoint().is_none());

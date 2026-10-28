@@ -34,6 +34,12 @@ let
     lib.match "(https://.*|http://(localhost|127\\.0\\.0\\.1|[[]::1[]])(:[0-9]+)?(/.*)?)" (
       lib.toLower cfg.ollama.url
     ) != null;
+  speechBaseUrlOk =
+    cfg.settings.speechBaseUrl == null
+    ||
+      lib.match "(https://.*|http://(localhost|127\\.0\\.0\\.1|[[]::1[]])(:[0-9]+)?(/.*)?)" (
+        lib.toLower cfg.settings.speechBaseUrl
+      ) != null;
 
   # nixarchy (when imported) installs plugins; without it the plugin goes to omarchy's folder.
   hasPlugins = lib.hasAttrByPath [ "programs" "nixarchy" "plugins" ] options;
@@ -69,6 +75,8 @@ let
     speech_provider = speechProvider;
     speech_model = speechModel;
     speech_language = speechLanguage;
+    speech_base_url = speechBaseUrl;
+    deepgram_region = cfg.deepgram.region;
     text_scale = textScale;
     reduce_motion = reduceMotion;
     mcp_allow_record = mcpAllowRecord;
@@ -91,6 +99,9 @@ let
   ++ lib.optional (
     cfg.ollamaCloud.keyFile != null
   ) "NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE=${cfg.ollamaCloud.keyFile}"
+  ++ lib.optional (
+    cfg.deepgram.keyFile != null
+  ) "NIXARCHY_MEETINGAI_DEEPGRAM_KEY_FILE=${cfg.deepgram.keyFile}"
   ++ lib.mapAttrsToList (n: v: "${n}=${v}") cfg.extraEnvironment;
 
   # option name -> [ description command ]
@@ -233,6 +244,24 @@ in
       '';
     };
 
+    deepgram.keyFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/run/agenix/deepgram";
+      description = "Path to a Deepgram key file, read by the daemon at runtime. A vault key takes precedence.";
+    };
+
+    deepgram.region = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "us"
+          "eu"
+        ]
+      );
+      default = null;
+      description = "Deepgram API region; EU requests opt out of model improvement.";
+    };
+
     ollama.url = lib.mkOption {
       type = lib.types.str;
       default = "http://127.0.0.1:11434";
@@ -257,9 +286,10 @@ in
       smartFollowUps = nullable bool "Suggest follow-up questions.";
       autoRecordOnCall = nullable bool "Start recording when a call begins.";
       calendarEnabled = nullable bool "Name sessions from the calendar (read-only, through `gog`; off by default).";
-      speechProvider = nullable str "Speech-to-text provider (`whisper-local` or `deepgram-stt`).";
+      speechProvider = nullable str "Speech-to-text provider (`whisper-local`, `deepgram-stt`, or `openai-compatible-stt`).";
       speechModel = nullable str "Speech-to-text model.";
       speechLanguage = nullable str "Speech language code; empty detects it.";
+      speechBaseUrl = nullable str "Base URL for OpenAI-compatible speech; must be set for that provider.";
       textScale = nullable (lib.types.ints.between 80 160) "Overlay text size in percent.";
       reduceMotion = nullable bool "Reduce motion.";
       mcpAllowRecord = nullable bool "Let MCP clients start recording.";
@@ -348,6 +378,10 @@ in
       {
         assertion = ollamaUrlOk;
         message = "programs.nixarchy-meetingai: ollama.url must be https, or http on localhost, 127.0.0.1 or [::1].";
+      }
+      {
+        assertion = speechBaseUrlOk;
+        message = "programs.nixarchy-meetingai: settings.speechBaseUrl must be https, or http on localhost, 127.0.0.1 or [::1].";
       }
       {
         assertion = cfg.ollamaCloud.keyFile == null || cfg.ollamaCloud.environmentFile == null;

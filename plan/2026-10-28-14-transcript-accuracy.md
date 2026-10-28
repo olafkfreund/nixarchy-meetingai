@@ -146,6 +146,7 @@ is reported, not replaced.
 
 ## Deviations log
 
+- Step 6: local-only interviews may use `openai-compatible-stt` only with a loopback base URL. `deepgram.region` is nullable in Home Manager; `null` leaves settings.json absent in a minimal configuration, while the daemon defaults to `us`.
 - Step 2: a saved `cpal:` input device keeps CPAL and so runs without echo
   cancelling (the user's explicit choice is kept). The picker still lists and
   selects it, labelled "(no echo cancelling)", and Listen start emits one
