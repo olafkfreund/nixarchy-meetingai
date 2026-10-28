@@ -4,54 +4,69 @@ use tokio::sync::watch;
 const TITLE_INSTRUCTION: &str = "Give this conversation a title of two to six plain words. Name its concrete topic using only the supplied text. Reply with the title alone: no label, quotes, or closing punctuation.";
 
 fn title_prompt(body: &str) -> String {
-    let shortened = if body.chars().count() > 6_000 {
-        let start: String = body.chars().take(3_000).collect();
-        let end: String = body
-            .chars()
-            .rev()
-            .take(3_000)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        format!("{start}\n[transcript elided]\n{end}")
+    let total = body.chars().count();
+    let text = if total > 6_000 {
+        let head: String = body.chars().take(3_000).collect();
+        let tail: String = body.chars().skip(total - 3_000).collect();
+        format!("{head}\n[transcript elided]\n{tail}")
     } else {
         body.to_owned()
     };
-    format!(
-        "Follow the title instruction for the transcript below.\n<transcript>\n{shortened}\n</transcript>"
-    )
+    format!("{TITLE_INSTRUCTION}\n\n<transcript>\n{text}\n</transcript>")
+}
+
+/// Removes markdown decoration: leading `#`/`*`/whitespace, trailing `*`.
+fn strip_markdown(line: &str) -> &str {
+    let mut start = line.len();
+    for (at, ch) in line.char_indices() {
+        if !(ch == '#' || ch == '*' || ch.is_whitespace()) {
+            start = at;
+            break;
+        }
+    }
+    let mut end = start;
+    for (at, ch) in line[start..].char_indices() {
+        if ch != '*' {
+            end = start + at + ch.len_utf8();
+        }
+    }
+    &line[start..end]
 }
 
 fn clean_title(reply: &str) -> Option<String> {
-    let first = reply.lines().find(|line| !line.trim().is_empty())?;
-    let mut title = first
-        .trim()
-        .trim_start_matches(|c: char| c == '#' || c == '*' || c.is_whitespace())
-        .trim_end_matches('*')
-        .trim();
-    if title
-        .get(..6)
-        .is_some_and(|label| label.eq_ignore_ascii_case("title:"))
-    {
-        title = title[6..].trim();
+    let line = reply.lines().find(|l| !l.trim().is_empty())?;
+    let mut title = strip_markdown(line.trim()).trim();
+    for label in ["Title:", "title:"] {
+        if let Some(rest) = title.strip_prefix(label) {
+            title = rest.trim();
+            break;
+        }
     }
-    title = title.trim_start_matches(['"', '\'', '`']).trim();
-    title = title.trim_end_matches(['"', '\'', '`', '.', '*']).trim();
+    let is_quote = |c: char| matches!(c, '"' | '\'' | '`');
+    title = title.trim_matches(is_quote).trim();
+    title = title.trim_end_matches('.').trim();
+    // a closing quote can sit behind the full stop, as in `"Plan".`
+    title = title.trim_matches(is_quote).trim();
     if title.is_empty() || title.eq_ignore_ascii_case("new conversation") {
         return None;
     }
     if title.chars().count() <= 42 {
-        return Some(title.into());
+        return Some(title.to_owned());
     }
-    let first: String = title.chars().take(42).collect();
-    let cut = first
-        .rfind(' ')
-        .filter(|at| first[..*at].chars().count() > 21);
-    Some(format!(
-        "{}…",
-        cut.map_or(first.as_str(), |at| &first[..at]).trim_end()
-    ))
+    let cut_at = title.char_indices().nth(42).map_or(title.len(), |(i, _)| i);
+    let head = &title[..cut_at];
+    let kept = match head.rfind(' ') {
+        Some(sp) if head[..sp].chars().count() > 21 => &head[..sp],
+        _ => head,
+    };
+    Some(format!("{}…", kept.trim_end()))
+}
+
+fn title_context() -> crate::ai::engine::TurnContext {
+    crate::ai::engine::TurnContext {
+        system: Some(TITLE_INSTRUCTION.to_owned()),
+        images: Vec::new(),
+    }
 }
 
 pub async fn request_title(
@@ -59,20 +74,16 @@ pub async fn request_title(
     config: &crate::ai::providers::ProviderConfig,
     body: &str,
 ) -> Option<String> {
-    let (_tx, rx) = watch::channel(false);
-    let context = crate::ai::engine::TurnContext {
-        system: Some(TITLE_INSTRUCTION.into()),
-        images: Vec::new(),
-    };
+    let (_keep_open, rx) = watch::channel(false);
+    let context = title_context();
     let messages = [crate::core::domain::Message::user(title_prompt(body))];
-    let reply = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        crate::ai::engine::stream_chat(client, config, &messages, &context, Arc::new(rx), |_| {}),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    clean_title(&reply)
+    let call =
+        crate::ai::engine::stream_chat(client, config, &messages, &context, Arc::new(rx), |_| {});
+    let outcome = tokio::select! {
+        r = call => r,
+        () = tokio::time::sleep(std::time::Duration::from_secs(20)) => return None,
+    };
+    clean_title(&outcome.ok()?)
 }
 
 #[cfg(test)]

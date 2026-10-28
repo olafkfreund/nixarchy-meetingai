@@ -125,8 +125,7 @@ impl CustomProvider {
             "none" => return None,
             "bearer" => format!("Bearer {key}"),
             "token" => format!("Token {key}"),
-            "header" => key.to_owned(),
-            _ => return None,
+            _ => key.to_owned(),
         };
         Some((self.auth_header.clone(), value))
     }

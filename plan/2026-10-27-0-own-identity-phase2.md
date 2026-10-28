@@ -220,3 +220,19 @@ commit and reverts alone.
   test for the short old default would put its old text back in the code.
   Review fixes by the lead: two `load` helpers and one test rewritten so
   they no longer match the old bodies.
+- **Step 8** (Codex, then a fresh Claude `coder`): Codex's version again
+  matched old statements and step order (model recall; its log shows no
+  access to the old files). Per the handoff fallback, a fresh `coder`
+  rewrote titling cleanup and the title call, model discovery
+  (pagination, status and body errors, id collection, auth headers, the
+  overall limit), `is_usable`'s custom branch, `speech_usable_in` and the
+  preset response path, from the brief. Behaviour kept from the old code:
+  a page over 2,000 ids keeps the first 2,000; the 10,000 cap applies
+  only when another page follows; a custom config without a `custom-` id
+  falls back to the catalogue; an unknown auth value sends the key as is.
+  Accepted differences: the title instruction is in the user message as
+  the brief says; new error wording; an unencodable key fails the refresh
+  before sending. The cache key is pinned by a test. Dead items deleted:
+  `models::label`, `models::is_known_provider`,
+  `titling::name_untitled_meetings`, `Preset::docs`, which leaves
+  `db::meetings::untitled` without a caller.

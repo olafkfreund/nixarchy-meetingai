@@ -168,9 +168,8 @@ impl ProviderConfig {
     }
 
     pub fn endpoint(&self) -> Option<String> {
-        if self.custom.is_some() {
-            return (self.id.starts_with("custom-") && !self.base_url.is_empty())
-                .then(|| self.base_url.clone());
+        if self.custom.is_some() && self.id.starts_with("custom-") {
+            return (!self.base_url.is_empty()).then(|| self.base_url.clone());
         }
         let provider = ChatProvider::by_id(&self.id)?;
         if provider.wire == ChatWire::Cli {
@@ -183,16 +182,34 @@ impl ProviderConfig {
     }
 
     pub fn is_usable(&self) -> bool {
-        if let Some(custom) = &self.custom {
-            return self.endpoint().is_some()
-                && !self.model.trim().is_empty()
-                && (custom.auth == "none" || !self.api_key.trim().is_empty())
-                && custom.validate(false).is_ok();
+        match &self.custom {
+            Some(custom) => self.custom_chat_usable(custom),
+            None => {
+                let has_endpoint = self.endpoint().is_some();
+                let has_model = !self.model.trim().is_empty();
+                let key_ok = ChatProvider::by_id(&self.id)
+                    .is_some_and(|p| !p.requires_key || self.has_key());
+                has_endpoint && has_model && key_ok
+            }
         }
-        self.endpoint().is_some()
-            && !self.model.trim().is_empty()
-            && ChatProvider::by_id(&self.id)
-                .is_some_and(|p| !p.requires_key || !self.api_key.trim().is_empty())
+    }
+
+    fn has_key(&self) -> bool {
+        !self.api_key.trim().is_empty()
+    }
+
+    fn custom_key_ok(&self, custom: &super::custom::CustomProvider) -> bool {
+        match custom.auth.as_str() {
+            "none" => true,
+            _ => self.has_key(),
+        }
+    }
+
+    fn custom_chat_usable(&self, custom: &super::custom::CustomProvider) -> bool {
+        let has_endpoint = self.endpoint().is_some();
+        let has_model = !self.model.trim().is_empty();
+        let valid = custom.validate(false).is_ok();
+        has_endpoint && has_model && self.custom_key_ok(custom) && valid
     }
 
     pub fn speech_usable(&self) -> bool {
@@ -201,20 +218,20 @@ impl ProviderConfig {
 
     fn speech_usable_in(&self, parakeet_dir: Option<std::path::PathBuf>) -> bool {
         if let Some(custom) = &self.custom {
-            return self.id.starts_with("custom-")
-                && !self.base_url.is_empty()
-                && (custom.auth == "none" || !self.api_key.trim().is_empty())
-                && custom.validate(true).is_ok();
+            let is_custom = self.id.starts_with("custom-") && !self.base_url.is_empty();
+            return is_custom && self.custom_key_ok(custom) && custom.validate(true).is_ok();
         }
         let Some(provider) = SttProvider::by_id(&self.id) else {
             return false;
         };
-        if provider.wire == SttWire::InProcess {
-            return crate::speech::stt::parakeet::model_ready_in(parakeet_dir);
+        let key_ok = !provider.requires_key() || self.has_key();
+        match provider.wire {
+            SttWire::InProcess => crate::speech::stt::parakeet::model_ready_in(parakeet_dir),
+            SttWire::OpenAiMultipart => {
+                key_ok && endpoint_allowed(&self.base_url) && !self.model.trim().is_empty()
+            }
+            SttWire::RawAudio => key_ok,
         }
-        (!provider.requires_key() || !self.api_key.trim().is_empty())
-            && (provider.wire != SttWire::OpenAiMultipart
-                || (endpoint_allowed(&self.base_url) && !self.model.trim().is_empty()))
     }
 
     pub fn speech_streaming(&self) -> bool {
@@ -285,6 +302,10 @@ mod tests {
             "nova-3"
         );
         assert!(SttProvider::by_id("retired-speech").is_none());
+        for retired in ["openai-whisper", "whisper-local"] {
+            assert!(STT_PROVIDERS.iter().all(|p| p.id != retired));
+            assert!(SttProvider::by_id(retired).is_none());
+        }
     }
 
     #[test]
@@ -356,5 +377,15 @@ mod tests {
         }
         assert!(config.speech_usable_in(Some(dir.clone())) && !config.speech_streaming());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn custom_config_with_a_catalogue_id_uses_the_catalogue() {
+        let mut config = ProviderConfig::new("ollama", "", "m");
+        config.custom = Some(super::super::custom::CustomProvider::default());
+        assert_eq!(
+            config.endpoint().as_deref(),
+            Some("http://127.0.0.1:11434/v1/chat/completions")
+        );
     }
 }

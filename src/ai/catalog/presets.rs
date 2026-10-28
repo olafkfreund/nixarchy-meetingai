@@ -103,6 +103,11 @@ pub const PRESETS: &[Preset] = &[
 
 impl Preset {
     pub fn draft(&self) -> Credential {
+        let response_path = match (self.speech, self.wire) {
+            (true, _) => "/text",
+            (false, "anthropic") => "/content/0/text",
+            (false, _) => "/choices/0/message/content",
+        };
         let custom = CustomProvider {
             name: self.name.into(),
             auth: if self.endpoint.starts_with("http://") {
@@ -112,14 +117,7 @@ impl Preset {
             }
             .into(),
             request_format: self.wire.into(),
-            response_path: if self.speech {
-                "/text"
-            } else if self.wire == "anthropic" {
-                "/content/0/text"
-            } else {
-                "/choices/0/message/content"
-            }
-            .into(),
+            response_path: response_path.into(),
             streaming: !self.speech,
             supports_images: self.images,
             ..Default::default()
@@ -155,6 +153,8 @@ mod tests {
                 first.to_config().custom.unwrap().streaming,
                 !template.speech
             );
+            let streaming = first.to_config().speech_streaming();
+            assert_eq!(streaming, !template.speech);
             first.api_key = "sample-secret".into();
             assert!(first.validate().is_ok(), "{}", template.name);
         }
