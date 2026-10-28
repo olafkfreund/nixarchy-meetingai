@@ -1,0 +1,8 @@
+# One utterance per line. Prefix me: (you, left channel) or them: (remote, right channel).
+them: can you hear me
+me: yes loud and clear
+[silence]
+# Output inside a timed span counts as invented (mm:ss-mm:ss):
+[silence 0:10-0:15]
+them: let's start with the roadmap
+me: I'd like to add the Wednesday review
