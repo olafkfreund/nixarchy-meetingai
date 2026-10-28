@@ -145,7 +145,28 @@ by a fresh Opus agent given this plan and the diff; a review not obtained
 is reported, not replaced.
 
 ## Deviations log
-
+- **Step 3 decision: in-process.** The official `sherpa-onnx` crate
+  2.0.1 with `features = ["shared"]` and `SHERPA_ONNX_LIB_DIR` pointing at
+  a `symlinkJoin` of nixpkgs `sherpa-onnx` 1.13.8 and `onnxruntime` links
+  without any build-time download (the default `static` feature downloads
+  and fails in the sandbox). On p620 (CPU, 4 threads): load 2.3–3.7 s,
+  1.1 GB idle, RTF 0.08 on 30 s chunks, peak 1.7 GB over a 60-minute file;
+  one-pass decode of very long audio fails, so 30 s chunks are required;
+  token timestamps come back on an 80 ms grid. The fallback service was
+  not needed. Step 5 adds a flake check running a tiny decode (crate 2.0.1
+  against library 1.13.8 may break on a nixpkgs bump) and updates the
+  package's cargo hash. Not measured: cold-disk load, two channels at
+  once, real meeting audio (step 5 / evaluation set).
+- **Step 5:** sherpa-onnx is a normal dependency (spike feature and
+  example removed); the sandboxed `nix build` and a `parakeet-decode`
+  flake check (real model, the archive's `test_wavs/en.wav`, 2.9 s incl.
+  load) prove the no-download build. `nix/parakeet-model.nix` keeps
+  `test_wavs` (~0.7 MB) for that check. The model env var is always set,
+  so every HM closure carries the 640 MB model until step 7 makes it
+  conditional on the provider. Default provider stays `whisper-local`
+  until step 7; chunks are WAV-encoded and decoded again for the
+  in-process wire (cheap, left as is). Not measured yet: daemon RSS with
+  two channels on the real model.
 - Step 6: local-only interviews may use `openai-compatible-stt` only with a loopback base URL. `deepgram.region` is nullable in Home Manager; `null` leaves settings.json absent in a minimal configuration, while the daemon defaults to `us`.
 - Step 2: a saved `cpal:` input device keeps CPAL and so runs without echo
   cancelling (the user's explicit choice is kept). The picker still lists and

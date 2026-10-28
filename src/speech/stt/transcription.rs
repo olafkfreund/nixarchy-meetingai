@@ -46,6 +46,7 @@ fn client() -> reqwest::Client {
 /// Pull the transcript out of a provider response.
 pub fn extract_transcript(provider: &SttProvider, value: &Value) -> Option<String> {
     let text = match provider.wire {
+        SttWire::InProcess => None,
         SttWire::WhisperServer | SttWire::OpenAiMultipart => {
             value.get("text").and_then(Value::as_str).map(str::to_owned)
         }
@@ -163,6 +164,27 @@ async fn transcribe_inner(
         return custom.text(&text).map_err(SttError::Protocol);
     }
     let provider = SttProvider::by_id(&config.id).ok_or(SttError::NotConfigured)?;
+    if provider.wire == SttWire::InProcess {
+        // Parakeet takes no prompt or language; it is multilingual and resamples itself.
+        let reader = hound::WavReader::new(std::io::Cursor::new(wav))
+            .map_err(|e| SttError::Encode(e.to_string()))?;
+        let spec = reader.spec();
+        if spec.channels != 1
+            || spec.bits_per_sample != 16
+            || spec.sample_format != hound::SampleFormat::Int
+        {
+            return Err(SttError::Encode("Parakeet needs mono 16-bit audio".into()));
+        }
+        let samples = reader
+            .into_samples::<i16>()
+            .map(|s| s.map(|v| f32::from(v) / 32768.0))
+            .collect::<Result<Vec<f32>, _>>()
+            .map_err(|e| SttError::Encode(e.to_string()))?;
+        return crate::speech::stt::parakeet::transcribe(samples, spec.sample_rate as i32)
+            .await
+            .map(|t| t.trim().to_owned())
+            .map_err(SttError::Protocol);
+    }
     if matches!(
         provider.wire,
         SttWire::WhisperServer | SttWire::OpenAiMultipart
@@ -1161,6 +1183,52 @@ mod tests {
     use super::*;
     use crate::ai::providers::STT_PROVIDERS;
 
+    /// Two channels through the batch path with a fake recogniser: channel and times survive,
+    /// and `finish` flushes chunks that never saw trailing silence.
+    #[tokio::test]
+    async fn parakeet_batch_keeps_channel_and_times_and_flushes_on_stop() {
+        crate::speech::stt::parakeet::set_decoder(Box::new(|_, samples| {
+            let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+            if peak < 0.3 {
+                "hello from the microphone"
+            } else {
+                "remote voice on the call"
+            }
+            .to_owned()
+        }));
+        let config = ProviderConfig::new("parakeet-local", "", "");
+        let mut live = LiveTranscriber::connect_batch(config, SttHints::default());
+        // Mic speaks from 0.5 s to 1.5 s, the call from 0 s to 1 s; the audio ends mid-speech.
+        let audio: Vec<f32> = (0..24_000)
+            .flat_map(|i| {
+                [
+                    if i >= 8_000 { 0.2 } else { 0.0 },
+                    if i < 16_000 { 0.4 } else { 0.0 },
+                ]
+            })
+            .collect();
+        live.push(&audio).await.unwrap();
+        live.finish();
+        let mut lines = Vec::new();
+        while let Some(event) = live.next_event().await {
+            if let LiveEvent::Transcript(line) = event {
+                lines.push(line);
+            }
+        }
+        lines.sort_by_key(|l| l.channel);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(
+            (lines[0].channel, lines[0].text.as_str()),
+            (0, "hello from the microphone")
+        );
+        assert_eq!(
+            (lines[1].channel, lines[1].text.as_str()),
+            (1, "remote voice on the call")
+        );
+        assert!((lines[0].start - 0.5).abs() < 0.01 && (lines[0].end - 1.5).abs() < 0.01);
+        assert!(lines[1].start.abs() < 0.01 && lines[1].end > 1.0);
+    }
+
     #[test]
     fn speaker_changes_preserve_word_identity_and_one_endpoint() {
         let events = parse_live_events(br#"{"type":"Results","channel_index":[1,2],"is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"Hello. How are you?","words":[{"word":"hello","punctuated_word":"Hello.","speaker":0,"start":0.1,"end":0.4},{"word":"how","punctuated_word":"How","speaker":1,"start":0.6,"end":0.8},{"word":"are","speaker":1,"start":0.9,"end":1.0},{"word":"you","punctuated_word":"you?","speaker":1,"start":1.1,"end":1.3}]}]}}"#);
@@ -1345,7 +1413,8 @@ mod tests {
         for provider in STT_PROVIDERS {
             assert!(!provider.name.is_empty());
             assert!(
-                provider.endpoint.starts_with("http") || provider.wire == SttWire::OpenAiMultipart
+                provider.endpoint.starts_with("http")
+                    || matches!(provider.wire, SttWire::OpenAiMultipart | SttWire::InProcess)
             );
         }
     }

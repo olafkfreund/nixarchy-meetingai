@@ -129,6 +129,7 @@
             BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
             PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig";
+            SHERPA_ONNX_LIB_DIR = "${pkgs.callPackage ./nix/sherpa-lib.nix { }}/lib";
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             NIX_SSL_CERT_FILE = SSL_CERT_FILE;
           };
@@ -261,6 +262,21 @@
                 chmod -R u+w shell
                 bash shell/tests/ci.sh $out
               '';
+          # The package's decode test against the real model and a clip shipped in its archive: a
+          # nixpkgs bump of sherpa-onnx/onnxruntime that breaks the crate (2.0.1 vs library 1.13.x) fails here.
+          parakeet-decode =
+            let
+              model = pkgs.callPackage ./nix/parakeet-model.nix { };
+            in
+            sysPkgs.default.overrideAttrs (_: {
+              doCheck = true;
+              cargoTestFlags = [
+                "--test"
+                "parakeet_decode"
+              ];
+              NIXARCHY_MEETINGAI_PARAKEET_DIR = "${model}";
+              NIXARCHY_MEETINGAI_PARAKEET_WAV = "${model}/test_wavs/en.wav";
+            });
           # So `nix flake check` builds them.
           package = sysPkgs.default;
           plugin = sysPkgs.plugin;
@@ -349,6 +365,7 @@
             lib.hasInfix "--port 9000 -t 4 --no-gpu" (toString fullWhisper.Service.ExecStart)
             && fullWhisper.Install.WantedBy == [ ]
             && builtins.elem "NIXARCHY_MEETINGAI_WHISPER_URL=http://127.0.0.1:9000" fullDaemon.Environment
+            && builtins.elem "NIXARCHY_MEETINGAI_PARAKEET_DIR=${full.programs.nixarchy-meetingai.parakeet.model}" fullDaemon.Environment
             && builtins.elem "RUST_LOG=nixarchy_meetingai=debug" fullDaemon.Environment
             && builtins.elem "FOO=bar" fullDaemon.Environment
             && builtins.elem "NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE=/run/agenix/ollama-cloud" fullDaemon.Environment

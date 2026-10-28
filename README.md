@@ -605,6 +605,27 @@ null
 
 
 
+## programs\.nixarchy-meetingai\.parakeet\.model
+
+
+
+The Parakeet speech model for ` speechProvider = "parakeet-local" `: a directory with ` encoder.int8.onnx `, ` decoder.int8.onnx `, ` joiner.int8.onnx ` and ` tokens.txt ` (NVIDIA Parakeet TDT 0\.6B v3, CC-BY-4\.0)\. The daemon gets it as ` NIXARCHY_MEETINGAI_PARAKEET_DIR `\. Once Parakeet has been used the model stays loaded (about 1\.1 GB RAM) while the daemon runs\.
+
+
+
+*Type:*
+package
+
+
+
+*Default:*
+
+```nix
+pkgs.callPackage ./nix/parakeet-model.nix { }
+```
+
+
+
 ## programs\.nixarchy-meetingai\.plugin\.enable
 
 
@@ -1047,7 +1068,7 @@ null
 
 
 
-Speech-to-text provider (` whisper-local `, ` deepgram-stt `, or ` openai-compatible-stt `)\.
+Speech-to-text provider (` parakeet-local `, ` whisper-local `, ` deepgram-stt `, or ` openai-compatible-stt `)\.
 
 
 

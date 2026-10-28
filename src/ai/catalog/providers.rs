@@ -105,6 +105,8 @@ pub enum SttWire {
     RawAudio,
     /// Multipart `POST /inference` to a local `whisper-server`; no key.
     WhisperServer,
+    /// Decoded inside the daemon (Parakeet through sherpa-onnx); no URL, no key.
+    InProcess,
     /// OpenAI-compatible multipart transcription.
     OpenAiMultipart,
 }
@@ -135,6 +137,13 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
         endpoint: "http://127.0.0.1:8178/inference",
         wire: SttWire::WhisperServer,
         default_model: "ggml-large-v3-turbo",
+    },
+    SttProvider {
+        id: "parakeet-local",
+        name: "Parakeet (local)",
+        endpoint: "",
+        wire: SttWire::InProcess,
+        default_model: "parakeet-tdt-0.6b-v3",
     },
     SttProvider {
         id: "openai-compatible-stt",
@@ -220,6 +229,11 @@ impl ProviderConfig {
     }
 
     pub fn speech_usable(&self) -> bool {
+        self.speech_usable_in(crate::speech::stt::parakeet::model_dir())
+    }
+
+    /// [`Self::speech_usable`] with the Parakeet model directory given.
+    fn speech_usable_in(&self, parakeet_dir: Option<std::path::PathBuf>) -> bool {
         if let Some(custom) = &self.custom {
             self.id.starts_with("custom-")
                 && !self.base_url.is_empty()
@@ -227,6 +241,9 @@ impl ProviderConfig {
                 && custom.validate(true).is_ok()
         } else {
             SttProvider::by_id(&self.id).is_some_and(|p| {
+                if p.wire == SttWire::InProcess {
+                    return crate::speech::stt::parakeet::model_ready_in(parakeet_dir);
+                }
                 (!p.requires_key() || !self.api_key.trim().is_empty())
                     && (p.wire != SttWire::OpenAiMultipart
                         || (endpoint_allowed(&self.base_url) && !self.model.trim().is_empty()))
@@ -237,10 +254,8 @@ impl ProviderConfig {
     pub fn speech_streaming(&self) -> bool {
         match &self.custom {
             Some(custom) => custom.streaming,
-            // Multipart providers are batch-only.
-            None => SttProvider::by_id(&self.id).is_none_or(|p| {
-                !matches!(p.wire, SttWire::WhisperServer | SttWire::OpenAiMultipart)
-            }),
+            // Only Deepgram's raw-audio wire streams; whisper-server, OpenAI multipart and Parakeet are batch.
+            None => SttProvider::by_id(&self.id).is_none_or(|p| p.wire == SttWire::RawAudio),
         }
     }
 
@@ -312,7 +327,7 @@ mod tests {
                 "ollama"
             ]
         );
-        assert_eq!(STT_PROVIDERS.len(), 3);
+        assert_eq!(STT_PROVIDERS.len(), 4);
         let retired = ProviderConfig::new("openai", "k", "m");
         assert!(!retired.is_usable());
         assert!(retired.endpoint().is_none());
@@ -377,5 +392,29 @@ mod tests {
         assert!(SttProvider::by_id("missing").is_none());
         let local = ProviderConfig::new("whisper-local", "", "");
         assert!(local.speech_usable() && !local.speech_streaming());
+    }
+
+    #[test]
+    fn parakeet_is_ready_only_with_its_model_files() {
+        let dir = std::env::temp_dir().join(format!("parakeet-ready-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = ProviderConfig::new("parakeet-local", "", "");
+        let provider = SttProvider::by_id("parakeet-local").unwrap();
+        assert!(!provider.requires_key());
+        assert!(!config.speech_usable_in(None));
+        assert!(
+            !config.speech_usable_in(Some(dir.clone())),
+            "empty directory"
+        );
+        for f in [
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "joiner.int8.onnx",
+            "tokens.txt",
+        ] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        assert!(config.speech_usable_in(Some(dir.clone())) && !config.speech_streaming());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

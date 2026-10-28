@@ -255,7 +255,7 @@ pub struct Daemon {
     tx: broadcast::Sender<Value>,
     pub shutdown: Notify,
     chunking: AtomicBool,
-    /// The session's candidate is local-only: only ollama and whisper-local may be used.
+    /// The session's candidate is local-only: only ollama, whisper-local and parakeet-local may be used.
     local_only: AtomicBool,
     /// Settings fixed by `programs.nixarchy-meetingai.settings.enforce`; `settings.set` refuses them.
     locked: Mutex<Vec<String>>,
@@ -496,6 +496,16 @@ fn stays_local(config: &ProviderConfig) -> bool {
                         .is_ok_and(|ip| ip.is_loopback())
             });
     loopback && config.id != "ollama-cloud" && !config.model.to_lowercase().ends_with("-cloud")
+}
+
+/// Why speech-to-text is not ready, for the provider that is selected.
+fn speech_not_ready(provider: &str, other: &'static str) -> String {
+    if provider == "parakeet-local" {
+        let reason = crate::speech::stt::parakeet::not_ready_reason().unwrap_or_default();
+        format!("Speech-to-text is not ready: {reason}.")
+    } else {
+        other.to_owned()
+    }
 }
 
 /// The Nix module tells the daemon where its whisper-server listens (`http://host:port`).
@@ -795,11 +805,14 @@ impl Daemon {
                 } else {
                     "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama."
                 }),
-                "speech": (!speech).then_some(if local {
-                    "Local-only is on: start whisper-server or configure openai-compatible-stt with a reachable loopback base URL."
-                } else {
-                    "Speech-to-text is not ready. Check whisper-server, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
-                }),
+                "speech": (!speech).then(|| speech_not_ready(
+                    &g.settings.speech_provider,
+                    if local {
+                        "Local-only is on: speech-to-text must run on this machine (Parakeet, or a whisper or OpenAI-compatible server on a loopback address)."
+                    } else {
+                        "Speech-to-text is not ready. Check the Parakeet model, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
+                    },
+                )),
             },
         })
     }
@@ -984,7 +997,12 @@ impl Daemon {
         } else {
             &s.speech_provider
         };
-        if local && id != "whisper-local" && id != "openai-compatible-stt" {
+        if local
+            && !matches!(
+                id,
+                "whisper-local" | "parakeet-local" | "openai-compatible-stt"
+            )
+        {
             return None;
         }
         let mut config = match credentials::load(&self.vault, Kind::Speech, id) {
@@ -1837,10 +1855,15 @@ impl Daemon {
                 g.consent = true;
             }
             let speech = if self.capture {
-                Some(self.speech_config(&g.settings, local).ok_or(if local {
-                    "local_only: speech-to-text must be ready on a loopback address."
-                } else {
-                    "Speech-to-text is not ready. Start whisper-server, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
+                Some(self.speech_config(&g.settings, local).ok_or_else(|| {
+                    speech_not_ready(
+                        &g.settings.speech_provider,
+                        if local {
+                            "local_only: speech-to-text must run on this machine (Parakeet, or a whisper or OpenAI-compatible server on a loopback address)."
+                        } else {
+                            "Speech-to-text is not ready. Check the Parakeet model, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
+                        },
+                    )
                 })?)
             } else {
                 None
@@ -1876,6 +1899,17 @@ impl Daemon {
                 g.settings.echo_gate,
             )
         };
+        // Load Parakeet before capture makes chunks, so a slow first load cannot back them up.
+        if speech.as_ref().is_some_and(|c| c.id == "parakeet-local") {
+            let loaded = tokio::task::spawn_blocking(crate::speech::stt::parakeet::preload)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+            if let Err(error) = loaded {
+                self.inner.lock().recording = None;
+                return Err(error);
+            }
+        }
         let opened = if self.capture {
             let config = SessionConfig {
                 device,
@@ -2256,7 +2290,14 @@ impl Daemon {
                 .speech_config(&g.settings, self.local_now(&g))
                 .is_none()
             {
-                return Err("Speech-to-text is not ready; dictation needs it.".into());
+                return Err(speech_not_ready(
+                    &g.settings.speech_provider,
+                    "Speech-to-text is not ready; dictation needs it.",
+                ));
+            }
+            if g.settings.speech_provider == "parakeet-local" {
+                // Warm the model while the user speaks; a failure shows when the text is transcribed.
+                tokio::task::spawn_blocking(crate::speech::stt::parakeet::preload);
             }
             let meeting = g
                 .recording
@@ -4210,7 +4251,7 @@ mod command_tests {
         assert_eq!(st["hints"]["chat"], Value::Null);
         assert_eq!(st["ready"]["speech"], false);
         let hint = st["hints"]["speech"].as_str().unwrap();
-        assert!(hint.contains("whisper-server"), "{hint}");
+        assert!(hint.contains("Parakeet"), "{hint}");
         assert!(hint.contains("Deepgram key"), "{hint}");
         assert!(hint.contains("openai-compatible-stt base URL"), "{hint}");
         // The default local whisper needs no key.
