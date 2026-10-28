@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::StreamExt;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
@@ -98,9 +99,12 @@ pub async fn stream_chat_bounded<F: Future<Output = ()>>(
     on_text: impl FnMut(String) -> F,
 ) -> Result<String, ChatError> {
     let started = Instant::now();
+    let redactor = Redactor {
+        key: &config.api_key,
+    };
     let outcome = execute_turn(client, config, history, context, cancel, on_text)
         .await
-        .map_err(|err| scrub_error(err, &config.api_key));
+        .map_err(|err| public_error(err, &redactor));
     tracing::debug!(
         provider = %config.id,
         elapsed_ms = started.elapsed().as_millis() as u64,
@@ -108,6 +112,73 @@ pub async fn stream_chat_bounded<F: Future<Output = ()>>(
         "chat turn finished"
     );
     outcome
+}
+
+/// True when `extra` more bytes still keep an answer of `current` bytes within the limit.
+fn fits(current: usize, extra: usize) -> bool {
+    current
+        .checked_add(extra)
+        .is_some_and(|total| total <= ANSWER_BYTE_LIMIT)
+}
+
+/// How a request authenticates itself.
+enum Auth<'a> {
+    /// The bundled providers: `with_key` picks the header for the wire.
+    WireKey(ChatWire, &'a str),
+    /// A custom provider: at most one header, possibly none.
+    Header(Option<(String, String)>),
+}
+
+/// Everything needed to send one request, before it is tied to a client.
+struct RequestParts<'a> {
+    method: reqwest::Method,
+    url: String,
+    auth: Auth<'a>,
+    anthropic: bool,
+    body: Value,
+}
+
+impl<'a> RequestParts<'a> {
+    fn new(
+        provider: &ChatProvider,
+        config: &'a ProviderConfig,
+        url: String,
+        body: Value,
+    ) -> Result<Self, ChatError> {
+        let (method, auth) = match &config.custom {
+            Some(custom) => {
+                let method =
+                    reqwest::Method::from_bytes(custom.method.as_bytes()).map_err(|_| {
+                        ChatError::Protocol(format!("unsupported HTTP method '{}'", custom.method))
+                    })?;
+                (method, Auth::Header(custom.header(&config.api_key)))
+            }
+            None => (
+                reqwest::Method::POST,
+                Auth::WireKey(provider.wire, &config.api_key),
+            ),
+        };
+        Ok(Self {
+            method,
+            url,
+            auth,
+            anthropic: provider.wire == ChatWire::Anthropic,
+            body,
+        })
+    }
+
+    fn into_builder(self, client: &reqwest::Client) -> reqwest::RequestBuilder {
+        let request = client.request(self.method, self.url);
+        let mut request = match self.auth {
+            Auth::WireKey(wire, key) => with_key(request, wire, key),
+            Auth::Header(Some((name, value))) => request.header(name, value),
+            Auth::Header(None) => request,
+        };
+        if self.anthropic {
+            request = request.header("anthropic-version", ANTHROPIC_API_VERSION);
+        }
+        request.json(&self.body)
+    }
 }
 
 async fn execute_turn<F: Future<Output = ()>>(
@@ -134,26 +205,9 @@ async fn execute_turn<F: Future<Output = ()>>(
         return Ok(String::new());
     }
 
-    let streaming = config.custom.as_ref().is_none_or(|c| c.streaming);
-    let payload = encode_request_payload(provider, config, history, context, streaming);
-
-    let mut builder = if let Some(custom) = &config.custom {
-        let method = reqwest::Method::from_bytes(custom.method.as_bytes()).map_err(|_| {
-            ChatError::Protocol(format!("unsupported HTTP method '{}'", custom.method))
-        })?;
-        let mut req = client.request(method, endpoint);
-        if let Some((header_name, header_val)) = custom.header(&config.api_key) {
-            req = req.header(header_name, header_val);
-        }
-        req
-    } else {
-        with_key(client.post(endpoint), provider.wire, &config.api_key)
-    };
-
-    if provider.wire == ChatWire::Anthropic {
-        builder = builder.header("anthropic-version", ANTHROPIC_API_VERSION);
-    }
-    let request = builder.json(&payload);
+    let batch = config.custom.as_ref().filter(|c| !c.streaming);
+    let body = encode_request_payload(provider, config, history, context, batch.is_none());
+    let request = RequestParts::new(&provider, config, endpoint, body)?.into_builder(client);
 
     let mut cancel_rx = (*cancel).clone();
     let response = tokio::select! {
@@ -163,156 +217,173 @@ async fn execute_turn<F: Future<Output = ()>>(
 
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let raw_body = tokio::select! {
+        let read = tokio::select! {
             read = crate::core::network::read_body(response, ERROR_BODY_LIMIT) => read,
             _ = wait_for_cancellation(&mut cancel_rx) => return Ok(String::new()),
         };
-        let message = match raw_body {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(err) => err.to_string(),
-        };
+        let message = read.map_or_else(
+            |err| err.to_string(),
+            |bytes| String::from_utf8_lossy(&bytes).into_owned(),
+        );
         return Err(ChatError::Status { status, message });
     }
 
-    if let Some(custom) = config.custom.as_ref().filter(|c| !c.streaming) {
-        let bytes = tokio::select! {
-            read = crate::core::network::read_body(response, BATCH_BODY_LIMIT) => {
-                read.map_err(|err| ChatError::Protocol(err.to_string()))?
-            }
-            _ = wait_for_cancellation(&mut cancel_rx) => return Ok(String::new()),
-        };
-        let text_body = String::from_utf8(bytes)
-            .map_err(|_| ChatError::Protocol("response body was not valid UTF-8".into()))?;
-        let extracted = custom.text(&text_body).map_err(ChatError::Protocol)?;
-        if extracted.len() > ANSWER_BYTE_LIMIT {
-            return Err(ChatError::Protocol(
-                "response text exceeded the size limit".into(),
-            ));
-        }
-        tokio::select! {
-            () = on_text(extracted.clone()) => {}
-            _ = wait_for_cancellation(&mut cancel_rx) => return Ok(String::new()),
-        }
-        return Ok(extracted);
-    }
-
-    let mut byte_stream = response.bytes_stream();
-    let mut pending = Vec::new();
-    let mut assembled = String::new();
-    let started = Instant::now();
-    let mut logged_first_delta = false;
-
-    loop {
-        let maybe_chunk = tokio::select! {
-            item = byte_stream.next() => item,
-            _ = wait_for_cancellation(&mut cancel_rx) => return Ok(assembled),
-        };
-        let Some(chunk_res) = maybe_chunk else {
-            break;
-        };
-        let chunk = chunk_res.map_err(ChatError::Request)?;
-        pending.extend_from_slice(&chunk);
-
-        while let Some(nl) = pending.iter().position(|&b| b == b'\n') {
-            let mut raw_line: Vec<u8> = pending.drain(..=nl).collect();
-            if raw_line.last() == Some(&b'\n') {
-                raw_line.pop();
-            }
-            if raw_line.last() == Some(&b'\r') {
-                raw_line.pop();
-            }
-            if raw_line.len() > SSE_LINE_LIMIT {
+    match batch {
+        Some(custom) => {
+            let read = tokio::select! {
+                read = crate::core::network::read_body(response, BATCH_BODY_LIMIT) => read,
+                _ = wait_for_cancellation(&mut cancel_rx) => return Ok(String::new()),
+            };
+            let bytes = read.map_err(|err| ChatError::Protocol(err.to_string()))?;
+            let raw = String::from_utf8(bytes)
+                .map_err(|_| ChatError::Protocol("response body was not valid UTF-8".into()))?;
+            let answer = custom.text(&raw).map_err(ChatError::Protocol)?;
+            if !fits(0, answer.len()) {
                 return Err(ChatError::Protocol(
-                    "SSE line exceeded the size limit".into(),
+                    "response text exceeded the size limit".into(),
                 ));
             }
-            match decode_sse_line(provider.wire, &raw_line)? {
-                SseOutcome::Ignore => {}
-                SseOutcome::Delta(piece) => {
-                    if piece.is_empty() {
-                        continue;
-                    }
-                    if piece.len() > ANSWER_BYTE_LIMIT.saturating_sub(assembled.len()) {
-                        return Err(ChatError::Protocol(
-                            "streamed answer exceeded the size limit".into(),
-                        ));
-                    }
-                    if !logged_first_delta {
-                        logged_first_delta = true;
-                        tracing::debug!(
-                            provider = %config.id,
-                            ttft_ms = started.elapsed().as_millis() as u64,
-                            "received first chat delta"
-                        );
-                    }
-                    assembled.push_str(&piece);
-                    tokio::select! {
-                        () = on_text(piece) => {}
-                        _ = wait_for_cancellation(&mut cancel_rx) => return Ok(assembled),
-                    }
-                }
-                SseOutcome::Done => {
-                    if assembled.trim().is_empty() {
-                        return Err(ChatError::Protocol(
-                            "stream completed without an answer".into(),
-                        ));
-                    }
-                    return Ok(assembled);
-                }
+            tokio::select! {
+                () = on_text(answer.clone()) => Ok(answer),
+                _ = wait_for_cancellation(&mut cancel_rx) => Ok(String::new()),
             }
         }
-
-        if pending.len() > SSE_LINE_LIMIT {
-            return Err(ChatError::Protocol(
-                "unterminated SSE line exceeded the size limit".into(),
-            ));
+        None => {
+            let reader = StreamReader {
+                wire: provider.wire,
+                provider_id: &config.id,
+                opened: Instant::now(),
+            };
+            reader.run(response, &mut cancel_rx, on_text).await
         }
     }
+}
 
-    if !pending.is_empty() {
-        if pending.last() == Some(&b'\r') {
-            pending.pop();
-        }
-        if pending.len() > SSE_LINE_LIMIT {
-            return Err(ChatError::Protocol(
-                "trailing SSE line exceeded the size limit".into(),
-            ));
-        }
-        match decode_sse_line(provider.wire, &pending)? {
-            SseOutcome::Ignore => {}
-            SseOutcome::Delta(piece) => {
-                if !piece.is_empty() {
-                    if piece.len() > ANSWER_BYTE_LIMIT.saturating_sub(assembled.len()) {
-                        return Err(ChatError::Protocol(
-                            "streamed answer exceeded the size limit".into(),
-                        ));
-                    }
-                    assembled.push_str(&piece);
-                    tokio::select! {
-                        () = on_text(piece) => {}
-                        _ = wait_for_cancellation(&mut cancel_rx) => return Ok(assembled),
-                    }
-                }
-            }
-            SseOutcome::Done => {
-                if assembled.trim().is_empty() {
+/// What a processed stream line means for the loop reading the body.
+enum Flow {
+    More,
+    Finished,
+    Cancelled,
+}
+
+struct StreamReader<'a> {
+    wire: ChatWire,
+    provider_id: &'a str,
+    opened: Instant,
+}
+
+impl StreamReader<'_> {
+    async fn run<F: Future<Output = ()>>(
+        &self,
+        response: reqwest::Response,
+        cancel_rx: &mut watch::Receiver<bool>,
+        mut on_text: impl FnMut(String) -> F,
+    ) -> Result<String, ChatError> {
+        let mut chunks = response.bytes_stream();
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut answer = String::new();
+
+        loop {
+            let next = tokio::select! {
+                next = chunks.next() => next,
+                _ = wait_for_cancellation(cancel_rx) => return Ok(answer),
+            };
+            let Some(chunk) = next else { break };
+            buffer.extend_from_slice(&chunk.map_err(ChatError::Request)?);
+
+            while let Some(end) = buffer.iter().position(|&b| b == b'\n') {
+                let raw: Vec<u8> = buffer.drain(..=end).collect();
+                let line = trim_eol(&raw);
+                if line.len() > SSE_LINE_LIMIT {
                     return Err(ChatError::Protocol(
-                        "stream completed without an answer".into(),
+                        "SSE line exceeded the size limit".into(),
                     ));
                 }
-                return Ok(assembled);
+                match self
+                    .consume(line, &mut answer, &mut on_text, cancel_rx)
+                    .await?
+                {
+                    Flow::More => {}
+                    Flow::Finished => {
+                        return non_blank(answer, "stream completed without an answer");
+                    }
+                    Flow::Cancelled => return Ok(answer),
+                }
+            }
+            if buffer.len() > SSE_LINE_LIMIT {
+                return Err(ChatError::Protocol(
+                    "unterminated SSE line exceeded the size limit".into(),
+                ));
             }
         }
+
+        let leftover = trim_eol(&buffer);
+        if !leftover.is_empty() {
+            match self
+                .consume(leftover, &mut answer, &mut on_text, cancel_rx)
+                .await?
+            {
+                Flow::More => {}
+                Flow::Finished => return non_blank(answer, "stream completed without an answer"),
+                Flow::Cancelled => return Ok(answer),
+            }
+        }
+
+        if answer.trim().is_empty() {
+            return Err(ChatError::Protocol(
+                "stream closed without an answer".into(),
+            ));
+        }
+        Err(ChatError::Protocol(
+            "stream ended before confirming completion; the partial text was kept".into(),
+        ))
     }
 
-    if assembled.trim().is_empty() {
-        Err(ChatError::Protocol(
-            "stream closed without an answer".into(),
-        ))
+    /// Interprets one line and, for a text delta, hands it to the consumer.
+    async fn consume<F: Future<Output = ()>>(
+        &self,
+        line: &[u8],
+        answer: &mut String,
+        on_text: &mut impl FnMut(String) -> F,
+        cancel_rx: &mut watch::Receiver<bool>,
+    ) -> Result<Flow, ChatError> {
+        let piece = match decode_sse_line(self.wire, line)? {
+            SseOutcome::Ignore => return Ok(Flow::More),
+            SseOutcome::Done => return Ok(Flow::Finished),
+            SseOutcome::Delta(piece) if piece.is_empty() => return Ok(Flow::More),
+            SseOutcome::Delta(piece) => piece,
+        };
+        if !fits(answer.len(), piece.len()) {
+            return Err(ChatError::Protocol(
+                "streamed answer exceeded the size limit".into(),
+            ));
+        }
+        if answer.is_empty() {
+            tracing::debug!(
+                provider = %self.provider_id,
+                ttft_ms = self.opened.elapsed().as_millis() as u64,
+                "received first chat delta"
+            );
+        }
+        answer.push_str(&piece);
+        tokio::select! {
+            () = on_text(piece) => Ok(Flow::More),
+            _ = wait_for_cancellation(cancel_rx) => Ok(Flow::Cancelled),
+        }
+    }
+}
+
+fn trim_eol(line: &[u8]) -> &[u8] {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
+/// Passes the answer through unless it is blank, which is reported as `blank_msg`.
+fn non_blank(answer: String, blank_msg: &str) -> Result<String, ChatError> {
+    if answer.trim().is_empty() {
+        Err(ChatError::Protocol(blank_msg.into()))
     } else {
-        Err(ChatError::Protocol(
-            "stream ended before confirming completion; partial text was kept".into(),
-        ))
+        Ok(answer)
     }
 }
 
@@ -417,6 +488,28 @@ fn encode_request_payload(
     }
 }
 
+/// The Anthropic stream events that matter here; any other shape is ignored.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicEvent {
+    #[serde(rename = "content_block_delta")]
+    Delta { delta: DeltaBody },
+    #[serde(rename = "message_stop")]
+    Stop,
+    #[serde(other)]
+    Other,
+}
+
+/// Only visible text is kept, so thinking deltas never reach the answer.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum DeltaBody {
+    #[serde(rename = "text_delta")]
+    Text { text: String },
+    #[serde(other)]
+    Other,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum SseOutcome {
     Ignore,
@@ -459,45 +552,53 @@ fn decode_sse_line(wire: ChatWire, raw_line: &[u8]) -> Result<SseOutcome, ChatEr
                 Ok(SseOutcome::Ignore)
             }
         }
-        ChatWire::Anthropic => match parsed.get("type").and_then(Value::as_str) {
-            Some("message_stop") => Ok(SseOutcome::Done),
-            Some("content_block_delta")
-                if parsed.pointer("/delta/type").and_then(Value::as_str) == Some("text_delta") =>
-            {
-                if let Some(delta) = parsed.pointer("/delta/text").and_then(Value::as_str) {
-                    Ok(SseOutcome::Delta(delta.to_owned()))
-                } else {
-                    Ok(SseOutcome::Ignore)
-                }
-            }
-            _ => Ok(SseOutcome::Ignore),
-        },
+        ChatWire::Anthropic => Ok(
+            match serde_json::from_value(parsed).unwrap_or(AnthropicEvent::Other) {
+                AnthropicEvent::Stop => SseOutcome::Done,
+                AnthropicEvent::Delta {
+                    delta: DeltaBody::Text { text },
+                } => SseOutcome::Delta(text),
+                AnthropicEvent::Delta { .. } | AnthropicEvent::Other => SseOutcome::Ignore,
+            },
+        ),
         ChatWire::Cli => Ok(SseOutcome::Ignore),
     }
 }
 
-fn scrub_error(err: ChatError, api_key: &str) -> ChatError {
-    let mask = |input: String| -> String {
-        if api_key.is_empty() {
-            return input;
+/// Removes the API key from text that may be shown to the user.
+struct Redactor<'a> {
+    key: &'a str,
+}
+
+impl Redactor<'_> {
+    fn scrub(&self, text: String) -> String {
+        if self.key.is_empty() {
+            return text;
         }
-        let replaced = input.replace(api_key, "[redacted]");
-        let trimmed = api_key.trim();
-        if !trimmed.is_empty() && trimmed != api_key {
-            replaced.replace(trimmed, "[redacted]")
-        } else {
-            replaced
+        let text = text.replace(self.key, "[redacted]");
+        let bare = self.key.trim();
+        if bare.is_empty() || bare == self.key {
+            return text;
         }
-    };
-    match err {
-        ChatError::Request(inner) => ChatError::Request(inner.without_url()),
-        ChatError::Status { status, message } => ChatError::Status {
-            status,
-            message: mask(message),
-        },
-        ChatError::Protocol(message) => ChatError::Protocol(mask(message)),
-        other => other,
+        text.replace(bare, "[redacted]")
     }
+}
+
+/// Makes an error safe to show: no URL on transport errors, no key in messages.
+fn public_error(err: ChatError, redactor: &Redactor) -> ChatError {
+    if let ChatError::Protocol(message) = err {
+        return ChatError::Protocol(redactor.scrub(message));
+    }
+    if let ChatError::Status { status, message } = err {
+        return ChatError::Status {
+            status,
+            message: redactor.scrub(message),
+        };
+    }
+    if let ChatError::Request(inner) = err {
+        return ChatError::Request(inner.without_url());
+    }
+    err
 }
 
 #[cfg(test)]
@@ -596,7 +697,7 @@ mod tests {
             SseOutcome::Done
         );
         assert_eq!(
-            decode_sse_line(openai.wire, b": keepalive").unwrap(),
+            decode_sse_line(openai.wire, b": still alive").unwrap(),
             SseOutcome::Ignore
         );
         assert_eq!(
@@ -724,5 +825,66 @@ mod tests {
             decode_sse_line(ChatWire::Anthropic, stop_line).unwrap(),
             SseOutcome::Done
         );
+    }
+
+    #[tokio::test]
+    async fn empty_deltas_never_reach_the_consumer() {
+        let reader = StreamReader {
+            wire: ChatWire::OpenAi,
+            provider_id: "test",
+            opened: Instant::now(),
+        };
+        let (_keep_open, mut cancel) = watch::channel(false);
+        let mut answer = String::new();
+        let mut seen: Vec<String> = Vec::new();
+        let mut on_text = |piece: String| {
+            seen.push(piece);
+            std::future::ready(())
+        };
+        for line in [
+            &br#"data: {"choices":[{"delta":{"content":""}}]}"#[..],
+            &br#"data: {"choices":[{"delta":{"content":"hi"}}]}"#[..],
+        ] {
+            reader
+                .consume(line, &mut answer, &mut on_text, &mut cancel)
+                .await
+                .unwrap();
+        }
+        assert_eq!(seen, ["hi"]);
+        assert_eq!(answer, "hi");
+    }
+
+    #[test]
+    fn api_key_is_redacted_even_with_surrounding_whitespace() {
+        let redactor = Redactor {
+            key: " sk-secret\n",
+        };
+        let text = "bad key sk-secret and  sk-secret\n end".to_string();
+        let scrubbed = redactor.scrub(text);
+        assert!(!scrubbed.contains("sk-secret"));
+        assert!(scrubbed.contains("[redacted]"));
+
+        let status = public_error(
+            ChatError::Status {
+                status: 401,
+                message: "key sk-secret rejected".into(),
+            },
+            &redactor,
+        );
+        assert!(
+            matches!(status, ChatError::Status { ref message, .. } if message == "key [redacted] rejected")
+        );
+        let protocol = public_error(ChatError::Protocol("echo sk-secret".into()), &redactor);
+        assert!(matches!(protocol, ChatError::Protocol(ref m) if m == "echo [redacted]"));
+
+        let none = Redactor { key: "" };
+        assert_eq!(none.scrub("unchanged".into()), "unchanged");
+    }
+
+    #[test]
+    fn answer_limit_check_is_inclusive_and_overflow_safe() {
+        assert!(fits(ANSWER_BYTE_LIMIT - 3, 3));
+        assert!(!fits(ANSWER_BYTE_LIMIT - 3, 4));
+        assert!(!fits(usize::MAX, 1));
     }
 }

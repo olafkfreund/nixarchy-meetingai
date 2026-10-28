@@ -15,6 +15,7 @@ const WINDOW_CHAR_BUDGET: usize = 32_000;
 const MIN_REMAINING_BUDGET: usize = 256;
 const SHORTENED_NOTICE: &str =
     "\n[...middle omitted to fit context; the full message is saved in this conversation...]\n";
+const NOTICE_CHARS: usize = SHORTENED_NOTICE.len(); // the notice is ASCII
 
 /// Reasons starting a chat turn can be rejected before contacting a provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +121,7 @@ impl ChatSession {
         if cleaned.is_empty() {
             return Err(SendError::Empty);
         }
-        if question.chars().nth(MAX_QUESTION_CHARS).is_some() {
+        if question.chars().count() > MAX_QUESTION_CHARS {
             return Err(SendError::TooLarge);
         }
         let Some(db) = database else {
@@ -235,53 +236,71 @@ fn record_to_message(rec: conversations::MessageRecord) -> Message {
     }
 }
 
-fn window_history(mut turns: Vec<Message>) -> Vec<Message> {
-    let Some(latest) = turns.pop() else {
+/// Fits the conversation into the character budget; the last element is the new question.
+fn window_history(mut history: Vec<Message>) -> Vec<Message> {
+    let Some(question) = history.pop() else {
         return Vec::new();
     };
-    let latest_len = latest.content.chars().count();
-    let mut remaining = WINDOW_CHAR_BUDGET.saturating_sub(latest_len);
-    let mut selected = vec![latest];
+    let mut budget_left = WINDOW_CHAR_BUDGET.saturating_sub(question.content.chars().count());
 
-    for mut msg in turns.into_iter().rev().take(PRIOR_HISTORY_LIMIT) {
-        if remaining < MIN_REMAINING_BUDGET {
+    // Pass 1, newest first: decide how much of each earlier message survives.
+    // `None` keeps the message whole, `Some(n)` cuts it down to `n` characters.
+    let mut cuts: Vec<Option<usize>> = Vec::new();
+    for message in history.iter().rev().take(PRIOR_HISTORY_LIMIT) {
+        if budget_left < MIN_REMAINING_BUDGET {
             break;
         }
-        let char_count = msg.content.chars().count();
-        if char_count <= remaining {
-            remaining -= char_count;
-            selected.push(msg);
+        let size = message.content.chars().count();
+        if size <= budget_left {
+            budget_left -= size;
+            cuts.push(None);
         } else {
-            let allowance = if msg.role == Role::User {
-                remaining
-            } else {
-                remaining / 2
+            let cap = match message.role {
+                Role::User => budget_left,
+                _ => budget_left / 2,
             };
-            let shortened = shorten_middle(&msg.content, allowance);
-            let used = shortened.chars().count();
-            msg.content = shortened;
-            remaining = remaining.saturating_sub(used);
-            selected.push(msg);
+            let (head, tail) = split_kept(cap);
+            budget_left = budget_left.saturating_sub(head + tail + NOTICE_CHARS);
+            cuts.push(Some(cap));
         }
     }
 
-    selected.reverse();
-    while selected.len() > 1 && selected[0].role != Role::User {
-        selected.remove(0);
-    }
-    selected
+    // Pass 2, oldest first: the picked messages are the newest `cuts.len()` ones.
+    let first_picked = history.len() - cuts.len();
+    let mut windowed: Vec<Message> = history
+        .drain(first_picked..)
+        .zip(cuts.into_iter().rev())
+        .map(|(mut message, cut)| {
+            if let Some(cap) = cut {
+                message.content = shorten_middle(&message.content, cap);
+            }
+            message
+        })
+        .collect();
+    windowed.push(question);
+
+    let first_user = windowed
+        .iter()
+        .position(|m| m.role == Role::User)
+        .unwrap_or(windowed.len() - 1);
+    windowed.drain(..first_user);
+    windowed
 }
 
-fn shorten_middle(text: &str, max_chars: usize) -> String {
-    let notice_len = SHORTENED_NOTICE.chars().count();
-    let keep = max_chars.saturating_sub(notice_len);
-    let head_count = (keep / 2).max(1);
-    let tail_count = keep.saturating_sub(head_count).max(1);
-    let chars: Vec<char> = text.chars().collect();
-    let head: String = chars[..head_count.min(chars.len())].iter().collect();
-    let tail_start = chars.len().saturating_sub(tail_count);
-    let tail: String = chars[tail_start..].iter().collect();
-    format!("{head}{SHORTENED_NOTICE}{tail}")
+/// How many characters of the start and of the end survive when `cap` is the whole allowance.
+/// The end gets twice as much as the start because recent text matters more.
+fn split_kept(cap: usize) -> (usize, usize) {
+    let kept = cap.saturating_sub(NOTICE_CHARS);
+    let head = (kept / 3).max(1);
+    (head, kept.saturating_sub(head).max(1))
+}
+
+fn shorten_middle(text: &str, cap: usize) -> String {
+    let (head, tail) = split_kept(cap);
+    let total = text.chars().count();
+    let start: String = text.chars().take(head).collect();
+    let end: String = text.chars().skip(total.saturating_sub(tail)).collect();
+    format!("{start}{SHORTENED_NOTICE}{end}")
 }
 
 #[cfg(test)]
@@ -463,11 +482,11 @@ mod tests {
         let db = Database::in_memory().unwrap();
         let mut session = ChatSession::new();
         session.begin(Some(&db), "Ask").unwrap();
-        session.push_delta(Some(&db), "Partial output");
-        let combined = session.fail(Some(&db), "connection reset");
+        session.push_delta(Some(&db), "Half an ans");
+        let combined = session.fail(Some(&db), "upstream hung up");
         assert!(!session.is_streaming());
-        assert!(combined.contains("Partial output"));
-        assert!(combined.contains("connection reset"));
+        assert!(combined.contains("Half an ans"));
+        assert!(combined.contains("upstream hung up"));
     }
 
     #[test]
@@ -494,6 +513,31 @@ mod tests {
         assert_eq!(history[0].content, "First question");
         assert_eq!(history[1].content, "First answer");
         assert_eq!(history[2].content, "Second question");
+    }
+
+    #[test]
+    fn blank_earlier_messages_are_not_sent_back() {
+        let db = Database::in_memory().unwrap();
+        let mut session = ChatSession::new();
+        session.begin(Some(&db), "Opening").unwrap();
+        session.finish();
+        let id = session.conversation_id().unwrap().to_owned();
+        conversations::append_message(db.connection(), &id, "assistant", " \n ", 5).unwrap();
+        let history = session.begin(Some(&db), "Next").unwrap();
+        assert!(history.iter().all(|m| !m.content.trim().is_empty()));
+        assert_eq!(history.last().unwrap().content, "Next");
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn shorten_middle_keeps_a_third_head_and_two_thirds_tail() {
+        let text = format!("{}{}", "h".repeat(5_000), "t".repeat(5_000));
+        let out = shorten_middle(&text, NOTICE_CHARS + 900);
+        let (start, end) = out.split_once(SHORTENED_NOTICE).unwrap();
+        assert_eq!(start.chars().count(), 300);
+        assert_eq!(end.chars().count(), 600);
+        assert!(start.chars().all(|c| c == 'h'));
+        assert!(end.chars().all(|c| c == 't'));
     }
 
     #[test]
