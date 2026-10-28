@@ -36,3 +36,5 @@ test-key*
 node_modules/
 .wrangler
 .claude/worktrees/
+# Synthetic key for the old-data test fixture (#3), not a secret.
+!tests/fixtures/old-history/history.db.key
