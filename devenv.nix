@@ -75,6 +75,8 @@ in
 
   env.PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig";
 
+  env.SHERPA_ONNX_LIB_DIR = "${pkgs.callPackage ./nix/sherpa-lib.nix { }}/lib";
+
   env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
   env.NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
 

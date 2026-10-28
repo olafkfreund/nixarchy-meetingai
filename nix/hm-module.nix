@@ -81,6 +81,7 @@ let
     "RUST_LOG=nixarchy_meetingai=${cfg.logLevel}"
   ]
   ++ [ "NIXARCHY_MEETINGAI_OLLAMA_URL=${cfg.ollama.url}" ]
+  ++ [ "NIXARCHY_MEETINGAI_PARAKEET_DIR=${cfg.parakeet.model}" ]
   ++ lib.optional cfg.whisper.enable "NIXARCHY_MEETINGAI_WHISPER_URL=http://${whisperAddr}"
   ++ lib.optional (
     cfg.ollamaCloud.keyFile != null
@@ -158,6 +159,13 @@ in
         HTTPS_PROXY = "http://proxy:3128";
       };
       description = "Extra environment for the daemon service. Never put secrets here: it lands in the Nix store.";
+    };
+
+    parakeet.model = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.callPackage ./parakeet-model.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./nix/parakeet-model.nix { }";
+      description = "The Parakeet speech model for `speechProvider = \"parakeet-local\"`: a directory with `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt` (NVIDIA Parakeet TDT 0.6B v3, CC-BY-4.0). The daemon gets it as `NIXARCHY_MEETINGAI_PARAKEET_DIR`.";
     };
 
     whisper = {
@@ -251,7 +259,7 @@ in
       smartFollowUps = nullable bool "Suggest follow-up questions.";
       autoRecordOnCall = nullable bool "Start recording when a call begins.";
       calendarEnabled = nullable bool "Name sessions from the calendar (read-only, through `gog`; off by default).";
-      speechProvider = nullable str "Speech-to-text provider (`whisper-local` or `deepgram-stt`).";
+      speechProvider = nullable str "Speech-to-text provider (`parakeet-local`, `whisper-local` or `deepgram-stt`).";
       speechModel = nullable str "Speech-to-text model.";
       speechLanguage = nullable str "Speech language code; empty detects it.";
       textScale = nullable (lib.types.ints.between 80 160) "Overlay text size in percent.";

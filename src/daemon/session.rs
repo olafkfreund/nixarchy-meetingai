@@ -253,7 +253,7 @@ pub struct Daemon {
     tx: broadcast::Sender<Value>,
     pub shutdown: Notify,
     chunking: AtomicBool,
-    /// The session's candidate is local-only: only ollama and whisper-local may be used.
+    /// The session's candidate is local-only: only ollama, whisper-local and parakeet-local may be used.
     local_only: AtomicBool,
     /// Settings fixed by `programs.nixarchy-meetingai.settings.enforce`; `settings.set` refuses them.
     locked: Mutex<Vec<String>>,
@@ -960,7 +960,7 @@ impl Daemon {
         } else {
             &s.speech_provider
         };
-        if local && id != "whisper-local" {
+        if local && !matches!(id, "whisper-local" | "parakeet-local") {
             return None;
         }
         let mut config = match credentials::load(&self.vault, Kind::Speech, id) {
@@ -1783,8 +1783,13 @@ impl Daemon {
             }
             g.settings = Settings::load(&g.db).unwrap_or_default();
             let local = self.local_now(g);
-            if local && !matches!(g.settings.speech_provider.as_str(), "" | "whisper-local") {
-                return Err("local_only: this interview is local-only. Choose whisper-local for speech-to-text.".into());
+            if local
+                && !matches!(
+                    g.settings.speech_provider.as_str(),
+                    "" | "whisper-local" | "parakeet-local"
+                )
+            {
+                return Err("local_only: this interview is local-only. Choose parakeet-local or whisper-local for speech-to-text.".into());
             }
             // Any session with a candidate is an interview, whatever the mode button says.
             if g.candidate.is_some() || g.settings.meeting_mode == MeetingMode::Interviewer {

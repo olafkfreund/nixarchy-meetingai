@@ -157,3 +157,13 @@ is reported, not replaced.
   against library 1.13.8 may break on a nixpkgs bump) and updates the
   package's cargo hash. Not measured: cold-disk load, two channels at
   once, real meeting audio (step 5 / evaluation set).
+- **Step 5:** sherpa-onnx is a normal dependency (spike feature and
+  example removed); the sandboxed `nix build` and a `parakeet-decode`
+  flake check (real model, the archive's `test_wavs/en.wav`, 2.9 s incl.
+  load) prove the no-download build. `nix/parakeet-model.nix` keeps
+  `test_wavs` (~0.7 MB) for that check. The model env var is always set,
+  so every HM closure carries the 640 MB model until step 7 makes it
+  conditional on the provider. Default provider stays `whisper-local`
+  until step 7; chunks are WAV-encoded and decoded again for the
+  in-process wire (cheap, left as is). Not measured yet: daemon RSS with
+  two channels on the real model.

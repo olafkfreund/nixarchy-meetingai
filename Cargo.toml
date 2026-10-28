@@ -31,15 +31,8 @@ tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"]
 rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher-vendored-openssl"] }
 pdf-extract = "0.12.1"
 rmcp = { version = "=3.8.0", features = ["server", "transport-io", "macros"] }
-# Spike: Parakeet via sherpa-onnx. "shared" + SHERPA_ONNX_LIB_DIR links the nixpkgs library (default "static" downloads at build time).
-sherpa-onnx = { version = "2.0.1", default-features = false, features = ["shared"], optional = true }
-
-[features]
-parakeet = ["dep:sherpa-onnx"]
-
-[[example]]
-name = "parakeet"
-required-features = ["parakeet"]
+# Parakeet. "shared" + SHERPA_ONNX_LIB_DIR (nix/sherpa-lib.nix) links the nixpkgs library; the default "static" downloads at build time.
+sherpa-onnx = { version = "2.0.1", default-features = false, features = ["shared"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.191"
