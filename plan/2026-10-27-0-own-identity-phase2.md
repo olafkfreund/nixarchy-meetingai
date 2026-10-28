@@ -69,6 +69,16 @@ x;`, schema columns) back to the old file. This makes the count easy to
 game, so the reviewer's check for copied identifiers and comments, and
 `--copies`, stay the real guard.
 
+## Briefs (lesson from steps 2 and 4)
+
+Briefs give the interface, the formats and behaviour in our own words.
+They never carry the old file's statements, test input values or the
+order of its steps: steps 2 and 4 got old test constants and the old
+`schema.sql` statements through the brief, and the code came back with
+them. Table statements in `schema.sql` are rewritten (only index and
+trigger SQL is token-fixed); `tests/old_data.rs` compares columns,
+foreign keys and unique keys, so the layout is free.
+
 ## Repo traps
 
 - In-file `#[cfg(test)]` tests are original code too: they go with the

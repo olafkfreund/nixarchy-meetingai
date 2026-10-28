@@ -191,6 +191,8 @@ struct Inner {
     meeting_offset: f64,
     speaker_offset: i64,
     last_elapsed: f64,
+    /// `record.tap` copy of the audio the transcriber receives.
+    tap: Option<super::tap::Tap>,
     transcript: Vec<Entry>,
     mic: bool,
     system: bool,
@@ -253,7 +255,7 @@ pub struct Daemon {
     tx: broadcast::Sender<Value>,
     pub shutdown: Notify,
     chunking: AtomicBool,
-    /// The session's candidate is local-only: only ollama and whisper-local may be used.
+    /// The session's candidate is local-only: only ollama, whisper-local and parakeet-local may be used.
     local_only: AtomicBool,
     /// Settings fixed by `programs.nixarchy-meetingai.settings.enforce`; `settings.set` refuses them.
     locked: Mutex<Vec<String>>,
@@ -483,7 +485,7 @@ fn plan_chain(
 /// Local-only data may only go to a loopback endpoint (localhost, 127.0.0.0/8, ::1) and never to
 /// an ollama cloud model. An empty `base_url` means the provider's default, which is loopback.
 fn stays_local(config: &ProviderConfig) -> bool {
-    let loopback = config.base_url.is_empty()
+    let loopback = (config.base_url.is_empty() && config.id != "openai-compatible-stt")
         || reqwest::Url::parse(&config.base_url)
             .ok()
             .and_then(|u| u.host_str().map(str::to_owned))
@@ -494,6 +496,16 @@ fn stays_local(config: &ProviderConfig) -> bool {
                         .is_ok_and(|ip| ip.is_loopback())
             });
     loopback && config.id != "ollama-cloud" && !config.model.to_lowercase().ends_with("-cloud")
+}
+
+/// Why speech-to-text is not ready, for the provider that is selected.
+fn speech_not_ready(provider: &str, other: &'static str) -> String {
+    if provider == "parakeet-local" {
+        let reason = crate::speech::stt::parakeet::not_ready_reason().unwrap_or_default();
+        format!("Speech-to-text is not ready: {reason}.")
+    } else {
+        other.to_owned()
+    }
 }
 
 /// The Nix module tells the daemon where its whisper-server listens (`http://host:port`).
@@ -511,12 +523,21 @@ fn apply_ollama_url(config: &mut ProviderConfig, url: Option<String>) {
 }
 
 /// A key from a file; a missing or unreadable file means no key (warned once, never the content).
-fn read_key_file(path: Option<std::ffi::OsString>) -> Option<String> {
-    static WARNED: std::sync::Once = std::sync::Once::new();
+fn read_key_file(path: Option<std::ffi::OsString>, provider: &str) -> Option<String> {
+    static WARNED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(String, std::ffi::OsString)>>,
+    > = std::sync::OnceLock::new();
     let path = path?;
     let text = std::fs::read_to_string(&path)
         .inspect_err(|error| {
-            WARNED.call_once(|| tracing::warn!(%error, ?path, "cannot read the Ollama key file"));
+            if WARNED
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .insert((provider.into(), path.clone()))
+            {
+                tracing::warn!(%error, ?path, %provider, "cannot read the provider key file");
+            }
         })
         .ok()?;
     Some(text.trim().to_owned()).filter(|k| !k.is_empty())
@@ -524,12 +545,24 @@ fn read_key_file(path: Option<std::ffi::OsString>) -> Option<String> {
 
 /// The Ollama Cloud key given outside the app: the Nix key file, then `OLLAMA_API_KEY`.
 fn external_ollama_key() -> Option<String> {
-    read_key_file(std::env::var_os("NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE")).or_else(|| {
+    read_key_file(
+        std::env::var_os("NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE"),
+        "Ollama",
+    )
+    .or_else(|| {
         std::env::var("OLLAMA_API_KEY")
             .ok()
             .map(|k| k.trim().to_owned())
             .filter(|k| !k.is_empty())
     })
+}
+
+fn apply_deepgram_key(config: &mut ProviderConfig, path: Option<std::ffi::OsString>) {
+    if config.api_key.trim().is_empty()
+        && let Some(key) = read_key_file(path, "Deepgram")
+    {
+        config.api_key = key;
+    }
 }
 
 fn locked_error(key: &str) -> String {
@@ -708,6 +741,7 @@ impl Daemon {
                 meeting_offset: 0.0,
                 speaker_offset: 0,
                 last_elapsed: 0.0,
+                tap: None,
                 transcript: Vec::new(),
                 mic: true,
                 system: true,
@@ -771,11 +805,14 @@ impl Daemon {
                 } else {
                     "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama."
                 }),
-                "speech": (!speech).then_some(if local {
-                    "Local-only is on: speech-to-text must be whisper on this machine. Check nixarchy-meetingai-whisper.service."
-                } else {
-                    "Speech-to-text is not ready. Check nixarchy-meetingai-whisper.service, or add a Deepgram key in Providers."
-                }),
+                "speech": (!speech).then(|| speech_not_ready(
+                    &g.settings.speech_provider,
+                    if local {
+                        "Local-only is on: speech-to-text must run on this machine (Parakeet, or a whisper or OpenAI-compatible server on a loopback address)."
+                    } else {
+                        "Speech-to-text is not ready. Check the Parakeet model, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
+                    },
+                )),
             },
         })
     }
@@ -960,15 +997,36 @@ impl Daemon {
         } else {
             &s.speech_provider
         };
-        if local && id != "whisper-local" {
+        if local
+            && !matches!(
+                id,
+                "whisper-local" | "parakeet-local" | "openai-compatible-stt"
+            )
+        {
             return None;
         }
         let mut config = match credentials::load(&self.vault, Kind::Speech, id) {
             Ok(Some(c)) => c.to_config(),
             _ => SttProvider::by_id(id)
-                .filter(|p| !p.requires_key())
+                .filter(|p| {
+                    !p.requires_key()
+                        || (id == "deepgram-stt"
+                            && std::env::var_os("NIXARCHY_MEETINGAI_DEEPGRAM_KEY_FILE").is_some())
+                })
                 .map(|p| ProviderConfig::new(id, "", p.default_model))?,
         };
+        if id == "deepgram-stt" {
+            apply_deepgram_key(
+                &mut config,
+                std::env::var_os("NIXARCHY_MEETINGAI_DEEPGRAM_KEY_FILE"),
+            );
+            if s.deepgram_region == "eu" {
+                config.base_url = "https://api.eu.deepgram.com/v1/listen".into();
+            }
+        }
+        if id == "openai-compatible-stt" {
+            config.base_url.clone_from(&s.speech_base_url);
+        }
         config.language.clone_from(&s.speech_language);
         if !s.speech_model.is_empty() {
             config.model.clone_from(&s.speech_model);
@@ -1765,7 +1823,7 @@ impl Daemon {
         title: String,
         new: bool,
     ) -> Result<Value, String> {
-        let (stop, speech, device, output_device, system) = {
+        let (stop, speech, device, output_device, system, echo_gate) = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
             if g.finishing_meeting.is_some() && g.recording.is_none() {
@@ -1783,8 +1841,11 @@ impl Daemon {
             }
             g.settings = Settings::load(&g.db).unwrap_or_default();
             let local = self.local_now(g);
-            if local && !matches!(g.settings.speech_provider.as_str(), "" | "whisper-local") {
-                return Err("local_only: this interview is local-only. Choose whisper-local for speech-to-text.".into());
+            if local && self.speech_config(&g.settings, true).is_none() {
+                return Err(
+                    "local_only: this interview needs a ready loopback speech-to-text provider."
+                        .into(),
+                );
             }
             // Any session with a candidate is an interview, whatever the mode button says.
             if g.candidate.is_some() || g.settings.meeting_mode == MeetingMode::Interviewer {
@@ -1794,10 +1855,15 @@ impl Daemon {
                 g.consent = true;
             }
             let speech = if self.capture {
-                Some(self.speech_config(&g.settings, local).ok_or(if local {
-                    "local_only: whisper-local must be running on this machine (loopback address)."
-                } else {
-                    "Speech-to-text is not ready. Start whisper-server or add a Deepgram key."
+                Some(self.speech_config(&g.settings, local).ok_or_else(|| {
+                    speech_not_ready(
+                        &g.settings.speech_provider,
+                        if local {
+                            "local_only: speech-to-text must run on this machine (Parakeet, or a whisper or OpenAI-compatible server on a loopback address)."
+                        } else {
+                            "Speech-to-text is not ready. Check the Parakeet model, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
+                        },
+                    )
                 })?)
             } else {
                 None
@@ -1830,14 +1896,27 @@ impl Daemon {
                 Some(g.settings.input_device.clone()).filter(|d| !d.is_empty()),
                 Some(g.settings.output_device.clone()).filter(|d| !d.is_empty()),
                 g.system,
+                g.settings.echo_gate,
             )
         };
+        // Load Parakeet before capture makes chunks, so a slow first load cannot back them up.
+        if speech.as_ref().is_some_and(|c| c.id == "parakeet-local") {
+            let loaded = tokio::task::spawn_blocking(crate::speech::stt::parakeet::preload)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+            if let Err(error) = loaded {
+                self.inner.lock().recording = None;
+                return Err(error);
+            }
+        }
         let opened = if self.capture {
             let config = SessionConfig {
                 device,
                 system_audio: system,
                 output_device,
                 speech: speech.clone(),
+                echo_gate,
             };
             tokio::task::spawn_blocking(move || {
                 let (session, events) = ListenSession::start(&config);
@@ -1992,6 +2071,7 @@ impl Daemon {
                 match event {
                     SessionEvent::Audio(mut samples) => {
                         self.route_audio(&mut samples);
+                        self.tap_audio(&samples);
                         if let Some(v) = levels.feed(&samples, Instant::now()) {
                             self.emit("levels", v);
                         }
@@ -2048,6 +2128,55 @@ impl Daemon {
         self.finish_recording(&meeting).await;
     }
 
+    fn tap_audio(&self, samples: &[f32]) {
+        let mut g = self.inner.lock();
+        // Local-only can begin mid-tap (interview start, candidate switch): close it at once.
+        let local = g.tap.is_some() && self.local_now(&g);
+        if let Some(tap) = g.tap.as_mut()
+            && (local || !tap.write(samples))
+            && let Some(tap) = g.tap.take()
+        {
+            tap.finish();
+        }
+    }
+
+    /// `record.tap {"path","seconds"}` or `{"stop":true}`: only during a recording, never local-only.
+    fn record_tap(&self, args: &Value) -> Result<Value, String> {
+        let mut g = self.inner.lock();
+        if args["stop"].as_bool() == Some(true) {
+            if let Some(tap) = g.tap.take() {
+                tap.finish();
+            }
+            return Ok(json!({}));
+        }
+        if !g
+            .recording
+            .as_ref()
+            .is_some_and(|r| !r.stop.load(Ordering::Relaxed))
+        {
+            return Err("record.tap needs a running recording".into());
+        }
+        if self.local_now(&g) {
+            return Err("local_only: record.tap is refused during a local-only interview".into());
+        }
+        if g.tap.is_some() {
+            return Err("record.tap is already running; stop it first".into());
+        }
+        let path = args["path"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .ok_or("record.tap needs a path")?;
+        let seconds = args["seconds"]
+            .as_u64()
+            .filter(|s| *s > 0)
+            .ok_or("record.tap needs seconds")?;
+        g.tap = Some(super::tap::Tap::create(
+            std::path::Path::new(path),
+            seconds,
+        )?);
+        Ok(json!({}))
+    }
+
     /// Meeting dictation borrows the microphone channel; a muted mic is silenced.
     fn route_audio(&self, samples: &mut [f32]) {
         let mut g = self.inner.lock();
@@ -2068,6 +2197,9 @@ impl Daemon {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
             g.finishing_meeting = Some(meeting.to_owned());
+            if let Some(tap) = g.tap.take() {
+                tap.finish();
+            }
             if let Some(r) = g.recording.take() {
                 g.last_elapsed = g.meeting_offset + r.started.elapsed().as_secs_f64();
             }
@@ -2148,27 +2280,50 @@ impl Daemon {
     // ----- dictation ----------------------------------------------------
 
     fn dictate_start(self: &Arc<Self>) -> Result<Value, String> {
+        // Opening the microphone runs pactl, so do it without the daemon lock.
+        let (meeting, device) = {
+            let g = self.inner.lock();
+            if g.dictation.is_some() {
+                return Err("Dictation is already running.".into());
+            }
+            if self
+                .speech_config(&g.settings, self.local_now(&g))
+                .is_none()
+            {
+                return Err(speech_not_ready(
+                    &g.settings.speech_provider,
+                    "Speech-to-text is not ready; dictation needs it.",
+                ));
+            }
+            if g.settings.speech_provider == "parakeet-local" {
+                // Warm the model while the user speaks; a failure shows when the text is transcribed.
+                tokio::task::spawn_blocking(crate::speech::stt::parakeet::preload);
+            }
+            let meeting = g
+                .recording
+                .as_ref()
+                .is_some_and(|r| !r.stop.load(Ordering::Relaxed));
+            if g.recording.is_some() && !meeting {
+                return Err("Wait for the previous meeting transcript to finish.".into());
+            }
+            (
+                meeting,
+                Some(g.settings.input_device.clone()).filter(|d| !d.is_empty()),
+            )
+        };
+        let microphone = if meeting {
+            None
+        } else {
+            Some(
+                Microphone::start(device.as_deref())
+                    .map_err(|e| format!("Could not start dictation: {e}"))?,
+            )
+        };
         let mut guard = self.inner.lock();
         let g = &mut *guard;
         if g.dictation.is_some() {
             return Err("Dictation is already running.".into());
         }
-        if self.speech_config(&g.settings, self.local_now(g)).is_none() {
-            return Err("Speech-to-text is not ready; dictation needs it.".into());
-        }
-        let meeting = g
-            .recording
-            .as_ref()
-            .is_some_and(|r| !r.stop.load(Ordering::Relaxed));
-        if g.recording.is_some() && !meeting {
-            return Err("Wait for the previous meeting transcript to finish.".into());
-        }
-        let microphone = if meeting {
-            None
-        } else {
-            let device = Some(g.settings.input_device.as_str()).filter(|d| !d.is_empty());
-            Some(Microphone::start(device).map_err(|e| format!("Could not start dictation: {e}"))?)
-        };
         g.pending_question = None;
         g.pending_created = None;
         g.pending_since = None;
@@ -3406,6 +3561,7 @@ impl Daemon {
             }
             "candidates.delete" => self.candidate_delete(&parse::<protocol::IdArg>(args)?.id),
             "record.stop" => self.record_stop(),
+            "record.tap" => self.record_tap(&args),
             "record.toggle_mic" | "record.toggle_system" => {
                 let mut g = self.inner.lock();
                 let flag = if cmd == "record.toggle_mic" {
@@ -3529,6 +3685,24 @@ mod routing_tests {
         );
         assert_eq!(plan[0].1, "sonnet");
         assert_eq!(plan[1].1, "");
+    }
+
+    #[tokio::test]
+    async fn muted_mic_is_zeroed_and_the_remote_channel_kept() {
+        let root = std::env::temp_dir().join(format!("nixarchy-mute-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let d = Daemon::new(Options {
+            db_path: root.join("t.db"),
+            vault_dir: root.clone(),
+            capture: false,
+        })
+        .unwrap();
+        let mut frames = [0.5, -0.5, 0.25, -0.25];
+        d.route_audio(&mut frames);
+        assert_eq!(frames, [0.5, -0.5, 0.25, -0.25]);
+        d.inner.lock().mic = false;
+        d.route_audio(&mut frames);
+        assert_eq!(frames, [0.0, -0.5, 0.0, -0.25]);
     }
 
     #[tokio::test]
@@ -4069,7 +4243,7 @@ mod command_tests {
                     .unwrap();
             }
         };
-        // Deepgram without a key: speech is not ready and the hint points at the unit and Providers.
+        // Deepgram without a key: speech is not ready and the hint covers each provider.
         set("speech_provider", "deepgram-stt").await;
         set("chat_provider", "ollama").await;
         let st = d.handle("state.get", json!({}), None).await.unwrap();
@@ -4077,10 +4251,9 @@ mod command_tests {
         assert_eq!(st["hints"]["chat"], Value::Null);
         assert_eq!(st["ready"]["speech"], false);
         let hint = st["hints"]["speech"].as_str().unwrap();
-        assert!(
-            hint.contains("nixarchy-meetingai-whisper.service"),
-            "{hint}"
-        );
+        assert!(hint.contains("Parakeet"), "{hint}");
+        assert!(hint.contains("Deepgram key"), "{hint}");
+        assert!(hint.contains("openai-compatible-stt base URL"), "{hint}");
         // The default local whisper needs no key.
         set("speech_provider", "whisper-local").await;
         let st = d.handle("state.get", json!({}), None).await.unwrap();
@@ -4463,11 +4636,40 @@ mod command_tests {
         std::fs::write(dir.join("ollama"), "fake-key-123\n").unwrap();
         std::fs::write(dir.join("empty"), "\n").unwrap();
         let f = |n: &str| Some(dir.join(n).into_os_string());
-        assert_eq!(read_key_file(f("ollama")).as_deref(), Some("fake-key-123"));
-        assert_eq!(read_key_file(f("empty")), None);
-        assert_eq!(read_key_file(f("missing")), None);
-        assert_eq!(read_key_file(None), None);
+        assert_eq!(
+            read_key_file(f("ollama"), "Ollama").as_deref(),
+            Some("fake-key-123")
+        );
+        assert_eq!(read_key_file(f("empty"), "Ollama"), None);
+        assert_eq!(read_key_file(f("missing"), "Ollama"), None);
+        assert_eq!(read_key_file(None, "Ollama"), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn deepgram_vault_key_wins_and_file_only_is_ready() {
+        let path = std::env::temp_dir().join(format!("nm-deepgram-{}", std::process::id()));
+        std::fs::write(&path, "file-key\n").unwrap();
+        let mut saved = ProviderConfig::new("deepgram-stt", "vault-key", "nova-3");
+        apply_deepgram_key(&mut saved, Some(path.clone().into_os_string()));
+        assert_eq!(saved.api_key, "vault-key");
+        let mut file_only = ProviderConfig::new("deepgram-stt", "", "nova-3");
+        apply_deepgram_key(&mut file_only, Some(path.clone().into_os_string()));
+        assert_eq!(file_only.api_key, "file-key");
+        assert!(file_only.speech_usable());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn compatible_speech_is_local_only_on_loopback() {
+        let mut config = ProviderConfig::new("openai-compatible-stt", "", "parakeet");
+        assert!(!config.speech_usable());
+        assert!(!stays_local(&config));
+        config.base_url = "http://127.0.0.1:8000".into();
+        assert!(config.speech_usable());
+        assert!(stays_local(&config));
+        config.base_url = "https://speech.example.com".into();
+        assert!(!stays_local(&config));
     }
 
     #[test]
@@ -4534,6 +4736,36 @@ mod command_tests {
             normalize("  Infra\u{ad}\n structure   ROCKS "),
             "infrastructure rocks"
         );
+    }
+
+    #[tokio::test]
+    async fn record_tap_needs_a_recording_and_refuses_local_only() {
+        let d = daemon();
+        let tap = json!({"path": "/nonexistent-tap/x.wav", "seconds": 5});
+        let err = d.handle("record.tap", tap.clone(), None).await.unwrap_err();
+        assert!(err.contains("running recording"), "{err}");
+        d.inner.lock().recording = Some(Recording {
+            started: Instant::now(),
+            since_ms: 0,
+            stop: Arc::new(AtomicBool::new(false)),
+        });
+        d.local_only.store(true, Ordering::Relaxed);
+        let err = d.handle("record.tap", tap, None).await.unwrap_err();
+        assert!(err.starts_with("local_only: "), "{err}");
+        // A running tap closes when the session turns local-only, and a second tap is refused.
+        d.local_only.store(false, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("tap-s-{}.wav", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let args = json!({"path": path, "seconds": 5});
+        d.handle("record.tap", args.clone(), None).await.unwrap();
+        let err = d.handle("record.tap", args, None).await.unwrap_err();
+        assert!(err.contains("already running"), "{err}");
+        d.local_only.store(true, Ordering::Relaxed);
+        d.tap_audio(&[0.0, 0.0]);
+        assert!(d.inner.lock().tap.is_none());
+        assert!(hound::WavReader::open(&path).is_ok());
+        std::fs::remove_file(&path).unwrap();
+        d.inner.lock().recording = None;
     }
 
     #[tokio::test]
