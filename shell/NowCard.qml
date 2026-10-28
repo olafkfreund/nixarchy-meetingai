@@ -16,9 +16,14 @@ Rectangle {
     required property var theme
     required property string status
     required property var themedLinks
+    // Collapsed: only the header line (Now · status · model), so the transcript gets the room.
+    required property bool open
+    signal toggled()
+    readonly property string iDown: String.fromCodePoint(0xf0140)
+    readonly property string iRight: String.fromCodePoint(0xf0142)
 
     readonly property real extras: (nowWait.visible ? nowWait.height + nowCol.spacing : 0) + (nowErr.visible ? nowErr.implicitHeight + nowCol.spacing : 0)
-    readonly property real nowWant: nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.height + nowCol.spacing * 2 + root.extras + root.theme.padY * 2
+    readonly property real nowWant: !root.open ? nowHead.height + root.theme.padY * 2 : nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.height + nowCol.spacing * 2 + root.extras + root.theme.padY * 2
 
     radius: root.theme.radius
     color: Qt.alpha(Commons.Color.accent, 0.12)
@@ -31,8 +36,9 @@ Rectangle {
         Row {   // who and what, on one caption line: Now · Ready · provider model
             id: nowHead
             spacing: root.theme.gap
-            UiText { textFormat: Text.PlainText; text: "Now"; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption; font.bold: true; }
+            IconButton { objectName: "nowToggle"; ts: root.theme.ts; anchors.verticalCenter: parent.verticalCenter; iconText: root.open ? root.iDown : root.iRight; text: "Now"; tooltipText: root.open ? "Collapse the answer card" : "Expand the answer card"; onClicked: root.toggled() }
             UiText {
+                anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
                 text: [root.status, (root.daemon.now.provider + " " + root.daemon.now.model).trim()].filter(function(x) { return x !== ""; }).join("  \u00b7  ")
                 color: Commons.Color.popups.text
@@ -43,7 +49,7 @@ Rectangle {
         UiText {
             id: nowQ
             width: parent.width
-            visible: root.daemon.now.question !== ""
+            visible: root.open && root.daemon.now.question !== ""
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
             maximumLineCount: 2
@@ -56,7 +62,7 @@ Rectangle {
         }
         Rectangle {   // "Writing…": between the question being sent and the first words of the answer
             id: nowWait
-            visible: root.daemon.answering && root.daemon.now.body === "" && !root.daemon.now.error
+            visible: root.open && root.daemon.answering && root.daemon.now.body === "" && !root.daemon.now.error
             width: parent.width
             height: Style.space(3)
             radius: height / 2
@@ -73,7 +79,7 @@ Rectangle {
         }
         RowLayout {   // a failed answer: the reason and Retry, where the answer would have been
             id: nowErr
-            visible: !!root.daemon.now.error
+            visible: root.open && !!root.daemon.now.error
             width: parent.width
             spacing: root.theme.gap
             UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Error: " + String(root.daemon.now.error || ""); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
@@ -81,6 +87,7 @@ Rectangle {
         }
         Flickable {
             id: nowFlick
+            visible: root.open
             width: parent.width
             height: Math.max(0, Math.min(answerText.height, root.height - nowHead.height - (nowQ.visible ? nowQ.implicitHeight : 0) - nowCol.spacing * 2 - root.extras - root.theme.padY * 2))
             contentHeight: answerText.height
