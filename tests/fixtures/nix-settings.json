@@ -16,8 +16,8 @@
     "response_pace": "Fast",
     "smart_follow_ups": "false",
     "speech_language": "en",
-    "speech_model": "ggml-large-v3-turbo",
-    "speech_provider": "whisper-local",
+    "speech_model": "parakeet-tdt-0.6b-v3",
+    "speech_provider": "parakeet-local",
     "text_scale": "120"
   }
 }

@@ -167,3 +167,19 @@ is reported, not replaced.
   until step 7; chunks are WAV-encoded and decoded again for the
   in-process wire (cheap, left as is). Not measured yet: daemon RSS with
   two channels on the real model.
+- **Step 7:** whisper removed (provider, `SttWire::WhisperServer`, the
+  loopback retry that only served it and its three mock-server tests, the
+  user service, `whisper.*` options as `mkRemovedOptionModule`,
+  `nix/whisper-model.nix`, `whisper-model-*` packages, `docs/whisper-bench.md`,
+  `tools/whisper-bench.sh`, the SetupCard whisper command). Default
+  `speech_provider` is `parakeet-local`; `migrate_whisper` rewrites a saved
+  `whisper-local` at daemon start and joins its notice to the startup notice.
+  New `parakeet.enable` (default true) gates `NIXARCHY_MEETINGAI_PARAKEET_DIR`;
+  without it the daemon's not-ready hint says so. **Pending decision:**
+  `echo_gate` stays off by default; the evaluation set is not recorded, so
+  the gate is not turned on. **Depends on step 6:** this branch was cut from
+  step 5, so `openai-compatible-stt`, `deepgram.keyFile` and `deepgram.region`
+  do not exist here; the README speech section and the removed-option message
+  name them, and the README options block was generated without them. After
+  step 6 merges, regenerate the block (`nix build .#docs`). Also not
+  measured here: real-set final numbers and the p620 deploy.

@@ -41,7 +41,7 @@ pub fn model_dir() -> Option<PathBuf> {
 /// Why the model in `dir` cannot be used, or `None` when it can.
 pub fn not_ready_reason_in(dir: Option<PathBuf>) -> Option<String> {
     let Some(path) = &dir else {
-        return Some("the Parakeet model directory is not set".into());
+        return Some("the Parakeet model directory is not set (programs.nixarchy-meetingai.parakeet.enable is off, or this build has no model); turn it on or choose Deepgram or an OpenAI-compatible server in Providers".into());
     };
     if !FILES.iter().all(|f| path.join(f).is_file()) {
         return Some(format!(

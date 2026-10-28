@@ -47,7 +47,6 @@ fn client() -> reqwest::Client {
 pub fn extract_transcript(provider: &SttProvider, value: &Value) -> Option<String> {
     let text = match provider.wire {
         SttWire::InProcess => None,
-        SttWire::WhisperServer => value.get("text").and_then(Value::as_str).map(str::to_owned),
         SttWire::RawAudio => value
             .pointer("/results/channels/0/alternatives/0/transcript")
             .and_then(Value::as_str)
@@ -103,7 +102,7 @@ async fn transcribe_inner(
     config: &ProviderConfig,
     wav: Vec<u8>,
     language: Option<&str>,
-    prompt: &str,
+    _prompt: &str,
 ) -> Result<String, SttError> {
     let language =
         language.or_else(|| (!config.language.is_empty()).then_some(config.language.as_str()));
@@ -182,42 +181,6 @@ async fn transcribe_inner(
             .await
             .map(|t| t.trim().to_owned())
             .map_err(SttError::Protocol);
-    }
-    if provider.wire == SttWire::WhisperServer {
-        let endpoint = if config.base_url.is_empty() {
-            provider.endpoint
-        } else {
-            &config.base_url
-        };
-        let file = reqwest::multipart::Part::bytes(wav)
-            .file_name("audio.wav")
-            .mime_str("audio/wav")?;
-        let mut form = reqwest::multipart::Form::new()
-            .part("file", file)
-            .text("response_format", "json")
-            .text("temperature", "0");
-        if !prompt.is_empty() {
-            form = form.text("prompt", prompt.to_owned());
-        }
-        if let Some(language) = language.filter(|v| !v.is_empty()) {
-            form = form.text("language", language.to_owned());
-        }
-        let response = client().post(endpoint).multipart(form).send().await?;
-        let status = response.status();
-        let bytes = crate::core::network::read_body(response, 4 * 1024 * 1024)
-            .await
-            .map_err(|e| SttError::Protocol(e.to_string()))?;
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        if !status.is_success() {
-            return Err(SttError::Status {
-                status: status.as_u16(),
-                message: text.chars().take(512).collect(),
-            });
-        }
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| SttError::Protocol("response was not JSON".into()))?;
-        // Empty text is silence (a cough), not a failure.
-        return Ok(extract_transcript(provider, &value).unwrap_or_default());
     }
     if config.api_key.trim().is_empty() {
         return Err(SttError::MissingKey);
@@ -642,9 +605,11 @@ impl LiveTranscriber {
                     let config = config.clone();
                     let prompt = filter.prompt(channel, &hints.glossary);
                     requests.push_back(async move {
-                        let text = transcribe_with_retry(&config, &samples, &prompt)
-                            .await
-                            .map_err(|e| format!("{e} (lost audio {start:.1}s..{end:.1}s)"))?;
+                        let text = async {
+                            transcribe_with_prompt(&config, to_wav(&samples)?, None, &prompt).await
+                        }
+                        .await
+                        .map_err(|e| format!("{e} (lost audio {start:.1}s..{end:.1}s)"))?;
                         if text.is_empty() {
                             return Ok(None);
                         }
@@ -914,40 +879,6 @@ impl Drop for LiveTranscriber {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
-        }
-    }
-}
-
-/// Loopback providers (whisper-server) may be restarting: retry transient failures.
-async fn transcribe_with_retry(
-    config: &ProviderConfig,
-    samples: &[f32],
-    prompt: &str,
-) -> Result<String, SttError> {
-    let loopback = SttProvider::by_id(&config.id).is_some_and(|p| p.wire == SttWire::WhisperServer)
-        && reqwest::Url::parse(if config.base_url.is_empty() {
-            "http://127.0.0.1"
-        } else {
-            &config.base_url
-        })
-        .ok()
-        .and_then(|u| {
-            u.host_str()
-                .map(|h| matches!(h, "localhost" | "127.0.0.1" | "[::1]"))
-        })
-        .unwrap_or(false);
-    let mut delays = [250u64, 1000, 3000].into_iter();
-    loop {
-        let result = transcribe_with_prompt(config, to_wav(samples)?, None, prompt).await;
-        let transient = matches!(
-            result,
-            Err(SttError::Request(_) | SttError::Status { status: 500.., .. })
-        );
-        match delays.next() {
-            Some(ms) if loopback && transient => {
-                tokio::time::sleep(std::time::Duration::from_millis(ms)).await
-            }
-            _ => return result,
         }
     }
 }
