@@ -36,7 +36,7 @@ def parse_reference(text):
 
 
 def score(records, me, them, silence):
-    kept = [o for o in records if o["kept"]]
+    kept = [o for o in records if o.get("kind") == "line"]
     me_only, them_only = set(me) - set(them), set(them) - set(me)
     mic = [o for o in kept if o["channel"] == 0]
     remote = lambda o: sum(w in them_only for w in words(o["text"]))
@@ -48,7 +48,8 @@ def score(records, me, them, silence):
     in_silence = [o for o in kept if any(o["start"] < b and o["end"] > a for a, b in silence)]
     allref = set(me) | set(them)
     unknown = [o for o in kept if words(o["text"]) and sum(w in allref for w in words(o["text"])) / len(words(o["text"])) < 0.5]
-    latency = sum(o["latency"] for o in records) / len(records) if records else 0.0
+    requests = [o for o in records if o.get("kind") == "request"]
+    latency = sum(o["latency"] for o in requests) / len(requests) if requests else 0.0
     return bleed, lost, remote_words, in_silence, unknown, latency, len(kept)
 
 
@@ -73,7 +74,7 @@ def main(argv):
     print(f"bleed lines: {len(bleed)}")
     print(f"invented lines on silence: {len(in_silence)}")
     print(f"lines with mostly unknown words (second number): {len(unknown)}")
-    print(f"inference latency per chunk: {latency:.2f}s over {len(records)} requests ({n} lines kept)")
+    print(f"inference latency per chunk: {latency:.2f}s over {sum(1 for o in records if o.get("kind") == "request")} requests ({n} lines kept)")
 
 
 if __name__ == "__main__":
