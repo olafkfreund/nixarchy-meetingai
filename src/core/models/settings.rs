@@ -225,6 +225,7 @@ pub struct Settings {
     pub speech_language: String,
     pub speech_base_url: String,
     pub deepgram_region: String,
+    pub echo_gate: bool,
     pub response_length: ResponseLength,
     pub response_language: String,
     pub smart_follow_ups: bool,
@@ -271,6 +272,7 @@ impl Default for Settings {
             speech_language: String::new(),
             speech_base_url: String::new(),
             deepgram_region: "us".into(),
+            echo_gate: false,
             response_length: ResponseLength::Auto,
             response_language: "Auto".into(),
             smart_follow_ups: true,
@@ -308,6 +310,7 @@ mod keys {
     pub const OUTPUT_DEVICE: &str = "output_device";
     pub const SPEECH_PROVIDER: &str = "speech_provider";
     pub const SPEECH_MODEL: &str = "speech_model";
+    pub const ECHO_GATE: &str = "echo_gate";
     pub const SMART_FOLLOW_UPS: &str = "smart_follow_ups";
     pub const SMART_FOLLOW_UPS_PROMPT: &str = "smart_follow_ups_prompt";
     pub const RECAP_PROMPT_GENERAL: &str = "recap_prompt_general";
@@ -369,6 +372,7 @@ impl Settings {
                 "us"
             }
             .into(),
+            echo_gate: flag(keys::ECHO_GATE, defaults.echo_gate),
             response_length: get("response_length")
                 .map(ResponseLength::parse)
                 .unwrap_or_default(),
@@ -459,6 +463,7 @@ impl Settings {
             (keys::SPEECH_MODEL, self.speech_model.clone()),
             ("speech_base_url", self.speech_base_url.clone()),
             ("deepgram_region", self.deepgram_region.clone()),
+            (keys::ECHO_GATE, self.echo_gate.to_string()),
             ("response_length", self.response_length.label().into()),
             ("response_language", self.response_language.clone()),
             (
@@ -638,6 +643,7 @@ mod tests {
             speech_language: "en-US".into(),
             speech_base_url: "http://127.0.0.1:8000".into(),
             deepgram_region: "eu".into(),
+            echo_gate: true,
             response_length: ResponseLength::Medium,
             response_language: "Hindi".into(),
             smart_follow_ups: false,
