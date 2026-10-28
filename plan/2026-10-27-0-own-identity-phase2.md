@@ -212,6 +212,19 @@ commit and reverts alone.
   database (`history-plain.db`) is encrypted and kept. "Settings file"
   in step 0 means the settings rows in the database, which is where the
   app keeps them.
+- **Step 5** (Codex): the first version followed the old bodies'
+  structure in several functions and reused old test values, although
+  Codex's command log shows it never read the old files (the original
+  project is public, so model recall is the likely source; the brief
+  also gave `migrate_legacy`'s steps in order, against the Briefs rule).
+  Codex rewrote those functions with a different structure from their
+  names only. The kept "ours" tests for note chunks and profile documents
+  were replaced by new tests; `format_lines` has its own test again.
+  Accepted differences: new marker and error wording, a 16,000/16,000
+  head/tail split in `recent_messages`, `sessions::save`,
+  `delete_prompt` and `index_notes` in one transaction, rowid
+  tie-breaks, `untitled` matching the `Session · ` prefix exactly.
+  `--copies` leaves 4 boilerplate lines in `conversations.rs`.
 - **Step 7** (agy): the dead-code rule is read as "items nothing outside
   their file calls", so `Mode`, `OverlaySize`, `Role::is_user`,
   `AutoResponse::label`, `RESPONSE_LANGUAGES`, `load_from_path` and
