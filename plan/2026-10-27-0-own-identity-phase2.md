@@ -162,4 +162,10 @@ commit and reverts alone.
 
 ## Deviations log
 
-None yet.
+- **Step 0:** `git blame` needs `.git`, which the Nix sandbox source lacks,
+  so the measure runs as a separate CI job `origin-lines` (`fetch-depth:
+  0`, output in the job summary) instead of `checks.origin-lines`. The
+  script also skips `tests/fixtures/`. Its count is 11,099 lines (13,212
+  with `--all`); the 10,560 above was a hand estimate. The fixture
+  database is 296 KB (SQLCipher page size), above the 200 KB aim. Step 0
+  was done by the lead after the `coder` produced no output in an hour.
