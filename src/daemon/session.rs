@@ -2644,13 +2644,34 @@ impl Daemon {
             meetings::list(c, 40)
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .map(|r| json!({"id": r.id, "kind": "meeting", "title": r.title})),
+                .map(|r| {
+                    json!({"id": r.id, "kind": "meeting", "title": r.title, "started_at": r.started_at})
+                }),
         );
         if for_agent {
             let hidden = candidates::local_only_ids(c).map_err(|e| e.to_string())?;
             list.retain(|v| !v["id"].as_str().is_some_and(|id| hidden.contains(id)));
         }
         Ok(Value::Array(list))
+    }
+
+    /// Read-only archive search for agents; local-only interviews never appear.
+    fn meetings_search(&self, a: protocol::MeetingsSearch) -> Result<Value, String> {
+        let query = a.query.trim();
+        if query.is_empty() {
+            return Err("query is empty".into());
+        }
+        let limit = a.limit.unwrap_or(10).clamp(1, 50);
+        let g = self.inner.lock();
+        let c = g.db.connection();
+        let hidden = candidates::local_only_ids(c).map_err(|e| e.to_string())?;
+        let found = meetings::search(c, query, limit + hidden.len()).map_err(|e| e.to_string())?;
+        Ok(found
+            .into_iter()
+            .filter(|r| !hidden.contains(&r.id))
+            .take(limit)
+            .map(|r| json!({"id": r.id, "title": r.title, "started_at": r.started_at}))
+            .collect())
     }
 
     fn session_delete(&self, id: &str) -> Result<Value, String> {
@@ -3407,10 +3428,27 @@ impl Daemon {
         args: Value,
         origin: Option<&str>,
     ) -> Result<Value, String> {
-        if origin != Some("mcp") {
+        if !matches!(origin, Some("mcp" | "agent")) {
             return self.dispatch(cmd, args).await;
         }
-        tracing::info!(origin = "mcp", cmd);
+        // `ctl --agent`: the skill's read-only commands and nothing else.
+        if origin == Some("agent")
+            && !matches!(
+                cmd,
+                "session.list"
+                    | "meetings.search"
+                    | "notes.get"
+                    | "items.list"
+                    | "series.list"
+                    | "last_time.get"
+                    | "transcript.get"
+                    | "now.get"
+                    | "state.get"
+            )
+        {
+            return Err("not allowed for agents".into());
+        }
+        tracing::info!(origin, cmd);
         // Agents cannot give the candidate's consent, and cannot read a local-only interview.
         let mut args = args;
         if cmd == "record.start"
@@ -3437,7 +3475,8 @@ impl Daemon {
                     .ok()
                     .flatten()
                     .is_some_and(|c| c.local_only)
-            }) || (args["meeting"].is_null() && self.local_now(&g));
+            }) || ((cmd == "now.get" || args["meeting"].as_str().is_none())
+                && self.local_now(&g));
             if local {
                 return Err("This interview is local-only".into());
             }
@@ -3457,11 +3496,47 @@ impl Daemon {
             }
             _ => None,
         };
-        let result = self.dispatch(cmd, args).await;
+        let mut result = self.dispatch(cmd, args).await;
+        if let Ok(value) = &mut result {
+            self.hide_interviews(cmd, value);
+        }
         if let (Ok(_), Some(text)) = (&result, notice) {
             self.emit("notice", json!({"text": text}));
         }
         result
+    }
+
+    /// Strip what a local-only interview leaves in replies to agents.
+    fn hide_interviews(&self, cmd: &str, value: &mut Value) {
+        let g = self.inner.lock();
+        let Ok(hidden) = candidates::local_only_ids(g.db.connection()) else {
+            return;
+        };
+        let is_hidden =
+            |v: &Value, key: &str| v[key].as_str().is_some_and(|id| hidden.contains(id));
+        match cmd {
+            "state.get" if self.local_now(&g) => {
+                value["calendar_title"] = Value::Null;
+                value["meeting"] = Value::Null;
+            }
+            "items.list" => {
+                if let Some(list) = value.as_array_mut() {
+                    list.retain(|i| !is_hidden(i, "meeting_id"));
+                }
+            }
+            "last_time.get" => {
+                if is_hidden(value, "meeting") {
+                    for key in ["meeting", "title", "started_at"] {
+                        value[key] = Value::Null;
+                    }
+                    value["recap"] = "".into();
+                }
+                if let Some(list) = value["items"].as_array_mut() {
+                    list.retain(|i| !is_hidden(i, "meeting_id"));
+                }
+            }
+            _ => {}
+        }
     }
 
     async fn dispatch(self: &Arc<Self>, cmd: &str, args: Value) -> Result<Value, String> {
@@ -3550,6 +3625,7 @@ impl Daemon {
             "last_time.get" => self.last_time(&parse::<protocol::SeriesArg>(args)?.series),
             "session.restore" => self.session_restore(&parse::<protocol::IdArg>(args)?.id),
             "session.list" => self.session_list(false),
+            "meetings.search" => self.meetings_search(parse(args)?),
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
             "record.start" => {
                 let a = parse::<protocol::RecordStart>(args)?;
@@ -4896,6 +4972,166 @@ mod command_tests {
         assert!(candidates::get(g.db.connection(), &cand).unwrap().is_none());
         assert!(g.sources.is_empty() && g.candidate.is_none());
         assert!(!d.local_only.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn meetings_search_finds_notes_and_speech_and_hides_interviews() {
+        let d = daemon();
+        let (a, b, hid) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let mk = |t: &str| meetings::start(c, t, "", "en", None, Default::default()).unwrap();
+            let (a, b, hid) = (mk("Alpha"), mk("Beta"), mk("Ada"));
+            meetings::index_notes(c, &a, "ship the zebra release").unwrap();
+            meetings::add_line(c, &b, "me", None, "the quokka plan", 0.0, 1.0).unwrap();
+            meetings::add_line(c, &hid, "me", None, "secret quokka", 0.0, 1.0).unwrap();
+            let cand = candidates::create(c, "Ada").unwrap();
+            candidates::link_meeting(c, &cand.id, &hid).unwrap();
+            candidates::set_local_only(c, &cand.id, true).unwrap();
+            (a, b, hid)
+        };
+        let find = |q: &str, limit: Value| {
+            let d = &d;
+            let args = json!({"query": q, "limit": limit});
+            async move { d.handle("meetings.search", args, None).await }
+        };
+        let hits = find("zebra", Value::Null).await.unwrap();
+        assert_eq!(hits[0]["id"], json!(a));
+        assert!(hits[0]["started_at"].is_string() && hits[0]["title"] == "Alpha");
+        let hits = find("quokka", Value::Null).await.unwrap();
+        let ids: Vec<_> = hits
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["id"].clone())
+            .collect();
+        assert_eq!(ids, vec![json!(b)]);
+        assert!(!ids.contains(&json!(hid)));
+        assert_eq!(
+            find("a", json!(0)).await.unwrap().as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(find("  ", Value::Null).await.unwrap_err(), "query is empty");
+        let list = d.handle("session.list", json!({}), None).await.unwrap();
+        assert!(
+            list.as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["id"] == json!(a) && v["started_at"].is_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_origin_is_read_only_and_keeps_interviews_local() {
+        let d = daemon();
+        let (meeting, other) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let cand = candidates::create(c, "Ada").unwrap();
+            let m = meetings::start(c, "Ada", "", "en", None, Default::default()).unwrap();
+            candidates::link_meeting(c, &cand.id, &m).unwrap();
+            candidates::set_local_only(c, &cand.id, true).unwrap();
+            let o = meetings::start(c, "Team", "", "en", None, Default::default()).unwrap();
+            (m, o)
+        };
+        let agent = |cmd: &'static str, args: Value| {
+            let d = &d;
+            async move { d.handle(cmd, args, Some("agent")).await }
+        };
+        let list = agent("session.list", json!({})).await.unwrap();
+        let ids: Vec<_> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].clone())
+            .collect();
+        assert!(ids.contains(&json!(other)) && !ids.contains(&json!(meeting)));
+        for cmd in ["notes.get", "transcript.get", "items.list"] {
+            let err = agent(cmd, json!({"meeting": meeting})).await.unwrap_err();
+            assert!(err.contains("local-only"), "{cmd}: {err}");
+            assert!(agent(cmd, json!({"meeting": other})).await.is_ok(), "{cmd}");
+        }
+        for cmd in [
+            "settings.set",
+            "session.delete",
+            "record.start",
+            "chat.send",
+        ] {
+            let err = agent(cmd, json!({"id": meeting})).await.unwrap_err();
+            assert_eq!(err, "not allowed for agents", "{cmd}");
+        }
+        // The live session is local-only: no meeting argument means the live one.
+        d.local_only.store(true, Ordering::Relaxed);
+        for cmd in ["now.get", "transcript.get"] {
+            let err = agent(cmd, json!({})).await.unwrap_err();
+            assert!(err.contains("local-only"), "{cmd}: {err}");
+        }
+        d.local_only.store(false, Ordering::Relaxed);
+        // now.get ignores its arguments, so a meeting argument must not get past the guard.
+        d.local_only.store(true, Ordering::Relaxed);
+        for args in [json!({"meeting": other}), json!({"meeting": 5})] {
+            let err = agent("now.get", args).await.unwrap_err();
+            assert!(err.contains("local-only"), "{err}");
+        }
+        let st = agent("state.get", json!({})).await.unwrap();
+        assert!(st["meeting"].is_null() && st["calendar_title"].is_null());
+        d.local_only.store(false, Ordering::Relaxed);
+        // Series replies never carry an interview, even one that is in a series.
+        let series = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let s = items::series_create(c, "Weekly").unwrap();
+            c.execute("UPDATE meetings SET series_id = ?1", [&s])
+                .unwrap();
+            for (m, text) in [(&meeting, "secret item"), (&other, "team item")] {
+                let item = items::NewItem {
+                    meeting_id: m,
+                    series_id: Some(&s),
+                    kind: "action",
+                    text,
+                    owner: None,
+                    due: None,
+                    source_line: None,
+                    origin_item: None,
+                };
+                items::insert(c, &item).unwrap();
+            }
+            s
+        };
+        let listed = agent("items.list", json!({"series": series}))
+            .await
+            .unwrap();
+        let texts: Vec<_> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["text"].clone())
+            .collect();
+        assert_eq!(texts, vec![json!("team item")]);
+        let last = agent("last_time.get", json!({"series": series}))
+            .await
+            .unwrap();
+        assert!(
+            last["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| i["meeting_id"] != json!(meeting))
+        );
+        assert_ne!(last["meeting"], json!(meeting));
+        // Without an origin nothing changes.
+        let own = d.handle("session.list", json!({}), None).await.unwrap();
+        assert!(
+            own.as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["id"] == json!(meeting))
+        );
+        assert!(
+            d.handle("notes.get", json!({"meeting": meeting}), None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

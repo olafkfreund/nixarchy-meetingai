@@ -1,6 +1,5 @@
-//! Core domain types, user settings, and secure credential storage.
+//! Shared foundations: domain types, settings, secrets, attachments and HTTP plumbing.
 
-pub mod composer;
 pub mod context;
 pub mod models;
 pub(crate) mod network;
@@ -13,11 +12,10 @@ pub use security::credentials;
 pub use security::vault;
 pub use security::*;
 
-/// Use one TLS provider for HTTP and speech WebSockets on every platform.
-/// Explicit setup also covers tests and tools that do not launch the UI.
+/// Make rustls' `ring` provider the process default, once; an earlier install elsewhere is fine.
 pub(crate) fn install_tls_provider() {
-    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    INSTALLED.get_or_init(|| {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
 }

@@ -1,4 +1,4 @@
-//! Speech recognition and live listening sessions.
+//! Speech: the listening session and speech-to-text.
 
 pub mod session;
 pub mod stt;

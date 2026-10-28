@@ -42,6 +42,9 @@ fn usage() -> String {
         "  nixarchy-meetingai                  run the daemon",
         "  nixarchy-meetingai ctl CMD [JSON]   send one command, e.g. ctl state.get",
         "                                      or ctl chat.send '{\"text\":\"hi\"}'",
+        "  nixarchy-meetingai ctl --agent CMD [JSON]",
+        "                                      read-only, for AI agents: local-only interviews",
+        "                                      stay hidden and anything but reads is refused",
         "  nixarchy-meetingai mcp              MCP server over stdio, for AI agents",
         "  nixarchy-meetingai --version | --help",
     ]
@@ -59,6 +62,11 @@ pub fn socket_path() -> Option<PathBuf> {
 
 /// Send one request and return the printed reply line plus an exit code.
 fn ctl(args: &[String]) -> (String, i32) {
+    // `--agent`: the daemon applies its read-only allowlist and local-only protection.
+    let (origin, args) = match args.first().map(String::as_str) {
+        Some("--agent") => (Some("agent"), &args[1..]),
+        _ => (None, args),
+    };
     let Some(cmd) = args.first() else {
         return (usage(), 2);
     };
@@ -69,7 +77,7 @@ fn ctl(args: &[String]) -> (String, i32) {
         },
         None => serde_json::json!({}),
     };
-    match exchange(cmd, args_json) {
+    match exchange(cmd, args_json, origin) {
         Ok(reply) => {
             let ok = reply["ok"] == true;
             (reply.to_string(), if ok { 0 } else { 1 })
@@ -78,14 +86,18 @@ fn ctl(args: &[String]) -> (String, i32) {
     }
 }
 
-fn exchange(cmd: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
+fn exchange(
+    cmd: &str,
+    args: serde_json::Value,
+    origin: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let path = socket_path().ok_or("XDG_RUNTIME_DIR is not set")?;
     let mut stream = UnixStream::connect(&path)
         .map_err(|_| "no running nixarchy-meetingai daemon was found".to_owned())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(120)))
         .map_err(|e| e.to_string())?;
-    let request = serde_json::json!({"id": 1, "cmd": cmd, "args": args});
+    let request = request_line(cmd, args, origin);
     writeln!(stream, "{request}").map_err(|e| e.to_string())?;
     // Events share the socket; skip them until our reply arrives.
     for line in BufReader::new(stream).lines() {
@@ -96,6 +108,14 @@ fn exchange(cmd: &str, args: serde_json::Value) -> Result<serde_json::Value, Str
         }
     }
     Err("the daemon closed the connection".into())
+}
+
+fn request_line(cmd: &str, args: serde_json::Value, origin: Option<&str>) -> serde_json::Value {
+    let mut request = serde_json::json!({"id": 1, "cmd": cmd, "args": args});
+    if let Some(origin) = origin {
+        request["origin"] = origin.into();
+    }
+    request
 }
 
 /// Path of the exclusive launch lock held by the running instance.
@@ -149,6 +169,14 @@ impl InstanceLock {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agent_flag_adds_the_origin() {
+        let plain = super::request_line("state.get", serde_json::json!({}), None);
+        assert!(plain.get("origin").is_none());
+        let agent = super::request_line("state.get", serde_json::json!({}), Some("agent"));
+        assert_eq!(agent["origin"], "agent");
+    }
+
     use super::*;
 
     #[test]

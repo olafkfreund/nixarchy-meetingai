@@ -1,4 +1,4 @@
-//! Audio input devices, microphone streams, and system audio capture.
+//! Device listing and the microphone and system-audio capture backends.
 
 pub mod devices;
 pub mod microphone;

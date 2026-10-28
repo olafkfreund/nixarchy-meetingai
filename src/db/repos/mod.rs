@@ -1,4 +1,4 @@
-//! Database repositories for conversations, meetings, library files, and settings.
+//! Table-level repositories.
 
 pub mod candidates;
 pub mod conversations;

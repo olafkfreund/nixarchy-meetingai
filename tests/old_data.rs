@@ -54,6 +54,32 @@ fn shape(c: &Connection) -> Vec<String> {
                 .map(Result::unwrap)
                 .collect();
             out.push(format!("table {name} {}", cols.join(",")));
+            // Foreign keys and UNIQUE/PRIMARY KEY constraints do not show in table_info.
+            let mut keys = c
+                .prepare(
+                    "SELECT \"table\" || '.' || \"from\" || '>' || coalesce(\"to\", '') || ':' || on_update || ':' || on_delete
+                     FROM pragma_foreign_key_list(?1) ORDER BY 1",
+                )
+                .unwrap();
+            let fks: Vec<String> = keys
+                .query_map([&name], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            out.push(format!("fk {name} {}", fks.join(",")));
+            let mut uniques = c
+                .prepare(
+                    "SELECT l.\"unique\" || l.origin || ':' || group_concat(i.name, '+')
+                     FROM pragma_index_list(?1) l, pragma_index_info(l.name) i
+                     WHERE l.origin != 'c' GROUP BY l.name ORDER BY 1",
+                )
+                .unwrap();
+            let keys: Vec<String> = uniques
+                .query_map([&name], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            out.push(format!("keys {name} {}", keys.join(",")));
         } else {
             out.push(format!(
                 "{kind} {name} {}",
