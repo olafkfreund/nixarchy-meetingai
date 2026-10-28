@@ -831,9 +831,15 @@ where
         .map_err(|e| e.to_string())
 }
 
-type BatchChunk = (u8, f64, f64, Vec<f32>);
+/// Channel, start, end (seconds) and samples of one utterance.
+pub type BatchChunk = (u8, f64, f64, Vec<f32>);
+/// A sample above this level counts as sound (about -42 dBFS).
+const SOUND_LEVEL: f32 = 0.008;
+/// 0.2 s at 16 kHz.
+const MIN_SOUND_SAMPLES: usize = 3_200;
+/// Cuts interleaved 16 kHz stereo PCM into per-channel utterances (also used by `examples/accuracy_replay.rs`).
 #[derive(Default)]
-struct BatchChunks {
+pub struct BatchChunks {
     started: Vec<u8>,
     samples: [Vec<f32>; 2],
     silence: [usize; 2],
@@ -841,12 +847,12 @@ struct BatchChunks {
     start: [usize; 2],
 }
 impl BatchChunks {
-    fn push(&mut self, pcm: &[i16]) -> Vec<BatchChunk> {
+    pub fn push(&mut self, pcm: &[i16]) -> Vec<BatchChunk> {
         let mut ready = Vec::new();
         for frame in pcm.as_chunks::<2>().0 {
             for (channel, value) in frame.iter().enumerate() {
                 let sample = f32::from(*value) / f32::from(i16::MAX);
-                let speech = sample.abs() > 0.008;
+                let speech = sample.abs() > SOUND_LEVEL;
                 if self.samples[channel].is_empty() {
                     if !speech {
                         continue;
@@ -869,14 +875,17 @@ impl BatchChunks {
     fn take(&mut self, channel: usize) -> Option<BatchChunk> {
         let samples = std::mem::take(&mut self.samples[channel]);
         self.silence[channel] = 0;
-        (samples.len() >= 1600).then_some((
+        // A click or breath opens a chunk too; whisper turns such near-silence into invented
+        // words ("Amen."), so send only chunks with at least 0.2 s of sound in them.
+        let sound = samples.iter().filter(|s| s.abs() > SOUND_LEVEL).count();
+        (samples.len() >= 1600 && sound >= MIN_SOUND_SAMPLES).then_some((
             channel as u8,
             self.start[channel] as f64 / 16000.0,
             self.position as f64 / 16000.0,
             samples,
         ))
     }
-    fn finish(&mut self) -> Vec<BatchChunk> {
+    pub fn finish(&mut self) -> Vec<BatchChunk> {
         (0..2).filter_map(|c| self.take(c)).collect()
     }
 }
@@ -890,7 +899,7 @@ impl Drop for LiveTranscriber {
 }
 
 /// Loopback providers (whisper-server) may be restarting: retry transient failures.
-async fn transcribe_with_retry(
+pub async fn transcribe_with_retry(
     config: &ProviderConfig,
     samples: &[f32],
     prompt: &str,
@@ -948,6 +957,30 @@ pub fn local_chunk_payload(samples: &[f32], start: f64) -> Result<Value, SttErro
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_click_in_silence_is_not_sent_but_speech_is() {
+        let pcm = |s: &[f32]| -> Vec<i16> {
+            s.iter()
+                .flat_map(|v| {
+                    let x = (v * f32::from(i16::MAX)) as i16;
+                    [x, 0]
+                })
+                .collect()
+        };
+        let mut chunks = super::BatchChunks::default();
+        // A 0.05 s click, then a second of silence: nothing goes to whisper.
+        let mut click = vec![0.3_f32; 800];
+        click.extend(vec![0.0; 16_000]);
+        assert!(chunks.push(&pcm(&click)).is_empty());
+        assert!(chunks.finish().is_empty());
+        // Half a second of a loud tone, then silence: one mic chunk.
+        let mut tone: Vec<f32> = (0..8_000).map(|i| 0.2 * (i as f32 * 0.1).sin()).collect();
+        tone.extend(vec![0.0; 16_000]);
+        let ready = chunks.push(&pcm(&tone));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].0, 0);
+    }
+
     use super::*;
     use crate::ai::providers::STT_PROVIDERS;
 

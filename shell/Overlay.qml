@@ -34,6 +34,7 @@ Item {
     property bool noContext: false
     property real now: Date.now()
     property bool transcriptOpen: true
+    property bool nowOpen: true
     readonly property bool tList: root.transcriptOpen && backend.transcript.count > 0   // an empty or collapsed transcript gives its room to NOW
     readonly property bool tEmpty: root.transcriptOpen && backend.transcript.count === 0 && !root.panel   // nothing to list: NOW sits right under the hint line
     readonly property string status: backend.answering ? "Writing" : backend.now.error ? "Failed" : backend.now.body !== "" ? "Ready" : "Listening"
@@ -425,12 +426,14 @@ Item {
                         theme: metrics
                         status: root.status
                         themedLinks: root.themedLinks
+                        open: root.nowOpen
+                        onToggled: root.nowOpen = !root.nowOpen
                         // Team mode: only for a typed question, above the items.
                         visible: !root.team || (backend.now.turn >= 0 && !backend.now.automatic)
                         anchors.bottom: sugg.top
                         anchors.bottomMargin: root.tEmpty ? Style.spacing.md + convo.avail - height : Style.spacing.md   // nothing to list: rise to the hint line
                         width: parent.width
-                        height: root.panel ? Math.min(nowWant, convo.avail * 0.35) : root.tEmpty ? Math.min(nowWant, convo.avail) : root.tList ? Math.min(nowWant, convo.avail * 0.7) : convo.avail
+                        height: !root.nowOpen ? nowWant : root.panel ? Math.min(nowWant, convo.avail * 0.35) : root.tEmpty ? Math.min(nowWant, convo.avail) : root.tList ? Math.min(nowWant, convo.avail * 0.7) : convo.avail
                     }
 
                     // Team meeting: replaces NOW. Last time drawer, "Earlier task?" callout, items by kind.
