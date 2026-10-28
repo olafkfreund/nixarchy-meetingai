@@ -75,7 +75,8 @@ impl LineFilter {
     pub fn accept(&mut self, line: &TranscriptLine) -> bool {
         let words = tokens(&line.text);
         let text = line.text.trim();
-        if words.is_empty() || SILENCE_PHRASES.contains(&words.join(" ").as_str()) {
+        // "Amen. Amen. Amen." is the silence phrase said three times.
+        if words.is_empty() || SILENCE_PHRASES.contains(&collapse(&words).join(" ").as_str()) {
             return false;
         }
         let channel = usize::from(line.channel.min(1));
@@ -184,6 +185,9 @@ mod tests {
             "You",
             "[BLANK_AUDIO]",
             "(silence)",
+            "- Amen. - Amen. - Amen. - Amen. - Amen. - Amen.",
+            "- Amen. - Amen.",
+            "Thank you. Thank you.",
         ] {
             assert!(!f.accept(&line(0, t, 0.0, 1.0)), "{t:?}");
         }
