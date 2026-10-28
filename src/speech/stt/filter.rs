@@ -25,9 +25,34 @@ const LOOP_SIMILARITY: f64 = 0.8;
 const ECHO_WINDOW: f64 = 8.0;
 const ECHO_CONTAINMENT: f64 = 0.6;
 const HOLD_WINDOW: f64 = 3.0;
-/// shortcut: shorter mic lines ("yes") are kept even if the call said it too, upgrade with real AEC.
+const HOLD_CAP: f64 = 15.0;
+/// Minimum content words and consecutive phrase length required for echo drops.
 const ECHO_MIN_TOKENS: usize = 3;
 const PROMPT_PART: usize = 200;
+
+/// Common English function and conversational words ignored when counting content words.
+#[rustfmt::skip]
+const STOP_WORDS: &[&str] = &[
+    // Pronouns
+    "i", "me", "my", "mine", "myself", "you", "your", "yours", "yourself", "he", "him", "his",
+    "himself", "she", "her", "hers", "herself", "it", "its", "itself", "we", "us", "our", "ours",
+    "ourselves", "they", "them", "their", "theirs", "themselves", "this", "that", "these",
+    "those", "who", "whom", "whose", "what", "which",
+    // Articles, determiners, conjunctions
+    "a", "an", "the", "and", "or", "but", "if", "because", "as", "while", "not",
+    // Auxiliaries and contraction fragments
+    "am", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "having", "do",
+    "does", "did", "will", "would", "shall", "should", "can", "could", "may", "might", "must",
+    "don", "doesn", "didn", "won", "wouldn", "shouldn", "couldn", "isn", "aren", "wasn", "weren",
+    "haven", "hasn", "hadn", "t", "s", "m", "re", "ve", "ll", "d",
+    // Prepositions
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "up", "down", "out", "off", "over",
+    "under", "into", "onto", "about", "after", "before", "between", "through", "during",
+    "without", "within", "against", "around",
+    // Short conversational words
+    "yes", "no", "ok", "okay", "so", "think", "yeah", "well", "there", "here", "then", "than",
+    "too", "very", "just",
+];
 
 /// Lowercase alphanumeric words; punctuation, brackets and underscores split.
 pub(crate) fn tokens(text: &str) -> Vec<String> {
@@ -74,6 +99,16 @@ where
     shared_tokens(mic, system) as f64 / mic.len().max(1) as f64
 }
 
+fn has_consecutive_run(mic: &[String], system: &[&String], run_len: usize) -> bool {
+    mic.len() >= run_len
+        && system.len() >= run_len
+        && mic.windows(run_len).any(|run| {
+            system
+                .windows(run_len)
+                .any(|sys| run.iter().zip(sys).all(|(a, b)| a == *b))
+        })
+}
+
 /// Stateful filter over final lines of both channels, in arrival order.
 #[derive(Default)]
 pub struct LineFilter {
@@ -83,8 +118,12 @@ pub struct LineFilter {
     said: [Vec<(Vec<String>, f64)>; 2],
     /// Recent system lines: start, end, tokens.
     system: Vec<(f64, f64, Vec<String>)>,
-    /// Candidate mic lines waiting for overlapping system lines: line, tokens.
-    held: Vec<(TranscriptLine, Vec<String>)>,
+    /// Candidate mic lines waiting for overlapping system lines: line, tokens, arrived_at.
+    held: Vec<(TranscriptLine, Vec<String>, f64)>,
+    /// Audio clock observed so far.
+    clock: f64,
+    /// Earliest start time of any open or in-flight system chunk.
+    pending_sys_start: Option<f64>,
     /// Recent accepted text on the system channel, the whisper prompt context.
     recent_system: String,
 }
@@ -92,7 +131,8 @@ pub struct LineFilter {
 impl LineFilter {
     /// Accept a candidate line and return all lines released now.
     pub fn accept(&mut self, line: &TranscriptLine) -> Vec<TranscriptLine> {
-        let now = line.end;
+        let now = self.clock.max(line.end);
+        self.clock = now;
         let words = tokens(&line.text);
         let text = line.text.trim();
         // "Amen. Amen. Amen." is the silence phrase said three times.
@@ -100,27 +140,10 @@ impl LineFilter {
             return self.release_ready(now, false);
         }
         let channel = usize::from(line.channel.min(1));
-        if let Some((previous, end)) = &self.last[channel]
-            && previous == text
-            && line.start - end <= REPEAT_WINDOW
-        {
-            return self.release_ready(now, false);
-        }
-        // "Amen" is whisper's sign-off on silence; compare what is left.
-        let spoken: Vec<String> = words.iter().filter(|w| *w != "amen").cloned().collect();
-        let phrase = collapse(&spoken).to_vec();
-        let said = &mut self.said[channel];
-        said.retain(|(_, end)| line.start - end <= LOOP_WINDOW);
-        if phrase.len() >= ECHO_MIN_TOKENS
-            && said
-                .iter()
-                .any(|(other, _)| similarity(&phrase, other) >= LOOP_SIMILARITY)
-        {
-            return self.release_ready(now, false);
-        }
-        self.said[channel].push((phrase, line.end));
-        self.last[channel] = Some((text.to_owned(), line.end));
         if channel == 1 {
+            if !self.keep_for_channel(1, line, &words) {
+                return self.release_ready(now, false);
+            }
             self.system.retain(|s| s.1 > line.end - 30.0);
             self.system.push((line.start, line.end, words));
             self.recent_system.push(' ');
@@ -134,37 +157,69 @@ impl LineFilter {
             out.push(line.clone());
             out
         } else {
-            self.held.push((line.clone(), words));
+            self.held.push((line.clone(), words, now));
             self.release_ready(now, false)
         }
     }
 
-    /// Release held mic lines whose hold window has expired at audio clock `now`.
-    pub fn tick(&mut self, now: f64) -> Vec<TranscriptLine> {
-        self.release_ready(now, false)
+    /// Release held mic lines whose hold window has expired at audio clock `now`
+    /// and that have no overlapping open-or-in-flight system chunk (`pending_sys_start`).
+    pub fn tick(&mut self, now: f64, pending_sys_start: Option<f64>) -> Vec<TranscriptLine> {
+        self.clock = self.clock.max(now);
+        self.pending_sys_start = pending_sys_start;
+        self.release_ready(self.clock, false)
     }
 
     /// Judge and release all held mic lines at end of stream.
     pub fn flush(&mut self) -> Vec<TranscriptLine> {
+        self.pending_sys_start = None;
         self.release_ready(f64::INFINITY, true)
     }
 
+    fn keep_for_channel(
+        &mut self,
+        channel: usize,
+        line: &TranscriptLine,
+        words: &[String],
+    ) -> bool {
+        let text = line.text.trim();
+        if let Some((previous, end)) = &self.last[channel]
+            && previous == text
+            && line.start - end <= REPEAT_WINDOW
+        {
+            return false;
+        }
+        // "Amen" is whisper's sign-off on silence; compare what is left.
+        let spoken: Vec<String> = words.iter().filter(|w| *w != "amen").cloned().collect();
+        let phrase = collapse(&spoken).to_vec();
+        let said = &mut self.said[channel];
+        said.retain(|(_, end)| line.start - end <= LOOP_WINDOW);
+        if phrase.len() >= ECHO_MIN_TOKENS
+            && said
+                .iter()
+                .any(|(other, _)| similarity(&phrase, other) >= LOOP_SIMILARITY)
+        {
+            return false;
+        }
+        self.said[channel].push((phrase, line.end));
+        self.last[channel] = Some((text.to_owned(), line.end));
+        true
+    }
+
     fn release_ready(&mut self, now: f64, all: bool) -> Vec<TranscriptLine> {
-        let max_sys_end = self
-            .system
-            .iter()
-            .map(|(_, end, _)| *end)
-            .fold(f64::NEG_INFINITY, f64::max);
         let mut out = Vec::new();
         let mut i = 0;
         while i < self.held.len() {
             let ready = {
-                let (line, _) = &self.held[i];
-                all || max_sys_end >= line.end || now - line.end >= HOLD_WINDOW
+                let (line, _, arrived_at) = &self.held[i];
+                let waited = now - *arrived_at;
+                all || waited >= HOLD_CAP
+                    || (waited >= HOLD_WINDOW
+                        && self.pending_sys_start.is_none_or(|s| s > line.end))
             };
             if ready {
-                let (line, words) = self.held.remove(i);
-                if !self.is_echo(&line, &words) {
+                let (line, words, _) = self.held.remove(i);
+                if !self.is_echo(&line, &words) && self.keep_for_channel(0, &line, &words) {
                     out.push(line);
                 }
             } else {
@@ -175,17 +230,24 @@ impl LineFilter {
     }
 
     fn is_echo(&self, line: &TranscriptLine, words: &[String]) -> bool {
-        if words.len() < ECHO_MIN_TOKENS {
+        let content: Vec<String> = words
+            .iter()
+            .filter(|w| !STOP_WORDS.contains(&w.as_str()))
+            .cloned()
+            .collect();
+        if content.len() < ECHO_MIN_TOKENS {
             return false;
         }
-        let combined = self
+        let sys_tokens: Vec<&String> = self
             .system
             .iter()
             .filter(|(start, end, _)| {
                 line.start - ECHO_WINDOW <= *end && *start <= line.end + ECHO_WINDOW
             })
-            .flat_map(|(_, _, tokens)| tokens.iter());
-        containment(words, combined) >= ECHO_CONTAINMENT
+            .flat_map(|(_, _, tokens)| tokens.iter())
+            .collect();
+        has_consecutive_run(words, &sys_tokens, ECHO_MIN_TOKENS)
+            && containment(&content, sys_tokens) >= ECHO_CONTAINMENT
     }
 
     /// Prompt for the next request on `channel`.
@@ -341,25 +403,101 @@ mod tests {
     fn mic_echo_of_system_line_is_dropped() {
         let mut f = LineFilter::default();
         assert_eq!(
-            f.accept(&line(1, "we should ship the release on friday", 10.0, 15.0))
-                .len(),
+            f.accept(&line(
+                1,
+                "we should ship the new release on friday afternoon",
+                10.0,
+                15.0
+            ))
+            .len(),
             1
         );
+        // Exact echo is dropped.
         assert!(
             f.accept(&line(
                 0,
-                "we should ship the release on Friday.",
+                "we should ship the new release on Friday afternoon.",
                 12.0,
                 14.0
             ))
             .is_empty()
         );
-        // 3 of 5 shared tokens is 60% containment.
+        // Real echo repeating the remote sentence with a word or two misheard is dropped
+        // (3/5 content words = 60%, plus consecutive 3-word phrase runs).
         assert!(
-            f.accept(&line(0, "we should ship tomorrow morning", 10.5, 13.5))
-                .is_empty()
+            f.accept(&line(
+                0,
+                "we should ship the next release on friday morning",
+                10.5,
+                14.5
+            ))
+            .is_empty()
         );
         assert!(f.flush().is_empty());
+    }
+
+    #[test]
+    fn short_owner_replies_survive_ordinary_remote_speech() {
+        let mut f = LineFilter::default();
+        assert_eq!(
+            f.accept(&line(
+                1,
+                "I think we can send it to you if you will do the draft ok so yes we should ship the release on friday",
+                10.0,
+                16.0
+            ))
+            .len(),
+            1
+        );
+        for (i, reply) in [
+            "I think so",
+            "Can you send it to me",
+            "OK I will send the draft",
+            "we should ship tomorrow morning",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let start = 11.0 + i as f64;
+            assert!(
+                f.accept(&line(0, reply, start, start + 1.0)).is_empty(),
+                "{reply:?}"
+            );
+        }
+        let kept: Vec<String> = f.flush().into_iter().map(|l| l.text).collect();
+        assert_eq!(
+            kept,
+            vec![
+                "I think so",
+                "Can you send it to me",
+                "OK I will send the draft",
+                "we should ship tomorrow morning",
+            ]
+        );
+    }
+
+    #[test]
+    fn dropped_echo_does_not_block_owner_later_saying_same_sentence() {
+        let mut f = LineFilter::default();
+        assert_eq!(
+            f.accept(&line(1, "we should ship the release on friday", 0.0, 2.0))
+                .len(),
+            1
+        );
+        // Echo on the mic channel is dropped when released at t=5.0.
+        assert!(
+            f.accept(&line(0, "we should ship the release on friday", 0.2, 2.0))
+                .is_empty()
+        );
+        assert!(f.tick(5.0, None).is_empty());
+        // Owner says the same sentence later (within the 60 s loop window, outside the 8 s echo window).
+        assert!(
+            f.accept(&line(0, "we should ship the release on friday", 11.0, 13.0))
+                .is_empty()
+        );
+        let kept = f.flush();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].text, "we should ship the release on friday");
     }
 
     #[test]
@@ -371,8 +509,8 @@ mod tests {
                 .len(),
             1
         );
-        // Split across two system chunks, neither alone has >= 60% of the 6-word mic line (3/6 = 50%),
-        // but combined within +/-8 s they have 6/6 = 100%.
+        // Split across two system chunks, neither alone has >= 60% of the content words,
+        // but combined within +/-8 s they have 3/3 = 100% and a 3-word consecutive run.
         assert!(
             f.accept(&line(0, "we should ship the release friday", 10.5, 14.5))
                 .is_empty()
@@ -383,15 +521,16 @@ mod tests {
     #[test]
     fn mic_line_arriving_before_its_system_line_is_dropped_once_system_arrives() {
         let mut f = LineFilter::default();
-        // Mic chunk finishes first and is held because no system line >= 13.0 has arrived.
+        // Mic chunk finishes first and is held.
         assert!(
             f.accept(&line(0, "we should ship the release on friday", 10.0, 13.0))
                 .is_empty()
         );
-        // System chunk covering the utterance arrives later and triggers judgment -> dropped.
+        // System chunk covering the utterance arrives later; once held window expires, echo is dropped.
         let out = f.accept(&line(1, "we should ship the release on friday", 9.8, 13.5));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].channel, 1);
+        assert!(f.tick(16.0, None).is_empty());
         assert!(f.flush().is_empty());
     }
 
@@ -403,38 +542,58 @@ mod tests {
                 .len(),
             1
         );
-        // Owner speaks overlapping system speech (ends at 14.0 > 13.0, so held initially).
+        // Owner speaks overlapping system speech.
         assert!(
             f.accept(&line(0, "I think monday is safer for us", 12.0, 14.0))
                 .is_empty()
         );
-        // Beyond +/-8 s window -> held until flush, then kept.
-        assert!(
-            f.accept(&line(0, "we should ship the release on friday", 22.0, 24.0))
-                .len()
-                == 1
-        );
-        // Short (< 3 words) -> kept.
-        assert!(f.accept(&line(0, "friday", 12.0, 13.0)).len() == 1);
+        // Beyond +/-8 s window -> releases the earlier line (now=24.0 >= 14.0 + 3.0) and holds this one.
+        let released = f.accept(&line(0, "we should ship the release on friday", 22.0, 24.0));
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].text, "I think monday is safer for us");
+        // Short (< 3 words) -> held and kept on flush.
+        assert!(f.accept(&line(0, "friday", 24.0, 25.0)).is_empty());
         let flushed = f.flush();
-        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed.len(), 2);
         assert_eq!(flushed[0].text, "we should ship the release on friday");
+        assert_eq!(flushed[1].text, "friday");
     }
 
     #[test]
-    fn tick_releases_held_mic_line_after_hold_window_without_later_lines() {
+    fn tick_holds_for_three_seconds_after_arrival_and_waits_for_overlapping_system_chunk() {
         let mut f = LineFilter::default();
+        // Audio clock is already at 14.5 s when the 10.0..12.0 mic chunk finishes transcribing.
+        assert!(f.tick(14.5, Some(10.0)).is_empty());
         assert!(
             f.accept(&line(0, "I will follow up with the notes", 10.0, 12.0))
                 .is_empty()
         );
-        assert!(f.tick(12.0).is_empty());
-        assert!(f.tick(14.99).is_empty());
-        let released = f.tick(15.0);
+        // 3 s after line.end (15.0) is only 0.5 s after arrival -> still held even without pending system.
+        assert!(f.tick(15.0, None).is_empty());
+        assert!(f.tick(17.49, None).is_empty());
+        // At 17.5 s (3 s after arrival), if an overlapping system chunk (start 11.0 <= 12.0) is still
+        // open or in flight, the line remains held.
+        assert!(f.tick(17.5, Some(11.0)).is_empty());
+        assert!(f.tick(20.0, Some(11.0)).is_empty());
+        // A system chunk that started after the mic line ended (12.5 > 12.0) does not block release.
+        let released = f.tick(20.0, Some(12.5));
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].text, "I will follow up with the notes");
-        assert!(f.tick(20.0).is_empty());
         assert!(f.flush().is_empty());
+    }
+
+    #[test]
+    fn tick_enforces_fifteen_second_hard_cap_when_system_chunk_stays_open() {
+        let mut f = LineFilter::default();
+        assert!(f.tick(14.0, Some(10.0)).is_empty());
+        assert!(
+            f.accept(&line(0, "I will follow up with the notes", 10.0, 12.0))
+                .is_empty()
+        );
+        assert!(f.tick(28.99, Some(10.0)).is_empty());
+        let released = f.tick(29.0, Some(10.0));
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].text, "I will follow up with the notes");
     }
 
     #[test]

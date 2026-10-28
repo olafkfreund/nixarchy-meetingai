@@ -587,6 +587,7 @@ impl LiveTranscriber {
             let mut chunks = BatchChunks::default();
             let mut filter = LineFilter::default();
             let mut requests = futures_util::stream::FuturesOrdered::new();
+            let mut in_flight = std::collections::VecDeque::new();
             loop {
                 let finished;
                 let ready = tokio::select! {
@@ -600,6 +601,7 @@ impl LiveTranscriber {
                         match pcm { Some(pcm) => { finished = false; chunks.push(&pcm) }, None => { finished = true; chunks.finish() } }
                     }
                     result = requests.next(), if !requests.is_empty() => {
+                        let _ = in_flight.pop_front();
                         match result {
                             Some(Ok(Some(line))) => {
                                 for line in filter.accept(&line) {
@@ -607,8 +609,18 @@ impl LiveTranscriber {
                                 }
                             }
                             Some(Ok(None)) => {}
-                            Some(Err(error)) => { let _ = sender.send(LiveEvent::Failed(error)).await; break; }
+                            Some(Err(error)) => {
+                                for line in filter.flush() {
+                                    let _ = sender.send(LiveEvent::Transcript(line)).await;
+                                }
+                                let _ = sender.send(LiveEvent::Failed(error)).await;
+                                break;
+                            }
                             None => {}
+                        }
+                        let pending = chunks.earliest_system_start(&in_flight);
+                        for line in filter.tick(chunks.now(), pending) {
+                            let _ = sender.send(LiveEvent::Transcript(line)).await;
                         }
                         continue;
                     }
@@ -616,16 +628,17 @@ impl LiveTranscriber {
                 for channel in chunks.started.drain(..) {
                     let _ = sender.send(LiveEvent::SpeechStarted { channel }).await;
                 }
-                for line in filter.tick(chunks.now()) {
-                    let _ = sender.send(LiveEvent::Transcript(line)).await;
-                }
                 for (channel, start, end, samples) in ready {
                     if requests.len() >= 4 {
+                        for line in filter.flush() {
+                            let _ = sender.send(LiveEvent::Transcript(line)).await;
+                        }
                         let _ = sender.send(LiveEvent::Failed("The speech service fell behind. Recording stopped; start again to reconnect.".into())).await;
                         return;
                     }
                     let config = config.clone();
                     let prompt = filter.prompt(channel, &hints.glossary);
+                    in_flight.push_back((channel, start));
                     requests.push_back(async move {
                         let text = transcribe_with_retry(&config, &samples, &prompt)
                             .await
@@ -644,8 +657,14 @@ impl LiveTranscriber {
                         }))
                     });
                 }
+                let pending = chunks.earliest_system_start(&in_flight);
+                for line in filter.tick(chunks.now(), pending) {
+                    let _ = sender.send(LiveEvent::Transcript(line)).await;
+                }
                 if finished {
+                    let mut failed = None;
                     while let Some(result) = requests.next().await {
+                        let _ = in_flight.pop_front();
                         match result {
                             Ok(Some(line)) => {
                                 for line in filter.accept(&line) {
@@ -654,13 +673,16 @@ impl LiveTranscriber {
                             }
                             Ok(None) => {}
                             Err(error) => {
-                                let _ = sender.send(LiveEvent::Failed(error)).await;
+                                failed = Some(error);
                                 break;
                             }
                         }
                     }
                     for line in filter.flush() {
                         let _ = sender.send(LiveEvent::Transcript(line)).await;
+                    }
+                    if let Some(error) = failed {
+                        let _ = sender.send(LiveEvent::Failed(error)).await;
                     }
                     break;
                 }
@@ -898,6 +920,18 @@ impl BatchChunks {
     }
     fn now(&self) -> f64 {
         self.position as f64 / 16000.0
+    }
+    fn earliest_system_start(
+        &self,
+        in_flight: &std::collections::VecDeque<(u8, f64)>,
+    ) -> Option<f64> {
+        let open = (!self.samples[1].is_empty()).then_some(self.start[1] as f64 / 16000.0);
+        in_flight
+            .iter()
+            .filter(|(ch, _)| *ch == 1)
+            .map(|(_, start)| *start)
+            .chain(open)
+            .reduce(f64::min)
     }
 }
 
