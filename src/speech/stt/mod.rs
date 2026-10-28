@@ -1,4 +1,4 @@
-//! Speech-to-text engines (Deepgram WebSocket & batch providers).
+//! Speech-to-text: transcript filtering and transcription clients.
 
 pub mod filter;
 pub mod parakeet;
