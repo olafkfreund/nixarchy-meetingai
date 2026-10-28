@@ -128,4 +128,23 @@ mod tests {
         delete_prompt(c, id).unwrap();
         assert!(!prompts(c).unwrap().iter().any(|p| p.id == id));
     }
+
+    #[test]
+    fn custom_prompts_follow_slotted_prompts_in_name_order() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let z = create_prompt(c, "Zulu custom", "last").unwrap();
+        let a = create_prompt(c, "Alpha custom", "first").unwrap();
+        let prompts = prompts(c).unwrap();
+        assert_eq!(prompts, listen_modes(c).unwrap());
+        assert_eq!(prompts[prompts.len() - 2].id, a);
+        assert_eq!(prompts[prompts.len() - 1].id, z);
+        assert!(
+            prompts[..prompts.len() - 2]
+                .iter()
+                .all(|prompt| prompt.listen_slot.is_some())
+        );
+        delete_prompt(c, -1).unwrap();
+        assert_eq!(get(c, "deleted_listen_slot_-1").unwrap(), None);
+    }
 }

@@ -208,4 +208,55 @@ mod tests {
         let db = Database::in_memory().unwrap();
         assert!(require_conversation(db.connection(), "missing").is_err());
     }
+
+    #[test]
+    fn archive_search_is_case_insensitive_and_literal() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let archived = create(c, "Notes", 1).unwrap();
+        append_message(c, &archived, "user", "Résumé %_ cobalt", 2).unwrap();
+        for n in 0..205 {
+            create(c, &format!("Newer {n}"), n + 3).unwrap();
+        }
+        assert!(!list(c, 200).unwrap().iter().any(|row| row.id == archived));
+        for query in ["COBALT", "%_", "Résumé"] {
+            let found = search(c, query, 500).unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].id, archived);
+        }
+        assert!(search(c, "%x", 500).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_message_moves_an_older_conversation_to_the_top() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let older = create(c, "Earlier", 10).unwrap();
+        create(c, "Later", 20).unwrap();
+        append_message(c, &older, "assistant", "follow-up", 30).unwrap();
+        let first = &list(c, 2).unwrap()[0];
+        assert_eq!(first.id, older);
+        assert_eq!(first.updated_at, 30);
+        assert_eq!(first.message_count, 1);
+    }
+
+    #[test]
+    fn recent_messages_shortens_a_million_multibyte_characters() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let id = create(c, "Long reply", 0).unwrap();
+        for n in 0..101 {
+            append_message(c, &id, "user", &format!("small-{n}"), n).unwrap();
+        }
+        let full = format!("BEGIN{}FINISH", "界".repeat(1_000_001));
+        append_message(c, &id, "assistant", &full, 101).unwrap();
+        let recent = recent_messages(c, &id, 3).unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].content, "small-99");
+        assert!(recent[2].content.starts_with("BEGIN"));
+        assert!(recent[2].content.ends_with("FINISH"));
+        assert!(recent[2].content.contains("shortened"));
+        assert!(recent[2].content.chars().count() <= 32_000);
+        assert_eq!(messages(c, &id).unwrap().last().unwrap().content, full);
+    }
 }

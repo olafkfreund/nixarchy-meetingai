@@ -64,4 +64,20 @@ mod tests {
         assert!(load(c, &chat).unwrap().is_none());
         assert_eq!(meeting_chat(c, &meeting).unwrap(), None);
     }
+
+    #[test]
+    fn saved_context_is_replaced_and_unknown_chat_is_rejected() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let chat = conversations::create(c, "Choices", 8).unwrap();
+        let mut context = SavedContext {
+            response_length: "brief".into(),
+            ..Default::default()
+        };
+        save(c, &chat, None, &context).unwrap();
+        context.response_length = "detailed".into();
+        save(c, &chat, None, &context).unwrap();
+        assert_eq!(load(c, &chat).unwrap().unwrap().response_length, "detailed");
+        assert!(save(c, "missing", None, &context).is_err());
+    }
 }

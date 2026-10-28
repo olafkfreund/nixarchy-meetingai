@@ -490,4 +490,113 @@ mod tests {
         assert_eq!(format_duration(3700), "61:40");
         assert_eq!(format_duration(-5), "00:00");
     }
+
+    #[test]
+    fn notes_search_finds_only_the_indexed_meeting_and_delete_removes_it() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let older = start(c, "Old", "", "en", None, Default::default()).unwrap();
+        let newer = start(c, "New", "", "en", None, Default::default()).unwrap();
+        index_notes(c, &older, "maple decision").unwrap();
+        index_notes(c, &newer, "cedar decision").unwrap();
+        let found = search(c, "cedar", 10).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, newer);
+        for query in ["\"", "-", "(", "AND OR NOT *"] {
+            search(c, query, 10).unwrap();
+        }
+        delete(c, &newer).unwrap();
+        assert!(search(c, "cedar", 10).unwrap().is_empty());
+        assert_eq!(search(c, "maple", 10).unwrap()[0].id, older);
+    }
+
+    #[test]
+    fn recent_lines_keep_the_last_three_in_time_order() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let id = start(c, "Call", "", "en", None, Default::default()).unwrap();
+        for n in [4, 1, 3, 2] {
+            add_line(
+                c,
+                &id,
+                "them",
+                None,
+                &format!("utterance {n}"),
+                n as f64,
+                n as f64,
+            )
+            .unwrap();
+        }
+        let recent = recent_lines(c, &id, 3).unwrap();
+        assert_eq!(
+            recent
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            ["utterance 2", "utterance 3", "utterance 4"]
+        );
+        assert_eq!(lines(c, &id).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn renamed_meeting_and_replaced_speaker_are_visible() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let id = start(c, "Before", "", "en", None, Default::default()).unwrap();
+        rename(c, &id, "After").unwrap();
+        let listed = list(c, 10).unwrap();
+        assert_eq!(listed[0].title, "After");
+        name_speaker(c, &id, "speaker-a", "Mira").unwrap();
+        name_speaker(c, &id, "speaker-a", "Nora").unwrap();
+        let names = speaker_names(c, &id).unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names["speaker-a"], "Nora");
+    }
+
+    #[test]
+    fn untitled_limit_applies_before_skipping_short_transcripts() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let ready = start(c, "Session · 10:00", "", "en", None, Default::default()).unwrap();
+        add_line(c, &ready, "me", None, "first", 0.0, 1.0).unwrap();
+        add_line(c, &ready, "them", None, "second", 1.0, 2.0).unwrap();
+        let short = start(c, "Session · 10:01", "", "en", None, Default::default()).unwrap();
+        add_line(c, &short, "me", None, "only", 0.0, 1.0).unwrap();
+        assert!(untitled(c, 1).unwrap().is_empty());
+        let eligible = untitled(c, 2).unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].0, ready);
+        assert_eq!(eligible[0].1, "You: first\nThem: second\n");
+    }
+
+    #[test]
+    fn recap_retries_keep_previous_content_until_a_new_result() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let id = start(c, "Review", "", "en", None, Default::default()).unwrap();
+        assert!(recap(c, &id).unwrap().is_none());
+        begin_recap(c, &id).unwrap();
+        assert_eq!(recap(c, &id).unwrap().unwrap().status, "pending");
+        finish_recap(c, &id, Ok("first pass")).unwrap();
+        begin_recap(c, &id).unwrap();
+        assert_eq!(
+            recap(c, &id).unwrap().unwrap(),
+            Recap {
+                content: "first pass".into(),
+                status: "pending".into(),
+                error: "".into()
+            }
+        );
+        finish_recap(c, &id, Err("timeout")).unwrap();
+        assert_eq!(
+            recap(c, &id).unwrap().unwrap(),
+            Recap {
+                content: "".into(),
+                status: "failed".into(),
+                error: "timeout".into()
+            }
+        );
+        finish_recap(c, "absent", Ok("late")).unwrap();
+        assert!(recap(c, "absent").unwrap().is_none());
+    }
 }

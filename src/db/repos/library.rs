@@ -87,4 +87,24 @@ mod tests {
         delete(c, &id).unwrap();
         assert!(prompt_files(c, "p").unwrap().is_empty());
     }
+
+    #[test]
+    fn files_list_newest_first_with_their_stored_fields() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let first = insert(c, "notes.txt", "text/plain", 17, 0, "draft").unwrap();
+        let second = insert(c, "slides.pdf", "application/pdf", 2048, 12, "agenda").unwrap();
+        let files = list(c).unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.id.as_str())
+                .collect::<Vec<_>>(),
+            [second.as_str(), first.as_str()]
+        );
+        assert_eq!(files[0].mime_type, "application/pdf");
+        assert_eq!(files[0].size_bytes, 2048);
+        assert_eq!(files[0].pages, 12);
+        assert_eq!(files[0].ocr_text, "agenda");
+    }
 }

@@ -183,4 +183,25 @@ mod tests {
             assert!(list(connection).unwrap().is_empty());
         }
     }
+
+    #[test]
+    fn renaming_a_selected_profile_updates_the_only_list_entry() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let mut profile = Profile {
+            id: "work".into(),
+            name: "  First name  ".into(),
+            personal_context: "  personal  ".into(),
+            meeting_context: "  meeting  ".into(),
+        };
+        save(c, &profile).unwrap();
+        select(c, Some(&profile.id)).unwrap();
+        assert_eq!(selected(c).unwrap().unwrap().personal_context, "personal");
+        profile.name = "  Revised name  ".into();
+        save(c, &profile).unwrap();
+        let profiles = list(c).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "Revised name");
+        assert_eq!(profiles[0].meeting_context, "meeting");
+    }
 }
