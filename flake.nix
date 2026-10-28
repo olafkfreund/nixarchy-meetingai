@@ -62,6 +62,7 @@
           gnugrep
           gawk
           curl
+          fontconfig # fc-match: the shell asks it for the monospace family
           dbus
           quickshell
           sway
@@ -76,6 +77,7 @@
         SWAY_BIN = "${pkgs.sway}/bin/sway";
         FONTCONFIG_FILE = pkgs.makeFontsConf { fontDirectories = [ pkgs.nerd-fonts.jetbrains-mono ]; };
         SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"; # the daemon panics without a CA store
+        LANG = "C.UTF-8"; # Qt wants a UTF-8 locale; the build sandbox has none
         QT_QPA_PLATFORM = "wayland";
         QT_QUICK_BACKEND = "software"; # no GPU in a CI sandbox
       };

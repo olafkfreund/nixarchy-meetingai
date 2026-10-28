@@ -437,8 +437,7 @@ Item {
 
         CallState { id: callState }
         Hint {   // no state file 30 s after start: nothing detects calls
-            visible: root.tab === "settings" && callState.missing
-            height: visible ? implicitHeight : 0
+            visible: root.tab === "settings" && callState.missing   // the Column skips it while hidden
             text: "Call detection is off: enable the meeting-mode plugin (omarchy plugin enable nixarchy.meeting-mode --section center)."
         }
 

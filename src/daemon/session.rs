@@ -191,6 +191,8 @@ struct Inner {
     meeting_offset: f64,
     speaker_offset: i64,
     last_elapsed: f64,
+    /// `record.tap` copy of the audio the transcriber receives.
+    tap: Option<super::tap::Tap>,
     transcript: Vec<Entry>,
     mic: bool,
     system: bool,
@@ -708,6 +710,7 @@ impl Daemon {
                 meeting_offset: 0.0,
                 speaker_offset: 0,
                 last_elapsed: 0.0,
+                tap: None,
                 transcript: Vec::new(),
                 mic: true,
                 system: true,
@@ -1765,7 +1768,7 @@ impl Daemon {
         title: String,
         new: bool,
     ) -> Result<Value, String> {
-        let (stop, speech, device, output_device, system) = {
+        let (stop, speech, device, output_device, system, echo_gate) = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
             if g.finishing_meeting.is_some() && g.recording.is_none() {
@@ -1830,6 +1833,7 @@ impl Daemon {
                 Some(g.settings.input_device.clone()).filter(|d| !d.is_empty()),
                 Some(g.settings.output_device.clone()).filter(|d| !d.is_empty()),
                 g.system,
+                g.settings.echo_gate,
             )
         };
         let opened = if self.capture {
@@ -1838,6 +1842,7 @@ impl Daemon {
                 system_audio: system,
                 output_device,
                 speech: speech.clone(),
+                echo_gate,
             };
             tokio::task::spawn_blocking(move || {
                 let (session, events) = ListenSession::start(&config);
@@ -1992,6 +1997,7 @@ impl Daemon {
                 match event {
                     SessionEvent::Audio(mut samples) => {
                         self.route_audio(&mut samples);
+                        self.tap_audio(&samples);
                         if let Some(v) = levels.feed(&samples, Instant::now()) {
                             self.emit("levels", v);
                         }
@@ -2048,6 +2054,55 @@ impl Daemon {
         self.finish_recording(&meeting).await;
     }
 
+    fn tap_audio(&self, samples: &[f32]) {
+        let mut g = self.inner.lock();
+        // Local-only can begin mid-tap (interview start, candidate switch): close it at once.
+        let local = g.tap.is_some() && self.local_now(&g);
+        if let Some(tap) = g.tap.as_mut()
+            && (local || !tap.write(samples))
+            && let Some(tap) = g.tap.take()
+        {
+            tap.finish();
+        }
+    }
+
+    /// `record.tap {"path","seconds"}` or `{"stop":true}`: only during a recording, never local-only.
+    fn record_tap(&self, args: &Value) -> Result<Value, String> {
+        let mut g = self.inner.lock();
+        if args["stop"].as_bool() == Some(true) {
+            if let Some(tap) = g.tap.take() {
+                tap.finish();
+            }
+            return Ok(json!({}));
+        }
+        if !g
+            .recording
+            .as_ref()
+            .is_some_and(|r| !r.stop.load(Ordering::Relaxed))
+        {
+            return Err("record.tap needs a running recording".into());
+        }
+        if self.local_now(&g) {
+            return Err("local_only: record.tap is refused during a local-only interview".into());
+        }
+        if g.tap.is_some() {
+            return Err("record.tap is already running; stop it first".into());
+        }
+        let path = args["path"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .ok_or("record.tap needs a path")?;
+        let seconds = args["seconds"]
+            .as_u64()
+            .filter(|s| *s > 0)
+            .ok_or("record.tap needs seconds")?;
+        g.tap = Some(super::tap::Tap::create(
+            std::path::Path::new(path),
+            seconds,
+        )?);
+        Ok(json!({}))
+    }
+
     /// Meeting dictation borrows the microphone channel; a muted mic is silenced.
     fn route_audio(&self, samples: &mut [f32]) {
         let mut g = self.inner.lock();
@@ -2068,6 +2123,9 @@ impl Daemon {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
             g.finishing_meeting = Some(meeting.to_owned());
+            if let Some(tap) = g.tap.take() {
+                tap.finish();
+            }
             if let Some(r) = g.recording.take() {
                 g.last_elapsed = g.meeting_offset + r.started.elapsed().as_secs_f64();
             }
@@ -3406,6 +3464,7 @@ impl Daemon {
             }
             "candidates.delete" => self.candidate_delete(&parse::<protocol::IdArg>(args)?.id),
             "record.stop" => self.record_stop(),
+            "record.tap" => self.record_tap(&args),
             "record.toggle_mic" | "record.toggle_system" => {
                 let mut g = self.inner.lock();
                 let flag = if cmd == "record.toggle_mic" {
@@ -4534,6 +4593,36 @@ mod command_tests {
             normalize("  Infra\u{ad}\n structure   ROCKS "),
             "infrastructure rocks"
         );
+    }
+
+    #[tokio::test]
+    async fn record_tap_needs_a_recording_and_refuses_local_only() {
+        let d = daemon();
+        let tap = json!({"path": "/nonexistent-tap/x.wav", "seconds": 5});
+        let err = d.handle("record.tap", tap.clone(), None).await.unwrap_err();
+        assert!(err.contains("running recording"), "{err}");
+        d.inner.lock().recording = Some(Recording {
+            started: Instant::now(),
+            since_ms: 0,
+            stop: Arc::new(AtomicBool::new(false)),
+        });
+        d.local_only.store(true, Ordering::Relaxed);
+        let err = d.handle("record.tap", tap, None).await.unwrap_err();
+        assert!(err.starts_with("local_only: "), "{err}");
+        // A running tap closes when the session turns local-only, and a second tap is refused.
+        d.local_only.store(false, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("tap-s-{}.wav", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let args = json!({"path": path, "seconds": 5});
+        d.handle("record.tap", args.clone(), None).await.unwrap();
+        let err = d.handle("record.tap", args, None).await.unwrap_err();
+        assert!(err.contains("already running"), "{err}");
+        d.local_only.store(true, Ordering::Relaxed);
+        d.tap_audio(&[0.0, 0.0]);
+        assert!(d.inner.lock().tap.is_none());
+        assert!(hound::WavReader::open(&path).is_ok());
+        std::fs::remove_file(&path).unwrap();
+        d.inner.lock().recording = None;
     }
 
     #[tokio::test]

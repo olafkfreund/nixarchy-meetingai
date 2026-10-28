@@ -587,6 +587,7 @@ impl LiveTranscriber {
             let mut chunks = BatchChunks::default();
             let mut filter = LineFilter::default();
             let mut requests = futures_util::stream::FuturesOrdered::new();
+            let mut in_flight = std::collections::VecDeque::new();
             loop {
                 let finished;
                 let ready = tokio::select! {
@@ -600,11 +601,26 @@ impl LiveTranscriber {
                         match pcm { Some(pcm) => { finished = false; chunks.push(&pcm) }, None => { finished = true; chunks.finish() } }
                     }
                     result = requests.next(), if !requests.is_empty() => {
+                        let _ = in_flight.pop_front();
                         match result {
-                            Some(Ok(Some(line))) => { if filter.accept(&line) { let _ = sender.send(LiveEvent::Transcript(line)).await; } }
+                            Some(Ok(Some(line))) => {
+                                for line in filter.accept(&line) {
+                                    let _ = sender.send(LiveEvent::Transcript(line)).await;
+                                }
+                            }
                             Some(Ok(None)) => {}
-                            Some(Err(error)) => { let _ = sender.send(LiveEvent::Failed(error)).await; break; }
+                            Some(Err(error)) => {
+                                for line in filter.flush() {
+                                    let _ = sender.send(LiveEvent::Transcript(line)).await;
+                                }
+                                let _ = sender.send(LiveEvent::Failed(error)).await;
+                                break;
+                            }
                             None => {}
+                        }
+                        let pending = chunks.earliest_system_start(&in_flight);
+                        for line in filter.tick(chunks.now(), pending) {
+                            let _ = sender.send(LiveEvent::Transcript(line)).await;
                         }
                         continue;
                     }
@@ -614,11 +630,15 @@ impl LiveTranscriber {
                 }
                 for (channel, start, end, samples) in ready {
                     if requests.len() >= 4 {
+                        for line in filter.flush() {
+                            let _ = sender.send(LiveEvent::Transcript(line)).await;
+                        }
                         let _ = sender.send(LiveEvent::Failed("The speech service fell behind. Recording stopped; start again to reconnect.".into())).await;
                         return;
                     }
                     let config = config.clone();
                     let prompt = filter.prompt(channel, &hints.glossary);
+                    in_flight.push_back((channel, start));
                     requests.push_back(async move {
                         let text = transcribe_with_retry(&config, &samples, &prompt)
                             .await
@@ -637,20 +657,32 @@ impl LiveTranscriber {
                         }))
                     });
                 }
+                let pending = chunks.earliest_system_start(&in_flight);
+                for line in filter.tick(chunks.now(), pending) {
+                    let _ = sender.send(LiveEvent::Transcript(line)).await;
+                }
                 if finished {
+                    let mut failed = None;
                     while let Some(result) = requests.next().await {
+                        let _ = in_flight.pop_front();
                         match result {
                             Ok(Some(line)) => {
-                                if filter.accept(&line) {
+                                for line in filter.accept(&line) {
                                     let _ = sender.send(LiveEvent::Transcript(line)).await;
                                 }
                             }
                             Ok(None) => {}
                             Err(error) => {
-                                let _ = sender.send(LiveEvent::Failed(error)).await;
+                                failed = Some(error);
                                 break;
                             }
                         }
+                    }
+                    for line in filter.flush() {
+                        let _ = sender.send(LiveEvent::Transcript(line)).await;
+                    }
+                    if let Some(error) = failed {
+                        let _ = sender.send(LiveEvent::Failed(error)).await;
                     }
                     break;
                 }
@@ -831,9 +863,15 @@ where
         .map_err(|e| e.to_string())
 }
 
-type BatchChunk = (u8, f64, f64, Vec<f32>);
+/// Channel, start, end (seconds) and samples of one utterance.
+pub type BatchChunk = (u8, f64, f64, Vec<f32>);
+/// A sample above this level counts as sound (about -42 dBFS).
+const SOUND_LEVEL: f32 = 0.008;
+/// 0.2 s at 16 kHz.
+const MIN_SOUND_SAMPLES: usize = 3_200;
+/// Cuts interleaved 16 kHz stereo PCM into per-channel utterances (also used by `examples/accuracy_replay.rs`).
 #[derive(Default)]
-struct BatchChunks {
+pub struct BatchChunks {
     started: Vec<u8>,
     samples: [Vec<f32>; 2],
     silence: [usize; 2],
@@ -841,12 +879,12 @@ struct BatchChunks {
     start: [usize; 2],
 }
 impl BatchChunks {
-    fn push(&mut self, pcm: &[i16]) -> Vec<BatchChunk> {
+    pub fn push(&mut self, pcm: &[i16]) -> Vec<BatchChunk> {
         let mut ready = Vec::new();
         for frame in pcm.as_chunks::<2>().0 {
             for (channel, value) in frame.iter().enumerate() {
                 let sample = f32::from(*value) / f32::from(i16::MAX);
-                let speech = sample.abs() > 0.008;
+                let speech = sample.abs() > SOUND_LEVEL;
                 if self.samples[channel].is_empty() {
                     if !speech {
                         continue;
@@ -869,15 +907,33 @@ impl BatchChunks {
     fn take(&mut self, channel: usize) -> Option<BatchChunk> {
         let samples = std::mem::take(&mut self.samples[channel]);
         self.silence[channel] = 0;
-        (samples.len() >= 1600).then_some((
+        // A click or breath opens a chunk too; whisper turns such near-silence into invented
+        // words ("Amen."), so send only chunks with at least 0.2 s of sound in them.
+        let sound = samples.iter().filter(|s| s.abs() > SOUND_LEVEL).count();
+        (samples.len() >= 1600 && sound >= MIN_SOUND_SAMPLES).then_some((
             channel as u8,
             self.start[channel] as f64 / 16000.0,
             self.position as f64 / 16000.0,
             samples,
         ))
     }
-    fn finish(&mut self) -> Vec<BatchChunk> {
+    pub fn finish(&mut self) -> Vec<BatchChunk> {
         (0..2).filter_map(|c| self.take(c)).collect()
+    }
+    fn now(&self) -> f64 {
+        self.position as f64 / 16000.0
+    }
+    fn earliest_system_start(
+        &self,
+        in_flight: &std::collections::VecDeque<(u8, f64)>,
+    ) -> Option<f64> {
+        let open = (!self.samples[1].is_empty()).then_some(self.start[1] as f64 / 16000.0);
+        in_flight
+            .iter()
+            .filter(|(ch, _)| *ch == 1)
+            .map(|(_, start)| *start)
+            .chain(open)
+            .reduce(f64::min)
     }
 }
 
@@ -890,7 +946,7 @@ impl Drop for LiveTranscriber {
 }
 
 /// Loopback providers (whisper-server) may be restarting: retry transient failures.
-async fn transcribe_with_retry(
+pub async fn transcribe_with_retry(
     config: &ProviderConfig,
     samples: &[f32],
     prompt: &str,
@@ -948,6 +1004,30 @@ pub fn local_chunk_payload(samples: &[f32], start: f64) -> Result<Value, SttErro
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_click_in_silence_is_not_sent_but_speech_is() {
+        let pcm = |s: &[f32]| -> Vec<i16> {
+            s.iter()
+                .flat_map(|v| {
+                    let x = (v * f32::from(i16::MAX)) as i16;
+                    [x, 0]
+                })
+                .collect()
+        };
+        let mut chunks = super::BatchChunks::default();
+        // A 0.05 s click, then a second of silence: nothing goes to whisper.
+        let mut click = vec![0.3_f32; 800];
+        click.extend(vec![0.0; 16_000]);
+        assert!(chunks.push(&pcm(&click)).is_empty());
+        assert!(chunks.finish().is_empty());
+        // Half a second of a loud tone, then silence: one mic chunk.
+        let mut tone: Vec<f32> = (0..8_000).map(|i| 0.2 * (i as f32 * 0.1).sin()).collect();
+        tone.extend(vec![0.0; 16_000]);
+        let ready = chunks.push(&pcm(&tone));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].0, 0);
+    }
+
     use super::*;
     use crate::ai::providers::STT_PROVIDERS;
 
