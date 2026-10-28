@@ -1,48 +1,29 @@
-//! Shared application settings.
-//!
-//! A small key/value store read once at startup and written through, so settings
-//! persist without touching the credential vault.
-
+use crate::db::Result;
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeMap;
 
-use rusqlite::{Connection, params};
-
-use crate::db::Result;
-
-/// Read every setting.
-pub fn all(connection: &Connection) -> Result<BTreeMap<String, String>> {
-    let mut statement = connection.prepare("SELECT key, value FROM app_settings")?;
-    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get(1)?)))?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+pub fn all(c: &Connection) -> Result<BTreeMap<String, String>> {
+    let mut s = c.prepare("SELECT key, value FROM app_settings")?;
+    Ok(s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?)
 }
-
-/// Read one setting.
-pub fn get(connection: &Connection, key: &str) -> Result<Option<String>> {
-    let mut statement = connection.prepare("SELECT value FROM app_settings WHERE key = ?1")?;
-    let mut rows = statement.query(params![key])?;
-    match rows.next()? {
-        Some(row) => Ok(Some(row.get(0)?)),
-        None => Ok(None),
-    }
+pub fn get(c: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(
+        c.query_row("SELECT value FROM app_settings WHERE key=?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()?,
+    )
 }
-
-/// Write one setting, replacing any previous value.
-pub fn set(connection: &Connection, key: &str, value: &str) -> Result<()> {
-    connection.execute(
-        "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
-        params![key, value],
-    )?;
+pub fn set(c: &Connection, key: &str, value: &str) -> Result<()> {
+    c.execute("INSERT INTO app_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')", params![key, value])?;
+    Ok(())
+}
+pub fn remove(c: &Connection, key: &str) -> Result<()> {
+    c.execute("DELETE FROM app_settings WHERE key=?1", [key])?;
     Ok(())
 }
 
-/// Remove one setting.
-pub fn remove(connection: &Connection, key: &str) -> Result<()> {
-    connection.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
-    Ok(())
-}
-
-/// Editable prompt definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptRecord {
     pub id: i64,
@@ -50,63 +31,43 @@ pub struct PromptRecord {
     pub prompt: String,
     pub listen_slot: Option<i64>,
 }
-
-/// All prompts, listen modes first by slot then the rest by name.
-pub fn prompts(connection: &Connection) -> Result<Vec<PromptRecord>> {
-    let mut statement = connection.prepare(
-        "SELECT id, name, prompt, listen_slot FROM system_prompts
-         ORDER BY listen_slot IS NULL, listen_slot ASC, name ASC",
-    )?;
-    let rows = statement.query_map([], |row| {
+pub fn prompts(c: &Connection) -> Result<Vec<PromptRecord>> {
+    let mut s = c.prepare("SELECT id,name,prompt,listen_slot FROM system_prompts ORDER BY listen_slot IS NULL, listen_slot, name")?;
+    Ok(s.query_map([], |r| {
         Ok(PromptRecord {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            prompt: row.get(2)?,
-            listen_slot: row.get(3)?,
+            id: r.get(0)?,
+            name: r.get(1)?,
+            prompt: r.get(2)?,
+            listen_slot: r.get(3)?,
         })
-    })?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+    })?
+    .collect::<std::result::Result<_, _>>()?)
 }
-
-/// The five listen-mode prompts, in tab order.
-pub fn listen_modes(connection: &Connection) -> Result<Vec<PromptRecord>> {
-    prompts(connection)
+pub fn listen_modes(c: &Connection) -> Result<Vec<PromptRecord>> {
+    prompts(c)
 }
-
-/// Create a prompt.
-pub fn create_prompt(connection: &Connection, name: &str, prompt: &str) -> Result<i64> {
-    connection.execute(
-        "INSERT INTO system_prompts (name, prompt) VALUES (?1, ?2)",
+pub fn create_prompt(c: &Connection, name: &str, prompt: &str) -> Result<i64> {
+    c.execute(
+        "INSERT INTO system_prompts(name,prompt) VALUES(?1,?2)",
         params![name, prompt],
     )?;
-    Ok(connection.last_insert_rowid())
+    Ok(c.last_insert_rowid())
 }
-
-/// Update a prompt body.
-pub fn update_prompt(connection: &Connection, id: i64, name: &str, prompt: &str) -> Result<()> {
-    connection.execute(
-        "UPDATE system_prompts SET name = ?2, prompt = ?3 WHERE id = ?1",
+pub fn update_prompt(c: &Connection, id: i64, name: &str, prompt: &str) -> Result<()> {
+    c.execute(
+        "UPDATE system_prompts SET name=?2,prompt=?3 WHERE id=?1",
         params![id, name, prompt],
     )?;
     Ok(())
 }
-
-/// Delete a prompt.
-pub fn delete_prompt(connection: &Connection, id: i64) -> Result<()> {
-    use rusqlite::OptionalExtension;
-    let slot: Option<i64> = connection
-        .query_row(
-            "SELECT listen_slot FROM system_prompts WHERE id=?1",
-            params![id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .flatten();
-    if let Some(slot) = slot {
-        set(connection, &format!("deleted_listen_slot_{slot}"), "true")?;
-    }
-
-    connection.execute("DELETE FROM system_prompts WHERE id = ?1", params![id])?;
+pub fn delete_prompt(c: &Connection, id: i64) -> Result<()> {
+    let tx = c.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO app_settings(key,value) SELECT 'deleted_listen_slot_' || listen_slot,'true' FROM system_prompts WHERE id=?1 AND listen_slot IS NOT NULL ON CONFLICT(key) DO UPDATE SET value='true',updated_at=datetime('now')",
+        [id],
+    )?;
+    tx.execute("DELETE FROM system_prompts WHERE id=?1", [id])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -114,69 +75,20 @@ pub fn delete_prompt(connection: &Connection, id: i64) -> Result<()> {
 mod tests {
     use super::*;
     use crate::db::Database;
-
     #[test]
-    fn built_in_deletions_survive_reopen_and_custom_prompts_are_selectable() {
-        let db = Database::in_memory().unwrap();
-        let connection = db.connection();
-        let interview = prompts(connection)
-            .unwrap()
-            .into_iter()
-            .find(|p| p.listen_slot == Some(1))
-            .unwrap();
-        delete_prompt(connection, interview.id).unwrap();
-        crate::db::seed::seed_listen_modes(connection).unwrap();
-        assert!(
-            !prompts(connection)
-                .unwrap()
-                .iter()
-                .any(|p| p.listen_slot == Some(1))
-        );
-        let id = create_prompt(connection, "My interview", "Answer honestly").unwrap();
-        update_prompt(connection, id, "My meeting", "Use meeting context").unwrap();
-        assert!(
-            listen_modes(connection)
-                .unwrap()
-                .iter()
-                .any(|p| p.id == id && p.name == "My meeting" && p.prompt == "Use meeting context")
-        );
-    }
-
-    #[test]
-    fn settings_upsert_and_read_back() {
-        let database = Database::open_in_memory().unwrap();
-        let connection = database.connection();
-        set(connection, "reduce_motion", "false").unwrap();
-        set(connection, "reduce_motion", "true").unwrap();
+    fn settings_and_prompts() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        assert_eq!(get(c, "ui_scale").unwrap(), None);
+        set(c, "ui_scale", "small").unwrap();
+        set(c, "ui_scale", "large").unwrap();
+        assert_eq!(get(c, "ui_scale").unwrap().as_deref(), Some("large"));
+        assert_eq!(all(c).unwrap().len(), 1);
+        remove(c, "ui_scale").unwrap();
+        assert_eq!(get(c, "ui_scale").unwrap(), None);
+        let modes = listen_modes(c).unwrap();
         assert_eq!(
-            get(connection, "reduce_motion").unwrap().as_deref(),
-            Some("true")
-        );
-        assert_eq!(all(connection).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn missing_setting_is_none() {
-        let database = Database::open_in_memory().unwrap();
-        assert_eq!(get(database.connection(), "nope").unwrap(), None);
-    }
-
-    #[test]
-    fn remove_clears_setting() {
-        let database = Database::open_in_memory().unwrap();
-        let connection = database.connection();
-        set(connection, "k", "v").unwrap();
-        remove(connection, "k").unwrap();
-        assert!(get(connection, "k").unwrap().is_none());
-    }
-
-    #[test]
-    fn listen_modes_are_seeded_in_order() {
-        let database = Database::open_in_memory().unwrap();
-        let modes = listen_modes(database.connection()).unwrap();
-        let names: Vec<_> = modes.iter().map(|mode| mode.name.as_str()).collect();
-        assert_eq!(
-            names,
+            modes.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
             [
                 "General",
                 "Interview",
@@ -186,31 +98,46 @@ mod tests {
                 "Interviewer"
             ]
         );
-        let slots: Vec<_> = modes.iter().map(|mode| mode.listen_slot).collect();
         assert_eq!(
-            slots,
+            modes.iter().map(|p| p.listen_slot).collect::<Vec<_>>(),
             [Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)]
         );
+        delete_prompt(c, modes[1].id).unwrap();
+        crate::db::seed::seed_listen_modes(c).unwrap();
+        assert!(
+            !listen_modes(c)
+                .unwrap()
+                .iter()
+                .any(|p| p.listen_slot == Some(1))
+        );
+        let id = create_prompt(c, "Quick", "first").unwrap();
+        update_prompt(c, id, "Brief", "second").unwrap();
+        assert!(
+            listen_modes(c)
+                .unwrap()
+                .iter()
+                .any(|p| p.id == id && p.name == "Brief" && p.prompt == "second")
+        );
+        delete_prompt(c, id).unwrap();
+        assert!(!prompts(c).unwrap().iter().any(|p| p.id == id));
     }
 
     #[test]
-    fn prompts_crud() {
-        let database = Database::open_in_memory().unwrap();
-        let connection = database.connection();
-        let id = create_prompt(connection, "Custom", "Be nice").unwrap();
-        update_prompt(connection, id, "Custom", "Be very nice").unwrap();
-        let found = prompts(connection)
-            .unwrap()
-            .into_iter()
-            .find(|prompt| prompt.id == id)
-            .unwrap();
-        assert_eq!(found.prompt, "Be very nice");
-        delete_prompt(connection, id).unwrap();
+    fn custom_prompts_follow_slotted_prompts_in_name_order() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let z = create_prompt(c, "Zulu custom", "last").unwrap();
+        let a = create_prompt(c, "Alpha custom", "first").unwrap();
+        let prompts = prompts(c).unwrap();
+        assert_eq!(prompts, listen_modes(c).unwrap());
+        assert_eq!(prompts[prompts.len() - 2].id, a);
+        assert_eq!(prompts[prompts.len() - 1].id, z);
         assert!(
-            prompts(connection)
-                .unwrap()
+            prompts[..prompts.len() - 2]
                 .iter()
-                .all(|prompt| prompt.id != id)
+                .all(|prompt| prompt.listen_slot.is_some())
         );
+        delete_prompt(c, -1).unwrap();
+        assert_eq!(get(c, "deleted_listen_slot_-1").unwrap(), None);
     }
 }
