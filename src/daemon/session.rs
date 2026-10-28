@@ -3353,7 +3353,8 @@ impl Daemon {
                     .ok()
                     .flatten()
                     .is_some_and(|c| c.local_only)
-            }) || (args["meeting"].is_null() && self.local_now(&g));
+            }) || ((cmd == "now.get" || args["meeting"].as_str().is_none())
+                && self.local_now(&g));
             if local {
                 return Err("This interview is local-only".into());
             }
@@ -3373,11 +3374,47 @@ impl Daemon {
             }
             _ => None,
         };
-        let result = self.dispatch(cmd, args).await;
+        let mut result = self.dispatch(cmd, args).await;
+        if let Ok(value) = &mut result {
+            self.hide_interviews(cmd, value);
+        }
         if let (Ok(_), Some(text)) = (&result, notice) {
             self.emit("notice", json!({"text": text}));
         }
         result
+    }
+
+    /// Strip what a local-only interview leaves in replies to agents.
+    fn hide_interviews(&self, cmd: &str, value: &mut Value) {
+        let g = self.inner.lock();
+        let Ok(hidden) = candidates::local_only_ids(g.db.connection()) else {
+            return;
+        };
+        let is_hidden =
+            |v: &Value, key: &str| v[key].as_str().is_some_and(|id| hidden.contains(id));
+        match cmd {
+            "state.get" if self.local_now(&g) => {
+                value["calendar_title"] = Value::Null;
+                value["meeting"] = Value::Null;
+            }
+            "items.list" => {
+                if let Some(list) = value.as_array_mut() {
+                    list.retain(|i| !is_hidden(i, "meeting_id"));
+                }
+            }
+            "last_time.get" => {
+                if is_hidden(value, "meeting") {
+                    for key in ["meeting", "title", "started_at"] {
+                        value[key] = Value::Null;
+                    }
+                    value["recap"] = "".into();
+                }
+                if let Some(list) = value["items"].as_array_mut() {
+                    list.retain(|i| !is_hidden(i, "meeting_id"));
+                }
+            }
+            _ => {}
+        }
     }
 
     async fn dispatch(self: &Arc<Self>, cmd: &str, args: Value) -> Result<Value, String> {
@@ -4823,6 +4860,58 @@ mod command_tests {
             assert!(err.contains("local-only"), "{cmd}: {err}");
         }
         d.local_only.store(false, Ordering::Relaxed);
+        // now.get ignores its arguments, so a meeting argument must not get past the guard.
+        d.local_only.store(true, Ordering::Relaxed);
+        for args in [json!({"meeting": other}), json!({"meeting": 5})] {
+            let err = agent("now.get", args).await.unwrap_err();
+            assert!(err.contains("local-only"), "{err}");
+        }
+        let st = agent("state.get", json!({})).await.unwrap();
+        assert!(st["meeting"].is_null() && st["calendar_title"].is_null());
+        d.local_only.store(false, Ordering::Relaxed);
+        // Series replies never carry an interview, even one that is in a series.
+        let series = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let s = items::series_create(c, "Weekly").unwrap();
+            c.execute("UPDATE meetings SET series_id = ?1", [&s])
+                .unwrap();
+            for (m, text) in [(&meeting, "secret item"), (&other, "team item")] {
+                let item = items::NewItem {
+                    meeting_id: m,
+                    series_id: Some(&s),
+                    kind: "action",
+                    text,
+                    owner: None,
+                    due: None,
+                    source_line: None,
+                    origin_item: None,
+                };
+                items::insert(c, &item).unwrap();
+            }
+            s
+        };
+        let listed = agent("items.list", json!({"series": series}))
+            .await
+            .unwrap();
+        let texts: Vec<_> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["text"].clone())
+            .collect();
+        assert_eq!(texts, vec![json!("team item")]);
+        let last = agent("last_time.get", json!({"series": series}))
+            .await
+            .unwrap();
+        assert!(
+            last["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| i["meeting_id"] != json!(meeting))
+        );
+        assert_ne!(last["meeting"], json!(meeting));
         // Without an origin nothing changes.
         let own = d.handle("session.list", json!({}), None).await.unwrap();
         assert!(
