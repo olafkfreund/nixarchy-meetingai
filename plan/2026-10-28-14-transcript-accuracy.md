@@ -146,4 +146,11 @@ is reported, not replaced.
 
 ## Deviations log
 
-None yet.
+- **Step 0:** the replay is `examples/accuracy_replay.rs`, which runs
+  `BatchChunks` → provider → `LineFilter` in sequence rather than the
+  spawned live task (same components, latency measured per chunk); this
+  made `BatchChunk`/`BatchChunks` `pub`. JSON lines also carry `latency`.
+  `score.py` scores by words (bleed: > ½ of a mic line's words in `them:`
+  text and < ½ in `me:`; invented: < ½ of its words anywhere in the
+  reference); `[silence]` markers are parsed but unused. `score.py` calls
+  `cargo run --example`, so it runs inside `devenv shell`.

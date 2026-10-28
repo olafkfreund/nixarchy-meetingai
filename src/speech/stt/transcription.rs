@@ -831,13 +831,15 @@ where
         .map_err(|e| e.to_string())
 }
 
-type BatchChunk = (u8, f64, f64, Vec<f32>);
+/// Channel, start, end (seconds) and samples of one utterance.
+pub type BatchChunk = (u8, f64, f64, Vec<f32>);
 /// A sample above this level counts as sound (about -42 dBFS).
 const SOUND_LEVEL: f32 = 0.008;
 /// 0.2 s at 16 kHz.
 const MIN_SOUND_SAMPLES: usize = 3_200;
+/// Cuts interleaved 16 kHz stereo PCM into per-channel utterances (also used by `examples/accuracy_replay.rs`).
 #[derive(Default)]
-struct BatchChunks {
+pub struct BatchChunks {
     started: Vec<u8>,
     samples: [Vec<f32>; 2],
     silence: [usize; 2],
@@ -845,7 +847,7 @@ struct BatchChunks {
     start: [usize; 2],
 }
 impl BatchChunks {
-    fn push(&mut self, pcm: &[i16]) -> Vec<BatchChunk> {
+    pub fn push(&mut self, pcm: &[i16]) -> Vec<BatchChunk> {
         let mut ready = Vec::new();
         for frame in pcm.as_chunks::<2>().0 {
             for (channel, value) in frame.iter().enumerate() {
@@ -883,7 +885,7 @@ impl BatchChunks {
             samples,
         ))
     }
-    fn finish(&mut self) -> Vec<BatchChunk> {
+    pub fn finish(&mut self) -> Vec<BatchChunk> {
         (0..2).filter_map(|c| self.take(c)).collect()
     }
 }
