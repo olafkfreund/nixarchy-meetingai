@@ -3,21 +3,22 @@
 //! While recording, `maybe_chunk` summarises each new slice of final lines into
 //! `meeting_note_chunks`. `generate` summarises what is left, then consolidates
 //! every chunk into the recap, so a 3-hour meeting never needs one giant prompt.
-    ai::{engine, guard, providers::ProviderConfig},
-    core::{
-        domain::Message,
-        settings::{MeetingMode, Settings},
-    },
-    db::{
-        Database,
-        items::{self, ItemRecord, NewItem, Scope},
-        meetings::{self, LineRecord, NoteChunk},
-        repos::candidates,
-    },
-    speech::stt::filter::{similarity, tokens},
+use crate::ai::{engine, guard, providers::ProviderConfig};
+use crate::core::{
+    domain::Message,
+    settings::{MeetingMode, Settings},
+};
+use crate::db::{
+    Database,
+    items::{self, ItemRecord, NewItem, Scope},
+    meetings::{self, LineRecord, NoteChunk},
+    repos::candidates,
+};
+use crate::speech::stt::filter::{similarity, tokens};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::{path::Path, sync::Arc, time::Duration};
+
 /// New final characters that trigger a chunk, and the most one chunk covers.
 pub const CHUNK_CHARS: usize = 8000;
 /// Transcript seconds that trigger a chunk.
@@ -226,11 +227,27 @@ pub fn reconcile(connection: &Connection, meeting: &str) -> crate::db::Result<()
 }
 
 async fn ask(config: &ProviderConfig, system: String, user: String) -> Result<String, String> {
+    let context = engine::TurnContext {
         system: Some(system),
-        Duration::from_secs(120),
-            config,
-            &[Message::user(user)],
+        images: Vec::new(),
+    };
+    // Nobody holds the sender, so this turn can only end by finishing or timing out.
+    let (_keep, cancel) = tokio::sync::watch::channel(false);
+    let client = engine::http_client();
+    let history = [Message::user(user)];
+    let turn = engine::stream_chat(
+        &client,
+        config,
+        &history,
+        &context,
+        Arc::new(cancel),
+        |_| {},
+    );
+    match tokio::time::timeout(Duration::from_secs(120), turn).await {
+        Ok(done) => done.map_err(|e| e.to_string()),
         Err(_) => Err("The recap request timed out. You can retry from the saved meeting.".into()),
+    }
+}
 
 /// Run blocking database work off the async runtime.
 async fn db<T: Send + 'static>(
@@ -554,6 +571,7 @@ pub async fn generate(
         MeetingMode::Interview => &settings.recap_prompt_interview,
         MeetingMode::TeamMeeting => &settings.recap_prompt_team,
         MeetingMode::Interviewer => &settings.recap_prompt_interviewer,
+    };
     let result = match config {
         None => Err("Choose a configured AI provider in Settings to generate the recap.".into()),
         Some(config) if interview => {
@@ -575,7 +593,11 @@ pub async fn generate(
     db(path, {
         let (id, result) = (id.to_owned(), result.clone());
         move |db| {
+            meetings::finish_recap(
+                db.connection(),
                 &id,
+                result.as_deref().map_err(String::as_str),
+            )
         }
     })
     .await?;
@@ -586,6 +608,8 @@ pub async fn generate(
         })
         .await?;
     }
+    result.map(|_| ())
+}
 
 async fn notes(
     path: &Path,
