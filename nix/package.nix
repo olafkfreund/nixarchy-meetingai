@@ -9,6 +9,7 @@
   pipewire,
   openssl,
   makeWrapper,
+  callPackage,
   grim,
   slurp,
   libnotify,
@@ -26,6 +27,7 @@ rustPlatform.buildRustPackage {
       ../src
       ../packaging
       ../skills
+      ../tests/parakeet_decode.rs # run by the parakeet-decode flake check
     ];
   };
 
@@ -42,6 +44,8 @@ rustPlatform.buildRustPackage {
     pipewire
     openssl
   ];
+  # The sherpa-onnx crate would download its library at build time; use nixpkgs' instead.
+  SHERPA_ONNX_LIB_DIR = "${callPackage ./sherpa-lib.nix { }}/lib";
   LIBCLANG_PATH = "${libclang.lib}/lib";
 
   # Tests open sockets and audio devices; they run in the dev shell.

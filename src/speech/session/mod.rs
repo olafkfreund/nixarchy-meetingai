@@ -1,4 +1,4 @@
-//! Live audio listening sessions.
+//! The live listening session.
 
 pub mod listen;
 

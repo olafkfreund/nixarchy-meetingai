@@ -132,7 +132,21 @@ impl SystemAudio {
                     .ok_or(SystemAudioError::NoMonitor)?
             }
         };
+        Self::spawn(chosen)
+    }
 
+    /// Record a named (non-monitor) source verbatim, e.g. a microphone or `@DEFAULT_SOURCE@`.
+    pub fn start_input(source: &str) -> Result<Self, SystemAudioError> {
+        if !cfg!(target_os = "linux") {
+            return Err(SystemAudioError::Unsupported);
+        }
+        Self::spawn(MonitorSource {
+            id: source.to_owned(),
+            name: source.to_owned(),
+        })
+    }
+
+    fn spawn(chosen: MonitorSource) -> Result<Self, SystemAudioError> {
         // Ask parec for 16 kHz mono directly: it resamples in the server, so no
         // extra conversion is needed here.
         let mut child = Command::new("parec")
@@ -226,7 +240,7 @@ impl SystemAudio {
     }
 
     /// Drain buffered samples.
-    pub fn take(&mut self, limit: usize) -> Vec<f32> {
+    pub fn take(&self, limit: usize) -> Vec<f32> {
         match self.buffer.lock() {
             Ok(mut buffer) => {
                 let count = limit.min(buffer.len());
@@ -243,6 +257,11 @@ impl SystemAudio {
                 .as_mut()
                 .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
         })
+    }
+
+    /// Whether any audio has arrived since the last `take`.
+    pub fn has_samples(&self) -> bool {
+        self.buffer.lock().is_ok_and(|b| !b.is_empty())
     }
 
     /// Samples discarded because the consumer fell behind.

@@ -1,0 +1,29 @@
+//! Decodes a real clip with the real Parakeet model. Skipped unless
+//! `NIXARCHY_MEETINGAI_PARAKEET_DIR` and `NIXARCHY_MEETINGAI_PARAKEET_WAV` (16 kHz mono) are set;
+//! `nix flake check` sets both, so a nixpkgs bump that breaks sherpa-onnx fails there.
+
+use nixarchy_meetingai::speech::stt::parakeet;
+
+#[tokio::test]
+async fn real_model_decodes_a_clip() {
+    let Some(wav) = std::env::var_os("NIXARCHY_MEETINGAI_PARAKEET_WAV") else {
+        eprintln!("skipped: no model/clip configured");
+        return;
+    };
+    assert_eq!(parakeet::not_ready_reason(), None);
+    let samples: Vec<f32> = hound::WavReader::open(wav)
+        .unwrap()
+        .into_samples::<i16>()
+        .map(|s| f32::from(s.unwrap()) / 32768.0)
+        .collect();
+    let started = std::time::Instant::now();
+    let text = parakeet::transcribe(samples, 16_000)
+        .await
+        .unwrap()
+        .to_lowercase();
+    eprintln!("decoded in {:?}: {text}", started.elapsed());
+    assert!(
+        text.contains("ask what you can do for your country"),
+        "{text}"
+    );
+}

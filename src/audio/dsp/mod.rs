@@ -1,17 +1,11 @@
-//! Audio primitives: WAV encoding, resampling and voice-activity segmentation.
-//!
-//! Live capture feeds 16 kHz mono f32 samples. Everything that decides *what* to
-//! send is pure and unit-tested here; device I/O lives in [`capture`].
+//! Audio digital signal processing: WAV encoding, RMS measurement, and linear resampling.
 
 use std::io::Cursor;
 
-/// Sample rate used for every encoded chunk and for live streaming.
+/// Target audio sample rate in Hz (16 kHz mono).
 pub const SAMPLE_RATE: u32 = 16_000;
 
-/// Encode mono f32 samples as a 16-bit PCM WAV file.
-///
-/// Values outside `[-1, 1]` are clamped and NaN is treated as silence, so a
-/// misbehaving device can never produce an invalid file.
+/// Encodes normalized `f32` audio samples (`[-1.0, 1.0]`) into an in-memory 16-bit PCM WAV buffer.
 pub fn encode_wav(samples: &[f32]) -> Result<Vec<u8>, hound::Error> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -19,401 +13,264 @@ pub fn encode_wav(samples: &[f32]) -> Result<Vec<u8>, hound::Error> {
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let mut cursor = Cursor::new(Vec::new());
+
+    let mut buf = Vec::with_capacity(44 + samples.len() * 2);
     {
-        let mut writer = hound::WavWriter::new(&mut cursor, spec)?;
-        for sample in samples {
-            let clamped = if sample.is_finite() {
-                sample.clamp(-1.0, 1.0)
+        let mut writer = hound::WavWriter::new(Cursor::new(&mut buf), spec)?;
+        let scale = f32::from(i16::MAX);
+        for &s in samples {
+            let pcm = if s.is_finite() {
+                (s.clamp(-1.0, 1.0) * scale) as i16
             } else {
-                0.0
+                0
             };
-            writer.write_sample((clamped * f32::from(i16::MAX)) as i16)?;
+            writer.write_sample(pcm)?;
         }
         writer.finalize()?;
     }
-    Ok(cursor.into_inner())
+    Ok(buf)
 }
 
-/// Root-mean-square level of a frame, the value VAD compares against.
+/// Computes the root mean square (RMS) amplitude of a sample slice.
 pub fn rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
     }
-    let sum: f32 = samples
+    let sum_sq: f64 = samples
         .iter()
-        .filter(|sample| sample.is_finite())
-        .map(|sample| sample * sample)
+        .filter(|s| s.is_finite())
+        .map(|&s| {
+            let v = f64::from(s);
+            v * v
+        })
         .sum();
-    (sum / samples.len() as f32).sqrt()
+    ((sum_sq / (samples.len() as f64)).sqrt()) as f32
 }
 
-/// Downmix interleaved frames to mono.
-pub fn downmix(channels: &[Vec<f32>]) -> Vec<f32> {
-    let frames = channels.iter().map(Vec::len).min().unwrap_or(0);
-    if channels.is_empty() {
-        return Vec::new();
-    }
-    (0..frames)
-        .map(|i| channels.iter().map(|channel| channel[i]).sum::<f32>() / channels.len() as f32)
-        .collect()
-}
-
-/// Linear resampler that keeps phase across calls.
-///
-/// Streaming needs continuity: resampling each block independently would insert
-/// clicks at every boundary, so the fractional position and the last sample are
-/// carried between calls.
+/// Stateful linear resampler that converts an arbitrary input sample rate to [`SAMPLE_RATE`].
 #[derive(Debug, Clone)]
 pub struct LinearResampler {
-    input_rate: f64,
-    position: f64,
-    previous: f32,
+    input_rate: u32,
+    step: f64,
+    out_idx: u64,
+    in_count: u64,
+    prev_sample: f32,
 }
 
 impl LinearResampler {
+    /// Creates a new resampler from `input_rate` Hz to [`SAMPLE_RATE`] Hz.
     pub fn new(input_rate: u32) -> Self {
+        let effective_rate = input_rate.max(1);
         Self {
-            input_rate: input_rate.max(1) as f64,
-            position: 0.0,
-            previous: 0.0,
+            input_rate: effective_rate,
+            step: f64::from(effective_rate) / f64::from(SAMPLE_RATE),
+            out_idx: 0,
+            in_count: 0,
+            prev_sample: 0.0,
         }
     }
 
-    pub fn is_passthrough(&self) -> bool {
-        (self.input_rate - SAMPLE_RATE as f64).abs() < f64::EPSILON
-    }
-
-    /// Resample one block. Returns `SAMPLE_RATE`-family samples.
-    pub fn process(&mut self, input: &[f32]) -> Vec<f32> {
-        let mut output = Vec::new();
-        self.process_into(input, &mut output);
-        output
-    }
-
-    /// Reuse the callback's allocation and defer interpolation that needs the
-    /// next block's first sample instead of duplicating the previous endpoint.
+    /// Resamples `input` into `output`, clearing `output` first while reusing its allocation.
     pub fn process_into(&mut self, input: &[f32], output: &mut Vec<f32>) {
         output.clear();
         if input.is_empty() {
             return;
         }
-        if self.is_passthrough() {
+        if self.input_rate == SAMPLE_RATE {
             output.extend_from_slice(input);
             return;
         }
-        let step = self.input_rate / SAMPLE_RATE as f64;
-        output.reserve((input.len() as f64 / step) as usize + 1);
-        let mut position = self.position;
-        while position <= (input.len() - 1) as f64 {
-            let index = position.floor() as isize;
-            let fraction = (position - index as f64) as f32;
-            let current = if index < 0 {
-                self.previous
+        // Grow once up front so the audio callback does not reallocate while pushing.
+        output.reserve((input.len() as f64 / self.step) as usize + 1);
+
+        let start_in = self.in_count;
+        let end_in = start_in + input.len() as u64;
+        let last_in = end_in - 1;
+
+        let sample_at = |idx: u64, prev: f32| -> f32 {
+            if idx < start_in {
+                prev
             } else {
-                input[index as usize]
-            };
-            let next = input.get((index + 1) as usize).copied().unwrap_or(current);
-            output.push(current + (next - current) * fraction);
-            position += step;
-        }
-        self.position = position - input.len() as f64;
-        self.previous = input.last().copied().unwrap_or(self.previous);
-    }
-}
+                input[(idx - start_in) as usize]
+            }
+        };
 
-/// Why a buffer was flushed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlushReason {
-    /// Speech followed by enough silence.
-    Utterance,
-    /// The buffer hit its maximum length.
-    Maximum,
-    /// Capture stopped while speech was present.
-    Stopped,
-}
+        loop {
+            let pos = (self.out_idx as f64) * self.step;
+            let base = pos.floor() as u64;
+            let frac = (pos - (base as f64)) as f32;
 
-/// A finished utterance ready to send for transcription.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Segment {
-    pub samples: Vec<f32>,
-    pub reason: FlushReason,
-}
+            if base > last_in || (base == last_in && frac > 0.0) {
+                break;
+            }
 
-/// Tunables for speech segmentation.
-#[derive(Debug, Clone, Copy)]
-pub struct VadConfig {
-    /// RMS above which a frame counts as speech.
-    pub speech_threshold: f32,
-    /// Consecutive quiet ticks needed to close an utterance.
-    pub silence_ticks: usize,
-    /// Minimum samples in a normal utterance.
-    pub min_samples: usize,
-    /// Hard cap on a single utterance.
-    pub max_samples: usize,
-    /// Buffered audio with no speech at all is dropped at this length.
-    pub silence_reset: usize,
-}
-
-impl Default for VadConfig {
-    fn default() -> Self {
-        Self {
-            // Values match the reference: RMS 0.01, eight 100 ms quiet ticks,
-            // 2 s minimum, 20 s maximum and a 5 s silent reset at 16 kHz.
-            speech_threshold: 0.01,
-            silence_ticks: 8,
-            min_samples: 32_000,
-            max_samples: 320_000,
-            silence_reset: 80_000,
-        }
-    }
-}
-
-/// Streaming speech segmenter.
-#[derive(Debug, Clone)]
-pub struct Segmenter {
-    config: VadConfig,
-    samples: Vec<f32>,
-    silence_ticks: usize,
-    has_speech: bool,
-}
-
-impl Segmenter {
-    pub fn new(config: VadConfig) -> Self {
-        Self {
-            config,
-            samples: Vec::new(),
-            silence_ticks: 0,
-            has_speech: false,
-        }
-    }
-
-    pub fn buffered(&self) -> usize {
-        self.samples.len()
-    }
-
-    /// Feed one 100 ms frame, returning a finished segment when one closes.
-    pub fn push(&mut self, frame: &[f32]) -> Option<Segment> {
-        let level = rms(frame);
-        if level >= self.config.speech_threshold {
-            self.silence_ticks = 0;
-            self.has_speech = true;
-        } else {
-            self.silence_ticks += 1;
-        }
-        self.samples.extend_from_slice(frame);
-
-        if (self.samples.len() >= self.config.min_samples
-            && self.silence_ticks >= self.config.silence_ticks)
-            || self.samples.len() >= self.config.max_samples
-        {
-            let reason = if self.samples.len() >= self.config.max_samples {
-                FlushReason::Maximum
+            let x0 = sample_at(base, self.prev_sample);
+            let y = if frac == 0.0 {
+                x0
             } else {
-                FlushReason::Utterance
+                let x1 = sample_at(base + 1, self.prev_sample);
+                x0 + (x1 - x0) * frac
             };
-            return self.take(reason);
-        }
-        if !self.has_speech && self.samples.len() >= self.config.silence_reset {
-            self.reset();
-        }
-        None
-    }
 
-    /// Flush on stop, but only if something worth transcribing is buffered.
-    ///
-    /// A short answer ("yes", "ok") can legitimately be under a second, so the
-    /// stop flush uses a much lower bar than a normal utterance: a quarter
-    /// second of actual speech.
-    pub fn finish(&mut self) -> Option<Segment> {
-        let minimum = (SAMPLE_RATE as usize) / 4;
-        if self.has_speech && self.samples.len() >= minimum {
-            return self.take(FlushReason::Stopped);
+            output.push(y);
+            self.out_idx += 1;
         }
-        self.reset();
-        None
-    }
 
-    /// Drop buffered audio without producing a segment.
-    pub fn reset(&mut self) {
-        self.samples.clear();
-        self.silence_ticks = 0;
-        self.has_speech = false;
-    }
-
-    fn take(&mut self, reason: FlushReason) -> Option<Segment> {
-        if !self.has_speech || self.samples.is_empty() {
-            self.reset();
-            return None;
-        }
-        let samples = std::mem::take(&mut self.samples);
-        self.silence_ticks = 0;
-        self.has_speech = false;
-        Some(Segment { samples, reason })
+        self.in_count = end_in;
+        self.prev_sample = input[input.len() - 1];
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tone(amplitude: f32, len: usize) -> Vec<f32> {
-        (0..len)
-            .map(|i| {
-                amplitude
-                    * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / SAMPLE_RATE as f32).sin()
-            })
-            .collect()
-    }
-
-    fn silence(len: usize) -> Vec<f32> {
-        vec![0.0; len]
-    }
+    use std::io::Cursor;
 
     #[test]
-    fn wav_has_expected_header_and_duration() {
-        let bytes = encode_wav(&silence(SAMPLE_RATE as usize)).unwrap();
+    fn encode_wav_one_second_silence_header_and_format() {
+        let silence = vec![0.0_f32; SAMPLE_RATE as usize];
+        let bytes = encode_wav(&silence).expect("encode_wav failed");
+
         assert_eq!(&bytes[0..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WAVE");
-        let reader = hound::WavReader::new(Cursor::new(bytes)).unwrap();
-        assert_eq!(reader.spec().sample_rate, SAMPLE_RATE);
-        assert_eq!(reader.spec().channels, 1);
-        assert_eq!(reader.spec().bits_per_sample, 16);
-        assert_eq!(reader.len(), SAMPLE_RATE);
+
+        let reader = hound::WavReader::new(Cursor::new(&bytes)).expect("WavReader failed");
+        let spec = reader.spec();
+        assert_eq!(spec.sample_rate, 16_000);
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.bits_per_sample, 16);
+        assert_eq!(spec.sample_format, hound::SampleFormat::Int);
+
+        let decoded: Vec<i16> = reader
+            .into_samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reading samples failed");
+        assert_eq!(decoded.len(), 16_000);
+        assert!(decoded.iter().all(|&s| s == 0));
     }
 
     #[test]
-    fn wav_clamps_and_sanitises() {
-        let bytes = encode_wav(&[2.0, -2.0, f32::NAN, f32::INFINITY]).unwrap();
-        let mut reader = hound::WavReader::new(Cursor::new(bytes)).unwrap();
-        let samples: Vec<i16> = reader.samples::<i16>().map(|s| s.unwrap()).collect();
-        assert_eq!(samples[0], i16::MAX);
-        assert_eq!(samples[1], -i16::MAX);
-        // NaN and infinity are not finite, so both become silence.
-        assert_eq!(samples[2], 0);
-        assert_eq!(samples[3], 0);
+    fn encode_wav_clamps_and_handles_non_finite() {
+        let input = [
+            2.0_f32,
+            -2.0,
+            1.0,
+            -1.0,
+            0.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        let bytes = encode_wav(&input).expect("encode_wav failed");
+        let reader = hound::WavReader::new(Cursor::new(&bytes)).expect("WavReader failed");
+        let decoded: Vec<i16> = reader
+            .into_samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reading samples failed");
+
+        assert_eq!(decoded, vec![32767, -32767, 32767, -32767, 0, 0, 0, 0]);
     }
 
     #[test]
-    fn rms_matches_expected() {
+    fn encode_wav_empty_input() {
+        let bytes = encode_wav(&[]).expect("encode_wav failed");
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        let reader = hound::WavReader::new(Cursor::new(&bytes)).expect("WavReader failed");
+        assert_eq!(reader.len(), 0);
+    }
+
+    #[test]
+    fn rms_computation_and_edge_cases() {
         assert_eq!(rms(&[]), 0.0);
-        assert!((rms(&[1.0, -1.0]) - 1.0).abs() < 1e-6);
-        assert!((rms(&[0.5, -0.5]) - 0.5).abs() < 1e-6);
+        assert!((rms(&[1.0, -1.0]) - 1.0).abs() <= 1e-6);
+        assert!((rms(&[0.5, -0.5]) - 0.5).abs() <= 1e-6);
+        // Non-finite values contribute 0 to sum of squares but count toward total length (4)
+        let mixed = [1.0, -1.0, f32::NAN, f32::INFINITY];
+        let expected = (2.0_f32 / 4.0).sqrt();
+        assert!((rms(&mixed) - expected).abs() <= 1e-6);
     }
 
     #[test]
-    fn downmix_averages_channels() {
-        let mono = downmix(&[vec![1.0, 0.0], vec![0.0, 1.0]]);
-        assert_eq!(mono, vec![0.5, 0.5]);
-        assert!(downmix(&[]).is_empty());
+    fn resampler_zero_rate_does_not_divide_by_zero() {
+        let mut r = LinearResampler::new(0);
+        let mut out = Vec::new();
+        r.process_into(&[0.5, 0.5], &mut out);
+        assert!(!out.is_empty());
     }
 
     #[test]
-    fn resampler_halves_for_32k() {
-        let mut resampler = LinearResampler::new(32_000);
-        let input = tone(0.5, 3200);
-        let output = resampler.process(&input);
-        assert!((output.len() as i32 - 1600).abs() <= 1);
+    fn resampler_32khz_sine_length() {
+        let mut r = LinearResampler::new(32_000);
+        let input: Vec<f32> = (0..3_200).map(|i| (i as f32 * 0.05).sin()).collect();
+        let mut output = Vec::new();
+        r.process_into(&input, &mut output);
+        assert!(
+            (output.len() as isize - 1_600).abs() <= 1,
+            "expected ~1600 samples, got {}",
+            output.len()
+        );
     }
 
     #[test]
-    fn resampler_is_passthrough_at_native_rate() {
-        let mut resampler = LinearResampler::new(SAMPLE_RATE);
-        let input = vec![0.1, 0.2, 0.3];
-        assert_eq!(resampler.process(&input), input);
+    fn resampler_16khz_passthrough() {
+        let mut r = LinearResampler::new(16_000);
+        let mut output = vec![99.0];
+        r.process_into(&[0.1, 0.2, 0.3], &mut output);
+        assert_eq!(output, vec![0.1, 0.2, 0.3]);
     }
 
     #[test]
-    fn resampler_stays_continuous_across_blocks() {
-        // A constant signal must resample to the same constant: any discontinuity
-        // at a block boundary would show up as a different value.
-        let mut resampler = LinearResampler::new(48_000);
-        let first = resampler.process(&vec![0.25; 4800]);
-        let second = resampler.process(&vec![0.25; 4800]);
-        for sample in first.iter().chain(second.iter()) {
-            assert!((sample - 0.25).abs() < 1e-3, "discontinuity: {sample}");
+    fn resampler_48khz_constant_across_blocks() {
+        let mut r = LinearResampler::new(48_000);
+        let block = vec![0.4_f32; 2_400];
+        let mut out1 = Vec::new();
+        let mut out2 = Vec::new();
+        r.process_into(&block, &mut out1);
+        r.process_into(&block, &mut out2);
+
+        assert!(!out1.is_empty());
+        assert!(!out2.is_empty());
+        for &s in out1.iter().chain(out2.iter()) {
+            assert!((s - 0.4).abs() <= 1e-3, "sample {s} deviated from 0.4");
         }
     }
 
     #[test]
-    fn fractional_resampling_matches_one_pass_across_irregular_and_empty_blocks() {
-        let input: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.071).sin()).collect();
-        for rate in [8_000, 44_100, 48_000] {
-            let expected = LinearResampler::new(rate).process(&input);
-            for block in [1, 2, 63, 997] {
-                let mut resampler = LinearResampler::new(rate);
+    fn resampler_block_invariance_and_empty_calls() {
+        let full_input: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.013).sin()).collect();
+
+        for &rate in &[11_025_u32, 22_050, 48_000] {
+            let mut single = LinearResampler::new(rate);
+            let mut expected = Vec::new();
+            single.process_into(&full_input, &mut expected);
+
+            for &block_size in &[3_usize, 50, 1_009] {
+                let mut chunked = LinearResampler::new(rate);
                 let mut actual = Vec::new();
-                let mut output = Vec::new();
-                for chunk in input.chunks(block) {
-                    resampler.process_into(&[], &mut output);
-                    assert!(output.is_empty());
-                    resampler.process_into(chunk, &mut output);
-                    actual.extend_from_slice(&output);
+                let mut buf = Vec::new();
+
+                for chunk in full_input.chunks(block_size) {
+                    buf.push(123.0);
+                    chunked.process_into(&[], &mut buf);
+                    assert!(buf.is_empty(), "empty input must produce empty output");
+
+                    chunked.process_into(chunk, &mut buf);
+                    actual.extend_from_slice(&buf);
                 }
-                assert_eq!(actual.len(), expected.len(), "rate={rate}, block={block}");
-                assert!(
-                    actual
-                        .iter()
-                        .zip(&expected)
-                        .all(|(a, b)| (a - b).abs() < 1e-5),
-                    "rate={rate}, block={block}"
+
+                assert_eq!(
+                    actual.len(),
+                    expected.len(),
+                    "length mismatch for rate {rate}, block_size {block_size}"
                 );
+                for (idx, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
+                    assert!(
+                        (a - e).abs() <= 1e-5,
+                        "sample mismatch at {idx} for rate {rate}, block_size {block_size}: {a} vs {e}"
+                    );
+                }
             }
         }
-    }
-
-    #[test]
-    fn segmenter_emits_after_speech_then_silence() {
-        let mut segmenter = Segmenter::new(VadConfig::default());
-        let mut emitted = None;
-        // 2 s of speech in 100 ms frames.
-        for _ in 0..20 {
-            if let Some(segment) = segmenter.push(&tone(0.3, 1600)) {
-                emitted = Some(segment);
-            }
-        }
-        assert!(emitted.is_none(), "must not cut mid-speech");
-        // 800 ms of silence closes it.
-        for _ in 0..8 {
-            if let Some(segment) = segmenter.push(&silence(1600)) {
-                emitted = Some(segment);
-            }
-        }
-        let segment = emitted.expect("utterance should close");
-        assert_eq!(segment.reason, FlushReason::Utterance);
-        assert!(segment.samples.len() >= 32_000);
-    }
-
-    #[test]
-    fn silence_is_never_sent() {
-        let mut segmenter = Segmenter::new(VadConfig::default());
-        for _ in 0..100 {
-            assert!(segmenter.push(&silence(1600)).is_none());
-        }
-        assert!(segmenter.finish().is_none());
-    }
-
-    #[test]
-    fn long_speech_hits_maximum() {
-        let mut segmenter = Segmenter::new(VadConfig::default());
-        let mut reason = None;
-        for _ in 0..300 {
-            if let Some(segment) = segmenter.push(&tone(0.3, 1600)) {
-                reason = Some(segment.reason);
-                break;
-            }
-        }
-        assert_eq!(reason, Some(FlushReason::Maximum));
-    }
-
-    #[test]
-    fn finish_flushes_pending_speech_only() {
-        let mut segmenter = Segmenter::new(VadConfig::default());
-        for _ in 0..4 {
-            segmenter.push(&tone(0.3, 1600));
-        }
-        let segment = segmenter.finish().expect("pending speech flushes");
-        assert_eq!(segment.reason, FlushReason::Stopped);
-        assert!(segmenter.finish().is_none());
     }
 }

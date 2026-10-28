@@ -145,7 +145,46 @@ by a fresh Opus agent given this plan and the diff; a review not obtained
 is reported, not replaced.
 
 ## Deviations log
-
+- **Step 3 decision: in-process.** The official `sherpa-onnx` crate
+  2.0.1 with `features = ["shared"]` and `SHERPA_ONNX_LIB_DIR` pointing at
+  a `symlinkJoin` of nixpkgs `sherpa-onnx` 1.13.8 and `onnxruntime` links
+  without any build-time download (the default `static` feature downloads
+  and fails in the sandbox). On p620 (CPU, 4 threads): load 2.3–3.7 s,
+  1.1 GB idle, RTF 0.08 on 30 s chunks, peak 1.7 GB over a 60-minute file;
+  one-pass decode of very long audio fails, so 30 s chunks are required;
+  token timestamps come back on an 80 ms grid. The fallback service was
+  not needed. Step 5 adds a flake check running a tiny decode (crate 2.0.1
+  against library 1.13.8 may break on a nixpkgs bump) and updates the
+  package's cargo hash. Not measured: cold-disk load, two channels at
+  once, real meeting audio (step 5 / evaluation set).
+- **Step 5:** sherpa-onnx is a normal dependency (spike feature and
+  example removed); the sandboxed `nix build` and a `parakeet-decode`
+  flake check (real model, the archive's `test_wavs/en.wav`, 2.9 s incl.
+  load) prove the no-download build. `nix/parakeet-model.nix` keeps
+  `test_wavs` (~0.7 MB) for that check. The model env var is always set,
+  so every HM closure carries the 640 MB model until step 7 makes it
+  conditional on the provider. Default provider stays `whisper-local`
+  until step 7; chunks are WAV-encoded and decoded again for the
+  in-process wire (cheap, left as is). Not measured yet: daemon RSS with
+  two channels on the real model.
+- Step 6: local-only interviews may use `openai-compatible-stt` only with a loopback base URL. `deepgram.region` is nullable in Home Manager; `null` leaves settings.json absent in a minimal configuration, while the daemon defaults to `us`.
+- Step 2: a saved `cpal:` input device keeps CPAL and so runs without echo
+  cancelling (the user's explicit choice is kept). The picker still lists and
+  selects it, labelled "(no echo cancelling)", and Listen start emits one
+  notice suggesting "Meeting AI echo-cancelled mic".
+- Step 2: the parec mic falls back to `@DEFAULT_SOURCE@` when the chosen
+  source delivers no samples within 500 ms. The drop-in module entry carries
+  `flags = [ ifexists nofail ]`. `pactl list sources` has a 2 s timeout and
+  dictation start opens the mic outside the daemon lock.
+- **Step 2:** the module arguments were checked by loading the drop-in
+  into an isolated PipeWire 1.6.9 with the stock config: it creates
+  `meetingai-echo-cancel-source` and a sink it always makes, named
+  `meetingai-echo-cancel-sink` so it is recognisable. Mic capture goes
+  through `parec` for Pulse source names (echo-cancel source by default,
+  else `@DEFAULT_SOURCE@`); explicit `cpal:` devices and legacy names keep
+  CPAL; no Pulse server → CPAL. `Microphone::level()` is 0 on the parec
+  path (no callers). A parec failure on the default path is a start error,
+  not a CPAL fallback.
 - **Step 0:** the replay is `examples/accuracy_replay.rs`, which runs
   `BatchChunks` → provider → `LineFilter` in sequence rather than the
   spawned live task (same components, latency measured per chunk); this
@@ -171,3 +210,10 @@ is reported, not replaced.
   capture blocks instead of emitting 20 ms blocks; it holds one block for
   lookahead (50 ms extra latency, gate on only) so a quiet owner onset can
   restore the block before it. Off by default.
+- **Step 4:** echo needs a run of 3 consecutive words plus content-word
+  containment ≥ 0.6 (stop words ignored), so short owner replies survive;
+  mic lines are held until 3 s after they arrive (audio clock) and while
+  an overlapping system chunk is open or in flight (15 s cap); `accept`
+  returns released lines, `tick`/`flush` release the rest. The step 0
+  replay now prints request and released-line records separately and
+  flushes at the end; `score.py` reads them.
