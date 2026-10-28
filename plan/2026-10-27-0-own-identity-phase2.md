@@ -1,8 +1,19 @@
 ---
-status: approved
+status: draft
 issue: 3
 spec: spec/2026-10-27-0-own-identity-mit.md
-reviewers: []
+coders:        # owner asked 2026-10-28 for agy and codex to share the coding
+  2: agy       # audio/dsp: self-contained maths, small interface
+  4: codex     # db encryption/schema: SQL and SQLCipher, codex reads repos well
+  5: codex     # db repos: same domain as step 4
+  7: agy       # core/models: plain data types and serde
+  8: codex     # ai/catalog: provider/model lists, many small functions
+  9: agy       # ai/chat: engine and session over the catalog
+  # 0, 1, 3, 6, 10, 11, 12 stay with coder (Sonnet): tooling, audio
+  # capture, the vault and STT need the p620 checks run from this session
+reviewers:     # every step, read-only, on top of the Opus review
+  - codex      # codex review --base main, sandbox read-only
+  - agy        # agy --mode plan with the allowlist settings overlay
 ---
 
 # Plan: rewrite the remaining original code, then MIT (phase 2)
@@ -99,6 +110,12 @@ Steps 3, 6 and 10 are deployed to p620 and checked with the owner before
 the next step starts.
 
 ## Implementation split
+
+Per step the implementer is named in `coders:` above (agy and codex via
+the `handoff` skill in a worktree; the clean-room brief and the forbidden
+`git show`/`git log -p` of old files apply to them too). Reviews: codex
+and agy per `reviewers:`, one at a time, plus the Opus review below; a
+review that is not obtained is reported, not retried with another model.
 
 One `coder` (Sonnet) per step, briefed with the stub and behaviour list;
 continued with `SendMessage` while steps share context. Each step is
