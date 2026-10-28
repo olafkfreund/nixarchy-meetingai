@@ -57,7 +57,7 @@ scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 state = {"recording": live, "since": int(time.time() * 1000) - 754_000 if live else 0, "mic": True, "system": True}
 if first_run:
-    state.update(ready={"chat": False, "speech": False}, hints={"chat": "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama.", "speech": "Speech-to-text is not ready. Check nixarchy-meetingai-whisper.service, or add a Deepgram key in Providers."})
+    state.update(ready={"chat": False, "speech": False}, hints={"chat": "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama.", "speech": "Speech-to-text is not ready. Check the Parakeet model, or add a Deepgram key in Providers."})
 MODELS = {   # models.list per provider; a string is the daemon's error
     "claude-sub": ["sonnet", "opus", "haiku"],
     "agy-sub": ["gemini-3.8-flash-low", "gemini-3.8-pro"],

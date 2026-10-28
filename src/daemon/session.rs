@@ -54,7 +54,7 @@ use crate::{
     },
 };
 
-/// Names and terms from the profile and meeting brief for whisper to spell right:
+/// Names and terms from the profile and meeting brief for the speech engine to spell right:
 /// capitalised words, acronyms and words with digits, first-seen order, <= 200 chars.
 fn glossary(personal: &str, meeting: &str) -> String {
     let mut out = String::new();
@@ -64,7 +64,7 @@ fn glossary(personal: &str, meeting: &str) -> String {
         .chain(meeting.split_whitespace())
     {
         let word = raw.trim_matches(|c: char| !c.is_alphanumeric());
-        // shortcut: sentence-initial words count as terms too; harmless as a whisper hint.
+        // shortcut: sentence-initial words count as terms too; harmless as a hint.
         let term = word.chars().count() >= 2
             && word.chars().all(char::is_alphanumeric)
             && (word.starts_with(char::is_uppercase) || word.chars().any(|c| c.is_ascii_digit()));
@@ -255,7 +255,7 @@ pub struct Daemon {
     tx: broadcast::Sender<Value>,
     pub shutdown: Notify,
     chunking: AtomicBool,
-    /// The session's candidate is local-only: only ollama, whisper-local and parakeet-local may be used.
+    /// The session's candidate is local-only: only ollama, parakeet-local and a loopback openai-compatible-stt may be used.
     local_only: AtomicBool,
     /// Settings fixed by `programs.nixarchy-meetingai.settings.enforce`; `settings.set` refuses them.
     locked: Mutex<Vec<String>>,
@@ -508,13 +508,6 @@ fn speech_not_ready(provider: &str, other: &'static str) -> String {
     }
 }
 
-/// The Nix module tells the daemon where its whisper-server listens (`http://host:port`).
-fn apply_whisper_url(config: &mut ProviderConfig, url: Option<String>) {
-    if let Some(url) = url.filter(|u| !u.is_empty()) {
-        config.base_url = format!("{}/inference", url.trim_end_matches('/'));
-    }
-}
-
 /// The Nix module points the daemon at its Ollama (`http://host:port`); stays local only on loopback.
 fn apply_ollama_url(config: &mut ProviderConfig, url: Option<String>) {
     if let Some(url) = url.filter(|u| !u.is_empty()) {
@@ -602,6 +595,46 @@ fn migrate_gemini(db: &Database, vault: &Vault) -> Option<String> {
         return Some(notice.to_owned());
     }
     None
+}
+
+/// whisper.cpp is gone: a saved `whisper-local` becomes `parakeet-local`, and a user who never
+/// stored a provider (the old default was whisper) is told once, tracked by a marker setting.
+/// An old `ggml-*` speech model name is cleared so no other engine is sent it.
+fn migrate_whisper(db: &Database) -> Option<String> {
+    const MARKER: &str = "whisper_notice_shown";
+    let get = |key| {
+        crate::db::settings::get(db.connection(), key)
+            .ok()
+            .flatten()
+    };
+    let stored = get("speech_provider");
+    let notify = match stored.as_deref() {
+        Some("whisper-local") => {
+            crate::db::settings::set(db.connection(), "speech_provider", "parakeet-local").ok()?;
+            true
+        }
+        // Only an existing user (some meeting or conversation) needs telling; a fresh install does not.
+        None if get(MARKER).is_none() => ["meetings", "conversations"].iter().any(|table| {
+            db.connection()
+                .query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| {
+                    r.get::<_, bool>(0)
+                })
+                .unwrap_or(false)
+        }),
+        _ => false,
+    };
+    if !notify {
+        // A fresh install is marked silently so a later first meeting is not told about whisper.
+        if stored.is_none() {
+            let _ = crate::db::settings::set(db.connection(), MARKER, "1");
+        }
+        return None;
+    }
+    if get("speech_model").is_some_and(|m| m.starts_with("ggml-")) {
+        crate::db::settings::set(db.connection(), "speech_model", "").ok()?;
+    }
+    crate::db::settings::set(db.connection(), MARKER, "1").ok()?;
+    Some("Speech now uses Parakeet locally; whisper was removed.".to_owned())
 }
 
 /// Lowercase with whitespace runs as one space; a soft hyphen (and the line break after it) vanishes.
@@ -699,7 +732,10 @@ impl Daemon {
         crate::core::install_tls_provider();
         let vault = Vault::open(&options.vault_dir).map_err(|e| e.to_string())?;
         let db = Database::open(&options.db_path).map_err(|e| e.to_string())?;
-        let startup_notice = migrate_gemini(&db, &vault);
+        let startup_notice = [migrate_gemini(&db, &vault), migrate_whisper(&db)]
+            .into_iter()
+            .flatten()
+            .reduce(|a, b| format!("{a} {b}"));
         let settings = Settings::load(&db).unwrap_or_default();
         let active_profile_id = profiles::selected(db.connection())
             .ok()
@@ -808,7 +844,7 @@ impl Daemon {
                 "speech": (!speech).then(|| speech_not_ready(
                     &g.settings.speech_provider,
                     if local {
-                        "Local-only is on: speech-to-text must run on this machine (Parakeet, or a whisper or OpenAI-compatible server on a loopback address)."
+                        "Local-only is on: speech-to-text must run on this machine (Parakeet, or an OpenAI-compatible server on a loopback address)."
                     } else {
                         "Speech-to-text is not ready. Check the Parakeet model, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
                     },
@@ -993,16 +1029,11 @@ impl Daemon {
 
     fn speech_config(&self, s: &Settings, local: bool) -> Option<ProviderConfig> {
         let id = if s.speech_provider.is_empty() {
-            "whisper-local"
+            "parakeet-local"
         } else {
             &s.speech_provider
         };
-        if local
-            && !matches!(
-                id,
-                "whisper-local" | "parakeet-local" | "openai-compatible-stt"
-            )
-        {
+        if local && !matches!(id, "parakeet-local" | "openai-compatible-stt") {
             return None;
         }
         let mut config = match credentials::load(&self.vault, Kind::Speech, id) {
@@ -1030,12 +1061,6 @@ impl Daemon {
         config.language.clone_from(&s.speech_language);
         if !s.speech_model.is_empty() {
             config.model.clone_from(&s.speech_model);
-        }
-        if id == "whisper-local" {
-            apply_whisper_url(
-                &mut config,
-                std::env::var("NIXARCHY_MEETINGAI_WHISPER_URL").ok(),
-            );
         }
         (config.speech_usable() && (!local || stays_local(&config))).then_some(config)
     }
@@ -1859,7 +1884,7 @@ impl Daemon {
                     speech_not_ready(
                         &g.settings.speech_provider,
                         if local {
-                            "local_only: speech-to-text must run on this machine (Parakeet, or a whisper or OpenAI-compatible server on a loopback address)."
+                            "local_only: speech-to-text must run on this machine (Parakeet, or an OpenAI-compatible server on a loopback address)."
                         } else {
                             "Speech-to-text is not ready. Check the Parakeet model, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
                         },
@@ -4330,8 +4355,15 @@ mod command_tests {
         assert!(hint.contains("Parakeet"), "{hint}");
         assert!(hint.contains("Deepgram key"), "{hint}");
         assert!(hint.contains("openai-compatible-stt base URL"), "{hint}");
-        // The default local whisper needs no key.
-        set("speech_provider", "whisper-local").await;
+        // Parakeet needs no key; without a model directory it is not ready.
+        set("speech_provider", "parakeet-local").await;
+        let st = d.handle("state.get", json!({}), None).await.unwrap();
+        assert_eq!(st["ready"]["speech"], false);
+        assert!(st["hints"]["speech"].as_str().unwrap().contains("Parakeet"));
+        // A loopback OpenAI-compatible server with a model is ready.
+        set("speech_base_url", "http://127.0.0.1:8000").await;
+        set("speech_model", "m").await;
+        set("speech_provider", "openai-compatible-stt").await;
         let st = d.handle("state.get", json!({}), None).await.unwrap();
         assert_eq!(st["ready"]["speech"], true);
         assert_eq!(st["hints"]["speech"], Value::Null);
@@ -4663,12 +4695,15 @@ mod command_tests {
         // The chain never leaves the machine.
         let chain = d.chain(&d.inner.lock().settings.clone(), false, true);
         assert!(chain.iter().all(|c| c.id == "ollama"));
-        call(
-            "settings.set",
-            json!({"key": "speech_provider", "value": "whisper-local"}),
-        )
-        .await
-        .unwrap();
+        for (key, value) in [
+            ("speech_base_url", "http://127.0.0.1:8000"),
+            ("speech_model", "m"),
+            ("speech_provider", "openai-compatible-stt"),
+        ] {
+            call("settings.set", json!({"key": key, "value": value}))
+                .await
+                .unwrap();
+        }
         call("record.start", json!({"consent": true}))
             .await
             .unwrap();
@@ -4692,17 +4727,46 @@ mod command_tests {
     }
 
     #[test]
-    fn whisper_url_env_sets_the_inference_endpoint_once() {
-        let mut c = ProviderConfig::new("whisper-local", "", "m");
-        apply_whisper_url(&mut c, None);
-        assert_eq!(c.base_url, "");
-        apply_whisper_url(&mut c, Some("http://127.0.0.1:9000/".into()));
-        assert_eq!(c.base_url, "http://127.0.0.1:9000/inference");
-        assert!(stays_local(&c));
-        // The Nix address wins over a stored one.
-        c.base_url = "http://stored:1/inference".into();
-        apply_whisper_url(&mut c, Some("http://127.0.0.1:1".into()));
-        assert_eq!(c.base_url, "http://127.0.0.1:1/inference");
+    fn saved_whisper_local_migrates_once_with_a_notice() {
+        use crate::db::settings::{get, set};
+        let db = Database::open_in_memory().unwrap();
+        set(db.connection(), "speech_provider", "whisper-local").unwrap();
+        set(db.connection(), "speech_model", "ggml-large-v3-turbo").unwrap();
+        assert!(migrate_whisper(&db).unwrap().contains("Parakeet"));
+        assert_eq!(
+            Settings::load(&db).unwrap().speech_provider,
+            "parakeet-local"
+        );
+        assert_eq!(
+            get(db.connection(), "speech_model").unwrap().as_deref(),
+            Some("")
+        );
+        assert_eq!(migrate_whisper(&db), None);
+    }
+
+    #[test]
+    fn an_unset_provider_gets_the_notice_once_without_being_written() {
+        use crate::db::settings::{get, set};
+        let db = Database::open_in_memory().unwrap();
+        // A fresh install: no notice, marked silently, and a meeting made later stays quiet.
+        assert_eq!(migrate_whisper(&db), None);
+        db.connection()
+            .execute("INSERT INTO meetings (id, title) VALUES ('m', 't')", [])
+            .unwrap();
+        assert_eq!(migrate_whisper(&db), None);
+        // An existing user with no stored provider is told once, nothing is written.
+        let db = Database::open_in_memory().unwrap();
+        db.connection()
+            .execute("INSERT INTO meetings (id, title) VALUES ('m', 't')", [])
+            .unwrap();
+        assert!(migrate_whisper(&db).is_some());
+        assert_eq!(get(db.connection(), "speech_provider").unwrap(), None);
+        assert_eq!(migrate_whisper(&db), None);
+        // A deliberate choice is left alone, with no notice.
+        let other = Database::open_in_memory().unwrap();
+        set(other.connection(), "speech_provider", "deepgram-stt").unwrap();
+        set(other.connection(), "speech_model", "ggml-small").unwrap();
+        assert_eq!(migrate_whisper(&other), None);
     }
 
     #[test]

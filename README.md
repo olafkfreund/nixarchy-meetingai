@@ -4,7 +4,7 @@ A meeting copilot for [Omarchy](https://omarchy.org) on NixOS (Nixarchy). It
 listens to your calls, writes a live transcript, answers questions while you
 talk, suggests what to ask next, and turns each meeting into notes you can
 search later. It runs on your own machine: transcription is local
-(whisper.cpp), and answers come from the AI subscriptions you already have,
+(Parakeet), and answers come from the AI subscriptions you already have,
 or from local models.
 
 - **Daemon:** `nixarchy-meetingai`, a Rust user service that records,
@@ -23,7 +23,7 @@ or from local models.
 - At least one way to get answers (see [Providers](#providers)): a Claude or
   ChatGPT subscription CLI, Antigravity, OpenCode, an Ollama Cloud key, or a
   local [Ollama](https://ollama.com).
-- A GPU helps: the speech-to-text build uses Vulkan.
+- About 1.1 GB of free RAM while Parakeet speech-to-text is loaded (CPU only, no GPU needed).
 
 ### 2. Add the flake
 
@@ -48,10 +48,9 @@ Then, in your Home Manager configuration:
 }
 ```
 
-Rebuild. This installs the binary, two user services
-(`nixarchy-meetingai` and `nixarchy-meetingai-whisper`), the shell plugin, the
-whisper model (large-v3-turbo, about 1.6 GB, downloaded once at build time),
-the call-detection plugin and a keybinding fragment.
+Rebuild. This installs the binary, the user service
+`nixarchy-meetingai`, the shell plugin, the Parakeet speech model (about
+640 MB, downloaded once at build time), the call-detection plugin and a keybinding fragment.
 
 ### 3. Two one-time steps
 
@@ -137,7 +136,7 @@ The copilot helps you ask; it never judges the candidate.
 - **Consent:** recording in this mode always asks you to confirm that the
   candidate has been told. Agents cannot give that consent.
 - **Local-only:** switch it on per candidate. Speech-to-text then stays on
-  whisper-local and every model call goes to a local Ollama on this machine;
+  Parakeet (or an OpenAI-compatible server on this machine) and every model call goes to a local Ollama on this machine;
   anything else is refused, and agents cannot read that interview.
 - **Deletion:** "Delete candidate…" removes the candidate, their documents,
   questions, the interview's transcript, notes and chats, in one step.
@@ -168,9 +167,22 @@ only as long as you need it, and make hiring decisions yourself.
 - Using a subscription CLI from another program is subject to that
   service's terms and limits.
 
+### Speech-to-text
+
+| Provider | Where it runs | Notes |
+| --- | --- | --- |
+| Parakeet (default, `parakeet-local`) | in the daemon, on the CPU | NVIDIA Parakeet TDT 0.6B v3; about 1.1 GB RAM while loaded; 25 European languages, detected automatically |
+| Deepgram (`deepgram-stt`) | cloud | a key in Providers, or an agenix file: `deepgram.keyFile = config.age.secrets.api-deepgram.path;` (a key in Providers wins); `deepgram.region = "eu"` uses `api.eu.deepgram.com` and opts out of model improvement |
+| OpenAI-compatible (`openai-compatible-stt`) | your server | any server with `/v1/audio/transcriptions` (a whisper server, vLLM, Groq, OpenAI): `settings.speechProvider = "openai-compatible-stt"`, `settings.speechBaseUrl` and `settings.speechModel` (required). whisper.cpp's `whisper-server` works when started with `--inference-path /v1/audio/transcriptions` |
+
+whisper.cpp was removed in favour of Parakeet; the `whisper.*` options now
+fail with a message saying so. A saved `whisper-local` choice becomes
+`parakeet-local` once, with a notice. For Deepgram or OpenAI-compatible setups
+only, set `parakeet.enable = false` to leave the model out of the closure.
+
 ### Fully offline
 
-Transcription is always local. Choose Ollama for answers and notes and
+With Parakeet, transcription is local. Choose Ollama for answers and notes and
 nothing leaves the machine. Large local models can take a while to load the
 first time; the answer card shows "Loading model…" meanwhile.
 
@@ -179,7 +191,7 @@ first time; the answer card shows "Loading model…" meanwhile.
 ### Home Manager options
 
 Everything is configured under `programs.nixarchy-meetingai`: the services
-(autostart, log level, the whisper server's model, address and flags), the
+(autostart, log level, the Parakeet model), the
 Ollama Cloud key and the local Ollama address, the app's settings (as defaults,
 or locked with `settings.enforce`), the plugin and call detection, and the
 keybindings. The full list is in [Nix options](#nix-options).
@@ -193,7 +205,7 @@ programs.nixarchy-meetingai = {
   settings = {
     chatProvider = "ollama-cloud";
     chatModel = "gpt-oss:120b";
-    speechProvider = "whisper-local";
+    speechProvider = "parakeet-local";
   };
 };
 ```
@@ -617,6 +629,27 @@ null
 
 ```nix
 "/run/agenix/ollama-cloud"
+```
+
+
+
+## programs\.nixarchy-meetingai\.parakeet\.enable
+
+
+
+Give the daemon the local Parakeet speech model (640 MB in the closure)\. Turn off only for Deepgram or OpenAI-compatible setups; the daemon then reports Parakeet as not ready\.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+
+```nix
+true
 ```
 
 
@@ -1084,7 +1117,7 @@ null
 
 
 
-Speech-to-text provider (` parakeet-local `, ` whisper-local `, ` deepgram-stt `, or ` openai-compatible-stt `)\.
+Speech-to-text provider (` parakeet-local ` (the default), ` deepgram-stt `, or ` openai-compatible-stt `)\.
 
 
 
@@ -1144,154 +1177,6 @@ true
 ```
 
 
-
-## programs\.nixarchy-meetingai\.whisper\.enable
-
-
-
-Run the local whisper\.cpp server\. Turn off when using Deepgram only\.
-
-
-
-*Type:*
-boolean
-
-
-
-*Default:*
-
-```nix
-true
-```
-
-
-
-## programs\.nixarchy-meetingai\.whisper\.package
-
-
-
-whisper\.cpp build providing ` whisper-server `\.
-
-
-
-*Type:*
-package
-
-
-
-*Default:*
-
-```nix
-pkgs.whisper-cpp-vulkan
-```
-
-
-
-## programs\.nixarchy-meetingai\.whisper\.extraArgs
-
-
-
-Extra ` whisper-server ` flags\.
-
-
-
-*Type:*
-list of string
-
-
-
-*Default:*
-
-```nix
-[ ]
-```
-
-
-
-## programs\.nixarchy-meetingai\.whisper\.host
-
-
-
-Listen address of the whisper server (keep it on loopback)\. The daemon is told 127\.0\.0\.1
-when this is ` 0.0.0.0 ` and ` ::1 ` when it is ` :: `; an IPv6 address is bracketed in its URL\.
-
-
-
-*Type:*
-string
-
-
-
-*Default:*
-
-```nix
-"127.0.0.1"
-```
-
-
-
-## programs\.nixarchy-meetingai\.whisper\.model
-
-
-
-A whisper\.cpp model package (one with ` passthru.modelName `)\.
-
-
-
-*Type:*
-package
-
-
-
-*Default:*
-
-```nix
-(pkgs.callPackage ./whisper-model.nix { })."large-v3-turbo"
-```
-
-
-
-## programs\.nixarchy-meetingai\.whisper\.port
-
-
-
-Port of the whisper server; the daemon is told the same address\.
-
-
-
-*Type:*
-16 bit unsigned integer; between 0 and 65535 (both inclusive)
-
-
-
-*Default:*
-
-```nix
-8178
-```
-
-
-
-## programs\.nixarchy-meetingai\.whisper\.threads
-
-
-
-Threads for the whisper server (` -t `); null leaves the default\.
-
-
-
-*Type:*
-null or (positive integer, meaning >0)
-
-
-
-*Default:*
-
-```nix
-null
-```
-
-
 <!-- nix-options:end -->
 
 ## Use from AI agents
@@ -1332,7 +1217,7 @@ The same commands work from a shell: `nixarchy-meetingai ctl state.get`.
 ## Troubleshooting
 
 ```bash
-systemctl --user status nixarchy-meetingai nixarchy-meetingai-whisper
+systemctl --user status nixarchy-meetingai
 journalctl --user -u nixarchy-meetingai -e
 nixarchy-meetingai ctl providers.status
 ```

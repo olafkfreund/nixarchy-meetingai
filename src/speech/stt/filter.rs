@@ -1,5 +1,5 @@
 //! Quality filters for final batch-transcript lines: whisper hallucinations (T3),
-//! microphone echo of the system channel (T4), and the whisper prompt (T2).
+//! microphone echo of the system channel (T4), and the speech prompt (T2).
 
 use super::transcription::TranscriptLine;
 
@@ -124,7 +124,7 @@ pub struct LineFilter {
     clock: f64,
     /// Earliest start time of any open or in-flight system chunk.
     pending_sys_start: Option<f64>,
-    /// Recent accepted text on the system channel, the whisper prompt context.
+    /// Recent accepted text on the system channel, the prompt context.
     recent_system: String,
 }
 
@@ -272,7 +272,7 @@ fn tail(text: &str, max: usize) -> &str {
     }
 }
 
-/// Whisper `prompt`: glossary terms, then the channel's recent final text.
+/// The `prompt` for OpenAI-compatible servers: glossary terms, then the channel's recent final text.
 pub fn whisper_prompt(glossary: &str, previous: &str) -> String {
     let glossary: String = glossary.trim().chars().take(PROMPT_PART).collect();
     let previous = tail(previous.trim(), PROMPT_PART);

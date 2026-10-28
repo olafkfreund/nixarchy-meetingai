@@ -103,8 +103,6 @@ impl ChatProvider {
 pub enum SttWire {
     /// Raw `audio/wav` body for Deepgram.
     RawAudio,
-    /// Multipart `POST /inference` to a local `whisper-server`; no key.
-    WhisperServer,
     /// Decoded inside the daemon (Parakeet through sherpa-onnx); no URL, no key.
     InProcess,
     /// OpenAI-compatible multipart transcription.
@@ -130,13 +128,6 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
         endpoint: "https://api.deepgram.com/v1/listen",
         wire: SttWire::RawAudio,
         default_model: "nova-3",
-    },
-    SttProvider {
-        id: "whisper-local",
-        name: "whisper.cpp (local)",
-        endpoint: "http://127.0.0.1:8178/inference",
-        wire: SttWire::WhisperServer,
-        default_model: "ggml-large-v3-turbo",
     },
     SttProvider {
         id: "parakeet-local",
@@ -254,7 +245,7 @@ impl ProviderConfig {
     pub fn speech_streaming(&self) -> bool {
         match &self.custom {
             Some(custom) => custom.streaming,
-            // Only Deepgram's raw-audio wire streams; whisper-server, OpenAI multipart and Parakeet are batch.
+            // Only Deepgram's raw-audio wire streams; OpenAI multipart and Parakeet are batch.
             None => SttProvider::by_id(&self.id).is_none_or(|p| p.wire == SttWire::RawAudio),
         }
     }
@@ -327,7 +318,7 @@ mod tests {
                 "ollama"
             ]
         );
-        assert_eq!(STT_PROVIDERS.len(), 4);
+        assert_eq!(STT_PROVIDERS.len(), 3);
         let retired = ProviderConfig::new("openai", "k", "m");
         assert!(!retired.is_usable());
         assert!(retired.endpoint().is_none());
@@ -390,8 +381,7 @@ mod tests {
             "nova-3"
         );
         assert!(SttProvider::by_id("missing").is_none());
-        let local = ProviderConfig::new("whisper-local", "", "");
-        assert!(local.speech_usable() && !local.speech_streaming());
+        assert!(SttProvider::by_id("whisper-local").is_none());
     }
 
     #[test]

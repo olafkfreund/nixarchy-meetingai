@@ -261,12 +261,12 @@ async fn inactive_response_body_times_out() {
 }
 
 /// Serves one multipart request per entry: `None` drops the connection, `Some(text)` answers.
-async fn whisper_mock(
+async fn speech_mock(
     replies: Vec<Option<&'static str>>,
 ) -> (ProviderConfig, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut config = ProviderConfig::new("whisper-local", "", "");
-    config.base_url = format!("http://{}/inference", listener.local_addr().unwrap());
+    let mut config = ProviderConfig::new("openai-compatible-stt", "", "m");
+    config.base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         for reply in replies {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -285,7 +285,7 @@ async fn whisper_mock(
     (config, server)
 }
 
-async fn run_whisper(
+async fn run_speech(
     config: &ProviderConfig,
 ) -> Vec<nixarchy_meetingai::speech::transcription::LiveEvent> {
     use nixarchy_meetingai::speech::transcription::LiveTranscriber;
@@ -304,29 +304,10 @@ async fn run_whisper(
 }
 
 #[tokio::test]
-async fn whisper_local_returns_text_and_retries_transient_failures() {
+async fn openai_compatible_speech_gives_up_with_the_lost_range() {
     use nixarchy_meetingai::speech::transcription::LiveEvent;
-    for replies in [vec![Some("hello")], vec![None, None, Some("hello")]] {
-        let (config, server) = whisper_mock(replies).await;
-        let events = run_whisper(&config).await;
-        let lines = events
-            .iter()
-            .filter(|e| matches!(e, LiveEvent::Transcript(l) if l.text == "hello"))
-            .count();
-        assert!(lines >= 1, "{events:?}");
-        assert!(
-            !events.iter().any(|e| matches!(e, LiveEvent::Failed(_))),
-            "{events:?}"
-        );
-        server.abort();
-    }
-}
-
-#[tokio::test]
-async fn whisper_local_gives_up_with_the_lost_range() {
-    use nixarchy_meetingai::speech::transcription::LiveEvent;
-    let (config, server) = whisper_mock(vec![None; 4]).await;
-    let events = run_whisper(&config).await;
+    let (config, server) = speech_mock(vec![None]).await;
+    let events = run_speech(&config).await;
     let failure = events.iter().find_map(|e| match e {
         LiveEvent::Failed(m) => Some(m.clone()),
         _ => None,
@@ -339,11 +320,10 @@ async fn whisper_local_gives_up_with_the_lost_range() {
 }
 
 #[tokio::test]
-async fn empty_whisper_text_is_skipped_without_failing() {
+async fn empty_openai_compatible_text_is_skipped_without_failing() {
     use nixarchy_meetingai::speech::transcription::LiveEvent;
-    // A cough (empty text) then a real chunk would need two chunks; one empty reply must end cleanly.
-    let (config, server) = whisper_mock(vec![Some("")]).await;
-    let events = run_whisper(&config).await;
+    let (config, server) = speech_mock(vec![Some("")]).await;
+    let events = run_speech(&config).await;
     assert!(
         !events
             .iter()
