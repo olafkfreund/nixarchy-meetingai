@@ -75,6 +75,28 @@ pub fn pulse_inputs(json: &str, default_source: Option<&str>) -> Result<Vec<Devi
     Ok(devices)
 }
 
+/// Keep a saved device visible and selected even when it is not a Pulse source
+/// (an explicit `cpal:` choice runs without echo cancelling).
+pub fn keep_selected(devices: &mut Vec<Device>, selected: Option<&str>) {
+    let Some(id) = selected
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != "default")
+    else {
+        return;
+    };
+    if !devices.iter().any(|d| d.id == id) {
+        let name = id.strip_prefix("cpal:").unwrap_or(id);
+        devices.push(Device {
+            id: id.to_owned(),
+            name: format!("{name} (no echo cancelling)"),
+            is_default: false,
+        });
+    }
+    for device in devices.iter_mut() {
+        device.is_default = device.id == id;
+    }
+}
+
 /// Parse `pactl --format=json list sinks`.
 pub fn parse_sinks(json: &str) -> Result<Vec<Device>, String> {
     let sinks: Vec<PactlSink> =
@@ -106,8 +128,9 @@ pub fn mark_default(devices: &mut [Device], default_name: Option<&str>) {
 }
 
 /// Enumerate devices on this machine.
-pub fn enumerate() -> Devices {
-    let result = enumerate_linux();
+/// `selected` is the saved input device; it stays in the list even when it is not a Pulse source.
+pub fn enumerate(selected: Option<&str>) -> Devices {
+    let result = enumerate_linux(selected);
     match result {
         Ok(devices) => devices,
         Err(error) => Devices {
@@ -117,25 +140,44 @@ pub fn enumerate() -> Devices {
     }
 }
 
-fn pactl(args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new("pactl")
+/// Run `pactl`, killed after two seconds so a wedged server cannot hang callers.
+pub(crate) fn pactl(args: &[&str]) -> Result<String, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("pactl")
         .args(args)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|error| format!("pactl is unavailable: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("pactl failed: {}", stderr.trim()));
+    let mut stdout = child.stdout.take().ok_or("pactl gave no output")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Read on a thread so a full pipe cannot block the child before the deadline.
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        let _ = tx.send(text);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(text) => match child.wait() {
+            Ok(status) if status.success() => Ok(text),
+            _ => Err("pactl failed".into()),
+        },
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err("pactl timed out".into())
+        }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn enumerate_linux() -> Result<Devices, String> {
+fn enumerate_linux(selected: Option<&str>) -> Result<Devices, String> {
     // Same ids as Microphone::start: Pulse source names, or `cpal:` ids when
     // there is no Pulse server.
     let default_source = pactl(&["get-default-source"])
         .ok()
         .and_then(|text| text.lines().next().map(str::to_owned));
-    let inputs = pactl(&["--format=json", "list", "sources"])
+    let mut inputs = pactl(&["--format=json", "list", "sources"])
         .and_then(|text| pulse_inputs(&text, default_source.as_deref()))
         .unwrap_or_else(|_| {
             crate::audio::microphone::input_devices()
@@ -147,6 +189,7 @@ fn enumerate_linux() -> Result<Devices, String> {
                 })
                 .collect()
         });
+    keep_selected(&mut inputs, selected);
     let outputs_result =
         pactl(&["--format=json", "list", "sinks"]).and_then(|text| parse_sinks(&text));
     let error = outputs_result.as_ref().err().cloned();
@@ -206,6 +249,16 @@ mod tests {
         let devices =
             pulse_inputs(SOURCES, Some("alsa_input.pci-0000_00_1f.3.analog-stereo")).unwrap();
         assert!(devices[0].is_default);
+    }
+
+    #[test]
+    fn saved_cpal_device_stays_listed_and_selected() {
+        let mut devices = pulse_inputs(SOURCES, None).unwrap();
+        keep_selected(&mut devices, Some("cpal:id:alsa:usb"));
+        assert_eq!(devices.len(), 2);
+        let saved = devices.iter().find(|d| d.id == "cpal:id:alsa:usb").unwrap();
+        assert!(saved.is_default && saved.name.contains("no echo cancelling"));
+        assert_eq!(devices.iter().filter(|d| d.is_default).count(), 1);
     }
 
     #[test]

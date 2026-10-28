@@ -20,14 +20,20 @@ let
     }
     .${cfg.whisper.host} or cfg.whisper.host;
   whisperAddr =
-    (if lib.hasInfix ":" daemonHost && !lib.hasPrefix "[" daemonHost then "[${daemonHost}]" else daemonHost)
+    (
+      if lib.hasInfix ":" daemonHost && !lib.hasPrefix "[" daemonHost then
+        "[${daemonHost}]"
+      else
+        daemonHost
+    )
     + ":${toString cfg.whisper.port}";
   # systemd expands % and $ in ExecStart words.
   unitEscape = lib.replaceStrings [ "%" "$" ] [ "%%" "$$" ];
   # The app only offers an Ollama at https, or http on loopback (see endpoint_allowed in the daemon).
-  ollamaUrlOk = lib.match "(https://.*|http://(localhost|127\\.0\\.0\\.1|[[]::1[]])(:[0-9]+)?(/.*)?)" (
-    lib.toLower cfg.ollama.url
-  ) != null;
+  ollamaUrlOk =
+    lib.match "(https://.*|http://(localhost|127\\.0\\.0\\.1|[[]::1[]])(:[0-9]+)?(/.*)?)" (
+      lib.toLower cfg.ollama.url
+    ) != null;
 
   # nixarchy (when imported) installs plugins; without it the plugin goes to omarchy's folder.
   hasPlugins = lib.hasAttrByPath [ "programs" "nixarchy" "plugins" ] options;
@@ -297,6 +303,8 @@ in
         Load PipeWire's WebRTC echo canceller with the default sink's monitor as the reference and
         expose the result as the `meetingai-echo-cancel-source` source, which the daemon records as the
         microphone when present. The system default source is not changed.
+        It takes effect after PipeWire restarts or at the next login
+        (`systemctl --user restart pipewire pipewire-pulse wireplumber`).
       '';
     };
 
@@ -362,6 +370,8 @@ in
           context.modules = [
             {
               name = libpipewire-module-echo-cancel
+              # A missing or failing module must never stop PipeWire at login.
+              flags = [ ifexists nofail ]
               args = {
                 library.name = aec/libspa-aec-webrtc
                 # The default sink's monitor is the reference; the capture side follows the default source.
@@ -399,7 +409,9 @@ in
       nixarchy.plugins = lib.mkMerge [
         (lib.mkIf cfg.plugin.enable { "nixarchy.meetingai".src = plugin; })
         # Keyed by the id in its manifest, as owners declare it; mkDefault lets their entry win, so it is never added twice.
-        (lib.mkIf cfg.callDetection.enable { "nixarchy.meeting-mode".src = lib.mkDefault callDetectionPlugin; })
+        (lib.mkIf cfg.callDetection.enable {
+          "nixarchy.meeting-mode".src = lib.mkDefault callDetectionPlugin;
+        })
       ];
     };
 

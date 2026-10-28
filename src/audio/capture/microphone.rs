@@ -56,14 +56,42 @@ pub fn choose_backend(requested: Option<&str>, sources: &[String]) -> Backend {
     }
 }
 
+/// How long a Pulse source may stay silent-of-data before falling back.
+const FIRST_SAMPLES_WAIT: Duration = Duration::from_millis(500);
+
+/// Open `source`; if it delivers nothing within `wait` (present but not driven),
+/// reopen on `@DEFAULT_SOURCE@`. Returns the handle and the source really used.
+fn open_with_fallback<T>(
+    source: &str,
+    open: impl Fn(&str) -> Result<T, AudioError>,
+    has_samples: impl Fn(&T) -> bool,
+    wait: Duration,
+) -> Result<(T, String), AudioError> {
+    const DEFAULT: &str = "@DEFAULT_SOURCE@";
+    let first = open(source)?;
+    let deadline = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < deadline {
+        if has_samples(&first) {
+            return Ok((first, source.to_owned()));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if has_samples(&first) || source == DEFAULT {
+        return Ok((first, source.to_owned()));
+    }
+    tracing::warn!(
+        source,
+        "microphone source delivered no audio; using the default source"
+    );
+    drop(first);
+    Ok((open(DEFAULT)?, DEFAULT.to_owned()))
+}
+
 /// Non-monitor Pulse source names, empty when there is no server.
 fn pulse_source_names() -> Vec<String> {
-    std::process::Command::new("pactl")
-        .args(["--format=json", "list", "sources"])
-        .output()
+    super::devices::pactl(&["--format=json", "list", "sources"])
         .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| super::devices::parse_sources(&String::from_utf8_lossy(&out.stdout)).ok())
+        .and_then(|text| super::devices::parse_sources(&text).ok())
         .unwrap_or_default()
         .into_iter()
         .map(|device| device.id)
@@ -136,21 +164,39 @@ pub struct Microphone {
     device_name: String,
     /// Set when the mic is a Pulse/PipeWire source recorded with `parec`.
     pulse: Option<SystemAudio>,
+    /// An explicit non-Pulse device was chosen while the echo canceller exists.
+    echo_cancel_bypassed: bool,
 }
 
 impl Microphone {
     /// Start capturing from the named device, or the system default.
     pub fn start(device: Option<&str>) -> Result<Self, AudioError> {
-        match choose_backend(device, &pulse_source_names()) {
+        let sources = pulse_source_names();
+        match choose_backend(device, &sources) {
             Backend::Pulse(source) => Self::start_pulse(&source),
-            Backend::Cpal(name) => Self::start_device(name.as_deref(), false),
+            Backend::Cpal(name) => {
+                let bypassed = name.is_some() && sources.iter().any(|s| s == ECHO_CANCEL_SOURCE);
+                let mut mic = Self::start_device(name.as_deref(), false)?;
+                mic.echo_cancel_bypassed = bypassed;
+                Ok(mic)
+            }
         }
     }
 
+    /// True when the user's explicit device skips the echo canceller.
+    pub fn echo_cancel_bypassed(&self) -> bool {
+        self.echo_cancel_bypassed
+    }
+
     fn start_pulse(source: &str) -> Result<Self, AudioError> {
-        let pulse =
-            SystemAudio::start_input(source).map_err(|e| AudioError::Startup(e.to_string()))?;
+        let (pulse, source) = open_with_fallback(
+            source,
+            |name| SystemAudio::start_input(name).map_err(|e| AudioError::Startup(e.to_string())),
+            SystemAudio::has_samples,
+            FIRST_SAMPLES_WAIT,
+        )?;
         Ok(Self {
+            echo_cancel_bypassed: false,
             buffer: Arc::new(Mutex::new(Buffer {
                 samples: VecDeque::new(),
                 capacity: 0,
@@ -159,7 +205,7 @@ impl Microphone {
             })),
             stop: None,
             worker: None,
-            device_name: source.to_owned(),
+            device_name: source,
             pulse: Some(pulse),
         })
     }
@@ -197,6 +243,7 @@ impl Microphone {
                 worker: Some(worker),
                 device_name,
                 pulse: None,
+                echo_cancel_bypassed: false,
             }),
             Ok(Err(error)) => {
                 let _ = worker.join();
@@ -272,7 +319,9 @@ impl Microphone {
 
     pub fn failure(&self) -> Option<String> {
         if let Some(pulse) = &self.pulse {
-            return pulse.failure();
+            return pulse
+                .failure()
+                .map(|_| "the microphone recorder (parec) exited".to_owned());
         }
         self.buffer
             .lock()
@@ -546,6 +595,39 @@ mod tests {
             choose_backend(Some("Old Device"), &sources),
             Backend::Cpal(Some("Old Device".into()))
         );
+    }
+
+    #[test]
+    fn silent_source_falls_back_to_the_default_source() {
+        use std::cell::RefCell;
+        let opened = RefCell::new(Vec::new());
+        let (handle, used) = open_with_fallback(
+            ECHO_CANCEL_SOURCE,
+            |name| {
+                opened.borrow_mut().push(name.to_owned());
+                Ok(name.to_owned())
+            },
+            |name: &String| name == "@DEFAULT_SOURCE@",
+            Duration::from_millis(60),
+        )
+        .unwrap();
+        assert_eq!(
+            (handle.as_str(), used.as_str()),
+            ("@DEFAULT_SOURCE@", "@DEFAULT_SOURCE@")
+        );
+        assert_eq!(*opened.borrow(), [ECHO_CANCEL_SOURCE, "@DEFAULT_SOURCE@"]);
+    }
+
+    #[test]
+    fn live_source_is_kept() {
+        let (_, used) = open_with_fallback(
+            ECHO_CANCEL_SOURCE,
+            |name| Ok(name.to_owned()),
+            |_: &String| true,
+            Duration::from_millis(60),
+        )
+        .unwrap();
+        assert_eq!(used, ECHO_CANCEL_SOURCE);
     }
 
     #[test]

@@ -259,6 +259,11 @@ impl SystemAudio {
         })
     }
 
+    /// Whether any audio has arrived since the last `take`.
+    pub fn has_samples(&self) -> bool {
+        self.buffer.lock().is_ok_and(|b| !b.is_empty())
+    }
+
     /// Samples discarded because the consumer fell behind.
     pub fn dropped(&self) -> u64 {
         self.dropped.lock().map(|count| *count).unwrap_or_default()

@@ -139,6 +139,12 @@ impl ListenSession {
                 events.push(SessionEvent::Started {
                     device: microphone.device_name().to_owned(),
                 });
+                if microphone.echo_cancel_bypassed() {
+                    events.push(SessionEvent::Notice(
+                        "Echo cancelling is off for the chosen microphone. Pick \"Meeting AI echo-cancelled mic\" in Settings → Audio to turn it on."
+                            .to_owned(),
+                    ));
+                }
                 Some(microphone)
             }
             Err(error) => {

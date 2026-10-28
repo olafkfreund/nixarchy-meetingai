@@ -2148,27 +2148,43 @@ impl Daemon {
     // ----- dictation ----------------------------------------------------
 
     fn dictate_start(self: &Arc<Self>) -> Result<Value, String> {
+        // Opening the microphone runs pactl, so do it without the daemon lock.
+        let (meeting, device) = {
+            let g = self.inner.lock();
+            if g.dictation.is_some() {
+                return Err("Dictation is already running.".into());
+            }
+            if self
+                .speech_config(&g.settings, self.local_now(&g))
+                .is_none()
+            {
+                return Err("Speech-to-text is not ready; dictation needs it.".into());
+            }
+            let meeting = g
+                .recording
+                .as_ref()
+                .is_some_and(|r| !r.stop.load(Ordering::Relaxed));
+            if g.recording.is_some() && !meeting {
+                return Err("Wait for the previous meeting transcript to finish.".into());
+            }
+            (
+                meeting,
+                Some(g.settings.input_device.clone()).filter(|d| !d.is_empty()),
+            )
+        };
+        let microphone = if meeting {
+            None
+        } else {
+            Some(
+                Microphone::start(device.as_deref())
+                    .map_err(|e| format!("Could not start dictation: {e}"))?,
+            )
+        };
         let mut guard = self.inner.lock();
         let g = &mut *guard;
         if g.dictation.is_some() {
             return Err("Dictation is already running.".into());
         }
-        if self.speech_config(&g.settings, self.local_now(g)).is_none() {
-            return Err("Speech-to-text is not ready; dictation needs it.".into());
-        }
-        let meeting = g
-            .recording
-            .as_ref()
-            .is_some_and(|r| !r.stop.load(Ordering::Relaxed));
-        if g.recording.is_some() && !meeting {
-            return Err("Wait for the previous meeting transcript to finish.".into());
-        }
-        let microphone = if meeting {
-            None
-        } else {
-            let device = Some(g.settings.input_device.as_str()).filter(|d| !d.is_empty());
-            Some(Microphone::start(device).map_err(|e| format!("Could not start dictation: {e}"))?)
-        };
         g.pending_question = None;
         g.pending_created = None;
         g.pending_since = None;

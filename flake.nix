@@ -265,6 +265,7 @@
             minimal.xdg.configFile ? ${echoFile}
             && !(echoOff.xdg.configFile ? ${echoFile})
             && lib.hasInfix "meetingai-echo-cancel-source" minimal.xdg.configFile.${echoFile}.text
+            && lib.hasInfix "flags = [ ifexists nofail ]" minimal.xdg.configFile.${echoFile}.text
           ) "echo-cancel conf must exist with echoCancel on and be absent when off";
           hm-plugin-nixarchy = assertThat "hm-plugin-nixarchy" (
             withPlugins.programs.nixarchy.plugins."nixarchy.meetingai".src
