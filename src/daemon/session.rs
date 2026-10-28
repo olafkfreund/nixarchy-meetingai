@@ -496,6 +496,16 @@ fn stays_local(config: &ProviderConfig) -> bool {
     loopback && config.id != "ollama-cloud" && !config.model.to_lowercase().ends_with("-cloud")
 }
 
+/// Why speech-to-text is not ready, for the provider that is selected.
+fn speech_not_ready(provider: &str, other: &'static str) -> String {
+    if provider == "parakeet-local" {
+        let reason = crate::speech::stt::parakeet::not_ready_reason().unwrap_or_default();
+        format!("Speech-to-text is not ready: {reason}.")
+    } else {
+        other.to_owned()
+    }
+}
+
 /// The Nix module tells the daemon where its whisper-server listens (`http://host:port`).
 fn apply_whisper_url(config: &mut ProviderConfig, url: Option<String>) {
     if let Some(url) = url.filter(|u| !u.is_empty()) {
@@ -771,11 +781,14 @@ impl Daemon {
                 } else {
                     "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama."
                 }),
-                "speech": (!speech).then_some(if local {
-                    "Local-only is on: speech-to-text must be whisper on this machine. Check nixarchy-meetingai-whisper.service."
-                } else {
-                    "Speech-to-text is not ready. Check nixarchy-meetingai-whisper.service, or add a Deepgram key in Providers."
-                }),
+                "speech": (!speech).then(|| speech_not_ready(
+                    &g.settings.speech_provider,
+                    if local {
+                        "Local-only is on: speech-to-text must be whisper or Parakeet on this machine. Check nixarchy-meetingai-whisper.service."
+                    } else {
+                        "Speech-to-text is not ready. Check nixarchy-meetingai-whisper.service, or add a Deepgram key in Providers."
+                    },
+                )),
             },
         })
     }
@@ -1799,10 +1812,15 @@ impl Daemon {
                 g.consent = true;
             }
             let speech = if self.capture {
-                Some(self.speech_config(&g.settings, local).ok_or(if local {
-                    "local_only: whisper-local must be running on this machine (loopback address)."
-                } else {
-                    "Speech-to-text is not ready. Start whisper-server or add a Deepgram key."
+                Some(self.speech_config(&g.settings, local).ok_or_else(|| {
+                    speech_not_ready(
+                        &g.settings.speech_provider,
+                        if local {
+                            "local_only: a local speech engine must be ready on this machine (whisper-local on loopback, or parakeet-local)."
+                        } else {
+                            "Speech-to-text is not ready. Start whisper-server or add a Deepgram key."
+                        },
+                    )
                 })?)
             } else {
                 None
@@ -1837,6 +1855,17 @@ impl Daemon {
                 g.system,
             )
         };
+        // Load Parakeet before capture makes chunks, so a slow first load cannot back them up.
+        if speech.as_ref().is_some_and(|c| c.id == "parakeet-local") {
+            let loaded = tokio::task::spawn_blocking(crate::speech::stt::parakeet::preload)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+            if let Err(error) = loaded {
+                self.inner.lock().recording = None;
+                return Err(error);
+            }
+        }
         let opened = if self.capture {
             let config = SessionConfig {
                 device,
@@ -2159,7 +2188,14 @@ impl Daemon {
             return Err("Dictation is already running.".into());
         }
         if self.speech_config(&g.settings, self.local_now(g)).is_none() {
-            return Err("Speech-to-text is not ready; dictation needs it.".into());
+            return Err(speech_not_ready(
+                &g.settings.speech_provider,
+                "Speech-to-text is not ready; dictation needs it.",
+            ));
+        }
+        if g.settings.speech_provider == "parakeet-local" {
+            // Warm the model while the user speaks; a failure shows when the text is transcribed.
+            tokio::task::spawn_blocking(crate::speech::stt::parakeet::preload);
         }
         let meeting = g
             .recording

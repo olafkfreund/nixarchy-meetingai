@@ -220,6 +220,11 @@ impl ProviderConfig {
     }
 
     pub fn speech_usable(&self) -> bool {
+        self.speech_usable_in(crate::speech::stt::parakeet::model_dir())
+    }
+
+    /// [`Self::speech_usable`] with the Parakeet model directory given.
+    fn speech_usable_in(&self, parakeet_dir: Option<std::path::PathBuf>) -> bool {
         if let Some(custom) = &self.custom {
             self.id.starts_with("custom-")
                 && !self.base_url.is_empty()
@@ -228,7 +233,7 @@ impl ProviderConfig {
         } else {
             SttProvider::by_id(&self.id).is_some_and(|p| {
                 if p.wire == SttWire::InProcess {
-                    return crate::speech::stt::parakeet::model_ready();
+                    return crate::speech::stt::parakeet::model_ready_in(parakeet_dir);
                 }
                 !p.requires_key() || !self.api_key.trim().is_empty()
             })
@@ -385,11 +390,11 @@ mod tests {
         let config = ProviderConfig::new("parakeet-local", "", "");
         let provider = SttProvider::by_id("parakeet-local").unwrap();
         assert!(!provider.requires_key());
-        // SAFETY: this is the only test that touches the variable.
-        unsafe { std::env::remove_var("NIXARCHY_MEETINGAI_PARAKEET_DIR") };
-        assert!(!config.speech_usable());
-        unsafe { std::env::set_var("NIXARCHY_MEETINGAI_PARAKEET_DIR", &dir) };
-        assert!(!config.speech_usable(), "empty directory");
+        assert!(!config.speech_usable_in(None));
+        assert!(
+            !config.speech_usable_in(Some(dir.clone())),
+            "empty directory"
+        );
         for f in [
             "encoder.int8.onnx",
             "decoder.int8.onnx",
@@ -398,8 +403,7 @@ mod tests {
         ] {
             std::fs::write(dir.join(f), b"x").unwrap();
         }
-        assert!(config.speech_usable() && !config.speech_streaming());
-        unsafe { std::env::remove_var("NIXARCHY_MEETINGAI_PARAKEET_DIR") };
+        assert!(config.speech_usable_in(Some(dir.clone())) && !config.speech_streaming());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

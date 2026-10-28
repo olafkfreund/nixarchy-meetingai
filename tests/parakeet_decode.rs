@@ -10,14 +10,17 @@ async fn real_model_decodes_a_clip() {
         eprintln!("skipped: no model/clip configured");
         return;
     };
-    assert!(parakeet::model_ready(), "model files missing");
+    assert_eq!(parakeet::not_ready_reason(), None);
     let samples: Vec<f32> = hound::WavReader::open(wav)
         .unwrap()
         .into_samples::<i16>()
-        .map(|s| f32::from(s.unwrap()) / f32::from(i16::MAX))
+        .map(|s| f32::from(s.unwrap()) / 32768.0)
         .collect();
     let started = std::time::Instant::now();
-    let text = parakeet::transcribe(samples).await.unwrap().to_lowercase();
+    let text = parakeet::transcribe(samples, 16_000)
+        .await
+        .unwrap()
+        .to_lowercase();
     eprintln!("decoded in {:?}: {text}", started.elapsed());
     assert!(
         text.contains("ask what you can do for your country"),

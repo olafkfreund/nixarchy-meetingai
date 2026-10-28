@@ -163,15 +163,22 @@ async fn transcribe_inner(
     }
     let provider = SttProvider::by_id(&config.id).ok_or(SttError::NotConfigured)?;
     if provider.wire == SttWire::InProcess {
-        // Parakeet takes no prompt or language; it is multilingual.
-        let samples = hound::WavReader::new(std::io::Cursor::new(wav))
-            .and_then(|r| {
-                r.into_samples::<i16>()
-                    .map(|s| s.map(|v| f32::from(v) / f32::from(i16::MAX)))
-                    .collect::<Result<Vec<f32>, _>>()
-            })
+        // Parakeet takes no prompt or language; it is multilingual and resamples itself.
+        let reader = hound::WavReader::new(std::io::Cursor::new(wav))
             .map_err(|e| SttError::Encode(e.to_string()))?;
-        return crate::speech::stt::parakeet::transcribe(samples)
+        let spec = reader.spec();
+        if spec.channels != 1
+            || spec.bits_per_sample != 16
+            || spec.sample_format != hound::SampleFormat::Int
+        {
+            return Err(SttError::Encode("Parakeet needs mono 16-bit audio".into()));
+        }
+        let samples = reader
+            .into_samples::<i16>()
+            .map(|s| s.map(|v| f32::from(v) / 32768.0))
+            .collect::<Result<Vec<f32>, _>>()
+            .map_err(|e| SttError::Encode(e.to_string()))?;
+        return crate::speech::stt::parakeet::transcribe(samples, spec.sample_rate as i32)
             .await
             .map(|t| t.trim().to_owned())
             .map_err(SttError::Protocol);
@@ -1001,7 +1008,7 @@ mod tests {
     /// and `finish` flushes chunks that never saw trailing silence.
     #[tokio::test]
     async fn parakeet_batch_keeps_channel_and_times_and_flushes_on_stop() {
-        crate::speech::stt::parakeet::set_decoder(Box::new(|samples| {
+        crate::speech::stt::parakeet::set_decoder(Box::new(|_, samples| {
             let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
             if peak < 0.3 {
                 "hello from the microphone"
