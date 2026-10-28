@@ -1,7 +1,23 @@
-//! and request shapes for Ollama, the subscription CLIs and Deepgram. Removed providers
-    /// A subscription CLI (`claude` / `codex` / `agy`) driven as a subprocess.
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatWire {
+    OpenAi,
+    Anthropic,
     Cli,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ChatProvider {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub endpoint: &'static str,
+    pub wire: ChatWire,
+    pub supports_images: bool,
     pub requires_key: bool,
+}
+
+pub const CHAT_PROVIDERS: &[ChatProvider] = &[
     ChatProvider {
         id: "claude-sub",
         name: "Claude (subscription)",
@@ -17,6 +33,7 @@
         wire: ChatWire::Cli,
         supports_images: false,
         requires_key: false,
+    },
     ChatProvider {
         id: "opencode",
         name: "OpenCode",
@@ -49,6 +66,14 @@
         supports_images: true,
         requires_key: false,
     },
+];
+
+impl ChatProvider {
+    pub fn by_id(id: &str) -> Option<&'static ChatProvider> {
+        CHAT_PROVIDERS.iter().find(|entry| entry.id == id)
+    }
+}
+
 /// `https` anywhere, `http` only for loopback hosts.
 pub fn endpoint_allowed(url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(url) else {
@@ -61,12 +86,29 @@ pub fn endpoint_allowed(url: &str) -> bool {
     }
 }
 
-    /// Decoded inside the daemon (Parakeet through sherpa-onnx); no URL, no key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SttWire {
+    RawAudio,
     InProcess,
-    /// OpenAI-compatible multipart transcription.
     OpenAiMultipart,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SttProvider {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub endpoint: &'static str,
+    pub wire: SttWire,
+    pub default_model: &'static str,
+}
+
 pub const STT_PROVIDERS: &[SttProvider] = &[
     SttProvider {
+        id: "deepgram-stt",
+        name: "Deepgram",
+        endpoint: "https://api.deepgram.com/v1/listen",
+        wire: SttWire::RawAudio,
+        default_model: "nova-3",
     },
     SttProvider {
         id: "parakeet-local",
@@ -83,44 +125,133 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
         default_model: "",
     },
 ];
+
+impl SttProvider {
+    pub fn by_id(id: &str) -> Option<&'static SttProvider> {
+        STT_PROVIDERS.iter().find(|entry| entry.id == id)
+    }
+
     pub fn requires_key(&self) -> bool {
         self.wire == SttWire::RawAudio
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderConfig {
+    pub id: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<super::custom::CustomProvider>,
+    #[serde(default)]
+    pub language: String,
+}
+
+impl ProviderConfig {
+    pub fn new(
+        id: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            api_key: api_key.into(),
+            model: model.into(),
+            base_url: String::new(),
+            custom: None,
+            language: String::new(),
+        }
+    }
+
+    pub fn endpoint(&self) -> Option<String> {
+        if self.custom.is_some() {
+            return (self.id.starts_with("custom-") && !self.base_url.is_empty())
+                .then(|| self.base_url.clone());
+        }
+        let provider = ChatProvider::by_id(&self.id)?;
         if provider.wire == ChatWire::Cli {
             return Some(String::new());
         }
+        if !self.base_url.is_empty() {
             return endpoint_allowed(&self.base_url).then(|| self.base_url.clone());
-            .map(|provider| provider.requires_key)
+        }
+        Some(provider.endpoint.to_owned())
+    }
+
+    pub fn is_usable(&self) -> bool {
+        if let Some(custom) = &self.custom {
+            return self.endpoint().is_some()
+                && !self.model.trim().is_empty()
+                && (custom.auth == "none" || !self.api_key.trim().is_empty())
+                && custom.validate(false).is_ok();
+        }
+        self.endpoint().is_some()
+            && !self.model.trim().is_empty()
+            && ChatProvider::by_id(&self.id)
+                .is_some_and(|p| !p.requires_key || !self.api_key.trim().is_empty())
+    }
+
+    pub fn speech_usable(&self) -> bool {
         self.speech_usable_in(crate::speech::stt::parakeet::model_dir())
     }
 
-    /// [`Self::speech_usable`] with the Parakeet model directory given.
     fn speech_usable_in(&self, parakeet_dir: Option<std::path::PathBuf>) -> bool {
-            SttProvider::by_id(&self.id).is_some_and(|p| {
-                if p.wire == SttWire::InProcess {
-                    return crate::speech::stt::parakeet::model_ready_in(parakeet_dir);
-                }
-                (!p.requires_key() || !self.api_key.trim().is_empty())
-                    && (p.wire != SttWire::OpenAiMultipart
-                        || (endpoint_allowed(&self.base_url) && !self.model.trim().is_empty()))
-            })
+        if let Some(custom) = &self.custom {
+            return self.id.starts_with("custom-")
+                && !self.base_url.is_empty()
+                && (custom.auth == "none" || !self.api_key.trim().is_empty())
+                && custom.validate(true).is_ok();
+        }
+        let Some(provider) = SttProvider::by_id(&self.id) else {
+            return false;
+        };
+        if provider.wire == SttWire::InProcess {
+            return crate::speech::stt::parakeet::model_ready_in(parakeet_dir);
+        }
+        (!provider.requires_key() || !self.api_key.trim().is_empty())
+            && (provider.wire != SttWire::OpenAiMultipart
+                || (endpoint_allowed(&self.base_url) && !self.model.trim().is_empty()))
+    }
+
+    pub fn speech_streaming(&self) -> bool {
         match &self.custom {
             Some(custom) => custom.streaming,
-            // Only Deepgram's raw-audio wire streams; OpenAI multipart and Parakeet are batch.
             None => SttProvider::by_id(&self.id).is_none_or(|p| p.wire == SttWire::RawAudio),
         }
+    }
+
+    pub fn chat_definition(&self) -> Option<ChatProvider> {
+        if let Some(custom) = &self.custom {
+            return self.id.starts_with("custom-").then(|| ChatProvider {
+                id: "custom",
+                name: "Custom",
+                endpoint: "",
+                wire: if custom.request_format == "anthropic" {
+                    ChatWire::Anthropic
+                } else {
+                    ChatWire::OpenAi
+                },
+                supports_images: custom.supports_images,
                 requires_key: custom.auth != "none",
-            assert!(
-                provider.wire == ChatWire::Cli || provider.endpoint.starts_with("http"),
-                "{}",
-                provider.id
-            );
-            if provider.wire != ChatWire::Cli && provider.id != "ollama" {
+            });
+        }
+        ChatProvider::by_id(&self.id).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_identity_and_order() {
+        let ids: Vec<_> = CHAT_PROVIDERS.iter().map(|p| p.id).collect();
         assert_eq!(
-            ChatProvider::by_id("agy-sub").unwrap().name,
-            "Antigravity (subscription)"
-        );
-        assert!(ChatProvider::by_id("agy-sub ").is_none());
+            ids,
             [
                 "claude-sub",
                 "agy-sub",
@@ -129,14 +260,49 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
                 "ollama-cloud",
                 "ollama"
             ]
+        );
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len());
+        for p in CHAT_PROVIDERS {
+            if p.wire != ChatWire::Cli {
+                assert!(p.endpoint.starts_with("http"));
+                if p.id != "ollama" {
+                    assert!(p.endpoint.starts_with("https://"));
+                }
+            }
+        }
+        assert_eq!(
+            ChatProvider::by_id("agy-sub").unwrap().name,
+            "Antigravity (subscription)"
+        );
+        assert!(ChatProvider::by_id("agy-sub ").is_none());
+        assert!(ChatProvider::by_id("legacy-chat").is_none());
         assert_eq!(STT_PROVIDERS.len(), 3);
-        let retired = ProviderConfig::new("openai", "k", "m");
-    fn providers_require_a_model() {
-        assert!(ProviderConfig::new("ollama", "", "gpt-4o").is_usable());
-        assert!(!ProviderConfig::new("ollama", "", "  ").is_usable());
-        // An unknown id has no endpoint.
-        assert!(!ProviderConfig::new("unknown", "", "m").is_usable());
-        let mut config = ProviderConfig::new("ollama", "k", "m");
+        assert_eq!(
+            SttProvider::by_id("deepgram-stt").unwrap().default_model,
+            "nova-3"
+        );
+        assert!(SttProvider::by_id("retired-speech").is_none());
+    }
+
+    #[test]
+    fn endpoint_and_model_rules() {
+        let mut config = ProviderConfig::new("ollama", "", "sample-model");
+        assert!(config.is_usable());
+        config.model = "  ".into();
+        assert!(!config.is_usable());
+        config.model = "sample-model".into();
+        config.base_url = "http://localhost:7777/v1/chat/completions".into();
+        assert_eq!(
+            config.endpoint().as_deref(),
+            Some("http://localhost:7777/v1/chat/completions")
+        );
+        let unknown = ProviderConfig::new("retired-chat", "key", "model");
+        assert!(unknown.endpoint().is_none() && !unknown.is_usable());
+    }
+
     #[test]
     fn keyless_providers_only_need_a_model() {
         for id in ["ollama", "claude-sub", "codex-sub", "agy-sub", "opencode"] {
@@ -168,8 +334,6 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
         assert!(!config.is_usable());
     }
 
-        assert!(SttProvider::by_id("whisper-local").is_none());
-
     #[test]
     fn parakeet_is_ready_only_with_its_model_files() {
         let dir = std::env::temp_dir().join(format!("parakeet-ready-{}", std::process::id()));
@@ -193,3 +357,4 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
         assert!(config.speech_usable_in(Some(dir.clone())) && !config.speech_streaming());
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
