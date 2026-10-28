@@ -107,6 +107,8 @@ pub enum SttWire {
     WhisperServer,
     /// Decoded inside the daemon (Parakeet through sherpa-onnx); no URL, no key.
     InProcess,
+    /// OpenAI-compatible multipart transcription.
+    OpenAiMultipart,
 }
 
 /// A speech-to-text provider definition.
@@ -143,6 +145,13 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
         wire: SttWire::InProcess,
         default_model: "parakeet-tdt-0.6b-v3",
     },
+    SttProvider {
+        id: "openai-compatible-stt",
+        name: "OpenAI-compatible speech",
+        endpoint: "",
+        wire: SttWire::OpenAiMultipart,
+        default_model: "",
+    },
 ];
 
 impl SttProvider {
@@ -151,7 +160,7 @@ impl SttProvider {
     }
 
     pub fn requires_key(&self) -> bool {
-        !matches!(self.wire, SttWire::WhisperServer | SttWire::InProcess)
+        self.wire == SttWire::RawAudio
     }
 }
 
@@ -235,7 +244,9 @@ impl ProviderConfig {
                 if p.wire == SttWire::InProcess {
                     return crate::speech::stt::parakeet::model_ready_in(parakeet_dir);
                 }
-                !p.requires_key() || !self.api_key.trim().is_empty()
+                (!p.requires_key() || !self.api_key.trim().is_empty())
+                    && (p.wire != SttWire::OpenAiMultipart
+                        || (endpoint_allowed(&self.base_url) && !self.model.trim().is_empty()))
             })
         }
     }
@@ -243,7 +254,7 @@ impl ProviderConfig {
     pub fn speech_streaming(&self) -> bool {
         match &self.custom {
             Some(custom) => custom.streaming,
-            // whisper-server and Parakeet are batch-only.
+            // Only Deepgram's raw-audio wire streams; whisper-server, OpenAI multipart and Parakeet are batch.
             None => SttProvider::by_id(&self.id).is_none_or(|p| p.wire == SttWire::RawAudio),
         }
     }
@@ -316,7 +327,7 @@ mod tests {
                 "ollama"
             ]
         );
-        assert_eq!(STT_PROVIDERS.len(), 3);
+        assert_eq!(STT_PROVIDERS.len(), 4);
         let retired = ProviderConfig::new("openai", "k", "m");
         assert!(!retired.is_usable());
         assert!(retired.endpoint().is_none());

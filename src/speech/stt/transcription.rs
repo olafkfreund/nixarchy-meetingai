@@ -47,7 +47,9 @@ fn client() -> reqwest::Client {
 pub fn extract_transcript(provider: &SttProvider, value: &Value) -> Option<String> {
     let text = match provider.wire {
         SttWire::InProcess => None,
-        SttWire::WhisperServer => value.get("text").and_then(Value::as_str).map(str::to_owned),
+        SttWire::WhisperServer | SttWire::OpenAiMultipart => {
+            value.get("text").and_then(Value::as_str).map(str::to_owned)
+        }
         SttWire::RawAudio => value
             .pointer("/results/channels/0/alternatives/0/transcript")
             .and_then(Value::as_str)
@@ -183,26 +185,56 @@ async fn transcribe_inner(
             .map(|t| t.trim().to_owned())
             .map_err(SttError::Protocol);
     }
-    if provider.wire == SttWire::WhisperServer {
+    if matches!(
+        provider.wire,
+        SttWire::WhisperServer | SttWire::OpenAiMultipart
+    ) {
+        if provider.wire == SttWire::OpenAiMultipart && !config.speech_usable() {
+            return Err(SttError::NotConfigured);
+        }
         let endpoint = if config.base_url.is_empty() {
             provider.endpoint
         } else {
             &config.base_url
         };
+        let endpoint = if provider.wire == SttWire::OpenAiMultipart {
+            let url = reqwest::Url::parse(endpoint)
+                .map_err(|e| SttError::Protocol(format!("invalid speech base URL: {e}")))?;
+            if url.query().is_some() || url.fragment().is_some() {
+                return Err(SttError::Protocol(
+                    "speech base URL must not contain a query string or fragment".into(),
+                ));
+            }
+            let base = endpoint.trim_end_matches('/');
+            let base = base.strip_suffix("/v1").unwrap_or(base);
+            format!("{base}/v1/audio/transcriptions")
+        } else {
+            endpoint.to_owned()
+        };
         let file = reqwest::multipart::Part::bytes(wav)
             .file_name("audio.wav")
             .mime_str("audio/wav")?;
-        let mut form = reqwest::multipart::Form::new()
-            .part("file", file)
-            .text("response_format", "json")
-            .text("temperature", "0");
-        if !prompt.is_empty() {
+        let mut form = reqwest::multipart::Form::new().part("file", file);
+        if provider.wire == SttWire::OpenAiMultipart {
+            form = form.text("model", config.model.clone());
+        } else {
+            form = form
+                .text("response_format", "json")
+                .text("temperature", "0");
+        }
+        if provider.wire == SttWire::WhisperServer && !prompt.is_empty() {
             form = form.text("prompt", prompt.to_owned());
         }
-        if let Some(language) = language.filter(|v| !v.is_empty()) {
+        if let Some(language) =
+            language.filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("auto"))
+        {
             form = form.text("language", language.to_owned());
         }
-        let response = client().post(endpoint).multipart(form).send().await?;
+        let mut request = client().post(endpoint).multipart(form);
+        if provider.wire == SttWire::OpenAiMultipart && !config.api_key.is_empty() {
+            request = request.bearer_auth(&config.api_key);
+        }
+        let response = request.send().await?;
         let status = response.status();
         let bytes = crate::core::network::read_body(response, 4 * 1024 * 1024)
             .await
@@ -234,19 +266,7 @@ async fn transcribe_inner(
     } else {
         &config.base_url
     };
-    let mut url = reqwest::Url::parse(endpoint)
-        .map_err(|_| SttError::Protocol("invalid speech endpoint".into()))?;
-    {
-        let mut query = url.query_pairs_mut();
-        query
-            .append_pair("model", model)
-            .append_pair("diarize", "true")
-            .append_pair("smart_format", "true")
-            .append_pair("punctuate", "true");
-        if let Some(language) = language.filter(|v| !v.is_empty()) {
-            query.append_pair("language", language);
-        }
-    }
+    let url = deepgram_batch_url(endpoint, model, language)?;
     let request = http
         .post(url)
         .header("Authorization", format!("Token {}", config.api_key))
@@ -278,6 +298,31 @@ async fn transcribe_inner(
     Ok(extract_transcript(provider, &value).unwrap_or_default())
 }
 
+fn deepgram_batch_url(
+    endpoint: &str,
+    model: &str,
+    language: Option<&str>,
+) -> Result<reqwest::Url, SttError> {
+    let mut url = reqwest::Url::parse(endpoint)
+        .map_err(|_| SttError::Protocol("invalid speech endpoint".into()))?;
+    let eu = url.host_str() == Some("api.eu.deepgram.com");
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .append_pair("model", model)
+            .append_pair("diarize", "true")
+            .append_pair("smart_format", "true")
+            .append_pair("punctuate", "true");
+        if let Some(language) = language.filter(|v| !v.is_empty()) {
+            query.append_pair("language", language);
+        }
+        if eu {
+            query.append_pair("mip_opt_out", "true");
+        }
+    }
+    Ok(url)
+}
+
 /// One transcript line from the live stream.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscriptLine {
@@ -292,10 +337,18 @@ pub struct TranscriptLine {
 }
 
 /// Deepgram streaming endpoint for raw 16-bit two-channel PCM.
-pub fn deepgram_url(model: &str, language: Option<&str>) -> String {
+pub fn deepgram_url(model: &str, language: Option<&str>, eu: bool) -> String {
+    let host = if eu {
+        "api.eu.deepgram.com"
+    } else {
+        "api.deepgram.com"
+    };
     let mut url = format!(
-        "wss://api.deepgram.com/v1/listen?model={model}&encoding=linear16&sample_rate={SAMPLE_RATE}&channels=2&multichannel=true&diarize_model=latest&interim_results=true&smart_format=true&punctuate=true&vad_events=true&endpointing=300&utterance_end_ms=1000"
+        "wss://{host}/v1/listen?model={model}&encoding=linear16&sample_rate={SAMPLE_RATE}&channels=2&multichannel=true&diarize_model=latest&interim_results=true&smart_format=true&punctuate=true&vad_events=true&endpointing=300&utterance_end_ms=1000"
     );
+    if eu {
+        url.push_str("&mip_opt_out=true");
+    }
     if let Some(language) = language.filter(|value| !value.is_empty() && *value != "en") {
         let mut parsed = reqwest::Url::parse(&url).expect("bundled Deepgram endpoint");
         parsed.query_pairs_mut().append_pair("language", language);
@@ -564,7 +617,8 @@ impl LiveTranscriber {
             return Ok(Self::connect_batch(config.clone(), hints));
         }
         let Some(custom) = &config.custom else {
-            let mut url = deepgram_url(validate_model(&config.model)?, Some(&config.language));
+            let eu = config.base_url.starts_with("https://api.eu.deepgram.com/");
+            let mut url = deepgram_url(validate_model(&config.model)?, Some(&config.language), eu);
             if !config.base_url.is_empty() {
                 let endpoint = config
                     .base_url
@@ -609,6 +663,7 @@ impl LiveTranscriber {
             let mut chunks = BatchChunks::default();
             let mut filter = LineFilter::default();
             let mut requests = futures_util::stream::FuturesOrdered::new();
+            let mut in_flight = std::collections::VecDeque::new();
             loop {
                 let finished;
                 let ready = tokio::select! {
@@ -622,11 +677,26 @@ impl LiveTranscriber {
                         match pcm { Some(pcm) => { finished = false; chunks.push(&pcm) }, None => { finished = true; chunks.finish() } }
                     }
                     result = requests.next(), if !requests.is_empty() => {
+                        let _ = in_flight.pop_front();
                         match result {
-                            Some(Ok(Some(line))) => { if filter.accept(&line) { let _ = sender.send(LiveEvent::Transcript(line)).await; } }
+                            Some(Ok(Some(line))) => {
+                                for line in filter.accept(&line) {
+                                    let _ = sender.send(LiveEvent::Transcript(line)).await;
+                                }
+                            }
                             Some(Ok(None)) => {}
-                            Some(Err(error)) => { let _ = sender.send(LiveEvent::Failed(error)).await; break; }
+                            Some(Err(error)) => {
+                                for line in filter.flush() {
+                                    let _ = sender.send(LiveEvent::Transcript(line)).await;
+                                }
+                                let _ = sender.send(LiveEvent::Failed(error)).await;
+                                break;
+                            }
                             None => {}
+                        }
+                        let pending = chunks.earliest_system_start(&in_flight);
+                        for line in filter.tick(chunks.now(), pending) {
+                            let _ = sender.send(LiveEvent::Transcript(line)).await;
                         }
                         continue;
                     }
@@ -636,11 +706,15 @@ impl LiveTranscriber {
                 }
                 for (channel, start, end, samples) in ready {
                     if requests.len() >= 4 {
+                        for line in filter.flush() {
+                            let _ = sender.send(LiveEvent::Transcript(line)).await;
+                        }
                         let _ = sender.send(LiveEvent::Failed("The speech service fell behind. Recording stopped; start again to reconnect.".into())).await;
                         return;
                     }
                     let config = config.clone();
                     let prompt = filter.prompt(channel, &hints.glossary);
+                    in_flight.push_back((channel, start));
                     requests.push_back(async move {
                         let text = transcribe_with_retry(&config, &samples, &prompt)
                             .await
@@ -659,20 +733,32 @@ impl LiveTranscriber {
                         }))
                     });
                 }
+                let pending = chunks.earliest_system_start(&in_flight);
+                for line in filter.tick(chunks.now(), pending) {
+                    let _ = sender.send(LiveEvent::Transcript(line)).await;
+                }
                 if finished {
+                    let mut failed = None;
                     while let Some(result) = requests.next().await {
+                        let _ = in_flight.pop_front();
                         match result {
                             Ok(Some(line)) => {
-                                if filter.accept(&line) {
+                                for line in filter.accept(&line) {
                                     let _ = sender.send(LiveEvent::Transcript(line)).await;
                                 }
                             }
                             Ok(None) => {}
                             Err(error) => {
-                                let _ = sender.send(LiveEvent::Failed(error)).await;
+                                failed = Some(error);
                                 break;
                             }
                         }
+                    }
+                    for line in filter.flush() {
+                        let _ = sender.send(LiveEvent::Transcript(line)).await;
+                    }
+                    if let Some(error) = failed {
+                        let _ = sender.send(LiveEvent::Failed(error)).await;
                     }
                     break;
                 }
@@ -691,7 +777,7 @@ impl LiveTranscriber {
         language: Option<String>,
     ) -> Result<Self, SttError> {
         let model = validate_model(&model)?;
-        Self::connect_url(api_key, deepgram_url(model, language.as_deref())).await
+        Self::connect_url(api_key, deepgram_url(model, language.as_deref(), false)).await
     }
 
     /// Endpoint injection is also used by protocol integration tests.
@@ -853,13 +939,15 @@ where
         .map_err(|e| e.to_string())
 }
 
-type BatchChunk = (u8, f64, f64, Vec<f32>);
+/// Channel, start, end (seconds) and samples of one utterance.
+pub type BatchChunk = (u8, f64, f64, Vec<f32>);
 /// A sample above this level counts as sound (about -42 dBFS).
 const SOUND_LEVEL: f32 = 0.008;
 /// 0.2 s at 16 kHz.
 const MIN_SOUND_SAMPLES: usize = 3_200;
+/// Cuts interleaved 16 kHz stereo PCM into per-channel utterances (also used by `examples/accuracy_replay.rs`).
 #[derive(Default)]
-struct BatchChunks {
+pub struct BatchChunks {
     started: Vec<u8>,
     samples: [Vec<f32>; 2],
     silence: [usize; 2],
@@ -867,7 +955,7 @@ struct BatchChunks {
     start: [usize; 2],
 }
 impl BatchChunks {
-    fn push(&mut self, pcm: &[i16]) -> Vec<BatchChunk> {
+    pub fn push(&mut self, pcm: &[i16]) -> Vec<BatchChunk> {
         let mut ready = Vec::new();
         for frame in pcm.as_chunks::<2>().0 {
             for (channel, value) in frame.iter().enumerate() {
@@ -905,8 +993,23 @@ impl BatchChunks {
             samples,
         ))
     }
-    fn finish(&mut self) -> Vec<BatchChunk> {
+    pub fn finish(&mut self) -> Vec<BatchChunk> {
         (0..2).filter_map(|c| self.take(c)).collect()
+    }
+    fn now(&self) -> f64 {
+        self.position as f64 / 16000.0
+    }
+    fn earliest_system_start(
+        &self,
+        in_flight: &std::collections::VecDeque<(u8, f64)>,
+    ) -> Option<f64> {
+        let open = (!self.samples[1].is_empty()).then_some(self.start[1] as f64 / 16000.0);
+        in_flight
+            .iter()
+            .filter(|(ch, _)| *ch == 1)
+            .map(|(_, start)| *start)
+            .chain(open)
+            .reduce(f64::min)
     }
 }
 
@@ -919,7 +1022,7 @@ impl Drop for LiveTranscriber {
 }
 
 /// Loopback providers (whisper-server) may be restarting: retry transient failures.
-async fn transcribe_with_retry(
+pub async fn transcribe_with_retry(
     config: &ProviderConfig,
     samples: &[f32],
     prompt: &str,
@@ -977,6 +1080,82 @@ pub fn local_chunk_payload(samples: &[f32], start: f64) -> Result<Value, SttErro
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn openai_multipart_sends_model_wav_and_optional_bearer_key() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                let count = socket.read(&mut buf).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buf[..count]);
+                if let Some(split) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..split]);
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|s| s.parse().ok())
+                        })
+                        .unwrap();
+                    if request.len() >= split + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&request);
+            assert!(text.starts_with("POST /v1/audio/transcriptions HTTP/1.1"));
+            assert!(
+                text.to_ascii_lowercase()
+                    .contains("authorization: bearer test-key")
+            );
+            assert!(text.contains("name=\"model\"\r\n\r\nparakeet"));
+            assert!(text.contains("name=\"language\"\r\n\r\nen"));
+            assert!(text.contains("name=\"file\"; filename=\"audio.wav\""));
+            assert!(text.contains("Content-Type: audio/wav"));
+            assert!(text.contains("RIFFtest"));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"text\":\"hello\"}").unwrap();
+        });
+        let mut config = crate::ai::providers::ProviderConfig::new(
+            "openai-compatible-stt",
+            "test-key",
+            "parakeet",
+        );
+        config.base_url = format!("http://127.0.0.1:{port}/v1///");
+        config.language = "en".into();
+        assert_eq!(
+            super::transcribe(&config, b"RIFFtest".to_vec(), None)
+                .await
+                .unwrap(),
+            "hello"
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn openai_multipart_rejects_query_and_fragment_in_base_url() {
+        let mut config =
+            crate::ai::providers::ProviderConfig::new("openai-compatible-stt", "", "parakeet");
+        for suffix in ["?token=secret", "#fragment"] {
+            config.base_url = format!("http://127.0.0.1:8000/v1{suffix}");
+            let error = super::transcribe(&config, b"RIFFtest".to_vec(), None)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("query string or fragment"),
+                "{error}"
+            );
+        }
+    }
+
     #[test]
     fn a_click_in_silence_is_not_sent_but_speech_is() {
         let pcm = |s: &[f32]| -> Vec<i16> {
@@ -1158,7 +1337,7 @@ mod tests {
 
     #[test]
     fn live_url_carries_native_parameters() {
-        let url = deepgram_url("nova-3", None);
+        let url = deepgram_url("nova-3", None, false);
         assert!(url.starts_with("wss://api.deepgram.com/v1/listen?"));
         assert!(url.contains("encoding=linear16"));
         assert!(url.contains("sample_rate=16000"));
@@ -1166,7 +1345,14 @@ mod tests {
         assert!(url.contains("channels=2&multichannel=true"));
         assert!(url.contains("interim_results=true"));
         assert!(!url.contains("language="), "default language is omitted");
-        assert!(deepgram_url("nova-3", Some("de")).contains("language=de"));
+        assert!(deepgram_url("nova-3", Some("de"), false).contains("language=de"));
+        let eu = deepgram_url("nova-3", None, true);
+        assert!(eu.starts_with("wss://api.eu.deepgram.com/v1/listen?"));
+        assert!(eu.contains("mip_opt_out=true"));
+        let batch =
+            deepgram_batch_url("https://api.eu.deepgram.com/v1/listen", "nova-3", None).unwrap();
+        assert_eq!(batch.host_str(), Some("api.eu.deepgram.com"));
+        assert!(batch.query().unwrap().contains("mip_opt_out=true"));
     }
 
     #[test]
@@ -1226,7 +1412,10 @@ mod tests {
     fn every_stt_provider_has_defaults() {
         for provider in STT_PROVIDERS {
             assert!(!provider.name.is_empty());
-            assert!(provider.wire == SttWire::InProcess || provider.endpoint.starts_with("http"));
+            assert!(
+                provider.endpoint.starts_with("http")
+                    || matches!(provider.wire, SttWire::OpenAiMultipart | SttWire::InProcess)
+            );
         }
     }
 }

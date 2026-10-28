@@ -361,6 +361,81 @@ true
 
 
 
+## programs\.nixarchy-meetingai\.deepgram\.keyFile
+
+
+
+Path to a Deepgram key file, read by the daemon at runtime\. A vault key takes precedence\.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+
+```nix
+null
+```
+
+
+
+*Example:*
+
+```nix
+"/run/agenix/deepgram"
+```
+
+
+
+## programs\.nixarchy-meetingai\.deepgram\.region
+
+
+
+Deepgram API region; EU requests opt out of model improvement\.
+
+
+
+*Type:*
+null or one of “us”, “eu”
+
+
+
+*Default:*
+
+```nix
+null
+```
+
+
+
+## programs\.nixarchy-meetingai\.echoCancel\.enable
+
+
+
+Load PipeWire’s WebRTC echo canceller with the default sink’s monitor as the reference and
+expose the result as the ` meetingai-echo-cancel-source ` source, which the daemon records as the
+microphone when present\. The system default source is not changed\.
+It takes effect after PipeWire restarts or at the next login
+(` systemctl --user restart pipewire pipewire-pulse wireplumber `)\.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+
+```nix
+true
+```
+
+
+
 ## programs\.nixarchy-meetingai\.extraEnvironment
 
 
@@ -926,6 +1001,27 @@ null
 
 
 
+## programs\.nixarchy-meetingai\.settings\.speechBaseUrl
+
+
+
+Base URL for OpenAI-compatible speech; must be set for that provider\.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+
+```nix
+null
+```
+
+
+
 ## programs\.nixarchy-meetingai\.settings\.speechLanguage
 
 
@@ -972,7 +1068,7 @@ null
 
 
 
-Speech-to-text provider (` parakeet-local `, ` whisper-local ` or ` deepgram-stt `)\.
+Speech-to-text provider (` parakeet-local `, ` whisper-local `, ` deepgram-stt `, or ` openai-compatible-stt `)\.
 
 
 
