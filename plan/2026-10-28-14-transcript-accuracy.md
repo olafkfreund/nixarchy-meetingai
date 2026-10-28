@@ -146,4 +146,4 @@ is reported, not replaced.
 
 ## Deviations log
 
-None yet.
+- Step 1: the gate analyzes 1 ms envelopes in the existing 50 ms capture blocks rather than emitting 20 ms blocks. It holds one block for lookahead, adding 50 ms of gate-only output latency so a quiet owner onset can restore the preceding block. The gate remains off by default.

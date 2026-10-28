@@ -15,7 +15,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::ai::providers::ProviderConfig;
-use crate::audio::echo_gate::{EchoGate, FRAME as ECHO_FRAME};
+use crate::audio::echo_gate::EchoGate;
 use crate::audio::microphone::{AudioError, Microphone};
 
 use crate::speech::transcription::{self, TranscriptLine};
@@ -137,6 +137,7 @@ pub struct ListenSession {
     sent_samples: usize,
     frames: CaptureFrames,
     echo_gate: Option<EchoGate>,
+    pending_audio: Option<(Vec<f32>, Vec<f32>)>,
     last_audio: [std::time::Instant; 2],
     elapsed: Duration,
     output_device: Option<String>,
@@ -200,6 +201,7 @@ impl ListenSession {
                 ..Default::default()
             },
             echo_gate: config.echo_gate.then(EchoGate::default),
+            pending_audio: None,
             last_audio: [std::time::Instant::now(); 2],
             elapsed: Duration::ZERO,
             output_device: config.output_device.clone(),
@@ -210,18 +212,21 @@ impl ListenSession {
     /// Switch call capture without reconnecting or interrupting the microphone.
     pub fn set_system_audio(&mut self, enabled: bool) -> Vec<SessionEvent> {
         if !enabled {
+            let pending = self.flush_audio();
             self.frames.set_remote(false);
             if let Some(gate) = &mut self.echo_gate {
                 gate.reset();
             }
             self.system.take();
-            return vec![SessionEvent::Started {
+            let mut events = pending.into_iter().collect::<Vec<_>>();
+            events.push(SessionEvent::Started {
                 device: self
                     .microphone
                     .as_ref()
                     .map(|m| m.device_name().to_owned())
                     .unwrap_or_default(),
-            }];
+            });
+            return events;
         }
         if self.system.is_some() {
             return Vec::new();
@@ -251,6 +256,38 @@ impl ListenSession {
     /// Time since the session began.
     pub fn elapsed(&self) -> Duration {
         self.elapsed
+    }
+
+    fn queue_audio(
+        gate: &mut Option<EchoGate>,
+        pending: &mut Option<(Vec<f32>, Vec<f32>)>,
+        mut samples: Vec<f32>,
+    ) -> Option<Vec<f32>> {
+        let Some(gate) = gate else {
+            return Some(samples);
+        };
+        let original = samples.clone();
+        gate.process(&mut samples);
+        let previous = pending.replace((samples, original));
+        previous.map(|(mut gated, raw)| {
+            if gate.protecting() {
+                for (pair, original) in gated
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .zip(raw.as_chunks::<2>().0.iter())
+                {
+                    pair[0] = original[0];
+                }
+            }
+            gated
+        })
+    }
+
+    fn flush_audio(&mut self) -> Option<SessionEvent> {
+        self.pending_audio
+            .take()
+            .map(|(_, original)| SessionEvent::Audio(original))
     }
 
     /// Drain pending audio and report what happened.
@@ -307,20 +344,16 @@ impl ListenSession {
             ));
             return events;
         }
-        let frame_size = if self.echo_gate.is_some() {
-            ECHO_FRAME
-        } else {
-            FRAME_SAMPLES
-        };
-        while self.sent_samples + frame_size <= due {
-            let Some(mut samples) = self.frames.next_sized(false, quiet, frame_size) else {
+        while self.sent_samples + FRAME_SAMPLES <= due {
+            let Some(samples) = self.frames.next_sized(false, quiet, FRAME_SAMPLES) else {
                 break;
             };
-            if let Some(gate) = &mut self.echo_gate {
-                gate.process(&mut samples);
-            }
             self.sent_samples += samples.len() / 2;
-            events.push(SessionEvent::Audio(samples));
+            if let Some(samples) =
+                Self::queue_audio(&mut self.echo_gate, &mut self.pending_audio, samples)
+            {
+                events.push(SessionEvent::Audio(samples));
+            }
         }
         self.elapsed = self.started.elapsed();
         events.push(SessionEvent::Level(level));
@@ -354,18 +387,17 @@ impl ListenSession {
                     "The final audio exceeded the capture buffer.".into(),
                 ));
             }
-            let frame_size = if self.echo_gate.is_some() {
-                ECHO_FRAME
-            } else {
-                FRAME_SAMPLES
-            };
-            while let Some(mut samples) = self.frames.next_sized(true, [false; 2], frame_size) {
-                if let Some(gate) = &mut self.echo_gate {
-                    gate.process(&mut samples);
+            while let Some(samples) = self.frames.next_sized(true, [false; 2], FRAME_SAMPLES) {
+                if let Some(samples) =
+                    Self::queue_audio(&mut self.echo_gate, &mut self.pending_audio, samples)
+                {
+                    events.push(SessionEvent::Audio(samples));
                 }
-                events.push(SessionEvent::Audio(samples));
             }
             microphone.stop();
+        }
+        if let Some(audio) = self.flush_audio() {
+            events.push(audio);
         }
         self.system.take();
         events.push(SessionEvent::Stopped {
@@ -556,10 +588,14 @@ mod tests {
         let mic = vec![0.251; FRAME_SAMPLES];
         let remote = vec![1.0; FRAME_SAMPLES];
         assert!(frames.push(&mic, &remote));
+        let samples = frames.next_sized(false, [false; 2], FRAME_SAMPLES).unwrap();
+        let mut gate = None;
+        let mut pending = None;
         assert_eq!(
-            frames.next_sized(false, [false; 2], FRAME_SAMPLES).unwrap(),
-            interleave(&mic, &remote, FRAME_SAMPLES)
+            ListenSession::queue_audio(&mut gate, &mut pending, samples),
+            Some(interleave(&mic, &remote, FRAME_SAMPLES))
         );
+        assert!(pending.is_none());
     }
 
     #[test]
