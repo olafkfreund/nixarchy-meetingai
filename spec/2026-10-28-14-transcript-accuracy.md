@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 14
 intent: intent/2026-10-28-14-transcript-accuracy.md
 ---
