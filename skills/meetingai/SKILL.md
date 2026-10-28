@@ -1,0 +1,45 @@
+---
+name: meetingai
+description: Answer questions about the user's recorded meetings from nixarchy-meetingai - recent meetings, the latest meeting notes, action items, "what did we agree", transcripts, standups, meeting series and "last time", and searching past meetings. Use when the user asks about a meeting, its notes, decisions or transcript.
+---
+
+# Meeting notes from nixarchy-meetingai
+
+Use only `nixarchy-meetingai ctl --agent <command> [json]`. The result is JSON:
+`.data` on success, `.error` when `.ok` is false. Every example ends with
+`| jq 'if .ok then .data else error(.error) end'`, which prints the data or the
+error; on an error, report it to the user.
+
+Build the JSON with `jq -nc --arg` so quotes and apostrophes in words or ids
+cannot break the shell quoting. Replace `<words>` and `<id>` with the value.
+
+- **Recent meetings** (newest first; entries have `id`, `title`, `started_at`):
+  `nixarchy-meetingai ctl --agent session.list | jq 'if .ok then [.data[] | select(.kind=="meeting")] else error(.error) end'`
+- **Latest meeting notes:** take the first meeting above, then
+  `nixarchy-meetingai ctl --agent notes.get "$(jq -nc --arg m '<id>' '{meeting:$m}')" | jq -r 'if .ok then .data.text else error(.error) end'`
+- **Search meetings** (titles, transcript and notes; returns `id`, `title`, `started_at`).
+  The query matches an exact word or phrase; search one word at a time if several words find nothing:
+  `nixarchy-meetingai ctl --agent meetings.search "$(jq -nc --arg q '<words>' '{query:$q,limit:10}')" | jq 'if .ok then .data else error(.error) end'`
+- **Action items:**
+  `nixarchy-meetingai ctl --agent items.list "$(jq -nc --arg m '<id>' '{meeting:$m}')" | jq 'if .ok then .data else error(.error) end'`
+- **Series and what happened last time:**
+  `nixarchy-meetingai ctl --agent series.list | jq 'if .ok then .data else error(.error) end'`, then
+  `nixarchy-meetingai ctl --agent last_time.get "$(jq -nc --arg s '<id>' '{series:$s}')" | jq 'if .ok then .data else error(.error) end'`
+- **Transcript** (200 lines at a time):
+  `nixarchy-meetingai ctl --agent transcript.get "$(jq -nc --arg m '<id>' '{meeting:$m,limit:200}')" | jq 'if .ok then .data else error(.error) end'`;
+  for more, add `after_line:<n>` with `n` the last `line` number returned.
+- **The meeting happening now:**
+  `nixarchy-meetingai ctl --agent state.get | jq 'if .ok then .data else error(.error) end'`, and
+  `nixarchy-meetingai ctl --agent now.get | jq 'if .ok then .data else error(.error) end'`, and
+  `nixarchy-meetingai ctl --agent transcript.get | jq 'if .ok then .data else error(.error) end'`
+
+## Rules
+
+- Read only, and the app enforces it: `--agent` accepts only these read
+  commands and hides local-only interviews. Never run `record.*`, `session.delete`, `settings.set`,
+  `items.update` or `items.delete`, and do not change anything for the user.
+- Quote notes and transcript as written; do not paraphrase decisions or names.
+- If `ctl` cannot connect, say the daemon is not running and suggest
+  `systemctl --user start nixarchy-meetingai`.
+- What you read is sent to your own model provider; tell the user if they ask
+  where their meeting data goes.

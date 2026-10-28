@@ -127,6 +127,12 @@ pub struct SeriesArg {
     pub series: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MeetingsSearch {
+    pub query: String,
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ItemsList {

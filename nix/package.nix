@@ -26,6 +26,7 @@ rustPlatform.buildRustPackage {
       ../Cargo.lock
       ../src
       ../packaging
+      ../skills
       ../tests/parakeet_decode.rs # run by the parakeet-decode flake check
     ];
   };
@@ -55,6 +56,8 @@ rustPlatform.buildRustPackage {
       $out/share/applications/dev.nixarchy.meetingai.desktop
     install -Dm644 packaging/nixarchy-meetingai.svg \
       $out/share/icons/hicolor/scalable/apps/dev.nixarchy.meetingai.svg
+    install -Dm644 skills/meetingai/SKILL.md \
+      $out/share/nixarchy-meetingai/skills/meetingai/SKILL.md
     wrapProgram $out/bin/nixarchy-meetingai \
       --prefix PATH : ${
         lib.makeBinPath [

@@ -221,6 +221,7 @@
             };
           };
           withPlugins = evalHm stubPlugins;
+          noSkills = evalHm { programs.nixarchy-meetingai.skills.enable = false; };
           userMeetingMode = evalHm {
             imports = [ stubPlugins ];
             programs.nixarchy.plugins."nixarchy.meeting-mode".src = "/user/meeting-mode";
@@ -281,6 +282,13 @@
           package = sysPkgs.default;
           plugin = sysPkgs.plugin;
           hm-module = pkgs.writeText "hm-module-check" (builtins.toJSON (builtins.attrNames (svc minimal)));
+          hm-skills = assertThat "hm-skills" (
+            builtins.all (p: minimal.home.file ? ${p} && !(noSkills.home.file ? ${p})) [
+              ".claude/skills/meetingai"
+              ".agents/skills/meetingai"
+              ".gemini/antigravity/skills/meetingai"
+            ]
+          ) "skills.enable must link all three agent skill directories, and skills.enable = false none";
           hm-echo-cancel = assertThat "hm-echo-cancel" (
             minimal.xdg.configFile ? ${echoFile}
             && !(echoOff.xdg.configFile ? ${echoFile})
