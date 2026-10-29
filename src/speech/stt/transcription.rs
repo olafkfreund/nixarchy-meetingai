@@ -4,11 +4,16 @@ use crate::ai::providers::{ProviderConfig, SttProvider, SttWire};
 use crate::audio::{SAMPLE_RATE, encode_wav};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc::{self, error::SendTimeoutError};
+use tokio::sync::watch;
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::{
-    Message, client::IntoClientRequest, protocol::WebSocketConfig,
+    Message,
+    client::IntoClientRequest,
+    http::{HeaderName, HeaderValue},
+    protocol::WebSocketConfig,
 };
 
 /// A provider result placed on the session audio clock.
@@ -42,6 +47,23 @@ pub enum SttError {
     Socket(String),
 }
 
+impl SttError {
+    /// Drops the request URL and masks `key` in the messages that may echo it.
+    fn scrubbed(self, key: &str) -> Self {
+        match self {
+            Self::Request(error) => Self::Request(error.without_url()),
+            mut other => {
+                if !key.is_empty()
+                    && let Self::Status { message, .. } | Self::Protocol(message) = &mut other
+                {
+                    *message = message.replace(key, "[redacted]");
+                }
+                other
+            }
+        }
+    }
+}
+
 /// Events produced by a live or batch recognition session.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiveEvent {
@@ -50,6 +72,11 @@ pub enum LiveEvent {
     UtteranceEnd { channel: u8, last_word_end: f64 },
     Failed(String),
 }
+
+/// Pending text of one channel is closed as a turn once it reaches this many bytes.
+const TURN_LIMIT: usize = 32_000;
+/// A boundary this much (seconds) before the pending end is treated as stale.
+const STALE: f64 = 0.010;
 
 #[derive(Default)]
 struct Turn {
@@ -68,7 +95,7 @@ impl LiveTurns {
         if !line.is_final {
             return Vec::new();
         }
-        let index = usize::from(line.channel.min(1));
+        let index = usize::from(line.channel != 0);
         let mut ready = Vec::new();
         if line.speaker.is_some()
             && self.channels[index].speaker.is_some()
@@ -88,7 +115,7 @@ impl LiveTurns {
             if line.speaker.is_some() {
                 turn.speaker = line.speaker;
             }
-            if turn.text.len() >= 32_000
+            if turn.text.len() >= TURN_LIMIT
                 && let Some(text) = self.take(index)
             {
                 ready.push(text);
@@ -102,8 +129,8 @@ impl LiveTurns {
         ready
     }
     pub fn finish(&mut self, channel: u8, last_word_end: f64) -> Option<String> {
-        let index = usize::from(channel.min(1));
-        if last_word_end + 0.01 < self.channels[index].end {
+        let index = usize::from(channel != 0);
+        if self.channels[index].end - last_word_end > STALE {
             return None;
         }
         self.take(index)
@@ -130,8 +157,11 @@ async fn transcribe_with_prompt(
     language: Option<&str>,
     prompt: &str,
 ) -> Result<String, SttError> {
-    let language =
-        language.or_else(|| (!config.language.is_empty()).then_some(config.language.as_str()));
+    let language = match (language, config.language.as_str()) {
+        (Some(chosen), _) => Some(chosen),
+        (None, "") => None,
+        (None, configured) => Some(configured),
+    };
     let result = if let Some(custom) = &config.custom {
         transcribe_custom(config, custom, wav, language).await
     } else if let Some(provider) = SttProvider::by_id(&config.id) {
@@ -145,22 +175,7 @@ async fn transcribe_with_prompt(
     } else {
         Err(SttError::NotConfigured)
     };
-    result.map_err(|error| match error {
-        SttError::Request(error) => SttError::Request(error.without_url()),
-        SttError::Status { status, message } => SttError::Status {
-            status,
-            message: hide_key(message, &config.api_key),
-        },
-        SttError::Protocol(message) => SttError::Protocol(hide_key(message, &config.api_key)),
-        other => other,
-    })
-}
-fn hide_key(message: String, key: &str) -> String {
-    if key.is_empty() {
-        message
-    } else {
-        message.replace(key, "[redacted]")
-    }
+    result.map_err(|error| error.scrubbed(&config.api_key))
 }
 async fn response_text(response: reqwest::Response) -> Result<String, SttError> {
     let status = response.status();
@@ -191,11 +206,9 @@ async fn transcribe_deepgram(
     if config.api_key.trim().is_empty() {
         return Err(SttError::MissingKey);
     }
-    let model = if config.model.trim().is_empty() {
-        provider.default_model
-    } else {
-        config.model.trim()
-    };
+    let model = Some(config.model.trim())
+        .filter(|m| !m.is_empty())
+        .unwrap_or(provider.default_model);
     let endpoint = if config.base_url.is_empty() {
         provider.endpoint
     } else {
@@ -214,6 +227,49 @@ async fn transcribe_deepgram(
         .map_err(|_| SttError::Protocol("Speech service sent malformed JSON".into()))?;
     Ok(extract_transcript(provider, &value).unwrap_or_default())
 }
+/// JSON body of the `json-wav` request format.
+#[derive(serde::Serialize)]
+struct WavJson<'a> {
+    audio: String,
+    model: &'a str,
+    language: Option<&'a str>,
+}
+
+/// How a custom provider wants the recording delivered.
+enum CustomBody {
+    Json,
+    Multipart,
+    Raw,
+}
+impl CustomBody {
+    fn from_format(format: &str) -> Self {
+        match format {
+            "json-wav" => Self::Json,
+            "multipart-wav" => Self::Multipart,
+            _ => Self::Raw,
+        }
+    }
+}
+
+/// Appends one multipart/form-data part (RFC 7578 framing) to `out`.
+fn form_part(
+    out: &mut Vec<u8>,
+    boundary: &str,
+    disposition: &str,
+    content_type: Option<&str>,
+    data: &[u8],
+) {
+    out.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: {disposition}\r\n").as_bytes(),
+    );
+    if let Some(kind) = content_type {
+        out.extend_from_slice(format!("Content-Type: {kind}\r\n").as_bytes());
+    }
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\r\n");
+}
+
 async fn transcribe_custom(
     config: &ProviderConfig,
     custom: &crate::ai::catalog::custom::CustomProvider,
@@ -226,31 +282,57 @@ async fn transcribe_custom(
     let mut url = reqwest::Url::parse(&config.base_url)
         .map_err(|_| SttError::Protocol("Speech endpoint URL is invalid".into()))?;
     if custom.request_format == "raw-wav" {
-        let mut query = url.query_pairs_mut();
-        if !config.model.is_empty() {
-            query.append_pair("model", &config.model);
-        }
-        if let Some(language) = language {
-            query.append_pair("language", language);
+        let pairs = [
+            ("model", config.model.as_str()),
+            ("language", language.unwrap_or("")),
+        ];
+        let wanted: Vec<_> = pairs.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+        if !wanted.is_empty() {
+            url.query_pairs_mut().extend_pairs(wanted);
         }
     }
+    let (content_type, bytes) = match CustomBody::from_format(&custom.request_format) {
+        CustomBody::Json => {
+            let body = WavJson {
+                audio: base64::engine::general_purpose::STANDARD.encode(&wav),
+                model: &config.model,
+                language,
+            };
+            let bytes = serde_json::to_vec(&body).map_err(|e| SttError::Encode(e.to_string()))?;
+            ("application/json".to_owned(), bytes)
+        }
+        CustomBody::Multipart => {
+            let boundary = format!("nixarchy-meetingai-{}", uuid::Uuid::new_v4());
+            let mut body = Vec::with_capacity(wav.len() + 512);
+            form_part(
+                &mut body,
+                &boundary,
+                "form-data; name=\"model\"",
+                None,
+                config.model.as_bytes(),
+            );
+            form_part(
+                &mut body,
+                &boundary,
+                "form-data; name=\"file\"; filename=\"audio.wav\"",
+                Some("audio/wav"),
+                &wav,
+            );
+            body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+            (format!("multipart/form-data; boundary={boundary}"), body)
+        }
+        CustomBody::Raw => ("audio/wav".to_owned(), wav),
+    };
     let mut request = crate::core::network::speech_client().request(method, url);
     if let Some((name, value)) = custom.header(&config.api_key) {
         request = request.header(name, value);
     }
-    request = match custom.request_format.as_str() {
-        "json-wav" => request.json(&json!({"audio": base64::engine::general_purpose::STANDARD.encode(wav), "model": config.model, "language": language})),
-        "multipart-wav" => {
-            let boundary = format!("nixarchy-meetingai-{}", uuid::Uuid::new_v4());
-            let mut body = Vec::new();
-            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n", config.model).as_bytes());
-            body.extend_from_slice(&wav);
-            body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-            request.header("Content-Type", format!("multipart/form-data; boundary={boundary}")).body(body)
-        }
-        _ => request.header("Content-Type", "audio/wav").body(wav),
-    };
-    let text = response_text(request.send().await?).await?;
+    let reply = request
+        .header("Content-Type", content_type)
+        .body(bytes)
+        .send()
+        .await?;
+    let text = response_text(reply).await?;
     custom.text(&text).map_err(SttError::Protocol)
 }
 fn extract_transcript(provider: &SttProvider, value: &Value) -> Option<String> {
@@ -393,6 +475,13 @@ async fn transcribe_openai(
     Ok(extract_transcript(provider, &value).unwrap_or_default())
 }
 
+/// Quiet samples (0.6 s) that end an utterance.
+const QUIET_CLOSE: usize = SAMPLE_RATE as usize * 3 / 5;
+/// Samples (15 s) after which an utterance is cut even without a pause.
+const LONGEST: usize = SAMPLE_RATE as usize * 15;
+/// Shortest utterance (0.1 s) worth recognising.
+const SHORTEST: usize = SAMPLE_RATE as usize / 10;
+
 #[derive(Default)]
 struct OpenChunk {
     start: f64,
@@ -400,75 +489,109 @@ struct OpenChunk {
     sound: usize,
     quiet: usize,
 }
+impl OpenChunk {
+    /// Keeps one more sample; true when the utterance has to end now.
+    fn add(&mut self, value: f32, sounding: bool) -> bool {
+        self.samples.push(value);
+        if sounding {
+            self.sound += 1;
+            self.quiet = 0;
+        } else {
+            self.quiet += 1;
+        }
+        self.quiet >= QUIET_CLOSE || self.samples.len() >= LONGEST
+    }
+    /// Ends the utterance; clicks and breaths are dropped.
+    fn close(self, channel: u8, end: f64) -> Option<BatchChunk> {
+        (self.samples.len() >= SHORTEST && self.sound >= MIN_SOUND_SAMPLES).then_some((
+            channel,
+            self.start,
+            end,
+            self.samples,
+        ))
+    }
+}
+
+#[derive(Default)]
+enum ChannelState {
+    #[default]
+    Idle,
+    Speaking(OpenChunk),
+}
+
 /// Splits stereo PCM into recognisable utterances on each channel.
 #[derive(Default)]
 pub struct BatchChunks {
     frames: usize,
-    open: [Option<OpenChunk>; 2],
-    started: Vec<u8>,
+    lanes: [ChannelState; 2],
+    opened: [bool; 2],
 }
 impl BatchChunks {
     pub fn push(&mut self, pcm: &[i16]) -> Vec<BatchChunk> {
-        let mut ready = Vec::new();
-        for frame in pcm.as_chunks::<2>().0 {
-            for (channel, sample) in frame.iter().enumerate() {
-                let value = f32::from(*sample) / 32767.0;
+        let pairs = pcm.len() / 2;
+        let rate = f64::from(SAMPLE_RATE);
+        let mut done = Vec::new();
+        for channel in 0..2 {
+            for (offset, &raw) in pcm.iter().skip(channel).step_by(2).take(pairs).enumerate() {
+                let frame = self.frames + offset;
+                let value = f32::from(raw) / 32767.0;
                 let sounding = value.abs() > SOUND_LEVEL;
-                if self.open[channel].is_none() && sounding {
-                    self.open[channel] = Some(OpenChunk {
-                        start: self.now(),
-                        ..OpenChunk::default()
-                    });
-                    self.started.push(channel as u8);
-                }
-                if let Some(chunk) = &mut self.open[channel] {
-                    chunk.samples.push(value);
-                    if sounding {
-                        chunk.sound += 1;
-                        chunk.quiet = 0;
-                    } else {
-                        chunk.quiet += 1;
+                let mut chunk = match std::mem::take(&mut self.lanes[channel]) {
+                    ChannelState::Speaking(open) => open,
+                    ChannelState::Idle if !sounding => continue,
+                    ChannelState::Idle => {
+                        self.opened[channel] = true;
+                        OpenChunk {
+                            start: frame as f64 / rate,
+                            ..OpenChunk::default()
+                        }
                     }
-                    if (chunk.quiet >= 9_600 || chunk.samples.len() >= 240_000)
-                        && let Some(chunk) =
-                            self.close(channel, (self.frames + 1) as f64 / f64::from(SAMPLE_RATE))
-                    {
-                        ready.push(chunk);
-                    }
+                };
+                if chunk.add(value, sounding) {
+                    done.extend(chunk.close(channel as u8, (frame + 1) as f64 / rate));
+                } else {
+                    self.lanes[channel] = ChannelState::Speaking(chunk);
                 }
             }
-            self.frames += 1;
         }
-        ready
+        self.frames += pairs;
+        // Stable: on equal end times the microphone comes first.
+        done.sort_by(|a, b| a.2.total_cmp(&b.2));
+        done
     }
     pub fn finish(&mut self) -> Vec<BatchChunk> {
-        (0..2)
-            .filter_map(|channel| self.close(channel, self.now()))
+        let end = self.now();
+        (0u8..2)
+            .filter_map(
+                |channel| match std::mem::take(&mut self.lanes[usize::from(channel)]) {
+                    ChannelState::Speaking(open) => open.close(channel, end),
+                    ChannelState::Idle => None,
+                },
+            )
             .collect()
-    }
-    fn close(&mut self, channel: usize, end: f64) -> Option<BatchChunk> {
-        let chunk = self.open[channel].take()?;
-        (chunk.samples.len() >= 1_600 && chunk.sound >= MIN_SOUND_SAMPLES).then_some((
-            channel as u8,
-            chunk.start,
-            end,
-            chunk.samples,
-        ))
     }
     fn now(&self) -> f64 {
         self.frames as f64 / f64::from(SAMPLE_RATE)
     }
     fn pending_system(&self) -> Option<f64> {
-        self.open[1].as_ref().map(|c| c.start)
+        match &self.lanes[1] {
+            ChannelState::Speaking(open) => Some(open.start),
+            ChannelState::Idle => None,
+        }
     }
-    fn started(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.started)
+    /// Which channels opened an utterance since the last call.
+    fn take_opened(&mut self) -> [bool; 2] {
+        std::mem::take(&mut self.opened)
     }
 }
 
 fn channel_number(value: Option<&Value>) -> u8 {
-    let value = value.and_then(|v| v.as_array().and_then(|a| a.first()).or(Some(v)));
-    value.and_then(Value::as_u64).unwrap_or(0).min(1) as u8
+    let number = match value {
+        Some(Value::Array(items)) => items.first().and_then(Value::as_u64),
+        Some(other) => other.as_u64(),
+        None => None,
+    };
+    number.map_or(0, |n| u8::from(n >= 1))
 }
 fn event_lines(text: &str) -> Vec<LiveEvent> {
     let Ok(value) = serde_json::from_str::<Value>(text) else {
@@ -596,19 +719,23 @@ fn event_lines(text: &str) -> Vec<LiveEvent> {
     })]
 }
 
+fn model_byte_ok(b: u8) -> bool {
+    matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.')
+}
 fn validated_model(model: &str) -> Result<&str, SttError> {
     let model = model.trim();
     if model.is_empty() {
         return Ok("nova-3");
     }
-    if model.len() > 60
-        || !model
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
-    {
+    if model.len() > 60 {
         return Err(SttError::Protocol(
-            "Speech model name contains unsupported characters or is too long".into(),
+            "Speech model name is longer than 60 characters".into(),
         ));
+    }
+    if let Some(bad) = model.bytes().find(|b| !model_byte_ok(*b)) {
+        return Err(SttError::Protocol(format!(
+            "Speech model name has an unsupported character (byte {bad:#04x})"
+        )));
     }
     Ok(model)
 }
@@ -641,10 +768,10 @@ type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 /// An active stream of speech events.
 pub struct LiveTranscriber {
-    audio: mpsc::Sender<Vec<u8>>,
-    events: mpsc::Receiver<LiveEvent>,
-    stop: watch::Sender<bool>,
-    task: tokio::task::JoinHandle<()>,
+    pcm_tx: mpsc::Sender<Vec<u8>>,
+    event_rx: mpsc::Receiver<LiveEvent>,
+    finish_tx: watch::Sender<bool>,
+    worker: tokio::task::JoinHandle<()>,
 }
 impl LiveTranscriber {
     pub async fn connect_config(config: &ProviderConfig) -> Result<Self, SttError> {
@@ -690,15 +817,24 @@ impl LiveTranscriber {
         let url = if config.base_url.is_empty() {
             generated
         } else {
-            let base = config
-                .base_url
-                .replace("https://", "wss://")
-                .replace("http://", "ws://");
-            let query = generated.split_once('?').unwrap().1;
-            format!(
-                "{base}{}{query}",
-                if base.contains('?') { "&" } else { "?" }
-            )
+            let mut target = reqwest::Url::parse(&config.base_url)
+                .map_err(|_| SttError::Protocol("Speech service URL is invalid".into()))?;
+            let scheme = match target.scheme() {
+                "https" => "wss",
+                "http" => "ws",
+                other => other,
+            }
+            .to_owned();
+            target
+                .set_scheme(&scheme)
+                .map_err(|()| SttError::Protocol("Speech service URL cannot be streamed".into()))?;
+            let live_query = generated.split_once('?').map_or("", |parts| parts.1);
+            let joined = match target.query() {
+                Some(existing) if !existing.is_empty() => format!("{existing}&{live_query}"),
+                _ => live_query.to_owned(),
+            };
+            target.set_query(Some(&joined));
+            target.into()
         };
         Self::connect_url(config.api_key.clone(), url).await
     }
@@ -706,11 +842,8 @@ impl LiveTranscriber {
         if api_key.trim().is_empty() {
             return Err(SttError::MissingKey);
         }
-        Self::open_socket(
-            &url,
-            Some(("Authorization".into(), format!("Token {api_key}"))),
-        )
-        .await
+        let auth = ("Authorization".to_owned(), format!("Token {api_key}"));
+        Self::open_socket(&url, Some(auth)).await
     }
     async fn open_socket(url: &str, auth: Option<(String, String)>) -> Result<Self, SttError> {
         crate::core::install_tls_provider();
@@ -718,173 +851,252 @@ impl LiveTranscriber {
             .into_client_request()
             .map_err(|e| SttError::Socket(format!("Cannot prepare speech connection: {e}")))?;
         if let Some((name, value)) = auth {
-            let name =
-                tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|_| {
-                        SttError::Protocol("Invalid speech authentication header".into())
-                    })?;
-            let value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&value)
-                .map_err(|_| SttError::MissingKey)?;
+            let name = HeaderName::try_from(name.as_str())
+                .map_err(|_| SttError::Protocol("Invalid speech authentication header".into()))?;
+            let value = HeaderValue::try_from(value.as_str()).map_err(|_| SttError::MissingKey)?;
             request.headers_mut().insert(name, value);
         }
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(1024 * 1024))
-            .max_frame_size(Some(1024 * 1024));
-        let (socket, _) = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio_tungstenite::connect_async_with_config(request, Some(config), false),
-        )
-        .await
-        .map_err(|_| SttError::Socket("Speech connection timed out; start recording again".into()))?
-        .map_err(|e| SttError::Socket(format!("Could not connect to speech service: {e}")))?;
-        Ok(Self::spawn_socket(socket))
+        let limits = WebSocketConfig::default()
+            .max_message_size(Some(WS_LIMIT))
+            .max_frame_size(Some(WS_LIMIT));
+        // Nagle off: small audio and control frames must not wait to fill a segment.
+        let connecting = tokio_tungstenite::connect_async_with_config(request, Some(limits), true);
+        tokio::select! {
+            joined = connecting => match joined {
+                Ok((socket, _)) => Ok(Self::spawn_socket(socket)),
+                Err(e) => Err(SttError::Socket(format!("Could not connect to speech service: {e}"))),
+            },
+            () = tokio::time::sleep(Duration::from_secs(10)) => Err(SttError::Socket(
+                "Speech connection timed out; start recording again".into(),
+            )),
+        }
     }
     fn spawn_socket(socket: Socket) -> Self {
-        let (audio, input) = mpsc::channel(32);
-        let (event_tx, events) = mpsc::channel(128);
-        let (stop, stopping) = watch::channel(false);
-        let task = tokio::spawn(async move {
-            socket_task(socket, input, event_tx, stopping).await;
-        });
+        let (pcm_tx, pcm_rx) = mpsc::channel(32);
+        let (event_tx, event_rx) = mpsc::channel(128);
+        let (finish_tx, finish_rx) = watch::channel(false);
+        let worker = tokio::spawn(socket_task(socket, pcm_rx, event_tx, finish_rx));
         Self {
-            audio,
-            events,
-            stop,
-            task,
+            pcm_tx,
+            event_rx,
+            finish_tx,
+            worker,
         }
     }
     fn connect_batch(config: ProviderConfig, hints: SttHints) -> Self {
-        let (audio, input) = mpsc::channel(32);
-        let (event_tx, events) = mpsc::channel(128);
-        let (stop, stopping) = watch::channel(false);
-        let task = tokio::spawn(async move {
-            batch_task(config, hints, input, event_tx, stopping).await;
-        });
+        let (pcm_tx, pcm_rx) = mpsc::channel(32);
+        let (event_tx, event_rx) = mpsc::channel(128);
+        let (finish_tx, finish_rx) = watch::channel(false);
+        let worker = tokio::spawn(batch_task(config, hints, pcm_rx, event_tx, finish_rx));
         Self {
-            audio,
-            events,
-            stop,
-            task,
+            pcm_tx,
+            event_rx,
+            finish_tx,
+            worker,
         }
     }
     pub async fn push(&self, samples: &[f32]) -> Result<(), SttError> {
-        let mut bytes = Vec::with_capacity(samples.len() * 2);
-        for sample in samples {
-            let integer = if sample.is_finite() {
-                (sample.clamp(-1.0, 1.0) * 32767.0) as i16
-            } else {
-                0
-            };
-            bytes.extend_from_slice(&integer.to_le_bytes());
+        let bytes: Vec<u8> = samples
+            .iter()
+            .flat_map(|x| {
+                let level = if x.is_finite() {
+                    x.clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
+                ((level * 32767.0) as i16).to_le_bytes()
+            })
+            .collect();
+        match self.pcm_tx.send_timeout(bytes, SEND_LIMIT).await {
+            Ok(()) => Ok(()),
+            Err(SendTimeoutError::Timeout(_)) => Err(SttError::Socket(
+                "Speech audio queue fell behind; start recording again".into(),
+            )),
+            Err(SendTimeoutError::Closed(_)) => Err(SttError::Socket(
+                "Speech stream ended; start recording again".into(),
+            )),
         }
-        tokio::time::timeout(Duration::from_secs(1), self.audio.send(bytes))
-            .await
-            .map_err(|_| {
-                SttError::Socket("Speech audio queue fell behind; start recording again".into())
-            })?
-            .map_err(|_| SttError::Socket("Speech stream ended; start recording again".into()))
     }
     pub async fn next_event(&mut self) -> Option<LiveEvent> {
-        self.events.recv().await
+        self.event_rx.recv().await
     }
     pub fn try_event(&mut self) -> Result<LiveEvent, mpsc::error::TryRecvError> {
-        self.events.try_recv()
+        self.event_rx.try_recv()
     }
     pub fn finish(&self) {
-        let _ = self.stop.send(true);
+        let _ = self.finish_tx.send(true);
     }
 }
 impl Drop for LiveTranscriber {
     fn drop(&mut self) {
-        self.task.abort();
+        self.worker.abort();
     }
 }
 
+/// Largest incoming WebSocket message or frame.
+const WS_LIMIT: usize = 1024 * 1024;
+/// Longest wait for a single send or for room in a queue.
+const SEND_LIMIT: Duration = Duration::from_secs(1);
+/// Pause between keep-alive messages.
+const KEEPALIVE_EVERY: Duration = Duration::from_secs(3);
+/// Time from the first stop request until the server must have closed.
+const FINISH_LIMIT: Duration = Duration::from_secs(4);
+
+/// Where the socket task is in its life.
+#[derive(Clone, Copy)]
+enum Phase {
+    Streaming,
+    /// Draining queued audio and sending the closing commands.
+    Finalizing {
+        deadline: Instant,
+    },
+    /// Waiting for the server to hang up.
+    AwaitingClose {
+        deadline: Instant,
+    },
+}
+
+/// How the socket task ended.
+enum End {
+    Quiet,
+    Fail(String),
+}
+
 async fn send_socket(socket: &mut Socket, message: Message) -> Result<(), String> {
-    tokio::time::timeout(Duration::from_secs(1), socket.send(message))
-        .await
-        .map_err(|_| "Speech service stopped accepting audio; start recording again".to_owned())?
-        .map_err(|e| format!("Speech connection failed: {e}"))
+    match tokio::time::timeout(SEND_LIMIT, socket.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("Speech connection failed: {e}")),
+        Err(_) => Err("Speech service stopped accepting audio; start recording again".to_owned()),
+    }
 }
-async fn offer(
+
+/// Hands the events of one server message to the consumer, waiting for room until
+/// `until` (a fresh one-second window per event when `None`).
+async fn deliver(
     tx: &mpsc::Sender<LiveEvent>,
-    event: LiveEvent,
-    deadline: Option<tokio::time::Instant>,
-) -> Result<(), String> {
-    let remaining = deadline.map_or(Duration::from_secs(1), |end| {
-        end.saturating_duration_since(tokio::time::Instant::now())
-            .min(Duration::from_secs(1))
-    });
-    tokio::time::timeout(remaining, tx.send(event))
-        .await
-        .map_err(|_| "Speech event consumer fell behind; start recording again".to_owned())?
-        .map_err(|_| "receiver gone".to_owned())
+    text: &str,
+    until: Option<Instant>,
+) -> Result<(), End> {
+    for event in event_lines(text) {
+        let limit = until.unwrap_or_else(|| Instant::now() + SEND_LIMIT);
+        match tokio::time::timeout_at(limit, tx.send(event)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Err(End::Quiet),
+            Err(_) => {
+                return Err(End::Fail(
+                    "Speech event consumer fell behind; start recording again".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
+
+/// Resolves once finishing was requested (or the requesting side is gone).
+async fn stop_requested(finish_rx: &mut watch::Receiver<bool>) {
+    let _ = finish_rx.wait_for(|stop| *stop).await;
+}
+
+/// Sends what is still queued, then asks the server to finalise and close.
+async fn finalize(socket: &mut Socket, pcm_rx: &mut mpsc::Receiver<Vec<u8>>) -> Result<(), String> {
+    while let Ok(block) = pcm_rx.try_recv() {
+        send_socket(socket, Message::Binary(block.into())).await?;
+    }
+    for command in [r#"{"type":"Finalize"}"#, r#"{"type":"CloseStream"}"#] {
+        send_socket(socket, Message::Text(command.into())).await?;
+    }
+    Ok(())
+}
+
 async fn socket_task(
     mut socket: Socket,
-    mut input: mpsc::Receiver<Vec<u8>>,
+    mut pcm_rx: mpsc::Receiver<Vec<u8>>,
     tx: mpsc::Sender<LiveEvent>,
-    mut stop: watch::Receiver<bool>,
+    mut finish_rx: watch::Receiver<bool>,
 ) {
-    let mut keepalive = tokio::time::interval(Duration::from_secs(3));
-    keepalive.tick().await;
-    let mut deadline = None;
-    let mut finished = false;
-    let result: Result<(), String> = 'work: loop {
-        if *stop.borrow() && !finished && input.is_empty() {
-            let end = tokio::time::Instant::now() + Duration::from_secs(4);
-            deadline = Some(end);
-            for command in ["{\"type\":\"Finalize\"}", "{\"type\":\"CloseStream\"}"] {
-                let remaining = end.saturating_duration_since(tokio::time::Instant::now());
-                match tokio::time::timeout(
-                    remaining,
-                    send_socket(&mut socket, Message::Text(command.into())),
-                )
-                .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => break 'work Err(e),
+    let mut keepalive = tokio::time::interval_at(Instant::now() + KEEPALIVE_EVERY, KEEPALIVE_EVERY);
+    let mut phase = Phase::Streaming;
+    let end = loop {
+        match phase {
+            Phase::Streaming => tokio::select! {
+                biased;
+                message = socket.next() => match message {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Err(end) = deliver(&tx, &text, None).await {
+                            break end;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        break End::Fail("Speech service disconnected; start recording again".into());
+                    }
+                    Some(Err(e)) => break End::Fail(format!("Speech connection failed: {e}")),
+                    Some(Ok(_)) => {}
+                },
+                // A dropped sender counts as a stop request too.
+                () = stop_requested(&mut finish_rx) => {
+                    phase = Phase::Finalizing { deadline: Instant::now() + FINISH_LIMIT };
+                }
+                _ = keepalive.tick() => {
+                    let ping = Message::Text(r#"{"type":"KeepAlive"}"#.into());
+                    if let Err(e) = send_socket(&mut socket, ping).await {
+                        break End::Fail(e);
+                    }
+                }
+                block = pcm_rx.recv() => match block {
+                    Some(block) => {
+                        if let Err(e) = send_socket(&mut socket, Message::Binary(block.into())).await {
+                            break End::Fail(e);
+                        }
+                    }
+                    None => phase = Phase::Finalizing { deadline: Instant::now() + FINISH_LIMIT },
+                },
+            },
+            Phase::Finalizing { deadline } => {
+                match tokio::time::timeout_at(deadline, finalize(&mut socket, &mut pcm_rx)).await {
+                    Ok(Ok(())) => phase = Phase::AwaitingClose { deadline },
+                    Ok(Err(e)) => break End::Fail(e),
                     Err(_) => {
-                        break 'work Err(
-                            "Speech finalisation timed out; start recording again".into()
+                        break End::Fail(
+                            "Speech finalisation timed out; start recording again".into(),
                         );
                     }
                 }
             }
-            finished = true;
-        }
-        tokio::select! {
-            biased;
-            message = socket.next() => match message {
-                Some(Ok(Message::Text(text))) => {
-                    for event in event_lines(&text) {
-                        if let Err(e) = offer(&tx, event, deadline).await { if e == "receiver gone" { return; } break 'work Err(e); }
+            Phase::AwaitingClose { deadline } => tokio::select! {
+                biased;
+                message = socket.next() => match message {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Err(end) = deliver(&tx, &text, Some(deadline)).await {
+                            break end;
+                        }
                     }
+                    Some(Ok(Message::Close(_))) | None => break End::Quiet,
+                    Some(Err(e)) => break End::Fail(format!("Speech connection failed: {e}")),
+                    Some(Ok(_)) => {}
+                },
+                () = tokio::time::sleep_until(deadline) => {
+                    break End::Fail(
+                        "Speech service did not close after finalisation; start recording again".into(),
+                    );
                 }
-                Some(Ok(Message::Close(_))) | None => break if finished { Ok(()) } else { Err("Speech service disconnected; start recording again".into()) },
-                Some(Err(e)) => break Err(format!("Speech connection failed: {e}")),
-                _ => {}
             },
-            _ = keepalive.tick(), if !finished => {
-                if let Err(e) = send_socket(&mut socket, Message::Text("{\"type\":\"KeepAlive\"}".into())).await { break Err(e); }
-            }
-            _ = stop.changed(), if !finished => {},
-            _ = tokio::time::sleep_until(deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400))), if finished => break Err("Speech service did not close after finalisation; start recording again".into()),
-            block = input.recv(), if !finished => {
-                if let Some(block) = block && let Err(e) = send_socket(&mut socket, Message::Binary(block.into())).await { break Err(e); }
-            }
         }
     };
-    if let Err(message) = result {
-        let _ = offer(&tx, LiveEvent::Failed(message), None).await;
-        let _ = tokio::time::timeout(Duration::from_secs(1), socket.close(None)).await;
+    if let End::Fail(message) = end {
+        let _ = tx
+            .send_timeout(LiveEvent::Failed(message), SEND_LIMIT)
+            .await;
+        let _ = tokio::time::timeout(SEND_LIMIT, socket.close(None)).await;
     }
 }
+
 type Pending = futures_util::stream::FuturesOrdered<
     std::pin::Pin<
         Box<dyn std::future::Future<Output = (u8, f64, f64, Result<String, SttError>)> + Send>,
     >,
 >;
+/// Batch requests allowed to be outstanding at once.
+const MAX_IN_FLIGHT: usize = 4;
 fn queue_chunks(
     pending: &mut Pending,
     chunks: Vec<BatchChunk>,
@@ -892,10 +1104,10 @@ fn queue_chunks(
     filter: &LineFilter,
     glossary: &str,
 ) -> Result<(), String> {
+    if pending.len() + chunks.len() > MAX_IN_FLIGHT {
+        return Err("Speech requests fell behind; start recording again".into());
+    }
     for (channel, start, end, samples) in chunks {
-        if pending.len() >= 4 {
-            return Err("Speech requests fell behind; start recording again".into());
-        }
         let config = config.clone();
         let prompt = filter.prompt(channel, glossary);
         pending.push_back(Box::pin(async move {
@@ -951,7 +1163,7 @@ async fn batch_task(
             block = input.recv() => { let Some(block) = block else { break; }; {
                 let pcm: Vec<i16> = block.as_chunks::<2>().0.iter().map(|pair| i16::from_le_bytes(*pair)).collect();
                 let ready = chunks.push(&pcm);
-                for channel in chunks.started() { let _ = tx.send(LiveEvent::SpeechStarted { channel }).await; }
+                for channel in (0u8..).zip(chunks.take_opened()).filter_map(|(c, opened)| opened.then_some(c)) { let _ = tx.send(LiveEvent::SpeechStarted { channel }).await; }
                 for chunk in &ready { if chunk.0 == 1 { system_requests.push_back(chunk.1); } }
                 if let Err(e) = queue_chunks(&mut pending, ready, &config, &filter, &hints.glossary) { error = Some(e); break; }
                 let earliest = [system_requests.front().copied(), chunks.pending_system()].into_iter().flatten().reduce(f64::min);
@@ -1009,6 +1221,7 @@ async fn batch_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     #[test]
     fn speaker_runs_preserve_final_boundary() {
         let events = event_lines(
@@ -1059,24 +1272,26 @@ mod tests {
     #[test]
     fn turn_bound_flushes_unicode_once() {
         let mut turns = LiveTurns::default();
+        let piece = "日本".repeat(40);
         let line = TranscriptLine {
             channel: 1,
             speaker: None,
-            text: "é".repeat(90),
+            text: piece.clone(),
             is_final: true,
             speech_final: false,
             start: 0.0,
             end: 1.0,
         };
         let mut complete = String::new();
-        for _ in 0..350 {
+        for _ in 0..400 {
             for text in turns.push(&line) {
                 complete.push_str(&text);
             }
-            assert!(turns.channels[1].text.len() < 32_000);
+            assert!(turns.channels[1].text.len() < TURN_LIMIT);
         }
         complete.push_str(&turns.finish(1, 1.0).unwrap_or_default());
-        assert_eq!(complete.chars().filter(|c| *c == 'é').count(), 350 * 90);
+        // Turns are joined with single spaces; without them nothing may be lost or repeated.
+        assert_eq!(complete.replace(' ', ""), piece.repeat(400));
     }
 
     #[test]
@@ -1161,7 +1376,7 @@ mod tests {
         assert_eq!(validated_model("  ").unwrap(), "nova-3");
         assert_eq!(validated_model("  alpha_2.0 ").unwrap(), "alpha_2.0");
         assert!(validated_model("model/unsafe").is_err());
-        assert!(validated_model(&"x".repeat(61)).is_err());
+        assert!(validated_model(&"q".repeat(64)).is_err());
         let plain = live_url("", None, false).unwrap();
         assert!(
             plain.starts_with("wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16")
@@ -1370,5 +1585,55 @@ mod tests {
         );
         assert!((lines[0].start - 0.5).abs() < 0.01 && (lines[0].end - 1.5).abs() < 0.01);
         assert!(lines[1].start.abs() < 0.01 && lines[1].end > 1.0);
+    }
+
+    /// The four-second finish deadline also covers draining queued audio into a sink
+    /// that accepts it slowly (each send alone stays under its one-second limit).
+    #[tokio::test]
+    async fn finish_deadline_covers_draining_a_slow_sink() {
+        use tokio::net::TcpSocket;
+        let listening = TcpSocket::new_v4().unwrap();
+        listening.set_recv_buffer_size(4096).unwrap();
+        listening.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = listening.local_addr().unwrap();
+        let listener = listening.listen(1).unwrap();
+        let sink = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(Ok(_)) = ws.next().await {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        });
+        let dialing = TcpSocket::new_v4().unwrap();
+        dialing.set_send_buffer_size(4096).unwrap();
+        let tcp = dialing.connect(address).await.unwrap();
+        let (socket, _) = tokio_tungstenite::client_async(
+            format!("ws://{address}/"),
+            tokio_tungstenite::MaybeTlsStream::Plain(tcp),
+        )
+        .await
+        .unwrap();
+        let mut live = LiveTranscriber::spawn_socket(socket);
+        for _ in 0..24 {
+            live.push(&vec![0.1; 8_192]).await.unwrap();
+        }
+        let began = Instant::now();
+        live.finish();
+        let mut failure = None;
+        while let Some(event) = live.next_event().await {
+            if let LiveEvent::Failed(message) = event {
+                failure = Some(message);
+            }
+        }
+        assert!(
+            failure.is_some(),
+            "a sink this slow cannot be drained in time"
+        );
+        assert!(
+            began.elapsed() < Duration::from_millis(5_500),
+            "{:?}",
+            began.elapsed()
+        );
+        sink.abort();
     }
 }

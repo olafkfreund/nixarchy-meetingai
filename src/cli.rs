@@ -34,21 +34,22 @@ pub fn run_cli(args: &[String]) -> Option<(String, i32)> {
     }
 }
 
+const USAGE: &str = concat!(
+    "nixarchy-meetingai: meeting copilot daemon\n",
+    "\n",
+    "Usage:\n",
+    "  nixarchy-meetingai                  run the daemon\n",
+    "  nixarchy-meetingai ctl CMD [JSON]   send one command, e.g. ctl state.get\n",
+    "                                      or ctl chat.send '{\"text\":\"hi\"}'\n",
+    "  nixarchy-meetingai ctl --agent CMD [JSON]\n",
+    "                                      read-only, for AI agents: local-only interviews\n",
+    "                                      stay hidden and anything but reads is refused\n",
+    "  nixarchy-meetingai mcp              MCP server over stdio, for AI agents\n",
+    "  nixarchy-meetingai --version | --help",
+);
+
 fn usage() -> String {
-    [
-        "nixarchy-meetingai: meeting copilot daemon",
-        "",
-        "Usage:",
-        "  nixarchy-meetingai                  run the daemon",
-        "  nixarchy-meetingai ctl CMD [JSON]   send one command, e.g. ctl state.get",
-        "                                      or ctl chat.send '{\"text\":\"hi\"}'",
-        "  nixarchy-meetingai ctl --agent CMD [JSON]",
-        "                                      read-only, for AI agents: local-only interviews",
-        "                                      stay hidden and anything but reads is refused",
-        "  nixarchy-meetingai mcp              MCP server over stdio, for AI agents",
-        "  nixarchy-meetingai --version | --help",
-    ]
-    .join("\n")
+    USAGE.to_owned()
 }
 
 /// Socket of the running daemon under `runtime`.
@@ -81,14 +82,14 @@ impl InstanceLock {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).ok()?;
         }
-        let mut handle = match std::fs::OpenOptions::new()
+        let handle = match std::fs::File::options()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(target)
         {
-            Ok(f) => f,
+            Ok(file) => file,
             Err(err) => {
                 tracing::warn!(
                     path = %target.display(),
@@ -99,10 +100,13 @@ impl InstanceLock {
             }
         };
         handle.try_lock().ok()?;
+        // Best effort: record our pid for whoever inspects the lock.
         let _ = handle.set_len(0);
-        let _ = std::io::Seek::seek(&mut handle, std::io::SeekFrom::Start(0));
-        let _ = writeln!(handle, "{}", std::process::id());
-        let _ = handle.flush();
+        let _ = std::os::unix::fs::FileExt::write_all_at(
+            &handle,
+            format!("{}\n", std::process::id()).as_bytes(),
+            0,
+        );
         Some(Self {
             _lock_handle: handle,
         })

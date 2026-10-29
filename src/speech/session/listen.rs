@@ -101,7 +101,7 @@ impl StereoAssembler {
         if !mic_ready || !sys_ready {
             return None;
         }
-        let mut interleaved = Vec::with_capacity(FRAME * 2);
+        let mut stereo = Vec::with_capacity(FRAME * 2);
         for _ in 0..FRAME {
             let left = self.mic_queue.pop_front().unwrap_or(0.0);
             let right = if self.sys_enabled {
@@ -109,10 +109,10 @@ impl StereoAssembler {
             } else {
                 0.0
             };
-            interleaved.push(left);
-            interleaved.push(right);
+            stereo.push(left);
+            stereo.push(right);
         }
-        Some(interleaved)
+        Some(stereo)
     }
 
     fn pull_finishing(&mut self) -> Option<Vec<f32>> {
@@ -125,7 +125,7 @@ impl StereoAssembler {
         if pairs == 0 {
             return None;
         }
-        let mut interleaved = Vec::with_capacity(pairs * 2);
+        let mut stereo = Vec::with_capacity(pairs * 2);
         for _ in 0..pairs {
             let left = self.mic_queue.pop_front().unwrap_or(0.0);
             let right = if self.sys_enabled {
@@ -133,17 +133,17 @@ impl StereoAssembler {
             } else {
                 0.0
             };
-            interleaved.push(left);
-            interleaved.push(right);
+            stereo.push(left);
+            stereo.push(right);
         }
-        Some(interleaved)
+        Some(stereo)
     }
 }
 
 fn describe_mic_error(err: &AudioError) -> String {
     match err {
         AudioError::NoDevice => {
-            "No microphone was found. Connect an audio input or select one in Settings → Audio."
+            "No audio input device was detected. Plug in a microphone or choose one under Settings → Audio."
                 .to_owned()
         }
         AudioError::DeviceMissing(name) => format!(
@@ -153,7 +153,7 @@ fn describe_mic_error(err: &AudioError) -> String {
             "Could not configure the selected microphone ({detail}). Try a different input in Settings → Audio."
         ),
         AudioError::Format(detail) => format!(
-            "The microphone uses an unsupported sample format ({detail}). Choose another input in Settings → Audio."
+            "This microphone delivers audio in a format that cannot be used ({detail}). Pick a different input under Settings → Audio."
         ),
         AudioError::Startup(detail) => format!(
             "Could not start the microphone ({detail}). Check your input choice in Settings → Audio."
@@ -161,7 +161,7 @@ fn describe_mic_error(err: &AudioError) -> String {
         AudioError::Stream(detail) => {
             format!("The microphone audio stream failed: {detail}.")
         }
-        AudioError::NotRunning => "Microphone capture is not running.".to_owned(),
+        AudioError::NotRunning => "The microphone is not currently capturing audio.".to_owned(),
     }
 }
 
@@ -174,7 +174,7 @@ fn format_mic_only_notice(err: &SystemAudioError) -> String {
 }
 
 fn format_interrupted_failure() -> String {
-    "Audio capture was interrupted or fell behind real time. Please start recording again."
+    "Audio capture lost data, so the recording was stopped. Start a new recording to continue."
         .to_owned()
 }
 
@@ -330,7 +330,8 @@ impl ListenSession {
 
         let now = Instant::now();
         let current_elapsed = now.duration_since(self.started_at);
-        let due_samples = (current_elapsed.as_secs_f64() * f64::from(SAMPLE_RATE)) as usize;
+        let due_samples =
+            (current_elapsed.as_micros() * u128::from(SAMPLE_RATE) / 1_000_000) as usize;
 
         let lagged = due_samples.saturating_sub(self.emitted_samples) > MAX_CHANNEL_SAMPLES;
         let mic_dropped = self.mic.as_ref().is_some_and(|m| m.dropped() > 0);
@@ -510,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn unaligned_channel_packets_interleave_exact_samples() {
+    fn unaligned_channel_packets_keep_every_sample_in_order() {
         let mut assembler = StereoAssembler::new(true);
         let total = 2_150usize;
         let left_in: Vec<f32> = (0..total).map(|i| (i as f32) + 1.0).collect();
@@ -549,10 +550,10 @@ mod tests {
     #[test]
     fn live_mode_waits_for_short_system_channel_and_finishing_pads_tail() {
         let mut assembler = StereoAssembler::new(true);
-        assert!(assembler.ingest(&vec![0.4; 850], &vec![0.8; 400]));
+        assert!(assembler.ingest(&vec![0.12; 850], &vec![0.57; 400]));
         assert!(assembler.pull_live(false, false).is_none());
 
-        assert!(assembler.ingest(&[], &vec![0.8; 430]));
+        assert!(assembler.ingest(&[], &vec![0.57; 430]));
         let full = assembler
             .pull_live(false, false)
             .expect("full frame should be emitted once system catches up");
@@ -561,7 +562,7 @@ mod tests {
             full.as_chunks::<2>()
                 .0
                 .iter()
-                .all(|pair| pair == &[0.4, 0.8])
+                .all(|pair| pair == &[0.12, 0.57])
         );
 
         // 50 mic samples and 30 system samples remain: too short for live mode.
@@ -572,8 +573,8 @@ mod tests {
             .expect("finishing should emit padded tail");
         assert_eq!(tail.len(), 50 * 2);
         for (idx, pair) in tail.as_chunks::<2>().0.iter().enumerate() {
-            assert_eq!(pair[0], 0.4);
-            assert_eq!(pair[1], if idx < 30 { 0.8 } else { 0.0 });
+            assert_eq!(pair[0], 0.12);
+            assert_eq!(pair[1], if idx < 30 { 0.57 } else { 0.0 });
         }
         assert!(assembler.pull_finishing().is_none());
     }
@@ -581,7 +582,7 @@ mod tests {
     #[test]
     fn quiet_system_channel_fills_right_with_zeros_until_active_again() {
         let mut assembler = StereoAssembler::new(true);
-        assert!(assembler.ingest(&vec![0.6; FRAME], &[]));
+        assert!(assembler.ingest(&vec![0.21; FRAME], &[]));
         assert!(assembler.pull_live(false, false).is_none());
 
         let quiet_frame = assembler
@@ -593,10 +594,10 @@ mod tests {
                 .as_chunks::<2>()
                 .0
                 .iter()
-                .all(|pair| pair == &[0.6, 0.0])
+                .all(|pair| pair == &[0.21, 0.0])
         );
 
-        assert!(assembler.ingest(&vec![0.3; FRAME], &vec![0.9; FRAME]));
+        assert!(assembler.ingest(&vec![0.66; FRAME], &vec![0.48; FRAME]));
         let resumed_frame = assembler
             .pull_live(false, false)
             .expect("both channels have a full frame");
@@ -605,7 +606,7 @@ mod tests {
                 .as_chunks::<2>()
                 .0
                 .iter()
-                .all(|pair| pair == &[0.3, 0.9])
+                .all(|pair| pair == &[0.66, 0.48])
         );
     }
 
