@@ -20,7 +20,7 @@ pub fn parse_sources(json: &str) -> Result<Vec<Device>, String> {
             .ok_or_else(|| "source entry lacks a string name".to_owned())?;
         optional_text(entry, "monitor_of_sink")?;
         optional_text(entry, "description")?;
-        if !is_monitor(entry) {
+        if !is_speaker_monitor(entry) {
             found.push(Device {
                 id: name.to_owned(),
                 name: label(entry, name).to_owned(),
@@ -32,7 +32,7 @@ pub fn parse_sources(json: &str) -> Result<Vec<Device>, String> {
 }
 
 /// A speaker monitor is marked by a non-empty `monitor_of_sink` or `monitor_source` text.
-pub(crate) fn is_monitor(entry: &serde_json::Value) -> bool {
+pub(crate) fn is_speaker_monitor(entry: &serde_json::Value) -> bool {
     ["monitor_of_sink", "monitor_source"].iter().any(|key| {
         entry
             .get(key)
@@ -127,15 +127,12 @@ mod tests {
     #[test]
     fn pipewire_listing_keeps_the_mic_and_drops_the_speaker_monitor() {
         let input = r#"[
-          {"index":41,"name":"alsa_input.usb-Fennel_Desk_Mic-00.analog-stereo","description":"Fennel Desk Mic Analog Stereo","monitor_of_sink":null,"monitor_of_sink_name":null,"monitor_source":"","state":"SUSPENDED"},
-          {"index":42,"name":"alsa_output.pci-0000_0c_00.1.hdmi-stereo.monitor","description":"Monitor of Quince HDMI Output","monitor_of_sink":null,"monitor_source":"alsa_output.pci-0000_0c_00.1.hdmi-stereo","state":"RUNNING"}
+          {"index":41,"name":"fennel-desk-mic","description":"Fennel Desk Mic Analog Stereo","monitor_of_sink":null,"monitor_of_sink_name":null,"monitor_source":"","state":"SUSPENDED"},
+          {"index":42,"name":"quince-hdmi-out.monitor","description":"Monitor of Quince HDMI Output","monitor_of_sink":null,"monitor_source":"quince-hdmi-out","state":"RUNNING"}
         ]"#;
         let found = parse_sources(input).unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(
-            found[0].id,
-            "alsa_input.usb-Fennel_Desk_Mic-00.analog-stereo"
-        );
+        assert_eq!(found[0].id, "fennel-desk-mic");
         assert_eq!(found[0].name, "Fennel Desk Mic Analog Stereo");
     }
 

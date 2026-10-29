@@ -9,7 +9,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::devices::{is_monitor, label};
+use super::devices::{is_speaker_monitor, label};
 use super::microphone::SampleQueue;
 
 /// Problems encountered while opening a server source.
@@ -221,7 +221,7 @@ fn monitor_sources(json: &str) -> Vec<(String, String)> {
         .iter()
         .filter_map(|entry| {
             let id = entry.get("name")?.as_str()?;
-            (is_monitor(entry) || id.ends_with(".monitor"))
+            (is_speaker_monitor(entry) || id.ends_with(".monitor"))
                 .then(|| (id.to_owned(), label(entry, id).to_owned()))
         })
         .collect()
@@ -247,8 +247,8 @@ mod tests {
           {"name":"cedar.out","monitor_source":"cedar","description":"Cedar Output"},
           {"name":"elm.monitor"},
           {"name":"plain.in"},
-          {"name":"alsa_input.usb-Fennel_Desk_Mic-00.analog-stereo","description":"Fennel Desk Mic","monitor_of_sink":null,"monitor_source":"","state":"SUSPENDED"},
-          {"name":"alsa_output.pci-0000_0c_00.1.hdmi-stereo.monitor","description":"Monitor of Quince HDMI","monitor_of_sink":null,"monitor_source":"alsa_output.pci-0000_0c_00.1.hdmi-stereo"}
+          {"name":"fennel-desk-mic","description":"Fennel Desk Mic","monitor_of_sink":null,"monitor_source":"","state":"SUSPENDED"},
+          {"name":"quince-hdmi-out.monitor","description":"Monitor of Quince HDMI","monitor_of_sink":null,"monitor_source":"quince-hdmi-out"}
         ]"#;
         assert_eq!(
             monitor_sources(json),
@@ -257,7 +257,7 @@ mod tests {
                 ("cedar.out".into(), "Cedar Output".into()),
                 ("elm.monitor".into(), "elm.monitor".into()),
                 (
-                    "alsa_output.pci-0000_0c_00.1.hdmi-stereo.monitor".into(),
+                    "quince-hdmi-out.monitor".into(),
                     "Monitor of Quince HDMI".into()
                 )
             ]
