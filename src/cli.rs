@@ -1,4 +1,4 @@
-//! Command line entry point.
+//! Daemon command-line dispatch, socket path resolution, and process lock.
 //!
 //! No arguments runs the daemon. `ctl <cmd> [json]` sends one request to the
 //! running daemon over its socket and prints the reply.
@@ -34,21 +34,22 @@ pub fn run_cli(args: &[String]) -> Option<(String, i32)> {
     }
 }
 
+const USAGE: &str = concat!(
+    "nixarchy-meetingai: meeting copilot daemon\n",
+    "\n",
+    "Usage:\n",
+    "  nixarchy-meetingai                  run the daemon\n",
+    "  nixarchy-meetingai ctl CMD [JSON]   send one command, e.g. ctl state.get\n",
+    "                                      or ctl chat.send '{\"text\":\"hi\"}'\n",
+    "  nixarchy-meetingai ctl --agent CMD [JSON]\n",
+    "                                      read-only, for AI agents: local-only interviews\n",
+    "                                      stay hidden and anything but reads is refused\n",
+    "  nixarchy-meetingai mcp              MCP server over stdio, for AI agents\n",
+    "  nixarchy-meetingai --version | --help",
+);
+
 fn usage() -> String {
-    [
-        "nixarchy-meetingai: meeting copilot daemon",
-        "",
-        "Usage:",
-        "  nixarchy-meetingai                  run the daemon",
-        "  nixarchy-meetingai ctl CMD [JSON]   send one command, e.g. ctl state.get",
-        "                                      or ctl chat.send '{\"text\":\"hi\"}'",
-        "  nixarchy-meetingai ctl --agent CMD [JSON]",
-        "                                      read-only, for AI agents: local-only interviews",
-        "                                      stay hidden and anything but reads is refused",
-        "  nixarchy-meetingai mcp              MCP server over stdio, for AI agents",
-        "  nixarchy-meetingai --version | --help",
-    ]
-    .join("\n")
+    USAGE.to_owned()
 }
 
 /// Socket of the running daemon under `runtime`.
@@ -58,6 +59,60 @@ pub fn socket_path_in(runtime: &Path) -> PathBuf {
 
 pub fn socket_path() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR").map(|r| socket_path_in(Path::new(&r)))
+}
+
+/// Exclusive process lock ensuring at most one daemon runs per user session.
+pub struct InstanceLock {
+    _lock_handle: std::fs::File,
+}
+
+fn lock_file_location() -> Option<PathBuf> {
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")?;
+    Some(Path::new(&runtime_dir).join("nixarchy-meetingai-instance.lock"))
+}
+
+impl InstanceLock {
+    /// Acquire the session-wide lock file under `XDG_RUNTIME_DIR`.
+    pub fn acquire() -> Option<Self> {
+        let target = lock_file_location()?;
+        Self::open_and_lock(&target)
+    }
+
+    fn open_and_lock(target: &Path) -> Option<Self> {
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        let handle = match std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(target)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::warn!(
+                    path = %target.display(),
+                    %err,
+                    "failed to open single-instance lock file"
+                );
+                return None;
+            }
+        };
+        if handle.try_lock().is_err() {
+            return None;
+        }
+        // Best effort: leave only our pid in the file for whoever inspects the lock.
+        handle.set_len(0).ok();
+        let _ = std::os::unix::fs::FileExt::write_all_at(
+            &handle,
+            format!("{}\n", std::process::id()).as_bytes(),
+            0,
+        );
+        Some(Self {
+            _lock_handle: handle,
+        })
+    }
 }
 
 /// Send one request and return the printed reply line plus an exit code.
@@ -118,103 +173,16 @@ fn request_line(cmd: &str, args: serde_json::Value, origin: Option<&str>) -> ser
     request
 }
 
-/// Path of the exclusive launch lock held by the running instance.
-pub fn instance_lock_path() -> Option<std::path::PathBuf> {
-    runtime_path("nixarchy-meetingai-instance.lock")
-}
-
-fn runtime_path(name: &str) -> Option<std::path::PathBuf> {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)?;
-    std::fs::create_dir_all(&runtime).ok()?;
-    Some(runtime.join(name))
-}
-
-/// Exclusive claim on being the one running instance.
-///
-/// A socket probe alone cannot stop a double launch: two processes can both
-/// find no listener and both start. `flock` is atomic, so exactly one launch
-/// obtains the lock and every later launch sees it taken. The kernel releases
-/// the lock when the process exits, so a crash never leaves it stuck.
-pub struct InstanceLock {
-    _file: std::fs::File,
-}
-
-impl InstanceLock {
-    /// Claim the instance slot, or return `None` when another instance holds it.
-    pub fn acquire() -> Option<Self> {
-        Self::acquire_at(&instance_lock_path()?)
-    }
-
-    /// Claim an explicit lock path. Used by tests to avoid the live instance.
-    fn acquire_at(path: &std::path::Path) -> Option<Self> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|error| tracing::warn!(%error, path = %path.display(), "could not open instance lock"))
-            .ok()?;
-
-        // std uses an OS file lock on Unix and Windows, released on crash too.
-        file.try_lock().ok()?;
-
-        let _ = file.set_len(0);
-        use std::io::Write;
-        let mut writer = &file;
-        let _ = writeln!(writer, "{}", std::process::id());
-        Some(Self { _file: file })
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn agent_flag_adds_the_origin() {
         let plain = super::request_line("state.get", serde_json::json!({}), None);
         assert!(plain.get("origin").is_none());
         let agent = super::request_line("state.get", serde_json::json!({}), Some("agent"));
         assert_eq!(agent["origin"], "agent");
-    }
-
-    use super::*;
-
-    #[test]
-    fn instance_lock_exists_in_the_runtime_dir() {
-        if let Some(path) = instance_lock_path() {
-            assert!(path.ends_with("nixarchy-meetingai-instance.lock"));
-        }
-    }
-
-    #[test]
-    fn only_one_instance_may_hold_the_lock() {
-        // Use a private lock file: the developer's own running app legitimately
-        // holds the real one, and the test must not depend on that.
-        let path = std::env::temp_dir().join(format!(
-            "nixarchy-meetingai-lock-test-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_file(&path);
-
-        let first = InstanceLock::acquire_at(&path).expect("the slot should be free");
-        // While held, a second claim must fail; that is what stops a double launch.
-        assert!(
-            InstanceLock::acquire_at(&path).is_none(),
-            "a second instance was allowed"
-        );
-        drop(first);
-        // Releasing returns the slot, so the app can start again after quitting.
-        // Other tests fork children in parallel; a child briefly holds a copy of
-        // the lock fd until its exec closes it, so allow that window to pass.
-        let reacquired = (0..100).any(|_| {
-            InstanceLock::acquire_at(&path).is_some() || {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                false
-            }
-        });
-        assert!(reacquired, "the slot should be reusable");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -237,5 +205,38 @@ mod tests {
                 .0
                 .contains("nixarchy-meetingai")
         );
+    }
+
+    #[test]
+    fn runtime_lock_file_has_expected_suffix() {
+        if std::env::var_os("XDG_RUNTIME_DIR").is_some() {
+            let resolved = lock_file_location().expect("runtime dir is present");
+            assert!(resolved.ends_with("nixarchy-meetingai-instance.lock"));
+        }
+    }
+
+    #[test]
+    fn exclusive_lock_blocks_second_holder_until_released() {
+        let scratch_path = std::env::temp_dir().join(format!(
+            "nixarchy-meetingai-lock-test-{}.lock",
+            uuid::Uuid::new_v4()
+        ));
+        let primary = InstanceLock::open_and_lock(&scratch_path)
+            .expect("initial lock acquisition must succeed");
+        assert!(InstanceLock::open_and_lock(&scratch_path).is_none());
+        drop(primary);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut reacquired = None;
+        while std::time::Instant::now() < deadline {
+            reacquired = InstanceLock::open_and_lock(&scratch_path);
+            if reacquired.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(reacquired.is_some(), "lock was not released in time");
+        drop(reacquired);
+        let _ = std::fs::remove_file(&scratch_path);
     }
 }

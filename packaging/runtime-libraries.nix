@@ -1,8 +1,8 @@
+# Shared libraries the binary dlopens or links at run time.
 { pkgs }:
-with pkgs;
 [
-  pipewire
-  alsa-lib
-  openssl
-  stdenv.cc.cc.lib
+  pkgs.pipewire
+  pkgs.alsa-lib
+  pkgs.openssl
+  pkgs.stdenv.cc.cc.lib
 ]
