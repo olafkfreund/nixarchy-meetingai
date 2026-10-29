@@ -19,18 +19,19 @@ const BIN_FILE: &str = "vault.bin";
 const LOCK_FILE: &str = "vault.lock";
 
 type EntryMap = BTreeMap<String, Value>;
+type RawKey = [u8; KEY_LEN];
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
-    #[error("vault I/O failed: {0}")]
+    #[error("cannot access the vault files: {0}")]
     Io(#[from] io::Error),
-    #[error("vault file format is unrecognized; existing file kept untouched")]
+    #[error("the vault file has an unknown layout; it was left as it was")]
     Format,
-    #[error("vault authentication failed; existing file kept untouched")]
+    #[error("the vault file does not open with its key; it was left as it was")]
     Auth,
-    #[error("vault encryption key is missing; existing file kept untouched")]
+    #[error("the vault key file is gone; the vault file was left as it was")]
     MissingKey,
-    #[error("vault payload is not a valid JSON object (line {}, column {}); existing file kept untouched", .0.line(), .0.column())]
+    #[error("the vault content is not a JSON object; the vault file was left as it was")]
     Json(serde_json::Error),
 }
 
@@ -52,171 +53,177 @@ impl Vault {
 
     pub fn read(&self) -> Result<BTreeMap<String, Value>, VaultError> {
         let _guard = self.acquire_lock()?;
-        let (entries, _) = self.load_unlocked()?;
-        Ok(entries)
+        Ok(self.load_locked()?.0)
     }
 
     pub fn get(&self, key: &str) -> Result<Option<Value>, VaultError> {
-        let entries = self.read()?;
-        Ok(entries.get(key).cloned())
+        Ok(self.read()?.get(key).cloned())
     }
 
     pub fn set(&self, key: &str, value: Value) -> Result<(), VaultError> {
         let _guard = self.acquire_lock()?;
-        let (mut entries, existing_key) = self.load_unlocked()?;
+        let (mut entries, key_on_disk) = self.load_locked()?;
         entries.insert(key.to_owned(), value);
-        self.save_unlocked(&entries, existing_key)
+        self.store_locked(&entries, key_on_disk)
     }
 
     pub fn remove(&self, keys: &[&str]) -> Result<(), VaultError> {
         let _guard = self.acquire_lock()?;
-        let (mut entries, existing_key) = self.load_unlocked()?;
-        if existing_key.is_none() && !self.bin_path().exists() {
+        let (mut entries, key_on_disk) = self.load_locked()?;
+        if key_on_disk.is_none() && !self.bin_file().exists() {
             return Ok(());
         }
         for name in keys {
             entries.remove(*name);
         }
-        self.save_unlocked(&entries, existing_key)
+        self.store_locked(&entries, key_on_disk)
     }
 
-    fn key_path(&self) -> PathBuf {
+    fn key_file(&self) -> PathBuf {
         self.dir.join(KEY_FILE)
     }
 
-    fn bin_path(&self) -> PathBuf {
+    fn bin_file(&self) -> PathBuf {
         self.dir.join(BIN_FILE)
     }
 
-    fn lock_path(&self) -> PathBuf {
-        self.dir.join(LOCK_FILE)
-    }
-
     fn acquire_lock(&self) -> Result<File, VaultError> {
-        Ok(lock(&self.lock_path())?)
+        Ok(lock(&self.dir.join(LOCK_FILE))?)
     }
 
-    fn load_unlocked(&self) -> Result<(EntryMap, Option<[u8; KEY_LEN]>), VaultError> {
-        let key_path = self.key_path();
-        let key_opt = match fs::symlink_metadata(&key_path) {
-            Ok(_) => Some(read_key_file(&key_path)?),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-            Err(err) => return Err(VaultError::Io(err)),
-        };
+    /// The key file's contents, or `None` when there is no such file.
+    fn stored_key(&self) -> Result<Option<RawKey>, VaultError> {
+        let key_file = self.key_file();
+        match fs::symlink_metadata(&key_file) {
+            Ok(_) => Ok(Some(read_key_file(&key_file)?)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
 
-        let bin_path = self.bin_path();
-        match fs::symlink_metadata(&bin_path) {
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                return Ok((BTreeMap::new(), key_opt));
-            }
-            Err(err) => return Err(VaultError::Io(err)),
+    /// Decrypts the store; also hands back the key that was found on disk.
+    fn load_locked(&self) -> Result<(EntryMap, Option<RawKey>), VaultError> {
+        let key = self.stored_key()?;
+        let bin_file = self.bin_file();
+        match fs::symlink_metadata(&bin_file) {
             Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Ok((EntryMap::new(), key));
+            }
+            Err(err) => return Err(err.into()),
         }
+        let key = key.ok_or(VaultError::MissingKey)?;
 
-        let Some(raw_key) = key_opt else {
-            return Err(VaultError::MissingKey);
-        };
-
-        let mut bin_file = open_private(&bin_path, false)?;
         let mut content = Vec::new();
-        bin_file.read_to_end(&mut content)?;
+        open_private(&bin_file, false)?.read_to_end(&mut content)?;
+        let rest = content
+            .strip_prefix(HEADER)
+            .filter(|rest| rest.len() >= NONCE_LEN)
+            .ok_or(VaultError::Format)?;
+        let (nonce, sealed) = rest.split_at(NONCE_LEN);
+        let nonce: [u8; NONCE_LEN] = nonce.try_into().expect("split at NONCE_LEN");
 
-        if content.len() < HEADER.len() + NONCE_LEN || !content.starts_with(HEADER) {
-            return Err(VaultError::Format);
-        }
-
-        let (nonce_slice, body) = content[HEADER.len()..].split_at(NONCE_LEN);
-        let nonce_arr: [u8; NONCE_LEN] = nonce_slice
-            .try_into()
-            .expect("slice has exact NONCE_LEN bytes");
-        let cipher = Aes256Gcm::new(&raw_key.into());
-        let plaintext = cipher
-            .decrypt(&Nonce::from(nonce_arr), body)
+        let plain = Aes256Gcm::new(&key.into())
+            .decrypt(&Nonce::from(nonce), sealed)
             .map_err(|_| VaultError::Auth)?;
-
-        let entries = decode_object(&plaintext)?;
-        Ok((entries, Some(raw_key)))
+        Ok((decode_object(&plain)?, Some(key)))
     }
 
-    fn save_unlocked(
+    fn store_locked(
         &self,
-        entries: &BTreeMap<String, Value>,
-        existing_key: Option<[u8; KEY_LEN]>,
+        entries: &EntryMap,
+        key_on_disk: Option<RawKey>,
     ) -> Result<(), VaultError> {
-        let raw_key = match existing_key {
-            Some(k) => k,
+        let key = match key_on_disk {
+            Some(key) => key,
             None => self.create_key_file()?,
         };
 
-        let plaintext = serde_json::to_vec(entries).map_err(VaultError::Json)?;
-        let nonce_bytes: [u8; NONCE_LEN] = rand::random();
-        let cipher = Aes256Gcm::new(&raw_key.into());
-        let encrypted = cipher
-            .encrypt(&Nonce::from(nonce_bytes), plaintext.as_slice())
-            .map_err(|_| io::Error::other("vault payload encryption failed"))?;
+        let plain = serde_json::to_vec(entries).map_err(VaultError::Json)?;
+        let nonce: [u8; NONCE_LEN] = rand::random();
+        let sealed = Aes256Gcm::new(&key.into())
+            .encrypt(&Nonce::from(nonce), plain.as_slice())
+            .map_err(|_| io::Error::other("could not seal the credential store"))?;
 
-        let mut blob = Vec::with_capacity(HEADER.len() + NONCE_LEN + encrypted.len());
+        let mut blob = Vec::with_capacity(HEADER.len() + NONCE_LEN + sealed.len());
         blob.extend_from_slice(HEADER);
-        blob.extend_from_slice(&nonce_bytes);
-        blob.extend_from_slice(&encrypted);
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&sealed);
 
-        let tmp_path = self
+        let stage_path = self
             .dir
             .join(format!("vault.stage-{}", uuid::Uuid::new_v4()));
-        let write_result = (|| -> io::Result<()> {
-            let mut tmp_file = open_private(&tmp_path, true)?;
-            tmp_file.write_all(&blob)?;
-            tmp_file.sync_all()?;
-            drop(tmp_file);
-            fs::rename(&tmp_path, self.bin_path())?;
-            sync_directory(&self.dir)?;
-            Ok(())
-        })();
-
-        if write_result.is_err() {
-            let _ = fs::remove_file(&tmp_path);
-        }
-        write_result?;
+        let mut file = open_private(&stage_path, true)?;
+        // Only now does the path belong to us; the guard deletes it on any early exit.
+        let staged = StagedFile {
+            path: stage_path,
+            armed: true,
+        };
+        file.write_all(&blob)?;
+        file.sync_all()?;
+        drop(file);
+        staged.commit(&self.bin_file())?;
+        sync_directory(&self.dir)?;
         Ok(())
     }
 
-    fn create_key_file(&self) -> Result<[u8; KEY_LEN], VaultError> {
-        let generated: [u8; KEY_LEN] = rand::random();
-        let key_path = self.key_path();
-        let mut handle = open_private(&key_path, true)?;
-        handle.write_all(&generated)?;
-        handle.sync_all()?;
-        drop(handle);
+    fn create_key_file(&self) -> Result<RawKey, VaultError> {
+        let key: RawKey = rand::random();
+        let key_file = self.key_file();
+        let mut file = open_private(&key_file, true)?;
+        if let Err(err) = file.write_all(&key).and_then(|()| file.sync_all()) {
+            // A half-written key must not stay: the next call would trust it.
+            drop(file);
+            let _ = fs::remove_file(&key_file);
+            return Err(err.into());
+        }
+        drop(file);
         sync_directory(&self.dir)?;
-        Ok(generated)
+        Ok(key)
     }
 }
 
-fn read_key_file(path: &Path) -> Result<[u8; KEY_LEN], VaultError> {
-    let mut handle = open_private(path, false)?;
+/// A temporary file that is deleted on drop unless `commit` moved it into place.
+struct StagedFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagedFile {
+    fn commit(mut self, target: &Path) -> io::Result<()> {
+        fs::rename(&self.path, target)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn read_key_file(path: &Path) -> Result<RawKey, VaultError> {
     let mut bytes = Vec::new();
-    handle.read_to_end(&mut bytes)?;
+    open_private(path, false)?.read_to_end(&mut bytes)?;
     bytes.try_into().map_err(|_| {
-        VaultError::Io(io::Error::new(
+        io::Error::new(
             io::ErrorKind::InvalidData,
-            "vault key length is invalid; existing files kept untouched",
-        ))
+            "the vault key file does not hold exactly 32 bytes; nothing was changed",
+        )
+        .into()
     })
 }
 
-fn decode_object(bytes: &[u8]) -> Result<BTreeMap<String, Value>, VaultError> {
-    let parsed: Value = serde_json::from_slice(bytes).map_err(|err| {
-        let pos_err = serde_json::from_slice::<Value>(b"").unwrap_err();
-        let _ = err;
-        VaultError::Json(pos_err)
-    })?;
-    match parsed {
-        Value::Object(map) => Ok(map.into_iter().collect()),
-        _ => {
-            let type_err = serde_json::from_slice::<BTreeMap<String, Value>>(b"null").unwrap_err();
-            Err(VaultError::Json(type_err))
-        }
-    }
+fn decode_object(bytes: &[u8]) -> Result<EntryMap, VaultError> {
+    // The parser's own message can quote stored text, so it is dropped.
+    serde_json::from_slice(bytes).map_err(|_| {
+        VaultError::Json(<serde_json::Error as serde::de::Error>::custom(
+            "vault content is not a JSON object",
+        ))
+    })
 }
 
 fn sync_directory(dir: &Path) -> io::Result<()> {
@@ -251,6 +258,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn staged_file_is_removed_unless_committed() {
+        let dir = TempDir::new();
+        Vault::open(dir.path()).unwrap();
+        let stage = |name: &str| {
+            let path = dir.path().join(name);
+            fs::write(&path, b"x").unwrap();
+            StagedFile { path, armed: true }
+        };
+
+        // A failed rename (target is a directory) still cleans up.
+        let target = dir.path().join("target-dir");
+        fs::create_dir(&target).unwrap();
+        let failing = stage("vault.stage-a");
+        assert!(failing.commit(&target).is_err());
+        assert!(!dir.path().join("vault.stage-a").exists());
+
+        let moved = dir.path().join("moved");
+        stage("vault.stage-b").commit(&moved).unwrap();
+        assert!(moved.exists());
+        assert!(!dir.path().join("vault.stage-b").exists());
     }
 
     #[test]

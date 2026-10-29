@@ -95,53 +95,82 @@ impl Credential {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.provider.trim().is_empty() {
-            return Err("Provider identifier cannot be blank.".into());
+            return Err("The provider id is empty.".into());
         }
-
-        if let Some(custom) = &self.custom {
-            if !self.provider.starts_with("custom-") {
-                return Err("Custom provider identifiers must start with 'custom-'.".into());
-            }
-            custom.validate(self.kind == Kind::Speech)?;
-            let parsed = reqwest::Url::parse(&self.base_url)
-                .map_err(|_| "Enter a valid http:// or https:// endpoint URL.".to_owned())?;
-            if !matches!(parsed.scheme(), "http" | "https") {
-                return Err("Endpoint URL must use http:// or https://.".into());
-            }
-            if !endpoint_allowed(&self.base_url) {
-                return Err("Plain http:// is only allowed for localhost; use https://.".into());
-            }
-            if custom.auth != "none" && self.api_key.trim().is_empty() {
-                return Err("An API key is required for this authentication mode.".into());
-            }
-            if self.kind == Kind::Chat && self.model.trim().is_empty() {
-                return Err("Enter a model name for this custom chat provider.".into());
-            }
-            return Ok(());
+        match &self.custom {
+            Some(custom) => self.check_custom(custom),
+            None => self.check_catalog(),
         }
+    }
 
-        let requires_key = match self.kind {
-            Kind::Chat => {
-                let Some(entry) = ChatProvider::by_id(&self.provider) else {
-                    return Err(format!("Unknown chat provider '{}'.", self.provider));
-                };
-                entry.requires_key
-            }
-            Kind::Speech => {
-                if SttProvider::by_id(&self.provider).is_none() {
-                    return Err(format!("Unknown speech provider '{}'.", self.provider));
-                }
-                true
-            }
+    fn check_custom(&self, custom: &CustomProvider) -> Result<(), String> {
+        custom.validate(self.kind == Kind::Speech)?;
+        let url_problem = endpoint_error(&self.base_url);
+        first_failure(&[
+            (
+                !self.provider.starts_with("custom-"),
+                "A custom provider id has to begin with \"custom-\".",
+            ),
+            (url_problem.is_some(), url_problem.unwrap_or_default()),
+            (
+                custom.auth != "none" && self.api_key.trim().is_empty(),
+                "This authentication mode needs an API key.",
+            ),
+            (
+                self.kind == Kind::Chat && self.model.trim().is_empty(),
+                "A custom chat provider needs a model.",
+            ),
+        ])
+    }
+
+    fn check_catalog(&self) -> Result<(), String> {
+        let needs_key = match self.kind {
+            Kind::Chat => ChatProvider::by_id(&self.provider).map(|p| p.requires_key),
+            Kind::Speech => SttProvider::by_id(&self.provider).map(|_| true),
         };
+        let Some(needs_key) = needs_key else {
+            let what = if self.kind == Kind::Chat {
+                "chat"
+            } else {
+                "speech"
+            };
+            return Err(format!(
+                "There is no {what} provider named '{}'.",
+                self.provider
+            ));
+        };
+        first_failure(&[
+            (
+                needs_key && self.api_key.trim().is_empty(),
+                "This provider needs an API key.",
+            ),
+            (
+                !self.base_url.is_empty() && !endpoint_allowed(&self.base_url),
+                "The custom endpoint must be https://, or http:// on localhost.",
+            ),
+        ])
+    }
+}
 
-        if requires_key && self.api_key.trim().is_empty() {
-            return Err("An API key is required for this provider.".into());
+/// Why `url` cannot be used as a provider endpoint, if it cannot.
+fn endpoint_error(url: &str) -> Option<&'static str> {
+    match reqwest::Url::parse(url) {
+        Err(_) => Some("The endpoint is not a well-formed URL."),
+        Ok(parsed) if !matches!(parsed.scheme(), "http" | "https") => {
+            Some("The endpoint has to start with http:// or https://.")
         }
-        if !self.base_url.is_empty() && !endpoint_allowed(&self.base_url) {
-            return Err("The custom endpoint must be https://, or http:// on localhost.".into());
+        Ok(_) if !endpoint_allowed(url) => {
+            Some("Plain http:// is only allowed for localhost; use https://.")
         }
-        Ok(())
+        Ok(_) => None,
+    }
+}
+
+/// The message of the first `(failed, message)` pair whose flag is set.
+fn first_failure(checks: &[(bool, &str)]) -> Result<(), String> {
+    match checks.iter().find(|(failed, _)| *failed) {
+        Some((_, message)) => Err((*message).to_owned()),
+        None => Ok(()),
     }
 }
 
@@ -152,69 +181,72 @@ fn kind_prefix(kind: Kind) -> &'static str {
     }
 }
 
-fn slot_name(kind: Kind, provider: &str) -> String {
+fn record_name(kind: Kind, provider: &str) -> String {
     format!("{}{provider}", kind_prefix(kind))
 }
 
-fn format_vault_err(err: VaultError) -> String {
-    format!("Credential vault could not be read or written: {err}")
+fn vault_failure(err: VaultError) -> String {
+    format!("The credential vault is unavailable (read or write failed): {err}")
 }
 
-fn is_known_for_kind(kind: Kind, provider: &str) -> bool {
-    match kind {
-        Kind::Chat => ChatProvider::by_id(provider).is_some(),
-        Kind::Speech => SttProvider::by_id(provider).is_some(),
-    }
+/// Decodes one stored record; a bad one is logged by name only.
+fn decode(name: &str, raw: serde_json::Value) -> Option<Credential> {
+    serde_json::from_value(raw)
+        .map_err(
+            |_| tracing::warn!(record = %name, "ignoring stored record that is not a credential"),
+        )
+        .ok()
+}
+
+/// Whether a decoded record may be offered for `kind`.
+fn usable(credential: &Credential, kind: Kind) -> bool {
+    let known = match kind {
+        Kind::Chat => ChatProvider::by_id(&credential.provider).is_some(),
+        Kind::Speech => SttProvider::by_id(&credential.provider).is_some(),
+    };
+    credential.kind == kind
+        && (known || credential.custom.is_some() && credential.provider.starts_with("custom-"))
 }
 
 pub fn save(vault: &Vault, credential: &Credential) -> Result<(), String> {
     credential.validate()?;
-    let encoded = serde_json::to_value(credential)
-        .map_err(|_| "Credential record could not be serialized.".to_owned())?;
-    vault
-        .set(&slot_name(credential.kind, &credential.provider), encoded)
-        .map_err(format_vault_err)
+    let (name, value) = (
+        record_name(credential.kind, &credential.provider),
+        serde_json::to_value(credential).map_err(|_| "The credential could not be encoded.")?,
+    );
+    vault.set(&name, value).map_err(vault_failure)
 }
 
 pub fn load(vault: &Vault, kind: Kind, provider: &str) -> Result<Option<Credential>, String> {
-    let name = slot_name(kind, provider);
-    let Some(raw) = vault.get(&name).map_err(format_vault_err)? else {
-        return Ok(None);
-    };
-    serde_json::from_value(raw)
-        .map(Some)
-        .map_err(|_| format!("Stored credential '{name}' could not be decoded."))
+    let name = record_name(kind, provider);
+    vault
+        .get(&name)
+        .map_err(vault_failure)?
+        .map(|raw| {
+            serde_json::from_value(raw)
+                .map_err(|_| format!("The stored credential '{name}' is unreadable."))
+        })
+        .transpose()
 }
 
 pub fn list(vault: &Vault, kind: Kind) -> Result<Vec<Credential>, String> {
-    let entries = vault.read().map_err(format_vault_err)?;
     let prefix = kind_prefix(kind);
-    let mut out = Vec::new();
-
-    for (name, raw) in entries {
-        if !name.starts_with(prefix) {
-            continue;
-        }
-        let Ok(cred) = serde_json::from_value::<Credential>(raw) else {
-            tracing::warn!(record = %name, "skipping unreadable credential record");
-            continue;
-        };
-        if cred.kind != kind {
-            continue;
-        }
-        let valid_custom = cred.custom.is_some() && cred.provider.starts_with("custom-");
-        if valid_custom || is_known_for_kind(kind, &cred.provider) {
-            out.push(cred);
-        }
-    }
-
-    out.sort_by(|a, b| a.provider.cmp(&b.provider));
-    Ok(out)
+    let mut found: Vec<Credential> = vault
+        .read()
+        .map_err(vault_failure)?
+        .into_iter()
+        .filter(|(name, _)| name.starts_with(prefix))
+        .filter_map(|(name, raw)| decode(&name, raw))
+        .filter(|credential| usable(credential, kind))
+        .collect();
+    found.sort_by_key(|credential| credential.provider.clone());
+    Ok(found)
 }
 
 pub fn remove(vault: &Vault, kind: Kind, provider: &str) -> Result<(), String> {
-    let name = slot_name(kind, provider);
-    vault.remove(&[name.as_str()]).map_err(format_vault_err)
+    vault
+        .remove(&[record_name(kind, provider).as_str()])
+        .map_err(vault_failure)
 }
 
 #[cfg(test)]
