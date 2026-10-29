@@ -418,48 +418,48 @@ mod tests {
         vault.set("k", json!(secret)).unwrap();
 
         let bin_path = dir.path().join("vault.bin");
-        let key_path = dir.path().join("vault.key");
+        let key_file_path = dir.path().join("vault.key");
         let saved_bin = fs::read(&bin_path).unwrap();
-        let saved_key = fs::read(&key_path).unwrap();
+        let saved_key = fs::read(&key_file_path).unwrap();
 
         // Delete vault.key
-        fs::remove_file(&key_path).unwrap();
+        fs::remove_file(&key_file_path).unwrap();
         let r_err = vault.read().unwrap_err();
         assert!(matches!(r_err, VaultError::MissingKey));
         assert!(!r_err.to_string().contains(secret));
         let s_err = vault.set("k2", json!("v2")).unwrap_err();
         assert!(matches!(s_err, VaultError::MissingKey));
-        assert!(!key_path.exists());
+        assert!(!key_file_path.exists());
         assert_eq!(fs::read(&bin_path).unwrap(), saved_bin);
 
         // 31-byte and 40-byte keys
         for bad_len in [31_usize, 40_usize] {
             let raw = vec![0x42_u8; bad_len];
-            fs::write(&key_path, &raw).unwrap();
+            fs::write(&key_file_path, &raw).unwrap();
             let err1 = vault.read().unwrap_err();
             assert!(!err1.to_string().contains(secret));
             let err2 = vault.set("k2", json!("v2")).unwrap_err();
             assert!(!err2.to_string().contains(secret));
             assert_eq!(fs::read(&bin_path).unwrap(), saved_bin);
-            assert_eq!(fs::read(&key_path).unwrap(), raw);
+            assert_eq!(fs::read(&key_file_path).unwrap(), raw);
         }
 
         // Symlinked vault.key
         #[cfg(unix)]
         {
-            fs::remove_file(&key_path).unwrap();
+            fs::remove_file(&key_file_path).unwrap();
             let target = dir.path().join("target.txt");
             fs::write(&target, b"untouched-target").unwrap();
-            std::os::unix::fs::symlink(&target, &key_path).unwrap();
+            std::os::unix::fs::symlink(&target, &key_file_path).unwrap();
             assert!(vault.read().is_err());
             assert!(vault.set("k2", json!("v2")).is_err());
             assert_eq!(fs::read(&target).unwrap(), b"untouched-target");
             assert_eq!(fs::read(&bin_path).unwrap(), saved_bin);
-            fs::remove_file(&key_path).unwrap();
+            fs::remove_file(&key_file_path).unwrap();
         }
 
         // Restore valid key and verify read works again
-        fs::write(&key_path, saved_key).unwrap();
+        fs::write(&key_file_path, saved_key).unwrap();
         assert_eq!(vault.get("k").unwrap(), Some(json!(secret)));
     }
 

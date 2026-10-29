@@ -277,3 +277,23 @@ commit and reverts alone.
   `--copies` count is a lower bound: it cannot see code deleted in the
   removal commit and retyped later, so the reviewer's text comparison
   is the real check.
+
+### Step 6 (core/security), 2026-10-29
+
+- agy implemented from the brief; the Opus review found validate, list,
+  the atomic write and several texts/names too close to the old code; a
+  fresh Claude coder rewrote them from explicit designs (handoff
+  fallback); the lead renamed the last four items the re-review listed.
+- Deliberate tightenings for the no-leak rule (same interface): a
+  hand-written Debug for Credential hides api_key; no serde error text
+  from stored data in errors; a failed open leaves no vault.key; a
+  half-written new key file is removed.
+- provider_import.rs deleted (nothing called parse or guide); dead
+  Vault::open_default, Vault::directory, Credential::masked_key removed;
+  Vault::write/update/Store made private.
+- New gate: tests/fixtures/old-vault (written by the old code, dummy
+  credential, synthetic key tracked like history.db.key) and
+  old_vault_reads_back.
+- p620 check done by the lead: a copy of the real vault opened with the
+  new code (1 record, 1 speech credential read back; counts only, copy
+  deleted).

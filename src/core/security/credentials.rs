@@ -1,4 +1,4 @@
-//! Provider credential records stored inside the encrypted vault.
+//! API keys and connection details per provider, kept as records in the vault.
 
 use super::vault::{Vault, VaultError};
 use crate::ai::{
@@ -124,11 +124,11 @@ impl Credential {
     }
 
     fn check_catalog(&self) -> Result<(), String> {
-        let needs_key = match self.kind {
+        let key_required = match self.kind {
             Kind::Chat => ChatProvider::by_id(&self.provider).map(|p| p.requires_key),
             Kind::Speech => SttProvider::by_id(&self.provider).map(|_| true),
         };
-        let Some(needs_key) = needs_key else {
+        let Some(key_required) = key_required else {
             let what = if self.kind == Kind::Chat {
                 "chat"
             } else {
@@ -139,11 +139,9 @@ impl Credential {
                 self.provider
             ));
         };
+        let key_blank = self.api_key.trim().is_empty();
         first_failure(&[
-            (
-                needs_key && self.api_key.trim().is_empty(),
-                "This provider needs an API key.",
-            ),
+            (key_required && key_blank, "This provider needs an API key."),
             (
                 !self.base_url.is_empty() && !endpoint_allowed(&self.base_url),
                 "The custom endpoint must be https://, or http:// on localhost.",
@@ -224,18 +222,18 @@ pub fn load(vault: &Vault, kind: Kind, provider: &str) -> Result<Option<Credenti
         .map_err(vault_failure)?
         .map(|raw| {
             serde_json::from_value(raw)
-                .map_err(|_| format!("The stored credential '{name}' is unreadable."))
+                .map_err(|_| format!("Vault record '{name}' could not be decoded."))
         })
         .transpose()
 }
 
 pub fn list(vault: &Vault, kind: Kind) -> Result<Vec<Credential>, String> {
-    let prefix = kind_prefix(kind);
+    let wanted = kind_prefix(kind);
     let mut found: Vec<Credential> = vault
         .read()
         .map_err(vault_failure)?
         .into_iter()
-        .filter(|(name, _)| name.starts_with(prefix))
+        .filter(|(name, _)| name.starts_with(wanted))
         .filter_map(|(name, raw)| decode(&name, raw))
         .filter(|credential| usable(credential, kind))
         .collect();
