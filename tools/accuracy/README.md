@@ -29,3 +29,17 @@ Prints bleed lines (decided on words unique to one side), lost owner words, remo
     python3 -I tools/accuracy/score.py tools/accuracy/data/echo.wav tools/accuracy/ref.example.txt --fake "hello there"
 
 `--fake TEXT` returns TEXT for every chunk instead of calling an engine.
+
+## Alkove Focus comparison (owner recordings only)
+
+Use a throwaway Python 3.13 venv in the scratchpad. These hashes pin the Linux x86-64 wheels; the Alkove 0.3.2 package pins and checks its model files. No API key is needed.
+
+    python3.13 -m venv ~/meetingai-eval/alkove-venv
+    cat > ~/meetingai-eval/alkove-requirements.txt <<'EOF'
+    alkove==0.3.2 --hash=sha256:8eeda691d6b030064f80b2440c7c1adb6a0b1849d84c79455c195039a7cdcdb9
+    numpy==2.2.6 --hash=sha256:1bc23a79bfabc5d056d106f9befb8d50c31ced2fbc70eedb8155aec74a45798f
+    EOF
+    ~/meetingai-eval/alkove-venv/bin/pip install --require-hashes --only-binary=:all: -r ~/meetingai-eval/alkove-requirements.txt
+    ~/meetingai-eval/alkove-venv/bin/python -I tools/accuracy/alkove_filter.py IN.wav SAMPLE.wav OUT.wav
+
+`IN.wav` is stereo 16 kHz 16-bit PCM (mic left, system right); `SAMPLE.wav` is mono owner-only audio in the same format. The output is stereo with the system channel unchanged and prints `{"rtf": ...}`. Output must not already exist.
