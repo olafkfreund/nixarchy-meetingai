@@ -30,6 +30,15 @@ Item {
     property string modelsFor: ""   // the provider the Models button asked about; a reply for another one is stale
     property var status: ({})        // providers.status rows by id: ready / not installed / not logged in / no key, with the login command
     readonly property var stateLabels: ({ ready: "ready", not_installed: "not installed", not_logged_in: "not logged in", no_key: "no key" })
+    property var presets: []        // presets.list rows
+    property string provMode: ""    // "" | "presets" | "form"
+    property string editId: ""      // custom provider id being edited, or "" when adding from a preset
+    property string formPreset: ""
+    // The key field shows unless the endpoint, as typed, is a localhost http URL.
+    readonly property bool formNeedsKey: !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])([:\/]|$)/i.test(provEndpoint.text.trim())
+    property int formEpoch: 0       // bumped when the form opens or closes; a test reply from an older one is ignored
+    property bool testingProvider: false
+    property string testMessage: ""
     property Component settingsHeader: null   // controls shown above the Settings list
 
     readonly property bool iv: client.settings.meeting_mode === "interviewer"
@@ -68,11 +77,92 @@ Item {
 
     function match(s) { return root.query === "" || String(s).toLowerCase().indexOf(root.query.toLowerCase()) >= 0; }
 
+    function endpointHost(url) {
+        var m = String(url || "").match(/^https?:\/\/([^\/]+)/);
+        return m ? m[1] : String(url || "");
+    }
+    function openPresetList() {
+        root.error = "";
+        root.provMode = "presets";
+        root.client.send("presets.list", {}, function(r) { if (r.ok) root.presets = r.data || []; });
+    }
+    function openPresetForm(p) {
+        root.error = "";
+        root.editId = "";
+        root.formPreset = String(p.preset || "");
+        provName.text = String(p.name || "");
+        provEndpoint.text = String(p.endpoint || "");
+        provModel.text = String(p.model || "");
+        provKey.text = "";
+        root.testMessage = "";
+        root.testingProvider = false;
+        root.provMode = "form";
+    }
+    function openEditProvider(p) {
+        root.error = "";
+        root.editId = String(p.id || "");
+        root.formPreset = "";
+        provName.text = String(p.name || "");
+        provEndpoint.text = String(p.endpoint || "");
+        provModel.text = String(p.model || "");
+        provKey.text = "";
+        root.testMessage = "";
+        root.testingProvider = false;
+        root.provMode = "form";
+    }
+    function testProvider() {
+        root.error = "";
+        root.testMessage = "";
+        root.testingProvider = true;
+        var epoch = root.formEpoch;
+        var args = { name: provName.text.trim(), model: provModel.text.trim(), endpoint: provEndpoint.text.trim() };
+        if (root.editId !== "") args.id = root.editId;
+        else args.preset = root.formPreset;
+        if (root.formNeedsKey && provKey.text !== "") args.api_key = provKey.text;
+        root.client.send("providers.test", args, function(r) {
+            if (epoch !== root.formEpoch) return;
+            root.testingProvider = false;
+            if (!r.ok) root.testMessage = "Error: " + String(r.error || "request failed");
+            else if (r.data && r.data.message !== undefined) root.testMessage = String(r.data.message);
+            else root.testMessage = r.data && r.data.ok ? "Connected." : "Connection failed.";
+        });
+    }
+    function saveProvider() {
+        root.error = "";
+        var args = {
+            name: provName.text.trim(),
+            model: provModel.text.trim(),
+            endpoint: provEndpoint.text.trim()
+        };
+        if (root.editId !== "") {
+            args.id = root.editId;
+            if (root.formNeedsKey && provKey.text !== "") args.api_key = provKey.text;
+            root.client.send("providers.update", args, function(r) {
+                if (!r.ok) { root.error = String(r.error || "request failed"); return; }
+                provKey.text = "";
+                root.provMode = "";
+                root.load();
+            });
+        } else {
+            args.preset = root.formPreset;
+            if (root.formNeedsKey && provKey.text !== "") args.api_key = provKey.text;
+            root.client.send("providers.add", args, function(r) {
+                if (!r.ok) { root.error = String(r.error || "request failed"); return; }
+                provKey.text = "";
+                root.provMode = "";
+                root.load();
+            });
+        }
+    }
+
     function load() {
         root.client.send("session.list", {}, function(r) { if (r.ok) root.sessions = r.data || []; });
         root.reload();
         root.client.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
-        if (root.tab === "providers") root.client.send("providers.status", {}, function(r) { if (r.ok) { var m = {}; (r.data || []).forEach(function(row) { m[row.id] = row; }); root.status = m; } });
+        if (root.tab === "providers") {
+            root.client.send("providers.status", {}, function(r) { if (r.ok) { var m = {}; (r.data || []).forEach(function(row) { m[row.id] = row; }); root.status = m; } });
+            root.client.send("presets.list", {}, function(r) { if (r.ok) root.presets = r.data || []; });
+        }
         root.search();
         root.loadPrompt();
         root.client.refreshCandidates();
@@ -88,7 +178,9 @@ Item {
     }
 
     property string error: ""   // the last failed request made from here, shown under the search field
-    onTabChanged: { root.error = ""; root.load(); }
+    onProvModeChanged: { root.formEpoch++; if (root.provMode !== "form") { provKey.text = ""; root.testMessage = ""; root.testingProvider = false; } }
+    onTabChanged: { root.error = ""; root.provMode = ""; root.load(); }
+    onVisibleChanged: if (!visible) root.provMode = ""   // closing the overlay drops a typed key
     onPromptModeChanged: root.loadPrompt()
     onPromptKindChanged: root.loadPrompt()
     Component.onCompleted: root.load()
@@ -97,6 +189,7 @@ Item {
         target: root.client
         function onLibraryError(message) { root.error = message; }
         function onNotesUpdated() { root.load(); }
+        function onProvidersChanged() { root.load(); }
     }
 
     Column {
@@ -347,25 +440,125 @@ Item {
         }
 
         ListView {
-            visible: root.tab === "providers"
+            visible: root.tab === "providers" && root.provMode === ""
             width: parent.width; height: parent.height - y
             clip: true
             spacing: Style.spacing.xs
-            model: root.providers.filter(function(p) { return root.match(p.name || p.id); })
-            header: Rectangle {   // the daemon's one-time notice (the removed Gemini key)
-                visible: root.client.providerNotice !== ""
-                width: ListView.view.width
-                height: visible ? pn.implicitHeight + root.theme.padY * 2 : 0
-                radius: root.theme.radius
-                color: Qt.alpha(Commons.Color.accent, 0.12)
-                RowLayout {
-                    id: pn
-                    x: root.theme.padX; y: root.theme.padY
-                    width: parent.width - root.theme.padX * 2
-                    spacing: root.theme.gap
-                    UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.client.providerNotice; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
-                    IconButton { objectName: "noticeDismiss"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Got it"; bordered: true; onClicked: root.client.providerNotice = "" }
+            model: root.providers.filter(function(p) { return !p.custom && root.match(p.name || p.id); })
+            header: Column {
+                width: ListView.view ? ListView.view.width : parent.width
+                spacing: Style.spacing.xs
+                bottomPadding: Style.spacing.sm
+                Rectangle {   // the daemon's one-time notice (the removed Gemini key)
+                    visible: root.client.providerNotice !== ""
+                    width: parent.width
+                    height: visible ? pn.implicitHeight + root.theme.padY * 2 : 0
+                    radius: root.theme.radius
+                    color: Qt.alpha(Commons.Color.accent, 0.12)
+                    RowLayout {
+                        id: pn
+                        x: root.theme.padX; y: root.theme.padY
+                        width: parent.width - root.theme.padX * 2
+                        spacing: root.theme.gap
+                        UiText { Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.client.providerNotice; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                        IconButton { objectName: "noticeDismiss"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Got it"; bordered: true; onClicked: root.client.providerNotice = "" }
+                    }
                 }
+                RowLayout {
+                    width: parent.width
+                    height: root.theme.ctl
+                    spacing: root.theme.gap
+                    UiText {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                        textFormat: Text.PlainText
+                        text: "Your providers"
+                        color: Commons.Color.popups.text
+                        font.pixelSize: root.theme.body
+                        font.bold: true
+                    }
+                    IconButton {
+                        objectName: "addProvider"
+                        ts: root.theme.ts
+                        Layout.alignment: Qt.AlignVCenter
+                        text: "Add provider"
+                        bordered: true
+                        onClicked: root.openPresetList()
+                    }
+                }
+                Repeater {
+                    model: root.providers.filter(function(p) { return p.custom === true && root.match(p.name || p.id); })
+                    Column {
+                        id: cprow
+                        required property var modelData
+                        readonly property var usedBy: ["chat_provider", "live_provider", "speech_provider"].filter(function(k) { return String(root.client.settings[k] || "") === cprow.modelData.id; })
+                        readonly property bool removeLocked: usedBy.some(function(k) { return root.client.isLocked(k); })
+                        width: parent.width
+                        spacing: Style.spacing.xs
+                        bottomPadding: Style.spacing.xs
+                        RowLayout {
+                            width: parent.width
+                            height: root.theme.ctl
+                            spacing: root.theme.gap
+                            UiText {
+                                objectName: "customProviderName"
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignVCenter
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                                mayCut: true
+                                text: cprow.modelData.name || cprow.modelData.id
+                                color: Commons.Color.popups.text
+                                font.pixelSize: root.theme.body
+                                font.bold: true
+                            }
+                            IconButton {
+                                objectName: "useProvider"
+                                ts: root.theme.ts
+                                Layout.alignment: Qt.AlignVCenter
+                                text: cprow.modelData.kind === "speech" ? "Use for speech" : "Use for chat"
+                                enabled: !root.client.isLocked(cprow.modelData.kind === "speech" ? "speech_provider" : "chat_provider")
+                                opacity: enabled ? 1 : 0.5
+                                onClicked: root.client.setSetting(cprow.modelData.kind === "speech" ? "speech_provider" : "chat_provider", cprow.modelData.id)
+                            }
+                            IconButton {
+                                objectName: "editProvider"
+                                ts: root.theme.ts
+                                Layout.alignment: Qt.AlignVCenter
+                                text: "Edit"
+                                onClicked: root.openEditProvider(cprow.modelData)
+                            }
+                            IconButton {
+                                objectName: "removeProvider"
+                                ts: root.theme.ts
+                                Layout.alignment: Qt.AlignVCenter
+                                text: "Remove"
+                                enabled: !cprow.removeLocked
+                                opacity: enabled ? 1 : 0.5
+                                onClicked: {
+                                    var p = cprow.modelData;
+                                    root.confirmRequested("Remove \"" + (p.name || p.id) + "\"?", "Remove", function() {
+                                        root.client.send("providers.remove", { id: p.id }, function(r) {
+                                            if (!r.ok) root.error = String(r.error || "request failed");
+                                            root.load();
+                                        });
+                                    });
+                                }
+                            }
+                        }
+                        UiText {
+                            objectName: "customProviderMeta"
+                            width: parent.width
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            text: (cprow.modelData.kind === "speech" ? "Speech" : "Chat") + "  ·  " + String(cprow.modelData.model || "") + "  ·  " + root.endpointHost(cprow.modelData.endpoint) + "  ·  " + (cprow.modelData.requires_key === false ? "on this computer" : (cprow.modelData.has_key ? "key set" : "no key")) + (cprow.usedBy.length ? "  ·  in use for " + cprow.usedBy.map(function(k) { return k === "speech_provider" ? "speech" : (k === "live_provider" ? "live answers" : "chat"); }).join(", ") : "") + (cprow.removeLocked ? "  ·  set in Nix, so it cannot be removed" : "")
+                            color: Commons.Color.popups.text
+                            opacity: root.theme.dim
+                            font.pixelSize: root.theme.caption
+                        }
+                    }
+                }
+                PanelSeparator { width: parent.width }
             }
             delegate: Column {   // the provider and its Models button; a key row if it takes one; then its status and, when not ready, the fix
                 id: prow
@@ -433,6 +626,190 @@ Item {
                 }
             }
             footer: UiText { text: root.modelsText; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText; color: Commons.Color.popups.text; font.pixelSize: root.theme.caption }
+        }
+
+        ScrollView {
+            id: presetScroll
+            visible: root.tab === "providers" && root.provMode === "presets"
+            width: parent.width; height: parent.height - y
+            contentWidth: availableWidth
+            clip: true
+            Column {
+                width: presetScroll.availableWidth
+                spacing: Style.spacing.xs
+                RowLayout {
+                    width: parent.width
+                    height: root.theme.ctl
+                    spacing: root.theme.gap
+                    IconButton {
+                        objectName: "presetBack"
+                        ts: root.theme.ts
+                        Layout.alignment: Qt.AlignVCenter
+                        text: "Back"
+                        onClicked: { root.error = ""; root.provMode = ""; }
+                    }
+                    UiText {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                        textFormat: Text.PlainText
+                        text: "Choose a preset"
+                        color: Commons.Color.popups.text
+                        font.pixelSize: root.theme.body
+                        font.bold: true
+                    }
+                }
+                UiText {
+                    textFormat: Text.PlainText
+                    text: "Chat"
+                    color: Commons.Color.popups.text
+                    font.pixelSize: root.theme.body
+                    font.bold: true
+                    topPadding: Style.spacing.xs
+                }
+                Repeater {
+                    model: root.presets.filter(function(p) { return p.kind === "chat" && root.match(p.name); })
+                    IconButton {
+                        required property var modelData
+                        objectName: "preset-" + modelData.preset
+                        ts: root.theme.ts
+                        leftAlign: true
+                        width: parent.width
+                        elidable: true
+                        text: modelData.name + (modelData.local ? "  ·  on this computer" : "") + "  ·  " + modelData.model
+                        onClicked: root.openPresetForm(modelData)
+                    }
+                }
+                UiText {
+                    textFormat: Text.PlainText
+                    text: "Speech"
+                    color: Commons.Color.popups.text
+                    font.pixelSize: root.theme.body
+                    font.bold: true
+                    topPadding: Style.spacing.xs
+                }
+                Repeater {
+                    model: root.presets.filter(function(p) { return p.kind === "speech" && root.match(p.name); })
+                    IconButton {
+                        required property var modelData
+                        objectName: "preset-" + modelData.preset
+                        ts: root.theme.ts
+                        leftAlign: true
+                        width: parent.width
+                        elidable: true
+                        text: modelData.name + (modelData.local ? "  ·  on this computer" : "") + "  ·  " + modelData.model
+                        onClicked: root.openPresetForm(modelData)
+                    }
+                }
+            }
+        }
+
+        ScrollView {
+            id: formScroll
+            visible: root.tab === "providers" && root.provMode === "form"
+            width: parent.width; height: parent.height - y
+            contentWidth: availableWidth
+            clip: true
+            Column {
+                width: formScroll.availableWidth
+                spacing: Style.spacing.xs
+                RowLayout {
+                    width: parent.width
+                    height: root.theme.ctl
+                    spacing: root.theme.gap
+                    IconButton {
+                        objectName: "formBack"
+                        ts: root.theme.ts
+                        Layout.alignment: Qt.AlignVCenter
+                        text: "Back"
+                        onClicked: { root.error = ""; root.testMessage = ""; root.provMode = root.editId !== "" ? "" : "presets"; }
+                    }
+                    UiText {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignVCenter
+                        textFormat: Text.PlainText
+                        text: root.editId !== "" ? "Edit provider" : "Add provider"
+                        color: Commons.Color.popups.text
+                        font.pixelSize: root.theme.body
+                        font.bold: true
+                    }
+                }
+                UiText { textFormat: Text.PlainText; text: "Name"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
+                Input {
+                    id: provName
+                    objectName: "providerName"
+                    accessibleName: "Provider name"
+                    ts: root.theme.ts
+                    width: parent.width
+                    placeholderText: "Provider name"
+                }
+                UiText { textFormat: Text.PlainText; text: "Endpoint"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
+                Input {
+                    id: provEndpoint
+                    objectName: "providerEndpoint"
+                    accessibleName: "Endpoint"
+                    ts: root.theme.ts
+                    width: parent.width
+                    placeholderText: "https://..."
+                }
+                UiText { textFormat: Text.PlainText; text: "Model"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
+                Input {
+                    id: provModel
+                    objectName: "providerModel"
+                    accessibleName: "Model"
+                    ts: root.theme.ts
+                    width: parent.width
+                    placeholderText: "Model id"
+                }
+                Column {
+                    visible: root.formNeedsKey
+                    width: parent.width
+                    spacing: Style.spacing.xs
+                    UiText { textFormat: Text.PlainText; text: "API key"; color: Commons.Color.popups.text; font.bold: true; font.pixelSize: root.theme.body }
+                    Input {
+                        id: provKey
+                        objectName: "providerKey"
+                        accessibleName: "API key"
+                        ts: root.theme.ts
+                        width: parent.width
+                        echoMode: TextInput.Password
+                        placeholderText: root.editId !== "" ? "Leave empty to keep the saved key" : "API key"
+                    }
+                }
+                RowLayout {
+                    width: parent.width
+                    height: root.theme.ctl
+                    spacing: root.theme.gap
+                    IconButton {
+                        objectName: "testProvider"
+                        ts: root.theme.ts
+                        Layout.alignment: Qt.AlignVCenter
+                        text: root.testingProvider ? "Testing…" : "Test connection"
+                        bordered: true
+                        enabled: !root.testingProvider
+                        opacity: enabled ? 1 : 0.5
+                        onClicked: root.testProvider()
+                    }
+                    IconButton {
+                        objectName: "saveProvider"
+                        ts: root.theme.ts
+                        Layout.alignment: Qt.AlignVCenter
+                        text: "Save"
+                        bordered: true
+                        onClicked: root.saveProvider()
+                    }
+                    Item { Layout.fillWidth: true }
+                }
+                UiText {
+                    objectName: "testMessage"
+                    visible: root.testMessage !== ""
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    text: root.testMessage
+                    color: Commons.Color.popups.text
+                    font.pixelSize: root.theme.caption
+                }
+            }
         }
 
         CallState { id: callState }

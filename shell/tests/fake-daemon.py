@@ -116,6 +116,126 @@ profiles = [
 next_doc = [3]
 DEFAULT_PROMPTS = {"answer": "default answer prompt", "live_answer": "default live answer prompt", "follow_up": "default follow-up prompt", "recap": "default recap prompt"}
 prompts = {}
+PRESETS = [
+    {"preset": "openai", "name": "OpenAI", "kind": "chat", "endpoint": "https://api.openai.com/v1/chat/completions", "model": "gpt-4.1-mini", "needs_key": True, "local": False},
+    {"preset": "anthropic", "name": "Anthropic", "kind": "chat", "endpoint": "https://api.anthropic.com/v1/messages", "model": "claude-sonnet-5-5", "needs_key": True, "local": False},
+    {"preset": "lm-studio", "name": "LM Studio", "kind": "chat", "endpoint": "http://127.0.0.1:1234/v1/chat/completions", "model": "local-model", "needs_key": False, "local": True},
+    {"preset": "openai-speech", "name": "OpenAI", "kind": "speech", "endpoint": "https://api.openai.com/v1/audio/transcriptions", "model": "whisper-1", "needs_key": True, "local": False},
+    {"preset": "groq-speech", "name": "Groq", "kind": "speech", "endpoint": "https://api.groq.com/openai/v1/audio/transcriptions", "model": "whisper-large-v3-turbo", "needs_key": True, "local": False},
+]
+CUSTOM_PROVIDERS = []
+next_custom = [1]
+if "--locked-use" in sys.argv:   # a custom provider is the Nix-fixed chat provider: Use and Remove must be off
+    CUSTOM_PROVIDERS.append({"id": "custom-9", "name": "Fixed one", "kind": "chat", "custom": True, "model": "m", "endpoint": "https://example.test/v1", "has_key": True, "requires_key": True})
+    settings.update(chat_provider="custom-9", locked=["chat_provider"])
+
+
+def endpoint_ok(url):
+    return url.startswith("https://") or url.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]"))
+
+
+def find_preset(slug, endpoint=""):
+    matches = [p for p in PRESETS if p["preset"] == slug]
+    if not matches:
+        return None
+    return next((p for p in matches if endpoint and p["endpoint"] == endpoint), matches[0])
+
+
+def providers_cmd(cmd, a):
+    """Returns (ok, data_or_error, changed_bool, extra_events) for presets.list and providers.add/update/remove/test."""
+    if cmd == "presets.list":
+        return True, PRESETS, False, []
+    if cmd == "providers.list":
+        return True, DATA["providers.list"] + CUSTOM_PROVIDERS, False, []
+    if cmd == "providers.test":
+        has_p, has_i = bool(a.get("preset")), bool(a.get("id"))
+        if has_p == has_i:
+            return False, "Specify either preset or id.", False, []
+        ep = (a.get("endpoint") or "").strip()
+        if ep and not endpoint_ok(ep):
+            return True, {"ok": False, "message": "Endpoint must use https://, or http:// on localhost."}, False, []
+        if has_i:
+            row = next((c for c in CUSTOM_PROVIDERS if c["id"] == a["id"]), None)
+            if row is None:
+                return False, "Unknown provider.", False, []
+            needs_key = row["requires_key"]
+            has_key = bool(a.get("api_key")) or row["has_key"]
+        else:
+            pr = find_preset(a["preset"], ep)
+            if pr is None:
+                return False, "Unknown preset.", False, []
+            needs_key = pr["needs_key"]
+            has_key = bool(a.get("api_key"))
+        if needs_key and not has_key:
+            return True, {"ok": False, "message": "This authentication mode needs an API key."}, False, []
+        return True, {"ok": True, "message": "Connection successful."}, False, []
+    if cmd == "providers.add":
+        ep_in = (a.get("endpoint") or "").strip()
+        pr = find_preset(a.get("preset"), ep_in)
+        if pr is None:
+            return False, "Unknown preset.", False, []
+        name = (a.get("name") or pr["name"]).strip() or pr["name"]
+        model = (a.get("model") or pr["model"]).strip() or pr["model"]
+        endpoint = ep_in or pr["endpoint"]
+        if not endpoint_ok(endpoint):
+            return False, "Endpoint must use https://, or http:// on localhost.", False, []
+        has_key = bool(a.get("api_key"))
+        if pr["needs_key"] and not has_key:
+            return False, "API key is required.", False, []
+        cid = "custom-%d" % next_custom[0]
+        next_custom[0] += 1
+        row = {"id": cid, "name": name, "kind": pr["kind"], "custom": True, "model": model, "endpoint": endpoint, "has_key": has_key, "requires_key": pr["needs_key"]}
+        CUSTOM_PROVIDERS.append(row)
+        MODELS[cid] = [model]
+        return True, {"id": cid}, True, []
+    if cmd == "providers.update":
+        row = next((c for c in CUSTOM_PROVIDERS if c["id"] == a.get("id")), None)
+        if row is None:
+            return False, "Unknown provider.", False, []
+        for field, label in (("name", "Enter a provider name."), ("model", "A custom chat provider needs a model."), ("endpoint", "Enter a valid endpoint.")):
+            if field in a and not (a[field] or "").strip() and (field != "model" or row["kind"] == "chat"):
+                return False, label, False, []
+        if "endpoint" in a:
+            ep = a["endpoint"].strip()
+            if not endpoint_ok(ep):
+                return False, "Endpoint must use https://, or http:// on localhost.", False, []
+            row["endpoint"] = ep
+            row["requires_key"] = not ep.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]"))
+        if "name" in a:
+            row["name"] = a["name"].strip()
+        if "model" in a and a["model"].strip():
+            row["model"] = a["model"].strip()
+            MODELS[row["id"]] = [row["model"]]
+        if "api_key" in a:
+            if a["api_key"] is None:
+                row["has_key"] = False
+            elif isinstance(a["api_key"], str) and a["api_key"] != "":
+                row["has_key"] = True
+        if row["requires_key"] and not row["has_key"]:
+            return False, "This authentication mode needs an API key.", False, []
+        return True, {}, True, []
+    if cmd == "providers.remove":
+        row = next((c for c in CUSTOM_PROVIDERS if c["id"] == a.get("id")), None)
+        if row is None:
+            return False, "Unknown provider.", False, []
+        cid = row["id"]
+        lck = settings.get("locked", [])
+        for k in ("chat_provider", "live_provider", "speech_provider"):
+            if settings.get(k) == cid and k in lck:
+                return False, f"Set in Nix: '{k}' is fixed by programs.nixarchy-meetingai.settings.", False, []
+        evs = []
+        reset = False
+        for k, dflt in (("chat_provider", "claude-sub"), ("live_provider", "claude-sub"), ("speech_provider", "parakeet-local")):
+            if settings.get(k) == cid:
+                settings[k] = dflt
+                reset = True
+        if reset:
+            evs.append({"event": "settings", "settings": settings})
+            evs.append({"event": "notice", "kind": "providers", "text": f"Removed {row['name']}; switched back to the default provider."})
+        CUSTOM_PROVIDERS.remove(row)
+        MODELS.pop(cid, None)
+        return True, {}, True, evs
+    return False, "bad request", False, []
 
 
 def profile(name):
@@ -467,6 +587,21 @@ class Handler(socketserver.StreamRequestHandler):
                 ok, data = profiles_cmd(cmd, req.get("args", {}))
                 self.send({"id": req["id"], "ok": ok, **({"data": data} if ok else {"error": data})})
                 continue
+            if cmd in ("presets.list", "providers.list", "providers.add", "providers.update", "providers.remove", "providers.test"):
+                ok, data, changed, evs = providers_cmd(cmd, req.get("args", {}))
+                self.send({"id": req["id"], "ok": ok, **({"data": data} if ok else {"error": data})})
+                for ev in evs:
+                    cast(ev)
+                if changed:
+                    cast({"event": "providers.changed"})
+                continue
+            if cmd == "settings.set":
+                k, val = req["args"]["key"], req["args"].get("value")
+                if k in ("chat_provider", "live_provider", "speech_provider") and isinstance(val, str) and val.startswith("custom-"):
+                    want_kind = "speech" if k == "speech_provider" else "chat"
+                    if not any(c["id"] == val and c["kind"] == want_kind for c in CUSTOM_PROVIDERS):
+                        self.send({"id": req["id"], "ok": False, "error": "This provider no longer exists."})
+                        continue
             self.send({"id": req["id"], "ok": True, "data": data})
             if cmd == "settings.set":
                 settings[req["args"]["key"]] = req["args"]["value"]

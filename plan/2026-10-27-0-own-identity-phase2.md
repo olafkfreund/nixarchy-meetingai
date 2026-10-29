@@ -9,8 +9,12 @@ coders:        # owner asked 2026-10-28 for agy and codex to share the coding
   7: agy       # core/models: plain data types and serde
   8: codex     # ai/catalog: provider/model lists, many small functions
   9: agy       # ai/chat: engine and session over the catalog
-  # 0, 1, 3, 6, 10, 11, 12 stay with coder (Sonnet): tooling, audio
-  # capture, the vault and STT need the p620 checks run from this session
+  # owner 2026-10-29 ("use agent teams with agy and codex to solve them all"):
+  3: codex     # audio/capture: devices, microphone, system audio
+  6: agy       # core/security: vault, credentials, provider import
+  10: codex+agy  # transcription.rs to codex; listen.rs and cli.rs to agy
+  # 0, 1, 11, 12 stay with coder (Sonnet). The p620 checks of 3, 6 and 10
+  # are still run from this session before each merge.
 reviewers:     # every step, read-only, on top of the Opus review
   - codex      # codex review --base main, sandbox read-only
   - agy        # agy --mode plan with the allowlist settings overlay
@@ -277,3 +281,88 @@ commit and reverts alone.
   `--copies` count is a lower bound: it cannot see code deleted in the
   removal commit and retyped later, so the reviewer's text comparison
   is the real check.
+
+### Step 10 (transcription, listen, cli), 2026-10-29
+
+- Codex wrote transcription.rs and agy listen.rs and cli.rs in parallel
+  from two briefs sharing one interface section. The Opus review found
+  transcribe_custom, socket_task, BatchChunks push/finish and
+  channel_number too close to the old code; a fresh Claude coder
+  rewrote them from explicit designs (handoff fallback); the lead fixed
+  clippy lints, one wrong test input and the re-review's last names and
+  texts.
+- Bugs fixed on the way: TCP_NODELAY on the live socket (Codex had left
+  Nagle on); the 4 s finish deadline starts at stop and covers draining
+  queued audio (Codex review; tested); events may wait until that
+  deadline while finishing; the live URL is built with Url, not string
+  replacement (a query keeps its own text).
+- Dead code removed: LiveTranscriber::connect, transcribe_samples,
+  local_chunk_payload, ListenSession::elapsed, interleave,
+  SharedSession/shared_session; instance_lock_path made private.
+- Kept although unused inside listen.rs: SessionConfig::speech and the
+  SessionEvent variants the daemon matches on (removing them means
+  editing the daemon, not in this step).
+- The plan's extra check ("a live whisper session") is now a live
+  Deepgram and Parakeet session on p620 with the owner (whisper was
+  removed in #14).
+
+### Step 11 (tests and build files), 2026-10-29
+
+- The Claude coder wrote the three integration tests from behaviour lists
+  and the build files from contracts; the Opus review's value/structure
+  matches and the broken `.envrc` (`source_url` with a script) were fixed
+  by the same coder.
+- Deleted as unused (nothing in the flake, CI, docs or installed hooks
+  refers to them): justfile, lefthook.yml, scripts/pre-push-checks.sh,
+  rust-toolchain.toml, .gitattributes. `SKIP_BUMP` therefore does nothing
+  any more.
+- Lock files are not regenerated (the plan said "regenerated"): both are
+  machine-written, `origin-lines.sh --total` does not count them, and a
+  regenerate would upgrade every crate inside a rewrite PR. A separate
+  dependency refresh can reset their blame later.
+- devenv kept (README uses it). provider_flow has 13 tests (the speech
+  formats are one test each).
+### Step 3 (audio/capture), 2026-10-29
+- Codex implemented the step. The Opus review found recalled shapes and
+  constants in it, so a fresh Claude coder rewrote those parts from explicit
+  designs (the handoff fallback).
+- Behaviour deviation, monitor rule: a source is a monitor if and only if
+  `monitor_of_sink` or `monitor_source` is a non-empty string. PipeWire on
+  p620 reports `monitor_of_sink: null` for every source, so the brief's rule
+  would have counted every microphone as a monitor.
+- Brief test 12 (`SystemAudio::start(None)`) is replaced by a fake-recorder
+  test, because the real call records on a host with Pulse.
+- `pactl` gets its 2 s timeout in `SystemAudio::start` too (brief decision).
+- The dead device-listing code was removed.
+### Owner decision, 2026-10-29: finish #3 without the pre-merge p620 checks
+- Owner: "Rewrite remaining lennette-authored code, then relicense MIT —
+  #3 approved." Steps 3, 10 and 11 merge after their reviews without the
+  live recording / live transcript checks on p620; those checks run after
+  the deploy instead (a short recording on Parakeet and Deepgram), and a
+  regression is fixed forward. Step 12 follows once origin-lines is 0.
+### Step 6 (core/security), 2026-10-29
+- agy implemented from the brief; the Opus review found validate, list,
+  the atomic write and several texts/names too close to the old code; a
+  fresh Claude coder rewrote them from explicit designs (handoff
+  fallback); the lead renamed the last four items the re-review listed.
+- Deliberate tightenings for the no-leak rule (same interface): a
+  hand-written Debug for Credential hides api_key; no serde error text
+  from stored data in errors; a failed open leaves no vault.key; a
+  half-written new key file is removed.
+- provider_import.rs deleted (nothing called parse or guide); dead
+  Vault::open_default, Vault::directory, Credential::masked_key removed;
+  Vault::write/update/Store made private.
+- New gate: tests/fixtures/old-vault (written by the old code, dummy
+  credential, synthetic key tracked like history.db.key) and
+  old_vault_reads_back.
+- p620 check done by the lead: a copy of the real vault opened with the
+  new code (1 record, 1 speech credential read back; counts only, copy
+  deleted).
+
+### Step 12 (licence), 2026-10-29
+
+- `tools/origin-lines.sh` reports total 0 after step 11. LICENSE is the MIT
+  text (Copyright (c) 2026 Olaf K. Freund, the name in shell/manifest.json);
+  Cargo.toml, nix/package.nix and shell/manifest.json say MIT; README's
+  "License and history" explains the clean-room rewrite and that releases
+  before it stay AGPL-3.0. Owner approved 2026-10-29. Closes #3.

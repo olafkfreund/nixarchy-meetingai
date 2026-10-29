@@ -1,187 +1,245 @@
-//! A live listening session.
+//! Dual-channel capture coordinator for live meeting transcription.
 //!
-//! Owns microphone and call capture, preserving separate channels for the
-//! live network transcriber. The UI drives `start`, `pump`, and `stop`.
-//!
-//! Everything that can fail — a missing device, a refused stream, a provider
-//! error — is reported through [`SessionEvent`] so the overlay can show the real
-//! reason instead of appearing to listen when nothing is recording.
+//! Pairs microphone audio (left channel) with optional system monitor audio
+//! (right channel) into 50 ms stereo frames at 16 kHz and routes them through
+//! the optional [`EchoGate`].
 
 use std::collections::VecDeque;
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::ai::providers::ProviderConfig;
-use crate::audio::echo_gate::EchoGate;
+use crate::audio::echo_gate::{EchoGate, FRAME};
 use crate::audio::microphone::{AudioError, Microphone};
-
+use crate::audio::system_audio::{SystemAudio, SystemAudioError};
+use crate::audio::{SAMPLE_RATE, rms};
 use crate::speech::transcription::{self, TranscriptLine};
 
-/// How much audio a single pump drains, in samples (about 50 ms at 16 kHz).
-const FRAME_SAMPLES: usize = 800;
+/// Maximum samples buffered per channel (2 seconds at 16 kHz).
+const MAX_CHANNEL_SAMPLES: usize = (SAMPLE_RATE as usize) * 2;
 
-/// Device callbacks have independent packet sizes. Retain incomplete frames;
-/// padding a live underflow would insert gaps into otherwise continuous speech.
-#[derive(Default)]
-struct CaptureFrames {
-    microphone: VecDeque<f32>,
-    remote: VecDeque<f32>,
-    remote_enabled: bool,
+/// Silence duration after which a capture channel is treated as quiet.
+const QUIET_AFTER: Duration = Duration::from_millis(250);
+
+/// Notice emitted when the user picked a microphone that bypasses echo cancellation.
+const ECHO_CANCEL_NOTICE: &str = "Echo cancelling is off for the chosen microphone. Pick \"Meeting AI echo-cancelled mic\" in Settings → Audio to turn it on.";
+
+/// Events produced by a [`ListenSession`] lifecycle step.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionEvent {
+    /// Capture is active on the named device(s).
+    Started { device: String },
+    /// Interleaved 16 kHz stereo samples: microphone on left, system on right.
+    Audio(Vec<f32>),
+    /// A transcript segment from the speech engine.
+    Transcript(TranscriptLine),
+    /// Peak RMS loudness observed during the latest pump cycle.
+    Level(f32),
+    /// Capture has ended with the session's final elapsed duration.
+    Stopped { elapsed: Duration },
+    /// Non-fatal warning message shown to the user while capture continues.
+    Notice(String),
+    /// Fatal capture error shown to the user; capture has stopped.
+    Failed(String),
 }
 
-impl CaptureFrames {
-    fn push(&mut self, microphone: &[f32], remote: &[f32]) -> bool {
-        const LIMIT: usize = crate::audio::SAMPLE_RATE as usize * 2;
-        if self.microphone.len() + microphone.len() > LIMIT
-            || self.remote.len() + remote.len() > LIMIT
-        {
+/// Configuration for opening a [`ListenSession`].
+#[derive(Debug, Clone, Default)]
+pub struct SessionConfig {
+    /// Which input to open; `None` lets the capture layer pick (echo-cancelled source first).
+    pub device: Option<String>,
+    /// Also record what the speakers play (the remote side) on the right channel.
+    pub system_audio: bool,
+    /// Monitor source identifier for system audio, or `None` for the default output.
+    pub output_device: Option<String>,
+    /// Speech provider settings carried for the daemon's live stream.
+    pub speech: Option<ProviderConfig>,
+    /// Suppress system audio leaking into an un-cancelled microphone.
+    pub echo_gate: bool,
+}
+
+/// Pairs mono 16 kHz queues from microphone and system audio into stereo frames.
+struct StereoAssembler {
+    mic_queue: VecDeque<f32>,
+    sys_queue: VecDeque<f32>,
+    sys_enabled: bool,
+}
+
+impl StereoAssembler {
+    fn new(sys_enabled: bool) -> Self {
+        Self {
+            mic_queue: VecDeque::with_capacity(MAX_CHANNEL_SAMPLES),
+            sys_queue: VecDeque::with_capacity(MAX_CHANNEL_SAMPLES),
+            sys_enabled,
+        }
+    }
+
+    fn configure_system(&mut self, enabled: bool) {
+        self.sys_enabled = enabled;
+        self.sys_queue.clear();
+    }
+
+    fn ingest(&mut self, mic_samples: &[f32], sys_samples: &[f32]) -> bool {
+        if self.mic_queue.len() + mic_samples.len() > MAX_CHANNEL_SAMPLES {
             return false;
         }
-        self.microphone.extend(microphone);
-        if self.remote_enabled {
-            self.remote.extend(remote);
+        if self.sys_enabled && self.sys_queue.len() + sys_samples.len() > MAX_CHANNEL_SAMPLES {
+            return false;
+        }
+        self.mic_queue.extend(mic_samples.iter().copied());
+        if self.sys_enabled {
+            self.sys_queue.extend(sys_samples.iter().copied());
         }
         true
     }
 
-    #[cfg(test)]
-    fn next(&mut self, finishing: bool, quiet: [bool; 2]) -> Option<Vec<f32>> {
-        self.next_sized(finishing, quiet, FRAME_SAMPLES)
+    fn pull_live(&mut self, mic_quiet: bool, sys_quiet: bool) -> Option<Vec<f32>> {
+        let mic_ready = self.mic_queue.len() >= FRAME || mic_quiet;
+        let sys_ready = !self.sys_enabled || self.sys_queue.len() >= FRAME || sys_quiet;
+        if !mic_ready || !sys_ready {
+            return None;
+        }
+        let mut stereo = Vec::with_capacity(FRAME * 2);
+        for _ in 0..FRAME {
+            let left = self.mic_queue.pop_front().unwrap_or(0.0);
+            let right = if self.sys_enabled {
+                self.sys_queue.pop_front().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            stereo.push(left);
+            stereo.push(right);
+        }
+        Some(stereo)
     }
 
-    fn next_sized(
-        &mut self,
-        finishing: bool,
-        quiet: [bool; 2],
-        frame_samples: usize,
-    ) -> Option<Vec<f32>> {
-        let available = if !self.remote_enabled {
-            self.microphone.len()
-        } else if finishing {
-            self.microphone.len().max(self.remote.len())
+    fn pull_finishing(&mut self) -> Option<Vec<f32>> {
+        let sys_len = if self.sys_enabled {
+            self.sys_queue.len()
         } else {
-            self.microphone.len().min(self.remote.len())
+            0
         };
-        let frames = if finishing {
-            if available == 0 {
-                return None;
-            }
-            available.min(frame_samples)
-        } else {
-            if self.microphone.len() < frame_samples && !quiet[0]
-                || self.remote_enabled && self.remote.len() < frame_samples && !quiet[1]
-            {
-                return None;
-            }
-            frame_samples
-        };
-        Some(
-            (0..frames)
-                .flat_map(|_| {
-                    [
-                        self.microphone.pop_front().unwrap_or(0.0),
-                        self.remote.pop_front().unwrap_or(0.0),
-                    ]
-                })
-                .collect(),
-        )
-    }
-
-    fn set_remote(&mut self, enabled: bool) {
-        self.remote.clear();
-        self.remote_enabled = enabled;
+        let pairs = self.mic_queue.len().max(sys_len).min(FRAME);
+        if pairs == 0 {
+            return None;
+        }
+        let mut stereo = Vec::with_capacity(pairs * 2);
+        for _ in 0..pairs {
+            let left = self.mic_queue.pop_front().unwrap_or(0.0);
+            let right = if self.sys_enabled {
+                self.sys_queue.pop_front().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            stereo.push(left);
+            stereo.push(right);
+        }
+        Some(stereo)
     }
 }
 
-/// Something the session wants the UI to know about.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SessionEvent {
-    /// Capture is running on this device.
-    Started { device: String },
-    /// Interleaved 16 kHz samples: microphone left, call audio right.
-    Audio(Vec<f32>),
-    /// A transcript line from the streaming provider.
-    Transcript(TranscriptLine),
-    /// Measured microphone level, for a meter.
-    Level(f32),
-    /// Capture stopped.
-    Stopped { elapsed: Duration },
-    /// Informational message, e.g. a fallback to microphone only.
-    Notice(String),
-    /// Something went wrong; the UI shows this verbatim.
-    Failed(String),
+fn describe_mic_error(err: &AudioError) -> String {
+    match err {
+        AudioError::NoDevice => {
+            "No audio input device was detected. Plug in a microphone or choose one under Settings → Audio."
+                .to_owned()
+        }
+        AudioError::DeviceMissing(name) => format!(
+            "Microphone '{name}' is not available. Select another input device in Settings → Audio."
+        ),
+        AudioError::Config(detail) => format!(
+            "Could not configure the selected microphone ({detail}). Try a different input in Settings → Audio."
+        ),
+        AudioError::Format(detail) => format!(
+            "This microphone delivers audio in a format that cannot be used ({detail}). Pick a different input under Settings → Audio."
+        ),
+        AudioError::Startup(detail) => format!(
+            "Could not start the microphone ({detail}). Check your input choice in Settings → Audio."
+        ),
+        AudioError::Stream(detail) => {
+            format!("The microphone audio stream failed: {detail}.")
+        }
+        AudioError::NotRunning => "The microphone is not currently capturing audio.".to_owned(),
+    }
 }
 
-/// Configuration for a session.
-#[derive(Debug, Clone, Default)]
-pub struct SessionConfig {
-    /// Device id (`cpal:<name>`), or `None` for the system default.
-    pub device: Option<String>,
-    /// Capture the far side of the call through a monitor source.
-    pub system_audio: bool,
-    pub output_device: Option<String>,
-    /// Speech provider used by the live network task.
-    pub speech: Option<ProviderConfig>,
-    /// Suppress system audio that strongly matches the microphone channel.
-    pub echo_gate: bool,
+fn format_combined_device(mic_name: &str, sys_source: &str) -> String {
+    format!("{mic_name} + {sys_source}")
 }
 
-/// A running capture session.
+fn format_mic_only_notice(err: &SystemAudioError) -> String {
+    format!(
+        "Only your microphone is being recorded: the speaker output could not be opened ({err})."
+    )
+}
+
+fn format_interrupted_failure() -> String {
+    "Audio capture lost data, so the recording was stopped. Start a new recording to continue."
+        .to_owned()
+}
+
+fn format_mic_stopped(reason: Option<&str>) -> String {
+    match reason {
+        Some(detail) if !detail.is_empty() => {
+            format!("Microphone capture stopped unexpectedly: {detail}")
+        }
+        _ => "Microphone capture stopped unexpectedly.".to_owned(),
+    }
+}
+
+/// Active audio capture session driven by periodic [`ListenSession::pump`] calls.
 pub struct ListenSession {
-    microphone: Option<Microphone>,
-    system: Option<crate::audio::system_audio::SystemAudio>,
-    started: std::time::Instant,
-    sent_samples: usize,
-    frames: CaptureFrames,
+    mic: Option<Microphone>,
+    sys: Option<SystemAudio>,
+    output_device: Option<String>,
+    assembler: StereoAssembler,
     echo_gate: Option<EchoGate>,
     pending_audio: Option<(Vec<f32>, Vec<f32>)>,
-    last_audio: [std::time::Instant; 2],
+    started_at: Instant,
     elapsed: Duration,
-    output_device: Option<String>,
+    emitted_samples: usize,
+    last_mic_delivery: Instant,
+    last_sys_delivery: Instant,
 }
 
 impl ListenSession {
-    /// Open the microphone and begin capturing.
+    /// Open the configured capture devices and start the session clock.
     pub fn start(config: &SessionConfig) -> (Self, Vec<SessionEvent>) {
-        let device = config.device.as_deref();
         let mut events = Vec::new();
-
-        let microphone = match Microphone::start(device) {
-            Ok(microphone) => {
+        let echo_gate = config.echo_gate.then(EchoGate::default);
+        let mic = match Microphone::start(config.device.as_deref()) {
+            Ok(handle) => {
                 events.push(SessionEvent::Started {
-                    device: microphone.device_name().to_owned(),
+                    device: handle.device_name().to_owned(),
                 });
-                if microphone.echo_cancel_bypassed() {
-                    events.push(SessionEvent::Notice(
-                        "Echo cancelling is off for the chosen microphone. Pick \"Meeting AI echo-cancelled mic\" in Settings → Audio to turn it on."
-                            .to_owned(),
-                    ));
+                if handle.echo_cancel_bypassed() {
+                    events.push(SessionEvent::Notice(ECHO_CANCEL_NOTICE.to_owned()));
                 }
-                Some(microphone)
+                Some(handle)
             }
-            Err(error) => {
-                events.push(SessionEvent::Failed(describe(&error)));
+            Err(err) => {
+                events.push(SessionEvent::Failed(describe_mic_error(&err)));
                 None
             }
         };
 
-        // The far side of the call, when requested. A failure here is reported
-        // but must not stop microphone capture.
-        let system = if config.system_audio && microphone.is_some() {
-            match crate::audio::system_audio::SystemAudio::start(config.output_device.as_deref()) {
-                Ok(system) => {
+        let sys = if let Some(ref mic_handle) = mic
+            && config.system_audio
+        {
+            match SystemAudio::start(config.output_device.as_deref()) {
+                Ok(sys_handle) => {
                     events.push(SessionEvent::Started {
-                        device: format!("microphone + {}", system.source()),
+                        device: format_combined_device(
+                            mic_handle.device_name(),
+                            sys_handle.source(),
+                        ),
                     });
-                    Some(system)
+                    Some(sys_handle)
                 }
-                Err(error) => {
-                    events.push(SessionEvent::Notice(format!(
-                        "Recording the microphone only: {error}"
-                    )));
+                Err(err) => {
+                    events.push(SessionEvent::Notice(format_mic_only_notice(&err)));
                     None
                 }
             }
@@ -189,79 +247,201 @@ impl ListenSession {
             None
         };
 
-        if let Some(mic) = &microphone {
-            mic.take(32_000);
+        if let Some(ref mic_handle) = mic {
+            let _ = mic_handle.take(usize::MAX);
         }
-        let mut system = system;
-        if let Some(sys) = &mut system {
-            sys.take(32_000);
+        if let Some(ref sys_handle) = sys {
+            let _ = sys_handle.take(usize::MAX);
         }
-        let remote_enabled = system.is_some();
+
+        let now = Instant::now();
         let session = Self {
-            microphone,
-            system,
-            started: std::time::Instant::now(),
-            sent_samples: 0,
-            frames: CaptureFrames {
-                remote_enabled,
-                ..Default::default()
-            },
-            echo_gate: config.echo_gate.then(EchoGate::default),
-            pending_audio: None,
-            last_audio: [std::time::Instant::now(); 2],
-            elapsed: Duration::ZERO,
+            assembler: StereoAssembler::new(sys.is_some()),
+            mic,
+            sys,
             output_device: config.output_device.clone(),
+            echo_gate,
+            pending_audio: None,
+            started_at: now,
+            elapsed: Duration::ZERO,
+            emitted_samples: 0,
+            last_mic_delivery: now,
+            last_sys_delivery: now,
         };
         (session, events)
     }
 
-    /// Switch call capture without reconnecting or interrupting the microphone.
+    /// Enable or disable system audio capture while keeping the microphone running.
     pub fn set_system_audio(&mut self, enabled: bool) -> Vec<SessionEvent> {
         if !enabled {
-            let pending = self.flush_audio();
-            self.frames.set_remote(false);
+            let mut events = Vec::new();
+            if let Some(flushed) = self.flush_audio() {
+                events.push(flushed);
+            }
+            self.assembler.configure_system(false);
             if let Some(gate) = &mut self.echo_gate {
                 gate.reset();
             }
-            self.system.take();
-            let mut events = pending.into_iter().collect::<Vec<_>>();
-            events.push(SessionEvent::Started {
-                device: self
-                    .microphone
-                    .as_ref()
-                    .map(|m| m.device_name().to_owned())
-                    .unwrap_or_default(),
-            });
+            self.sys = None;
+            let device = self
+                .mic
+                .as_ref()
+                .map(|m| m.device_name().to_owned())
+                .unwrap_or_default();
+            events.push(SessionEvent::Started { device });
             return events;
         }
-        if self.system.is_some() {
+
+        if self.sys.is_some() {
             return Vec::new();
         }
-        match crate::audio::system_audio::SystemAudio::start(self.output_device.as_deref()) {
-            Ok(system) => {
-                let device = format!("microphone + {}", system.source());
-                self.frames.set_remote(true);
+
+        match SystemAudio::start(self.output_device.as_deref()) {
+            Ok(sys_handle) => {
+                let _ = sys_handle.take(usize::MAX);
+                let sys_name = sys_handle.source().to_owned();
+                self.sys = Some(sys_handle);
+                self.assembler.configure_system(true);
+                self.last_sys_delivery = Instant::now();
                 if let Some(gate) = &mut self.echo_gate {
                     gate.reset();
                 }
-                self.last_audio[1] = std::time::Instant::now();
-                self.system = Some(system);
-                vec![SessionEvent::Started { device }]
+                let mic_name = self
+                    .mic
+                    .as_ref()
+                    .map(Microphone::device_name)
+                    .unwrap_or_default();
+                vec![SessionEvent::Started {
+                    device: format_combined_device(mic_name, &sys_name),
+                }]
             }
-            Err(error) => vec![SessionEvent::Notice(format!(
-                "Recording the microphone only: {error}"
-            ))],
+            Err(err) => vec![SessionEvent::Notice(format_mic_only_notice(&err))],
         }
     }
 
-    /// Whether capture is actually running.
+    /// True when a microphone handle is present and its capture worker is alive.
     pub fn is_capturing(&self) -> bool {
-        self.microphone.as_ref().is_some_and(Microphone::is_running)
+        self.mic.as_ref().is_some_and(Microphone::is_running)
     }
 
-    /// Time since the session began.
-    pub fn elapsed(&self) -> Duration {
-        self.elapsed
+    /// Drain newly captured audio and emit ready 50 ms frames plus a meter reading.
+    pub fn pump(&mut self) -> Vec<SessionEvent> {
+        if self.mic.is_none() {
+            return Vec::new();
+        }
+
+        let now = Instant::now();
+        let current_elapsed = now.duration_since(self.started_at);
+        let due_samples =
+            (current_elapsed.as_micros() * u128::from(SAMPLE_RATE) / 1_000_000) as usize;
+
+        let lagged = due_samples.saturating_sub(self.emitted_samples) > MAX_CHANNEL_SAMPLES;
+        let mic_dropped = self.mic.as_ref().is_some_and(|m| m.dropped() > 0);
+        let sys_failed = self
+            .sys
+            .as_ref()
+            .is_some_and(|s| s.dropped() > 0 || !s.is_running());
+
+        if lagged || mic_dropped || sys_failed {
+            self.abort_captures();
+            return vec![SessionEvent::Failed(format_interrupted_failure())];
+        }
+
+        let mic_samples = self
+            .mic
+            .as_ref()
+            .map(|m| m.take(MAX_CHANNEL_SAMPLES))
+            .unwrap_or_default();
+        let sys_samples = self
+            .sys
+            .as_ref()
+            .map(|s| s.take(MAX_CHANNEL_SAMPLES))
+            .unwrap_or_default();
+
+        if !self.assembler.ingest(&mic_samples, &sys_samples) {
+            self.abort_captures();
+            return vec![SessionEvent::Failed(format_interrupted_failure())];
+        }
+
+        if !mic_samples.is_empty() {
+            self.last_mic_delivery = now;
+        }
+        if !sys_samples.is_empty() {
+            self.last_sys_delivery = now;
+        }
+
+        let mic_quiet = now.duration_since(self.last_mic_delivery) >= QUIET_AFTER;
+        let sys_quiet = now.duration_since(self.last_sys_delivery) >= QUIET_AFTER;
+
+        let mut events = Vec::new();
+        while self.emitted_samples + FRAME <= due_samples {
+            let Some(frame) = self.assembler.pull_live(mic_quiet, sys_quiet) else {
+                break;
+            };
+            self.emitted_samples += FRAME;
+            if let Some(ready) =
+                Self::queue_audio(&mut self.echo_gate, &mut self.pending_audio, frame)
+            {
+                events.push(SessionEvent::Audio(ready));
+            }
+        }
+
+        let peak_rms = rms(&mic_samples).max(rms(&sys_samples));
+        events.push(SessionEvent::Level(peak_rms));
+        self.elapsed = current_elapsed;
+
+        if self.mic.as_ref().is_some_and(|m| !m.is_running()) {
+            let reason = self.mic.as_ref().and_then(Microphone::failure);
+            if let Some(mic_handle) = self.mic.take() {
+                mic_handle.stop();
+            }
+            events.push(SessionEvent::Failed(format_mic_stopped(reason.as_deref())));
+        }
+
+        events
+    }
+
+    /// Flush remaining buffered audio, stop capture handles, and emit `Stopped`.
+    pub fn stop(&mut self) -> Vec<SessionEvent> {
+        let mut events = self.pump();
+        if let Some(mic_handle) = self.mic.take() {
+            let rem_mic = mic_handle.take(MAX_CHANNEL_SAMPLES);
+            let rem_sys = self
+                .sys
+                .as_ref()
+                .map(|s| s.take(MAX_CHANNEL_SAMPLES))
+                .unwrap_or_default();
+            if !self.assembler.ingest(&rem_mic, &rem_sys) {
+                events.push(SessionEvent::Failed(
+                    "Remaining audio at the end of capture exceeded the buffer limit.".to_owned(),
+                ));
+            }
+            while let Some(frame) = self.assembler.pull_finishing() {
+                if let Some(ready) =
+                    Self::queue_audio(&mut self.echo_gate, &mut self.pending_audio, frame)
+                {
+                    events.push(SessionEvent::Audio(ready));
+                }
+            }
+            mic_handle.stop();
+        }
+        if let Some(flushed) = self.flush_audio() {
+            events.push(flushed);
+        }
+        self.sys = None;
+        self.assembler.configure_system(false);
+        events.push(SessionEvent::Stopped {
+            elapsed: self.elapsed,
+        });
+        events
+    }
+
+    fn abort_captures(&mut self) {
+        if let Some(mic_handle) = self.mic.take() {
+            mic_handle.stop();
+        }
+        self.sys = None;
+        self.assembler.configure_system(false);
     }
 
     fn queue_audio(
@@ -295,402 +475,252 @@ impl ListenSession {
             .take()
             .map(|(_, original)| SessionEvent::Audio(original))
     }
-
-    /// Drain pending audio and report what happened.
-    ///
-    /// Returns raw interleaved PCM blocks and a level reading. This is cheap enough to
-    /// call every frame: it only moves samples that are already buffered.
-    pub fn pump(&mut self) -> Vec<SessionEvent> {
-        let Some(microphone) = self.microphone.as_ref() else {
-            return Vec::new();
-        };
-        let mut events = Vec::new();
-        let mut level = 0.0_f32;
-        let due =
-            (self.started.elapsed().as_secs_f64() * f64::from(crate::audio::SAMPLE_RATE)) as usize;
-        if due.saturating_sub(self.sent_samples) > 32_000
-            || microphone.dropped() > 0
-            || self
-                .system
-                .as_ref()
-                .is_some_and(|s| s.dropped() > 0 || !s.is_running())
-        {
-            self.microphone.take();
-            self.system.take();
-            events.push(SessionEvent::Failed(
-                "Audio capture was interrupted or fell behind. Start again to reconnect.".into(),
-            ));
-            return events;
-        }
-        let frame = microphone.take(32_000);
-        let remote = self
-            .system
-            .as_mut()
-            .map(|s| s.take(32_000))
-            .unwrap_or_default();
-        let now = std::time::Instant::now();
-        for (channel, samples) in [&frame, &remote].into_iter().enumerate() {
-            if !samples.is_empty() {
-                self.last_audio[channel] = now;
-            }
-        }
-        // Wait through ordinary callback jitter. A loopback device may stop
-        // callbacks during genuine silence; only then pad its absent packets.
-        let quiet = self
-            .last_audio
-            .map(|at| now.duration_since(at) >= Duration::from_millis(250));
-        level = level
-            .max(crate::audio::rms(&frame))
-            .max(crate::audio::rms(&remote));
-        if !self.frames.push(&frame, &remote) {
-            self.microphone.take();
-            self.system.take();
-            events.push(SessionEvent::Failed(
-                "Audio capture was interrupted or fell behind. Start again to reconnect.".into(),
-            ));
-            return events;
-        }
-        while self.sent_samples + FRAME_SAMPLES <= due {
-            let Some(samples) = self.frames.next_sized(false, quiet, FRAME_SAMPLES) else {
-                break;
-            };
-            self.sent_samples += samples.len() / 2;
-            if let Some(samples) =
-                Self::queue_audio(&mut self.echo_gate, &mut self.pending_audio, samples)
-            {
-                events.push(SessionEvent::Audio(samples));
-            }
-        }
-        self.elapsed = self.started.elapsed();
-        events.push(SessionEvent::Level(level));
-
-        if !microphone.is_running() {
-            events.push(SessionEvent::Failed(
-                microphone
-                    .failure()
-                    .map(|error| format!("The microphone stopped: {error}"))
-                    .unwrap_or_else(|| {
-                        "The microphone stopped unexpectedly. Check your audio device.".to_owned()
-                    }),
-            ));
-            self.microphone = None;
-        }
-        events
-    }
-
-    /// Stop capturing and flush any pending speech.
-    pub fn stop(&mut self) -> Vec<SessionEvent> {
-        let mut events = self.pump();
-        if let Some(microphone) = self.microphone.take() {
-            let frame = microphone.take(32_000);
-            let remote = self
-                .system
-                .as_mut()
-                .map(|s| s.take(32_000))
-                .unwrap_or_default();
-            if !self.frames.push(&frame, &remote) {
-                events.push(SessionEvent::Failed(
-                    "The final audio exceeded the capture buffer.".into(),
-                ));
-            }
-            while let Some(samples) = self.frames.next_sized(true, [false; 2], FRAME_SAMPLES) {
-                if let Some(samples) =
-                    Self::queue_audio(&mut self.echo_gate, &mut self.pending_audio, samples)
-                {
-                    events.push(SessionEvent::Audio(samples));
-                }
-            }
-            microphone.stop();
-        }
-        if let Some(audio) = self.flush_audio() {
-            events.push(audio);
-        }
-        self.system.take();
-        events.push(SessionEvent::Stopped {
-            elapsed: self.elapsed,
-        });
-        events
-    }
 }
 
-/// Fixed channel order is the source of You/Them identity, independent of diarization.
-pub fn interleave(microphone: &[f32], remote: &[f32], frames: usize) -> Vec<f32> {
-    (0..frames)
-        .flat_map(|i| {
-            [
-                microphone.get(i).copied().unwrap_or(0.0),
-                remote.get(i).copied().unwrap_or(0.0),
-            ]
-        })
-        .collect()
-}
-
-fn describe(error: &AudioError) -> String {
-    match error {
-        AudioError::NoDevice => {
-            "No microphone was found. Connect one, or pick a device in Settings → Audio.".to_owned()
-        }
-        AudioError::DeviceMissing(name) => {
-            format!("'{name}' is no longer connected. Pick another device in Settings → Audio.")
-        }
-        AudioError::Config(message) => format!("The microphone rejected its settings: {message}"),
-        AudioError::Format(format) => {
-            format!("The microphone uses an unsupported format: {format}")
-        }
-        AudioError::Startup(message) => format!("The microphone could not start: {message}"),
-        AudioError::Stream(message) => format!("The microphone reported an error: {message}"),
-        AudioError::NotRunning => "Capture is not running.".to_owned(),
-    }
-}
-
-/// Transcribe a finished utterance with the configured batch provider.
+/// Decode a base64 WAV recording and transcribe it with the given provider.
 pub async fn transcribe_utterance(
     config: &ProviderConfig,
     wav_base64: &str,
     language: Option<&str>,
 ) -> Result<String, String> {
-    let wav = STANDARD
-        .decode(wav_base64.as_bytes())
-        .map_err(|error| format!("could not decode audio: {error}"))?;
-    transcription::transcribe(config, wav, language)
+    let wav_bytes = STANDARD
+        .decode(wav_base64)
+        .map_err(|err| format!("Could not decode base64 audio payload: {err}"))?;
+    transcription::transcribe(config, wav_bytes, language)
         .await
-        .map_err(|error| error.to_string())
-}
-
-/// Build a consistent payload for the overlay's local-chunk event.
-pub fn local_chunk_payload(wav_base64: &str, start: f64, duration: f64) -> serde_json::Value {
-    serde_json::json!({
-        "wavBase64": wav_base64,
-        "start": start,
-        "duration": duration,
-    })
-}
-
-/// Shared handle for a session that the UI can start and stop.
-pub type SharedSession = Arc<parking_lot::Mutex<Option<ListenSession>>>;
-
-/// Create an empty shared session slot.
-pub fn shared_session() -> SharedSession {
-    Arc::new(parking_lot::Mutex::new(None))
+        .map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::encode_wav;
+
+    fn idle_session(echo_gate: bool) -> ListenSession {
+        let now = Instant::now();
+        ListenSession {
+            mic: None,
+            sys: None,
+            output_device: None,
+            assembler: StereoAssembler::new(false),
+            echo_gate: echo_gate.then(EchoGate::default),
+            pending_audio: None,
+            started_at: now,
+            elapsed: Duration::ZERO,
+            emitted_samples: 0,
+            last_mic_delivery: now,
+            last_sys_delivery: now,
+        }
+    }
 
     #[test]
-    fn uneven_device_packets_preserve_both_audio_tracks_without_silence_insertion() {
-        let microphone: Vec<f32> = (1..=16_000).map(|i| i as f32 / 20_000.0).collect();
-        let remote: Vec<f32> = microphone.iter().map(|s| -s).collect();
-        let mut frames = CaptureFrames {
-            remote_enabled: true,
-            ..Default::default()
-        };
-        let mut actual = Vec::new();
-        let mut remote_cursor = 0;
-        // Microphone callbacks and parec pipe reads rarely share packet boundaries.
-        for (tick, chunk) in microphone.chunks(640).enumerate() {
-            let remote_end = (((tick + 1) * 640 / 1024) * 1024).min(remote.len());
-            assert!(frames.push(chunk, &remote[remote_cursor..remote_end]));
-            remote_cursor = remote_end;
-            while let Some(frame) = frames.next(false, [false; 2]) {
-                actual.extend(frame);
+    fn unaligned_channel_packets_keep_every_sample_in_order() {
+        let mut assembler = StereoAssembler::new(true);
+        let total = 2_150usize;
+        let left_in: Vec<f32> = (0..total).map(|i| (i as f32) + 1.0).collect();
+        let right_in: Vec<f32> = (0..total).map(|i| -((i as f32) + 1.0)).collect();
+
+        let mut left_cursor = 0;
+        let mut right_cursor = 0;
+        let mut output = Vec::new();
+
+        while left_cursor < total || right_cursor < total {
+            let next_left = (left_cursor + 317).min(total);
+            let next_right = (right_cursor + 503).min(total);
+            assert!(assembler.ingest(
+                &left_in[left_cursor..next_left],
+                &right_in[right_cursor..next_right],
+            ));
+            left_cursor = next_left;
+            right_cursor = next_right;
+
+            while let Some(frame) = assembler.pull_live(false, false) {
+                output.extend(frame);
             }
         }
-        assert!(frames.push(&[], &remote[remote_cursor..]));
-        while let Some(frame) = frames.next(true, [false; 2]) {
-            actual.extend(frame);
+        while let Some(frame) = assembler.pull_finishing() {
+            output.extend(frame);
         }
-        assert_eq!(actual, interleave(&microphone, &remote, microphone.len()));
+
+        let expected: Vec<f32> = left_in
+            .iter()
+            .zip(right_in.iter())
+            .flat_map(|(&l, &r)| [l, r])
+            .collect();
+        assert_eq!(output, expected);
     }
 
     #[test]
-    fn live_underflow_waits_and_stop_pads_only_the_final_tail() {
-        let mut frames = CaptureFrames {
-            remote_enabled: true,
-            ..Default::default()
-        };
-        assert!(frames.push(&vec![0.2; 800], &[0.7; 300]));
-        assert!(frames.next(false, [false; 2]).is_none());
-        assert!(frames.push(&[], &[0.8; 500]));
-        assert_eq!(
-            frames.next(false, [false; 2]).unwrap(),
-            interleave(
-                &vec![0.2; 800],
-                &[vec![0.7; 300], vec![0.8; 500]].concat(),
-                800
-            )
-        );
-        assert!(frames.push(&[0.3; 10], &[0.9; 5]));
-        assert!(frames.next(false, [false; 2]).is_none());
-        assert_eq!(
-            frames.next(true, [false; 2]).unwrap(),
-            interleave(&[0.3; 10], &[0.9; 5], 10)
-        );
-        assert!(frames.next(true, [false; 2]).is_none());
-    }
+    fn live_mode_waits_for_short_system_channel_and_finishing_pads_tail() {
+        let mut assembler = StereoAssembler::new(true);
+        assert!(assembler.ingest(&vec![0.12; 850], &vec![0.57; 400]));
+        assert!(assembler.pull_live(false, false).is_none());
 
-    #[test]
-    fn silent_loopback_can_pause_callbacks_without_stalling_the_microphone() {
-        let mut frames = CaptureFrames {
-            remote_enabled: true,
-            ..Default::default()
-        };
-        assert!(frames.push(&[0.2; 800], &[0.7; 300]));
+        assert!(assembler.ingest(&[], &vec![0.57; 430]));
+        let full = assembler
+            .pull_live(false, false)
+            .expect("full frame should be emitted once system catches up");
+        assert_eq!(full.len(), FRAME * 2);
         assert!(
-            frames.next(false, [false; 2]).is_none(),
-            "packet jitter must wait"
+            full.as_chunks::<2>()
+                .0
+                .iter()
+                .all(|pair| pair == &[0.12, 0.57])
         );
-        assert_eq!(
-            frames.next(false, [false, true]).unwrap(),
-            interleave(&[0.2; 800], &[0.7; 300], 800)
+
+        // 50 mic samples and 30 system samples remain: too short for live mode.
+        assert!(assembler.pull_live(false, false).is_none());
+
+        let tail = assembler
+            .pull_finishing()
+            .expect("finishing should emit padded tail");
+        assert_eq!(tail.len(), 50 * 2);
+        for (idx, pair) in tail.as_chunks::<2>().0.iter().enumerate() {
+            assert_eq!(pair[0], 0.12);
+            assert_eq!(pair[1], if idx < 30 { 0.57 } else { 0.0 });
+        }
+        assert!(assembler.pull_finishing().is_none());
+    }
+
+    #[test]
+    fn quiet_system_channel_fills_right_with_zeros_until_active_again() {
+        let mut assembler = StereoAssembler::new(true);
+        assert!(assembler.ingest(&vec![0.21; FRAME], &[]));
+        assert!(assembler.pull_live(false, false).is_none());
+
+        let quiet_frame = assembler
+            .pull_live(false, true)
+            .expect("quiet system channel should allow mic frame out");
+        assert_eq!(quiet_frame.len(), FRAME * 2);
+        assert!(
+            quiet_frame
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|pair| pair == &[0.21, 0.0])
         );
-        assert!(frames.push(&[0.4; 800], &[]));
-        assert_eq!(
-            frames.next(false, [false, true]).unwrap(),
-            interleave(&[0.4; 800], &[], 800)
-        );
-        // Fresh audio resets the quiet grace, so the resumed words stay intact.
-        assert!(frames.push(&[0.6; 800], &[0.9; 800]));
-        assert_eq!(
-            frames.next(false, [false; 2]).unwrap(),
-            interleave(&[0.6; 800], &[0.9; 800], 800)
+
+        assert!(assembler.ingest(&vec![0.66; FRAME], &vec![0.48; FRAME]));
+        let resumed_frame = assembler
+            .pull_live(false, false)
+            .expect("both channels have a full frame");
+        assert!(
+            resumed_frame
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|pair| pair == &[0.66, 0.48])
         );
     }
 
     #[test]
-    fn stalled_capture_is_bounded_and_disabling_remote_releases_microphone() {
-        let mut frames = CaptureFrames {
-            remote_enabled: true,
-            ..Default::default()
-        };
-        assert!(frames.push(&vec![0.4; 32_000], &[]));
-        assert!(!frames.push(&[0.4], &[]));
-        assert!(frames.next(false, [false; 2]).is_none());
-        frames.set_remote(false);
-        let frame = frames.next(false, [false; 2]).unwrap();
-        assert_eq!(frame, interleave(&vec![0.4; 800], &[], 800));
-        assert!(frames.remote.is_empty());
+    fn full_queue_rejects_addition_until_system_disabled() {
+        let mut assembler = StereoAssembler::new(true);
+        assert!(assembler.ingest(&vec![0.25; MAX_CHANNEL_SAMPLES], &vec![0.75; 120]));
+        assert!(!assembler.ingest(&[0.5], &[]));
+
+        assembler.configure_system(false);
+        assert!(assembler.sys_queue.is_empty());
+
+        let mut frames_pulled = 0;
+        while let Some(frame) = assembler.pull_live(false, false) {
+            assert_eq!(frame.len(), FRAME * 2);
+            assert!(
+                frame
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .all(|pair| pair == &[0.25, 0.0])
+            );
+            frames_pulled += 1;
+        }
+        assert_eq!(frames_pulled, MAX_CHANNEL_SAMPLES / FRAME);
     }
 
     #[test]
-    fn stereo_channels_never_mix_and_missing_audio_is_silent() {
-        assert_eq!(
-            interleave(&[0.1, 0.2], &[0.8], 3),
-            vec![0.1, 0.8, 0.2, 0.0, 0.0, 0.0]
-        );
-        assert_eq!(interleave(&[], &[0.3], 1), vec![0.0, 0.3]);
-    }
-
-    #[test]
-    fn disabled_gate_keeps_interleaved_samples() {
-        let config = SessionConfig::default();
-        assert!(!config.echo_gate);
-        let mut frames = CaptureFrames {
-            remote_enabled: true,
-            ..Default::default()
-        };
-        let mic = vec![0.251; FRAME_SAMPLES];
-        let remote = vec![1.0; FRAME_SAMPLES];
-        assert!(frames.push(&mic, &remote));
-        let samples = frames.next_sized(false, [false; 2], FRAME_SAMPLES).unwrap();
+    fn disabled_echo_gate_returns_frame_without_buffering() {
         let mut gate = None;
         let mut pending = None;
-        assert_eq!(
-            ListenSession::queue_audio(&mut gate, &mut pending, samples),
-            Some(interleave(&mic, &remote, FRAME_SAMPLES))
-        );
+        let input: Vec<f32> = (0..(FRAME * 2)).map(|i| (i as f32) * 0.001).collect();
+        let out = ListenSession::queue_audio(&mut gate, &mut pending, input.clone());
+        assert_eq!(out, Some(input));
         assert!(pending.is_none());
     }
 
     #[test]
-    fn missing_device_fails_with_a_readable_message() {
+    fn enabled_echo_gate_holds_one_frame_and_flushes_on_stop() {
+        let mut session = idle_session(true);
+        // Silent system channel: nothing for the gate to treat as echo, so frames pass unchanged.
+        let first: Vec<f32> = (0..FRAME).flat_map(|_| [0.15, 0.0]).collect();
+        let second: Vec<f32> = (0..FRAME).flat_map(|_| [0.35, 0.0]).collect();
+
+        let first_out = ListenSession::queue_audio(
+            &mut session.echo_gate,
+            &mut session.pending_audio,
+            first.clone(),
+        );
+        assert!(first_out.is_none());
+
+        let second_out = ListenSession::queue_audio(
+            &mut session.echo_gate,
+            &mut session.pending_audio,
+            second.clone(),
+        );
+        assert_eq!(second_out, Some(first));
+
+        let flushed = session.flush_audio();
+        assert_eq!(flushed, Some(SessionEvent::Audio(second)));
+        assert!(session.flush_audio().is_none());
+    }
+
+    #[test]
+    fn missing_device_id_fails_cleanly_and_names_device() {
+        let missing_id = "cpal:id:nonexistent-device-id-987654";
         let config = SessionConfig {
-            device: Some("cpal:nixarchy-meetingai-no-such-device".into()),
-            system_audio: false,
-            output_device: None,
-            speech: None,
-            echo_gate: false,
+            device: Some(missing_id.to_owned()),
+            ..Default::default()
         };
         let (session, events) = ListenSession::start(&config);
         assert!(!session.is_capturing());
-        let failure = events
-            .iter()
-            .find_map(|event| match event {
-                SessionEvent::Failed(message) => Some(message.clone()),
-                _ => None,
-            })
-            .expect("a missing device must report failure");
-        assert!(failure.contains("no longer connected"), "{failure}");
-    }
-
-    #[test]
-    fn stop_is_safe_without_a_microphone() {
-        let config = SessionConfig {
-            device: Some("cpal:nixarchy-meetingai-no-such-device".into()),
-            system_audio: false,
-            output_device: None,
-            speech: None,
-            echo_gate: false,
-        };
-        let (mut session, _) = ListenSession::start(&config);
-        let events = session.stop();
+        let failure = events.iter().find_map(|event| match event {
+            SessionEvent::Failed(text) => Some(text),
+            _ => None,
+        });
+        let message = failure.expect("expected a Failed event");
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, SessionEvent::Stopped { .. }))
-        );
-        // Stopping twice must not panic.
-        let again = session.stop();
-        assert!(
-            again
-                .iter()
-                .any(|event| matches!(event, SessionEvent::Stopped { .. }))
+            message.contains(missing_id),
+            "unexpected message: {message}"
         );
     }
 
     #[test]
-    fn pump_without_capture_is_quiet() {
-        let config = SessionConfig {
-            device: Some("cpal:nixarchy-meetingai-no-such-device".into()),
-            system_audio: false,
-            output_device: None,
-            speech: None,
-            echo_gate: false,
-        };
-        let (mut session, _) = ListenSession::start(&config);
+    fn stop_without_microphone_emits_stopped_and_is_idempotent() {
+        let mut session = idle_session(false);
+        assert_eq!(
+            session.stop(),
+            vec![SessionEvent::Stopped {
+                elapsed: Duration::ZERO
+            }]
+        );
+        assert_eq!(
+            session.stop(),
+            vec![SessionEvent::Stopped {
+                elapsed: Duration::ZERO
+            }]
+        );
+    }
+
+    #[test]
+    fn pump_without_microphone_returns_no_events() {
+        let mut session = idle_session(false);
         assert!(session.pump().is_empty());
-        assert_eq!(session.elapsed(), Duration::ZERO);
     }
 
-    #[test]
-    fn utterance_events_carry_real_wav() {
-        let samples = vec![0.0f32; 16_000];
-        let wav = encode_wav(&samples).unwrap();
-        let encoded = STANDARD.encode(wav);
-        let decoded = STANDARD.decode(encoded.as_bytes()).unwrap();
-        assert_eq!(&decoded[0..4], b"RIFF");
-    }
-
-    #[test]
-    fn chunk_payload_matches_the_frontend_contract() {
-        let payload = local_chunk_payload("AAAA", 2.0, 1.5);
-        assert_eq!(payload["wavBase64"], "AAAA");
-        assert_eq!(payload["start"], 2.0);
-        assert_eq!(payload["duration"], 1.5);
-    }
-
-    #[test]
-    fn transcribing_invalid_audio_fails_cleanly() {
-        let config = ProviderConfig::new("deepgram-stt", "key", "nova-3");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let error = runtime
-            .block_on(transcribe_utterance(&config, "not-base64!!", None))
-            .unwrap_err();
-        assert!(error.contains("could not decode audio"));
+    #[tokio::test]
+    async fn transcribe_utterance_rejects_malformed_base64() {
+        let config = ProviderConfig::new("deepgram-stt", "unused-key", "nova-3");
+        let err = transcribe_utterance(&config, "***not-valid-base64***", None)
+            .await
+            .expect_err("malformed base64 must fail before calling provider");
+        assert!(err.to_lowercase().contains("base64") || err.to_lowercase().contains("decode"));
     }
 }

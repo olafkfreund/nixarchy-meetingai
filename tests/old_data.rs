@@ -318,3 +318,39 @@ fn write_fixture() {
     drop(db);
     let _ = std::fs::remove_file(format!("{}.open.lock", path.display()));
 }
+
+const VAULT_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/old-vault");
+// Dummy values only: the fixture is committed.
+const VAULT_KEY: &str = "fixture-not-a-real-key-0001";
+
+/// A vault written before rewrite step 6 still opens and gives its credentials back.
+#[test]
+fn old_vault_reads_back() {
+    use nixarchy_meetingai::core::security::{Kind, Vault, credentials};
+    let dir = std::env::temp_dir().join(format!("nm-old-vault-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    for name in ["vault.bin", "vault.key"] {
+        std::fs::copy(Path::new(VAULT_FIXTURE).join(name), dir.join(name)).unwrap();
+    }
+    let vault = Vault::open(&dir).unwrap();
+    let speech = credentials::load(&vault, Kind::Speech, "deepgram-stt")
+        .unwrap()
+        .unwrap();
+    assert_eq!(speech.api_key, VAULT_KEY);
+    let all = credentials::list(&vault, Kind::Speech).unwrap();
+    assert_eq!(all.len(), 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+#[ignore]
+fn write_vault_fixture() {
+    use nixarchy_meetingai::core::security::{Credential, Vault, credentials};
+    if std::env::var_os("OLD_DATA_WRITE").is_none() {
+        return;
+    }
+    let dir = Path::new(VAULT_FIXTURE);
+    let _ = std::fs::remove_dir_all(dir);
+    let vault = Vault::open(dir).unwrap();
+    credentials::save(&vault, &Credential::speech("deepgram-stt", VAULT_KEY)).unwrap();
+}

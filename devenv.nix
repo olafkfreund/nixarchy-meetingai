@@ -1,111 +1,67 @@
-{
-  pkgs,
-  lib,
-  config,
-  inputs,
-  ...
-}:
-
+{ pkgs, inputs, ... }:
 let
-  runtimeLibraryPath = lib.makeLibraryPath (
-    import ./packaging/runtime-libraries.nix { inherit pkgs; }
-  );
+  toolchain = pkgs.rust-bin.stable."1.99.1".default.override {
+    extensions = [ "rust-src" "clippy" "rustfmt" "rust-analyzer" ];
+  };
+  sherpaLib = pkgs.callPackage ./nix/sherpa-lib.nix { };
+  certBundle = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
 in
 {
   name = "nixarchy-meetingai";
-  cachix.enable = true;
-  dotenv.enable = true;
-  dotenv.disableHint = true;
+
   overlays = [ (import inputs.rust-overlay) ];
 
-  env = {
-    RUST_BACKTRACE = "1";
-    LD_LIBRARY_PATH = runtimeLibraryPath;
-    NIXARCHY_MEETINGAI_RUNTIME_LIBRARY_PATH = runtimeLibraryPath;
+  languages.rust = {
+    enable = true;
+    toolchainPackage = toolchain;
   };
 
   packages = with pkgs; [
     git
-    curl
-    jq
-    just
-    rustfmt
-    lefthook
-    clippy
-    cargo-nextest
-    cargo-deny
     pkg-config
-    patchelf
-    llvmPackages.clang
+    clang
     llvmPackages.libclang
     openssl
     pipewire
     alsa-lib
     alsa-lib.dev
-    grim
-    sqlite
-    zlib
     cacert
+    perl # the vendored sqlcipher/openssl build
+    gnumake
+    grim # the daemon shells out to grim and slurp for screenshots
+    slurp
+    jq
+    curl
+    sqlite
   ];
 
-  languages.rust = {
+  env = {
+    RUST_BACKTRACE = "1";
+    # unix socket paths in tests/daemon_flow.rs cap at 108 bytes
+    TMPDIR = "/tmp";
+    LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (import ./packaging/runtime-libraries.nix { inherit pkgs; });
+    CPATH = "${pkgs.glibc.dev}/include";
+    BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
+    LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+    PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig";
+    SHERPA_ONNX_LIB_DIR = "${sherpaLib}/lib";
+    SSL_CERT_FILE = certBundle;
+    NIX_SSL_CERT_FILE = certBundle;
+  };
+
+  dotenv = {
     enable = true;
-    channel = "stable";
-    toolchain = {
-      rustc = pkgs.rust-bin.stable."1.99.1".rustc;
-      cargo = pkgs.rust-bin.stable."1.99.1".cargo;
-      clippy = pkgs.rust-bin.stable."1.99.1".clippy;
-      rustfmt = pkgs.rust-bin.stable."1.99.1".rustfmt;
-      rust-analyzer = pkgs.rust-bin.stable."1.99.1".rust-analyzer;
-    };
-    components = [
-      "rustc"
-      "cargo"
-      "clippy"
-      "rustfmt"
-      "rust-analyzer"
-    ];
+    disableHint = true;
   };
-
-  env.CPATH = "${pkgs.glibc.dev}/include";
-
-  env.BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
-
-  env.LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-
-  env.PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig";
-
-  env.SHERPA_ONNX_LIB_DIR = "${pkgs.callPackage ./nix/sherpa-lib.nix { }}/lib";
-
-  env.SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-  env.NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-
-  tasks = {
-    "nixarchy-meetingai:build" = {
-      exec = "cargo build";
-    };
-    "nixarchy-meetingai:test" = {
-      exec = "cargo nextest run --workspace";
-    };
-    "nixarchy-meetingai:check" = {
-      exec = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings";
-    };
-    "nixarchy-meetingai:run" = {
-      exec = "cargo run";
-    };
-  };
-
-  processes = { };
 
   enterShell = ''
-    echo "◆ nixarchy-meetingai devenv — NixOS"
-    echo "  rust $(rustc --version) | cargo $(cargo --version)"
-    echo "  tip: just build | just test | just run"
+    echo "nixarchy-meetingai dev shell: cargo build, cargo test --workspace"
   '';
 
+  # What CI runs.
   enterTest = ''
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
-    cargo nextest run --workspace
+    cargo test --workspace --no-fail-fast
   '';
 }
