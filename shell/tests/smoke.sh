@@ -16,6 +16,7 @@ mkdir "$work/cfg"
 cp -rs "$tree"/* "$work/cfg/"
 rm -f "$work/cfg/shell.qml"
 for f in "$here"/*.qml; do ln -s "$f" "$work/cfg/$(basename "$f")"; done
+ln -s "$here/tests/geometry.js" "$work/cfg/geometry.js"
 ln -s "$here/tests/harness.qml" "$work/cfg/shell.qml"
 
 # notify-send stub: records the call, never blocks.
@@ -115,6 +116,58 @@ if grep -aE "$qml_bad" "$work/locked.err" "$work/locked.out"; then echo "FAIL (l
 grep -q "settings.set live_provider" "$work/locked.log" || { echo "FAIL (locked): the free setting was not sent" >&2; exit 1; }
 if grep -qE "settings.set (chat_provider|chat_model|meeting_mode|text_scale)" "$work/locked.log"; then echo "FAIL (locked): a setting fixed by Nix was sent" >&2; exit 1; fi
 echo "locked: Nix-fixed settings are never sent"
+
+# --voice: room rows from transcript.get, transcript.relabel and transcript.final, plus voice.* controls in Settings.
+ln -sf "$here/tests/harness-voice.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-voice"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/voice.log" --voice &
+fake=$!
+sleep 0.5
+timeout 7 quickshell -p "$work/cfg" > "$work/voice.out" 2> "$work/voice.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/voice.err" "$work/voice.out" | grep -avE 'GEO \{|VOICE[1-5] '; then echo "FAIL (voice): QML errors above" >&2; exit 1; fi
+python3 "$here/tests/check-geometry.py" "$work/voice.out"
+python3 - "$work/voice.out" "$work/voice.log" <<'PY'
+import json, sys
+out = open(sys.argv[1], errors="replace").read().splitlines()
+cmds = open(sys.argv[2], errors="replace").read().splitlines()
+v = {k: json.loads(next(l[l.index(k + " ") + len(k) + 1:] for l in out if (k + " {") in l)) for k in ("VOICE1", "VOICE2", "VOICE3", "VOICE4", "VOICE5")}
+geos = {g["tag"]: g["items"] for g in (json.loads(l[l.index("GEO {") + 4:]) for l in out if "GEO {" in l)}
+want_rows = [
+    "room|Earlier room remark",
+    "mic|My own first line",
+    "room|Someone else in the room",
+    "room|Direct room line",
+]
+if v["VOICE1"]["rows"] != want_rows:
+    sys.exit(f"FAIL (voice): unexpected transcript rows: {v['VOICE1']['rows']}")
+t_items = geos.get("transcript", [])
+t_labels = [i["label"] for i in t_items]
+if t_labels.count("Room") != 3 or "You · Spoke" not in t_labels:
+    sys.exit(f"FAIL (voice): Room / You · Spoke labels missing in transcript: {t_labels}")
+room_xs = [i["x"] for i in t_items if i["label"] == "Room"]
+you_xs = [i["x"] for i in t_items if i["label"] == "You · Spoke"]
+if not room_xs or not you_xs or max(room_xs) >= min(you_xs):
+    sys.exit(f"FAIL (voice): Room rows must be left-aligned like Them, not right-aligned like You: room={room_xs} you={you_xs}")
+before = {i["n"]: i["label"] for i in geos.get("before-enroll", []) if i.get("n")}
+if before.get("voiceStatus") != "Owner voice: not enrolled" or "The quick brown fox" not in before.get("voiceSentence", "") or before.get("voiceRecord") != "Record my voice" or before.get("voicePause") != "Pause check":
+    sys.exit(f"FAIL (voice): initial Settings voice controls wrong: {before}")
+if not v["VOICE2"]["voiceEnrolling"]:
+    sys.exit(f"FAIL (voice): voiceEnrolling not set during voice.enroll: {v['VOICE2']}")
+enrolled = {i["n"]: i["label"] for i in geos.get("enrolled", []) if i.get("n")}
+if not v["VOICE3"]["voice"]["enrolled"] or v["VOICE3"]["voiceEnrolling"] or enrolled.get("voiceStatus") != "Owner voice: enrolled" or enrolled.get("voiceRecordAgain") != "Record again" or enrolled.get("voiceDelete") != "Delete":
+    sys.exit(f"FAIL (voice): enrolled state wrong: {v['VOICE3']} {enrolled}")
+paused = {i["n"]: i["label"] for i in geos.get("paused", []) if i.get("n")}
+if not v["VOICE4"]["voice"]["paused"] or paused.get("voiceStatus") != "Owner voice: enrolled (check paused)":
+    sys.exit(f"FAIL (voice): paused state wrong: {v['VOICE4']} {paused}")
+if v["VOICE5"]["voice"]["enrolled"]:
+    sys.exit(f"FAIL (voice): still enrolled after voice.delete: {v['VOICE5']}")
+for need in ("voice.status", "voice.enroll", "settings.set voice_check_paused", "voice.delete"):
+    if need not in cmds:
+        sys.exit(f"FAIL (voice): daemon never received {need!r}: {cmds}")
+print("voice: room rows (history, relabel, final) and voice controls verified")
+PY
 
 if grep -q record.start "$work/off.log"; then echo "FAIL: record.start sent with auto_record_on_call off" >&2; exit 1; fi
 grep -q record.start "$work/auto.log" || { echo "FAIL: record.start not sent with auto_record_on_call on" >&2; exit 1; }

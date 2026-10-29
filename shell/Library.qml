@@ -73,12 +73,13 @@ Item {
         root.reload();
         root.client.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
         if (root.tab === "providers") root.client.send("providers.status", {}, function(r) { if (r.ok) { var m = {}; (r.data || []).forEach(function(row) { m[row.id] = row; }); root.status = m; } });
+        if (root.tab === "settings") root.client.refreshVoice();
         root.search();
         root.loadPrompt();
         root.client.refreshCandidates();
     }
     function search() {
-        root.client.send("settings.search", { query: root.query }, function(r) { if (r.ok) root.found = (r.data || []).filter(function(f) { return String(f.key).indexOf("overlay_") !== 0; }); });
+        root.client.send("settings.search", { query: root.query }, function(r) { if (r.ok) root.found = (r.data || []).filter(function(f) { return String(f.key).indexOf("overlay_") !== 0 && f.key !== "voice_check_paused"; }); });
     }
 
     function loadPrompt() {
