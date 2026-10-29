@@ -60,12 +60,19 @@ impl SpeechDenoiser for SherpaDenoiser {
 /// sherpa ignores an unreadable or short sample and then learns a voice from the input, which
 /// would measure the wrong speaker: refuse anything but at least 3 s of 16 kHz mono.
 fn check_sample(path: &Path) -> Result<(), String> {
-    let reader = hound::WavReader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut reader =
+        hound::WavReader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let spec = reader.spec();
     if spec.channels != 1 || spec.sample_rate != RATE {
         return Err(format!("{}: need a mono 16 kHz WAV", path.display()));
     }
-    if reader.duration() < 3 * RATE {
+    // Count decoded samples, not the header's length: a truncated file must be refused too.
+    let mut decoded = 0u32;
+    for sample in reader.samples::<i16>() {
+        sample.map_err(|e| format!("{}: {e}", path.display()))?;
+        decoded += 1;
+    }
+    if decoded < 3 * RATE {
         return Err(format!(
             "{}: need at least 3 s of the owner's voice",
             path.display()
@@ -231,6 +238,12 @@ mod tests {
         assert!(check_sample(&write("stereo.wav", 2, RATE * 4)).is_err());
         assert!(check_sample(&dir.join("absent.wav")).is_err());
         assert!(check_sample(&write("ok.wav", 1, RATE * 3)).is_ok());
+        // A header that promises 4 s over only 1 s of data is refused.
+        let cut = write("cut.wav", 1, RATE * 4);
+        let bytes = std::fs::read(&cut).unwrap();
+        std::fs::write(&cut, &bytes[..44 + (RATE as usize) * 2]).unwrap();
+        assert!(check_sample(&cut).is_err());
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
