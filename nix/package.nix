@@ -28,6 +28,7 @@ rustPlatform.buildRustPackage {
       ../packaging
       ../skills
       ../tests/parakeet_decode.rs # run by the parakeet-decode flake check
+      ../tests/voice_model.rs # run by the voice-check flake check
     ];
   };
 
