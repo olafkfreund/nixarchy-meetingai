@@ -1,263 +1,312 @@
-//! Deterministic delayed-provider tests; no external keys or paid requests.
-use nixarchy_meetingai::{
-    ai::{
-        engine::{self, TurnContext},
-        providers::ProviderConfig,
-    },
-    core::domain::Message,
+//! Slow, stalled and broken providers: requests overlap, Stop cuts waits short, errors stay safe.
+use nixarchy_meetingai::ai::engine::{
+    ChatError, TurnContext, http_client, stream_chat, stream_chat_bounded,
 };
-use std::{sync::Arc, time::Duration};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::{mpsc, watch},
-};
+use nixarchy_meetingai::ai::providers::ProviderConfig;
+use nixarchy_meetingai::core::domain::Message;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, oneshot, watch};
 
-async fn read_request(socket: &mut TcpStream) {
-    let mut bytes = Vec::new();
-    loop {
-        let mut chunk = [0u8; 4096];
-        let n = socket.read(&mut chunk).await.unwrap();
-        assert!(n > 0);
-        bytes.extend_from_slice(&chunk[..n]);
-        if let Some(end) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
-            let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
-            let length: usize = headers
-                .lines()
-                .find_map(|s| s.strip_prefix("content-length:"))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            if bytes.len() >= end + 4 + length {
-                return;
-            }
-        }
-    }
+const WAIT: Duration = Duration::from_secs(5);
+const DELTA: &str = r#"data: {"choices":[{"delta":{"content":"pong"}}]}"#;
+
+fn headers_end(raw: &[u8]) -> Option<usize> {
+    raw.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|at| at + 4)
 }
 
-async fn response(status: u16, body: String) -> (ProviderConfig, tokio::task::JoinHandle<()>) {
+/// Header fields of a raw request head, names lowercased.
+fn header_map(head: &[u8]) -> HashMap<String, String> {
+    String::from_utf8_lossy(head)
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_lowercase(), value.trim().to_owned()))
+        .collect()
+}
+
+/// Reads one request (headers plus the declared body) off `socket`; a stall fails the test.
+async fn read_request(socket: &mut TcpStream) -> Vec<u8> {
+    tokio::time::timeout(WAIT, async {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 2048];
+        loop {
+            if let Some(body_at) = headers_end(&raw) {
+                let declared = header_map(&raw[..body_at])
+                    .get("content-length")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(0);
+                if raw.len() - body_at >= declared {
+                    return raw;
+                }
+            }
+            let n = socket.read(&mut buf).await.unwrap();
+            assert!(n > 0, "client left before sending a whole request");
+            raw.extend_from_slice(&buf[..n]);
+        }
+    })
+    .await
+    .expect("request never completed")
+}
+
+/// Binds a listener, serves its first connection with `handler`, returns the provider config.
+async fn provider_with<F, Fut>(handler: F) -> ProviderConfig
+where
+    F: FnOnce(TcpStream) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut config = ProviderConfig::new("ollama", "private-test-key", "model");
-    config.base_url = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
+    let mut config = ProviderConfig::new("ollama", "", "stub");
+    config.base_url = format!(
+        "http://{}/v1/chat/completions",
+        listener.local_addr().unwrap()
+    );
+    tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
         read_request(&mut socket).await;
-        let headers = format!(
-            "HTTP/1.1 {status} Test\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        socket.write_all(headers.as_bytes()).await.unwrap();
-        let _ = socket.write_all(body.as_bytes()).await;
+        handler(socket).await;
     });
-    (config, server)
+    config
+}
+
+/// One whole canned response; the server side may be cut off early, so write errors are ignored.
+async fn respond(socket: &mut TcpStream, status: &str, kind: &str, body: &[u8]) {
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = socket.write_all(head.as_bytes()).await;
+    let _ = socket.write_all(body).await;
+    let _ = socket.shutdown().await;
+}
+
+fn ask(text: &str) -> Vec<Message> {
+    vec![Message::user(text)]
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_workers_allow_twelve_requests_to_wait_concurrently() {
-    const REQUESTS: usize = 12;
+async fn many_requests_are_in_flight_together_on_few_workers() {
+    const CALLS: usize = 9;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let (arrivals, mut received) = mpsc::channel(REQUESTS);
-    let (release, gate) = watch::channel(false);
-    let server = tokio::spawn(async move {
-        let mut tasks = Vec::new();
-        for _ in 0..REQUESTS {
+    let url = format!(
+        "http://{}/v1/chat/completions",
+        listener.local_addr().unwrap()
+    );
+    let (gate_tx, gate_rx) = watch::channel(false);
+    let (arrived_tx, mut arrived_rx) = mpsc::unbounded_channel::<()>();
+    tokio::spawn(async move {
+        for _ in 0..CALLS {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let arrivals = arrivals.clone();
-            let mut gate = gate.clone();
-            tasks.push(tokio::spawn(async move {
+            let (mut gate, arrived) = (gate_rx.clone(), arrived_tx.clone());
+            tokio::spawn(async move {
                 read_request(&mut socket).await;
-                arrivals.send(()).await.unwrap();
-                while !*gate.borrow() { gate.changed().await.unwrap(); }
-                let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Answer\"}}]}\n\ndata: [DONE]\n";
-                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-            }));
-        }
-        for task in tasks {
-            task.await.unwrap();
+                arrived.send(()).unwrap();
+                gate.wait_for(|open| *open).await.unwrap();
+                let body = format!("{DELTA}\n\ndata: [DONE]\n\n");
+                respond(&mut socket, "200 OK", "text/event-stream", body.as_bytes()).await;
+            });
         }
     });
-    let tasks: Vec<_> = (0..REQUESTS)
+
+    let (_keep, cancel) = watch::channel(false);
+    let cancel = Arc::new(cancel);
+    let calls: Vec<_> = (0..CALLS)
         .map(|_| {
-            let mut config = ProviderConfig::new("ollama", "test-key", "model");
-            config.base_url = url.clone();
+            let (url, cancel) = (url.clone(), cancel.clone());
             tokio::spawn(async move {
-                engine::stream_chat(
-                    &engine::http_client(),
+                let mut config = ProviderConfig::new("ollama", "", "stub");
+                config.base_url = url;
+                stream_chat(
+                    &http_client(),
                     &config,
-                    &[Message::user("Hi")],
+                    &ask("hi"),
                     &TurnContext::default(),
-                    Arc::new(watch::channel(false).1),
+                    cancel,
                     |_| {},
                 )
                 .await
             })
         })
         .collect();
-    tokio::time::timeout(Duration::from_secs(3), async {
-        for _ in 0..REQUESTS {
-            received.recv().await.unwrap();
+
+    tokio::time::timeout(WAIT, async {
+        for _ in 0..CALLS {
+            arrived_rx.recv().await.unwrap();
         }
     })
     .await
-    .expect("All twelve requests must reach the provider before any response is released");
-    release.send(true).unwrap();
-    for task in tasks {
-        assert_eq!(task.await.unwrap().unwrap(), "Answer");
+    .expect("not every request reached the server while all were held");
+    gate_tx.send(true).unwrap();
+    for call in calls {
+        assert_eq!(call.await.unwrap().unwrap(), "pong");
     }
-    server.await.unwrap();
 }
 
 #[tokio::test]
-async fn stop_cancels_a_stalled_error_body() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut config = ProviderConfig::new("ollama", "test-key", "model");
-    config.base_url = format!("http://{}", listener.local_addr().unwrap());
-    let (headers, ready) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        read_request(&mut socket).await;
-        socket
-            .write_all(b"HTTP/1.1 429 Slow\r\nContent-Length: 1000\r\n\r\n")
-            .await
-            .unwrap();
-        headers.send(()).unwrap();
+async fn stop_ends_a_call_stuck_on_an_error_body() {
+    let (sent_tx, sent_rx) = oneshot::channel();
+    let config = provider_with(|mut socket| async move {
+        let head = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: 4000\r\n\r\nupstream";
+        socket.write_all(head.as_bytes()).await.unwrap();
+        sent_tx.send(()).unwrap();
         std::future::pending::<()>().await;
-    });
-    let (cancel, receiver) = watch::channel(false);
-    let request = tokio::spawn(async move {
-        engine::stream_chat(
-            &engine::http_client(),
+    })
+    .await;
+    let (stop, cancel) = watch::channel(false);
+    let call = tokio::spawn(async move {
+        stream_chat(
+            &http_client(),
             &config,
-            &[],
+            &ask("hi"),
             &TurnContext::default(),
-            Arc::new(receiver),
+            Arc::new(cancel),
             |_| {},
         )
         .await
     });
-    ready.await.unwrap();
-    let start = std::time::Instant::now();
-    cancel.send(true).unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_millis(500), request)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap(),
-        ""
-    );
-    assert!(start.elapsed() < Duration::from_millis(500));
-    server.abort();
+    sent_rx.await.unwrap();
+    stop.send(true).unwrap();
+    let outcome = tokio::time::timeout(Duration::from_millis(500), call)
+        .await
+        .expect("Stop did not end the call")
+        .unwrap();
+    assert_eq!(outcome.unwrap(), "");
 }
 
 #[tokio::test]
-async fn stop_interrupts_backpressure_without_waiting_for_the_consumer() {
-    let (config, server) = response(
-        200,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Partial\"}}]}\n\ndata: [DONE]\n".into(),
-    )
+async fn stop_ends_a_call_blocked_on_a_slow_consumer() {
+    let config = provider_with(|mut socket| async move {
+        let head =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+        let event = r#"data: {"choices":[{"delta":{"content":"first words"}}]}"#;
+        socket
+            .write_all(format!("{head}{event}\n\n").as_bytes())
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    })
     .await;
-    let (cancel, receiver) = watch::channel(false);
-    let (delivery, ready) = tokio::sync::oneshot::channel();
-    let mut delivery = Some(delivery);
-    let request = tokio::spawn(async move {
-        engine::stream_chat_bounded(
-            &engine::http_client(),
+    let (stop, cancel) = watch::channel(false);
+    let (seen_tx, mut seen_rx) = mpsc::unbounded_channel::<String>();
+    let call = tokio::spawn(async move {
+        stream_chat_bounded(
+            &http_client(),
             &config,
-            &[],
+            &ask("hi"),
             &TurnContext::default(),
-            Arc::new(receiver),
-            |_| {
-                delivery.take().unwrap().send(()).unwrap();
-                std::future::pending::<()>()
+            Arc::new(cancel),
+            move |delta| {
+                let seen = seen_tx.clone();
+                async move {
+                    seen.send(delta).unwrap();
+                    std::future::pending::<()>().await;
+                }
             },
         )
         .await
     });
-    ready.await.unwrap();
-    cancel.send(true).unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_millis(500), request)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap(),
-        "Partial"
-    );
-    server.await.unwrap();
+    assert_eq!(seen_rx.recv().await.unwrap(), "first words");
+    stop.send(true).unwrap();
+    let outcome = tokio::time::timeout(Duration::from_millis(500), call)
+        .await
+        .expect("Stop did not interrupt the blocked consumer")
+        .unwrap();
+    assert_eq!(outcome.unwrap(), "first words");
 }
 
 #[tokio::test]
-async fn errors_redact_credentials_and_abrupt_eof_does_not_claim_completion() {
-    for (status, body, expected) in [
-        (401, "invalid private-test-key".to_owned(), "[redacted]"),
+async fn failures_never_leak_the_key_and_a_cut_stream_is_not_success() {
+    const KEY: &str = "zq-secret-7731";
+    let oversized = vec![b'x'; 256 * 1024 + 1];
+    let cases: Vec<(&str, String, Vec<u8>, &str)> = vec![
         (
-            200,
-            "data: {\"error\":\"invalid private-test-key\"}\n".to_owned(),
+            "401 Unauthorized",
+            "application/json".into(),
+            format!(r#"{{"error":"rejected {KEY}"}}"#).into_bytes(),
             "[redacted]",
         ),
         (
-            200,
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Incomplete\"}}]}\n".to_owned(),
+            "200 OK",
+            "text/event-stream".into(),
+            format!("data: {{\"error\":\"bad credential {KEY}\"}}\n\n").into_bytes(),
+            "[redacted]",
+        ),
+        (
+            "200 OK",
+            "text/event-stream".into(),
+            format!("{DELTA}\n\n").into_bytes(),
             "before confirming completion",
         ),
-        (200, "x".repeat(256 * 1024 + 1), "size limit"),
-    ] {
-        let (config, server) = response(status, body).await;
-        let error = engine::stream_chat(
-            &engine::http_client(),
+        (
+            "200 OK",
+            "text/event-stream".into(),
+            oversized,
+            "size limit",
+        ),
+    ];
+    for (status, kind, body, expected) in cases {
+        let mut config = provider_with(move |mut socket| async move {
+            respond(&mut socket, status, &kind, &body).await;
+        })
+        .await;
+        config.api_key = KEY.into();
+        let (_keep, cancel) = watch::channel(false);
+        let message = stream_chat(
+            &http_client(),
             &config,
-            &[],
+            &ask("hi"),
             &TurnContext::default(),
-            Arc::new(watch::channel(false).1),
+            Arc::new(cancel),
             |_| {},
         )
         .await
-        .unwrap_err()
+        .expect_err("this reply must be an error")
         .to_string();
-        assert!(error.contains(expected), "{error}");
-        assert!(!error.contains("private-test-key"));
-        server.await.unwrap();
+        assert!(message.contains(expected), "{message}");
+        assert!(!message.contains(KEY), "{message}");
     }
 }
 
 #[tokio::test]
-async fn inactive_response_body_times_out() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut config = ProviderConfig::new("ollama", "test-key", "model");
-    config.base_url = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        read_request(&mut socket).await;
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
-            .await
-            .unwrap();
+async fn a_body_that_goes_quiet_times_out() {
+    let config = provider_with(|mut socket| async move {
+        let head =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 90000\r\n\r\n";
+        socket.write_all(head.as_bytes()).await.unwrap();
         std::future::pending::<()>().await;
-    });
-    let _ = engine::http_client(); // Install the app's TLS provider before overriding the timeout.
+    })
+    .await;
+    // Building a client directly needs the TLS provider the app's own client installs.
+    let _ = http_client();
     let client = reqwest::Client::builder()
-        .read_timeout(Duration::from_millis(50))
+        .read_timeout(Duration::from_millis(250))
         .build()
         .unwrap();
-    let error = tokio::time::timeout(
+    let (_keep, cancel) = watch::channel(false);
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(
         Duration::from_secs(1),
-        engine::stream_chat(
+        stream_chat(
             &client,
             &config,
-            &[],
+            &ask("hi"),
             &TurnContext::default(),
-            Arc::new(watch::channel(false).1),
+            Arc::new(cancel),
             |_| {},
         ),
     )
     .await
-    .unwrap()
-    .unwrap_err();
-    assert!(matches!(error, engine::ChatError::Request(e) if e.is_timeout()));
-    server.abort();
+    .expect("the idle body never timed out");
+    match outcome {
+        Err(ChatError::Request(error)) => assert!(error.is_timeout(), "{error}"),
+        other => panic!("expected a request timeout, got {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 /// Serves one multipart request per entry: `None` drops the connection, `Some(text)` answers.

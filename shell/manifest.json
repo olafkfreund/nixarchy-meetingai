@@ -4,7 +4,7 @@
   "name": "Meeting AI",
   "version": "0.1.0",
   "author": "Olaf K. Freund",
-  "license": "AGPL-3.0-or-later",
+  "license": "MIT",
   "homepage": "https://github.com/olafkfreund/nixarchy-meetingai",
   "description": "Live meeting transcript, AI answers and rolling notes. The UI for the nixarchy-meetingai daemon.",
   "kinds": [

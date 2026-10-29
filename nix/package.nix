@@ -71,7 +71,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Ambient real-time meeting copilot daemon for Omarchy";
-    license = lib.licenses.agpl3Plus;
+    license = lib.licenses.mit;
     mainProgram = "nixarchy-meetingai";
     platforms = lib.platforms.linux;
   };

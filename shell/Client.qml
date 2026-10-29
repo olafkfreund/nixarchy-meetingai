@@ -44,6 +44,7 @@ Item {
     property bool voiceEnrolling: false
     property string voiceError: ""
     signal notesUpdated(var meeting)
+    signal providersChanged()
     readonly property string currentMeeting: String(state.meeting || "")
     // While an item's text is being edited a refresh waits, so typing is not lost.
     property bool itemEditing: false
@@ -302,6 +303,7 @@ Item {
         case "earlier_item": if (ev.meeting === root.state.meeting) root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
         case "questions.updated": if (ev.candidate === root.shownCandidate) root.refreshCand(); break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
+        case "providers.changed": root.providersChanged(); break;
         case "error": root.addRow("error", "", String(ev.message || ""), false); break;
         }
     }

@@ -172,4 +172,243 @@ PY
 if grep -q record.start "$work/off.log"; then echo "FAIL: record.start sent with auto_record_on_call off" >&2; exit 1; fi
 grep -q record.start "$work/auto.log" || { echo "FAIL: record.start not sent with auto_record_on_call on" >&2; exit 1; }
 grep -q -- '-A take=' "$work/notify.log" || { echo "FAIL: no Take notes offer with the setting off" >&2; exit 1; }
+
+# preset picker: add -> test connection -> save -> use for chat -> edit (password field, empty key) -> remove (confirm dialog)
+cat > "$work/harness-preset.qml" <<'QML'
+import QtQuick
+import Quickshell
+
+ShellRoot {
+    id: root
+    property int phase: 0
+    property var out: ({})
+
+    function find(it, name, depth) {
+        if (!it || !it.visible || (depth || 0) > 60) return null;
+        if (it.objectName === name) return it;
+        var kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) { var f = find(kids[i], name, (depth || 0) + 1); if (f) return f; }
+        return null;
+    }
+    function findAny(it, name, depth) {
+        if (!it || (depth || 0) > 60) return null;
+        if (it.objectName === name) return it;
+        var kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) { var f = findAny(kids[i], name, (depth || 0) + 1); if (f) return f; }
+        return null;
+    }
+
+    function findAll(it, name, out, depth) {
+        if (!it || !it.visible || (depth || 0) > 60) return out;
+        if (it.objectName === name) out.push(it);
+        var kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) findAll(kids[i], name, out, (depth || 0) + 1);
+        return out;
+    }
+
+    Overlay {
+        id: overlay
+        Component.onCompleted: { overlay.open("{}"); overlay.showLibrary("providers"); }
+    }
+
+    Timer {
+        interval: 450; repeat: true; running: true
+        onTriggered: {
+            var card = overlay.geometryRoot();
+            root.phase += 1;
+            if (root.phase === 2) {
+                var addBtn = root.find(card, "addProvider");
+                if (addBtn) addBtn.clicked();
+            } else if (root.phase === 3) {
+                var locBtn = root.find(card, "preset-lm-studio");
+                var spBtn = root.find(card, "preset-groq-speech");
+                root.out.localLabel = locBtn ? String(locBtn.text) : "";
+                root.out.hasSpeechPreset = !!spBtn;
+                if (locBtn) locBtn.clicked();
+            } else if (root.phase === 4) {
+                var kLocal = root.find(card, "providerKey");
+                root.out.localKeyVisible = kLocal !== null;
+                var backBtn = root.find(card, "formBack");
+                if (backBtn) backBtn.clicked();
+            } else if (root.phase === 5) {
+                var oaBtn = root.find(card, "preset-openai");
+                if (oaBtn) oaBtn.clicked();
+            } else if (root.phase === 6) {
+                var nf = root.find(card, "providerName");
+                var mf = root.find(card, "providerModel");
+                var ef = root.find(card, "providerEndpoint");
+                var kf = root.find(card, "providerKey");
+                root.out.addPreFill = nf ? (nf.text + "|" + mf.text + "|" + ef.text) : "";
+                root.out.addKeyPassword = kf ? (kf.echoMode === TextInput.Password) : false;
+                root.out.addKeyEmpty = kf ? (kf.text === "") : false;
+                if (nf) nf.text = "My OpenAI";
+                if (kf) kf.text = "sk-smoke-secret-key";
+                var tBtn = root.find(card, "testProvider");
+                if (tBtn) tBtn.clicked();
+            } else if (root.phase === 7) {
+                var tm = root.find(card, "testMessage");
+                root.out.testMsg = tm ? String(tm.text) : "";
+                var sBtn = root.find(card, "saveProvider");
+                if (sBtn) sBtn.clicked();
+            } else if (root.phase === 8) {
+                var cn = root.find(card, "customProviderName");
+                var cm = root.find(card, "customProviderMeta");
+                root.out.savedName = cn ? String(cn.text) : "";
+                root.out.savedMeta = cm ? String(cm.text) : "";
+                var uBtn = root.find(card, "useProvider");
+                if (uBtn) uBtn.clicked();
+            } else if (root.phase === 9) {
+                root.out.usedChat = overlay.chatProvider;
+                root.out.inPicker = overlay.providers.some(function(p) { return p.id === overlay.chatProvider && p.name === "My OpenAI"; });
+                var eBtn = root.find(card, "editProvider");
+                if (eBtn) eBtn.clicked();
+            } else if (root.phase === 10) {
+                var ekf = root.find(card, "providerKey");
+                var enf = root.find(card, "providerName");
+                root.out.editName = enf ? String(enf.text) : "";
+                root.out.editKeyPassword = ekf ? (ekf.echoMode === TextInput.Password) : false;
+                root.out.editKeyEmpty = ekf ? (ekf.text === "") : false;
+                root.out.editKeyPlaceholder = ekf ? String(ekf.placeholderText) : "";
+                if (enf) enf.text = "My OpenAI 2";
+                var esv = root.find(card, "saveProvider");
+                if (esv) esv.clicked();
+            } else if (root.phase === 11) {
+                var cn2 = root.find(card, "customProviderName");
+                root.out.renamed = cn2 ? String(cn2.text) : "";
+                var add2 = root.find(card, "addProvider");
+                if (add2) add2.clicked();
+            } else if (root.phase === 12) {
+                var gb = root.find(card, "preset-groq-speech");
+                if (gb) gb.clicked();
+            } else if (root.phase === 13) {
+                var gn = root.find(card, "providerName");
+                var gk = root.find(card, "providerKey");
+                if (gn) gn.text = "My Groq";
+                if (gk) gk.text = "gk-smoke-secret-key";
+                var gs = root.find(card, "saveProvider");
+                if (gs) gs.clicked();
+            } else if (root.phase === 14) {
+                root.out.rows = root.findAll(card, "customProviderName", []).map(function(n) { return String(n.text); });
+                var uses = root.findAll(card, "useProvider", []);
+                root.out.useTexts = uses.map(function(u) { return String(u.text); });
+                if (uses.length > 1) uses[1].clicked();
+            } else if (root.phase === 15) {
+                root.out.metas = root.findAll(card, "customProviderMeta", []).map(function(n) { return String(n.text); });
+                var rms = root.findAll(card, "removeProvider", []);
+                if (rms.length) rms[0].clicked();
+            } else if (root.phase === 16) {
+                var okBtn = root.find(card, "confirmOk");
+                root.out.confirmShown = !!okBtn;
+                if (okBtn) okBtn.clicked();
+            } else if (root.phase === 17) {
+                root.out.banner = root.find(card, "noticeDismiss") !== null;
+                root.out.afterRemoveRows = root.findAll(card, "customProviderName", []).map(function(n) { return String(n.text); });
+                root.out.afterRemoveChat = overlay.chatProvider;
+                console.log("PRESET " + JSON.stringify(root.out));
+                Qt.quit();
+            }
+        }
+    }
+}
+QML
+ln -sf "$work/harness-preset.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-preset"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/preset.log" &
+fake=$!
+sleep 0.5
+timeout 20 quickshell -p "$work/cfg" > "$work/preset.out" 2> "$work/preset.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/preset.err" "$work/preset.out"; then echo "FAIL (preset): QML errors above" >&2; exit 1; fi
+if grep -q "sk-smoke-secret-key\|gk-smoke-secret-key" "$work/preset.log" "$work/preset.out" "$work/preset.err"; then echo "FAIL (preset): API key leaked to log or output" >&2; exit 1; fi
+python3 - "$work/preset.out" "$work/preset.log" <<'PY'
+import json, sys
+line = next((l for l in open(sys.argv[1], errors="replace") if "PRESET {" in l), None)
+if line is None:
+    sys.exit("FAIL (preset): no PRESET dump")
+d = json.loads(line[line.index("PRESET ") + 7:])
+log = open(sys.argv[2]).read().splitlines()
+bad = []
+if "on this computer" not in d.get("localLabel", ""):
+    bad.append(f"local preset not marked 'on this computer': {d.get('localLabel')!r}")
+if not d.get("hasSpeechPreset"):
+    bad.append("speech preset missing from preset picker")
+if d.get("localKeyVisible") is not False:
+    bad.append("API key field was visible for local preset")
+if d.get("addPreFill") != "OpenAI|gpt-4.1-mini|https://api.openai.com/v1/chat/completions":
+    bad.append(f"unexpected preset prefill: {d.get('addPreFill')!r}")
+if not d.get("addKeyPassword") or not d.get("addKeyEmpty"):
+    bad.append(f"add key field must be password and start empty: {d}")
+if d.get("testMsg") != "Connection successful.":
+    bad.append(f"test connection did not show 'Connection successful.': {d.get('testMsg')!r}")
+if d.get("savedName") != "My OpenAI" or not all(w in d.get("savedMeta", "") for w in ("Chat", "gpt-4.1-mini", "api.openai.com", "key set")):
+    bad.append(f"saved custom row mismatch: name={d.get('savedName')!r} meta={d.get('savedMeta')!r}")
+if not str(d.get("usedChat", "")).startswith("custom-") or not d.get("inPicker"):
+    bad.append(f"Use for chat did not select custom provider: {d}")
+if d.get("editName") != "My OpenAI" or not d.get("editKeyPassword") or not d.get("editKeyEmpty") or "leave empty to keep the saved key" not in d.get("editKeyPlaceholder", "").lower():
+    bad.append(f"edit form key field check failed: {d}")
+if d.get("renamed") != "My OpenAI 2":
+    bad.append(f"saved edit did not rename the row: {d.get('renamed')!r}")
+if d.get("rows") != ["My OpenAI 2", "My Groq"] or d.get("useTexts") != ["Use for chat", "Use for speech"]:
+    bad.append(f"speech provider row missing: {d}")
+if len(d.get("metas", [])) != 2 or "in use for chat" not in d["metas"][0] or "in use for speech" not in d["metas"][1] or "Speech" not in d["metas"][1]:
+    bad.append(f"in-use marks missing: {d.get('metas')}")
+if not d.get("confirmShown") or d.get("rows") is None or d.get("afterRemoveRows") != ["My Groq"] or d.get("afterRemoveChat") != "claude-sub":
+    bad.append(f"remove flow failed: {d}")
+if not d.get("banner"):
+    bad.append("removal notice banner not shown")
+for need in ("presets.list", "providers.test", "providers.add", "settings.set chat_provider", "settings.set speech_provider", "providers.update", "providers.remove"):
+    if need not in log:
+        bad.append(f"daemon log missing {need!r}: {log}")
+if bad:
+    for b in bad:
+        print("FAIL (preset):", b, file=sys.stderr)
+    sys.exit(1)
+print("preset: add -> test -> save -> use for chat -> edit -> remove ok")
+PY
+
+# Nix-fixed chat provider that is a custom one: Use and Remove are off, with the reason
+cat > "$work/harness-fixed.qml" <<'QML'
+import QtQuick
+import Quickshell
+
+ShellRoot {
+    id: root
+    property int phase: 0
+    function find(it, name, depth) {
+        if (!it || !it.visible || (depth || 0) > 60) return null;
+        if (it.objectName === name) return it;
+        var kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) { var f = find(kids[i], name, (depth || 0) + 1); if (f) return f; }
+        return null;
+    }
+    Overlay {
+        id: overlay
+        Component.onCompleted: overlay.open("{}")
+    }
+    Timer {
+        interval: 450; repeat: true; running: true
+        onTriggered: {
+            root.phase += 1;
+            if (root.phase === 3) overlay.showLibrary("providers");   // after the connection: the first load needs it
+            if (root.phase < 8) return;
+            var card = overlay.geometryRoot();
+            var u = root.find(card, "useProvider"), r = root.find(card, "removeProvider"), m = root.find(card, "customProviderMeta");
+            console.log("FIXED " + JSON.stringify({ use: u ? u.enabled : null, remove: r ? r.enabled : null, meta: m ? String(m.text) : "" }));
+            Qt.quit();
+        }
+    }
+}
+QML
+ln -sf "$work/harness-fixed.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-fixed"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/fixed.log" --locked-use &
+fake=$!
+sleep 0.5
+timeout 12 quickshell -p "$work/cfg" > "$work/fixed.out" 2> "$work/fixed.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/fixed.err" "$work/fixed.out"; then echo "FAIL (fixed): QML errors above" >&2; exit 1; fi
+grep -a 'FIXED {"use":false,"remove":false,"meta":".*set in Nix' "$work/fixed.out" > /dev/null || { echo "FAIL (fixed): Use/Remove not disabled with a reason: $(grep -a FIXED "$work/fixed.out")" >&2; exit 1; }
+echo "fixed: a Nix-fixed custom provider cannot be switched or removed"
 echo "smoke ok"
