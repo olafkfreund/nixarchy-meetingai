@@ -282,8 +282,28 @@ commit and reverts alone.
   removal commit and retyped later, so the reviewer's text comparison
   is the real check.
 
-### Step 6 (core/security), 2026-10-29
+### Step 3 (audio/capture), 2026-10-29
 
+- Codex implemented the step. The Opus review found recalled shapes and
+  constants in it, so a fresh Claude coder rewrote those parts from explicit
+  designs (the handoff fallback).
+- Behaviour deviation, monitor rule: a source is a monitor if and only if
+  `monitor_of_sink` or `monitor_source` is a non-empty string. PipeWire on
+  p620 reports `monitor_of_sink: null` for every source, so the brief's rule
+  would have counted every microphone as a monitor.
+- Brief test 12 (`SystemAudio::start(None)`) is replaced by a fake-recorder
+  test, because the real call records on a host with Pulse.
+- `pactl` gets its 2 s timeout in `SystemAudio::start` too (brief decision).
+- The dead device-listing code was removed.
+
+### Owner decision, 2026-10-29: finish #3 without the pre-merge p620 checks
+
+- Owner: "Rewrite remaining lennette-authored code, then relicense MIT —
+  #3 approved." Steps 3, 10 and 11 merge after their reviews without the
+  live recording / live transcript checks on p620; those checks run after
+  the deploy instead (a short recording on Parakeet and Deepgram), and a
+  regression is fixed forward. Step 12 follows once origin-lines is 0.
+### Step 6 (core/security), 2026-10-29
 - agy implemented from the brief; the Opus review found validate, list,
   the atomic write and several texts/names too close to the old code; a
   fresh Claude coder rewrote them from explicit designs (handoff
