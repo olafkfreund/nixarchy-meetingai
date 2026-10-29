@@ -134,3 +134,7 @@ the examples and scripts are standalone. Redeploy p620 from main.
   no longer has) and two more FetchContent tarballs (kaldi-native-fbank
   1.22.4, utf8proc 2.12.0). The version guard also asserts itself against
   a wrong version on every evaluation (the negative test).
+- Step 5a/5b done by the lead, 2026-10-29: the 29 Oct tap
+  (`aec-parakeet-tap.wav`, speakers playing `speech.wav`) replayed with
+  `accuracy_replay --parakeet` on the 1.13.8 library (commit fb778ff) and
+  on the 2.0.1 library: the same 6 lines, byte for byte (diff empty).
