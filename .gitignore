@@ -1,6 +1,31 @@
-.claude/worktrees/
+# Build output
+target/
+result
+result-*
+
+# Dev environments
+.devenv/
+.direnv/
+
+# Local secrets: the example file is the only one tracked
+.env
+.env.*
+!.env.example
+*.key
 # Synthetic key for the old-data test fixture (#3), not a secret.
 !tests/fixtures/old-history/history.db.key
+
+# Editors, OS and logs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+*.log
+
+# Agent worktrees
+.claude/worktrees/
 
 # Accuracy evaluation audio is personal: never commit it (tools/accuracy/README.md).
 tools/accuracy/*.wav

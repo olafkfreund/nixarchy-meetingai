@@ -1,6 +1,11 @@
+[Desktop Entry]
+Type=Application
 Name=Meeting AI
 GenericName=Meeting copilot
 Comment=Live transcripts, answers and notes for your calls
 Exec=nixarchy-meetingai
 Icon=dev.nixarchy.meetingai
 StartupWMClass=dev.nixarchy.meetingai
+Terminal=false
+Categories=AudioVideo;Audio;Recorder;
+Keywords=meeting;transcript;notes;assistant;call;
