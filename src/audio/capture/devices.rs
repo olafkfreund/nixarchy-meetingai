@@ -12,31 +12,46 @@ pub struct Device {
 pub fn parse_sources(json: &str) -> Result<Vec<Device>, String> {
     let entries: Vec<serde_json::Value> =
         serde_json::from_str(json).map_err(|error| format!("invalid source list: {error}"))?;
-    entries
-        .into_iter()
-        .map(|entry| {
-            let name = entry
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "source entry lacks a string name".to_owned())?;
-            let monitor = optional_text(&entry, "monitor_of_sink")?;
-            let label = optional_text(&entry, "description")?
-                .filter(|description| !description.is_empty())
-                .unwrap_or(name);
-            Ok((monitor.is_none()).then(|| Device {
+    let mut found = Vec::new();
+    for entry in &entries {
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "source entry lacks a string name".to_owned())?;
+        optional_text(entry, "monitor_of_sink")?;
+        optional_text(entry, "description")?;
+        if !is_monitor(entry) {
+            found.push(Device {
                 id: name.to_owned(),
-                name: label.to_owned(),
+                name: label(entry, name).to_owned(),
                 is_default: false,
-            }))
-        })
-        .collect::<Result<Vec<_>, String>>()
-        .map(|entries| entries.into_iter().flatten().collect())
+            });
+        }
+    }
+    Ok(found)
 }
 
-fn optional_text<'a>(entry: &'a serde_json::Value, key: &str) -> Result<Option<&'a str>, String> {
+/// A speaker monitor is marked by a non-empty `monitor_of_sink` or `monitor_source` text.
+pub(crate) fn is_monitor(entry: &serde_json::Value) -> bool {
+    ["monitor_of_sink", "monitor_source"].iter().any(|key| {
+        entry
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    })
+}
+
+/// Display name of a source entry: its description, or `id` when that is missing or empty.
+pub(crate) fn label<'a>(entry: &'a serde_json::Value, id: &'a str) -> &'a str {
+    match entry.get("description").and_then(serde_json::Value::as_str) {
+        Some(description) if !description.is_empty() => description,
+        _ => id,
+    }
+}
+
+fn optional_text(entry: &serde_json::Value, key: &str) -> Result<(), String> {
     match entry.get(key) {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(value)) => Ok(Some(value)),
+        None | Some(serde_json::Value::Null | serde_json::Value::String(_)) => Ok(()),
         Some(_) => Err(format!("source field {key} must be text or null")),
     }
 }
@@ -105,8 +120,23 @@ mod tests {
                 .iter()
                 .map(|item| item.name.as_str())
                 .collect::<Vec<_>>(),
-            ["larch.in", "elm.in", "oak.monitor"]
+            ["larch.in", "elm.in"]
         );
+    }
+
+    #[test]
+    fn pipewire_listing_keeps_the_mic_and_drops_the_speaker_monitor() {
+        let input = r#"[
+          {"index":41,"name":"alsa_input.usb-Fennel_Desk_Mic-00.analog-stereo","description":"Fennel Desk Mic Analog Stereo","monitor_of_sink":null,"monitor_of_sink_name":null,"monitor_source":"","state":"SUSPENDED"},
+          {"index":42,"name":"alsa_output.pci-0000_0c_00.1.hdmi-stereo.monitor","description":"Monitor of Quince HDMI Output","monitor_of_sink":null,"monitor_source":"alsa_output.pci-0000_0c_00.1.hdmi-stereo","state":"RUNNING"}
+        ]"#;
+        let found = parse_sources(input).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].id,
+            "alsa_input.usb-Fennel_Desk_Mic-00.analog-stereo"
+        );
+        assert_eq!(found[0].name, "Fennel Desk Mic Analog Stereo");
     }
 
     #[test]

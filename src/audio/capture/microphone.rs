@@ -1,7 +1,7 @@
 //! Opens a microphone through Pulse or CPAL and stores short 16 kHz mono chunks.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -29,6 +29,7 @@ pub enum AudioError {
     NotRunning,
 }
 
+/// Bounded FIFO of mono samples; the oldest ones are evicted when it is full.
 pub(crate) struct SampleQueue {
     data: VecDeque<f32>,
     capacity: usize,
@@ -43,32 +44,61 @@ impl SampleQueue {
             dropped: 0,
         }
     }
+
+    /// Append `samples`, evicting just enough of the oldest data to stay in bounds.
     pub(crate) fn push(&mut self, samples: &[f32]) {
-        for &sample in samples {
-            if self.data.len() == self.capacity {
-                self.data.pop_front();
-                self.dropped += 1;
-            }
-            if self.capacity > 0 {
-                self.data.push_back(sample);
-            }
-        }
+        let len = self.data.len();
+        let n = samples.len();
+        let overflow = (len + n).saturating_sub(self.capacity);
+        self.data.drain(..overflow.min(len));
+        self.dropped += overflow as u64;
+        self.data.extend(&samples[n - n.min(self.capacity)..]);
     }
+
     pub(crate) fn take(&mut self, limit: usize) -> Vec<f32> {
         self.data.drain(..limit.min(self.data.len())).collect()
     }
+
+    /// `take` through a shared queue; a poisoned lock yields nothing.
+    pub(crate) fn take_from(queue: &Mutex<Self>, limit: usize) -> Vec<f32> {
+        queue
+            .lock()
+            .map(|mut queue| queue.take(limit))
+            .unwrap_or_default()
+    }
+
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped
     }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 }
 
+/// How long `start` waits for the CPAL worker to report before giving up.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(7);
+
+/// Hand-over state between `start` and the thread that owns the CPAL stream.
+enum Phase {
+    Starting,
+    /// The stream is playing on the named device.
+    Live(String),
+    Failed(AudioError),
+    /// Set by the owner of the handle; the worker then drops the stream.
+    Stop,
+}
+
+type Gate = Arc<(Mutex<Phase>, Condvar)>;
+
+fn lock_phase(gate: &Gate) -> MutexGuard<'_, Phase> {
+    gate.0.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 enum Capture {
     Pulse(SystemAudio),
     Cpal {
-        stop: mpsc::Sender<()>,
+        gate: Gate,
         worker: Option<JoinHandle<()>>,
         samples: Arc<Mutex<SampleQueue>>,
         failure: Arc<Mutex<Option<String>>>,
@@ -110,46 +140,74 @@ impl Microphone {
                 let bypassed = explicit && sources.iter().any(|name| name == ECHO_CANCEL_SOURCE);
                 let samples = Arc::new(Mutex::new(SampleQueue::new(SAMPLE_RATE as usize * 2)));
                 let failure = Arc::new(Mutex::new(None));
-                let (stop, receiver) = mpsc::channel();
-                let (report, startup) = mpsc::sync_channel(1);
-                let queue = Arc::clone(&samples);
-                let errors = Arc::clone(&failure);
-                let worker = thread::spawn(move || {
-                    let result = open_cpal(requested.as_deref(), queue, errors);
-                    match result {
-                        Ok((stream, name)) => {
-                            if report.send(Ok(name)).is_ok() {
-                                let _ = receiver.recv();
+                let gate: Gate = Arc::new((Mutex::new(Phase::Starting), Condvar::new()));
+                let worker = {
+                    let (gate, samples, failure) = (
+                        Arc::clone(&gate),
+                        Arc::clone(&samples),
+                        Arc::clone(&failure),
+                    );
+                    thread::spawn(move || {
+                        let opened = open_cpal(requested.as_deref(), samples, failure);
+                        let mut phase = lock_phase(&gate);
+                        if matches!(*phase, Phase::Stop) {
+                            return; // start gave up; the stream is dropped here
+                        }
+                        match opened {
+                            Ok((stream, name)) => {
+                                *phase = Phase::Live(name);
+                                gate.1.notify_all();
+                                while !matches!(*phase, Phase::Stop) {
+                                    phase =
+                                        gate.1.wait(phase).unwrap_or_else(PoisonError::into_inner);
+                                }
+                                drop(phase);
+                                drop(stream);
                             }
-                            drop(stream);
+                            Err(error) => {
+                                *phase = Phase::Failed(error);
+                                gate.1.notify_all();
+                            }
                         }
-                        Err(error) => {
-                            let _ = report.send(Err(error));
+                    })
+                };
+                let name = {
+                    let guard = lock_phase(&gate);
+                    let (mut phase, _) = gate
+                        .1
+                        .wait_timeout_while(guard, STARTUP_TIMEOUT, |p| {
+                            matches!(p, Phase::Starting)
+                        })
+                        .unwrap_or_else(PoisonError::into_inner);
+                    match std::mem::replace(&mut *phase, Phase::Stop) {
+                        Phase::Live(name) => {
+                            *phase = Phase::Live(name.clone());
+                            name
+                        }
+                        Phase::Failed(error) => {
+                            drop(phase);
+                            let _ = worker.join();
+                            return Err(error);
+                        }
+                        _ => {
+                            drop(phase);
+                            gate.1.notify_all();
+                            return Err(AudioError::Startup(
+                                "the input stream did not report within 7 seconds".into(),
+                            ));
                         }
                     }
-                });
-                match startup.recv_timeout(Duration::from_secs(5)) {
-                    Ok(Ok(name)) => Ok(Self {
-                        capture: Capture::Cpal {
-                            stop,
-                            worker: Some(worker),
-                            samples,
-                            failure,
-                        },
-                        name,
-                        bypassed,
-                    }),
-                    Ok(Err(error)) => {
-                        let _ = worker.join();
-                        Err(error)
-                    }
-                    Err(_) => {
-                        let _ = stop.send(());
-                        Err(AudioError::Startup(
-                            "microphone startup exceeded five seconds".into(),
-                        ))
-                    }
-                }
+                };
+                Ok(Self {
+                    capture: Capture::Cpal {
+                        gate,
+                        worker: Some(worker),
+                        samples,
+                        failure,
+                    },
+                    name,
+                    bypassed,
+                })
             }
         }
     }
@@ -166,10 +224,7 @@ impl Microphone {
     pub fn take(&self, limit: usize) -> Vec<f32> {
         match &self.capture {
             Capture::Pulse(handle) => handle.take(limit),
-            Capture::Cpal { samples, .. } => samples
-                .lock()
-                .map(|mut queue| queue.take(limit))
-                .unwrap_or_default(),
+            Capture::Cpal { samples, .. } => SampleQueue::take_from(samples, limit),
         }
     }
     /// Count samples displaced by newer audio.
@@ -208,11 +263,41 @@ impl Microphone {
 
 impl Drop for Microphone {
     fn drop(&mut self) {
-        if let Capture::Cpal { stop, worker, .. } = &mut self.capture {
-            let _ = stop.send(());
+        if let Capture::Cpal { gate, worker, .. } = &mut self.capture {
+            *lock_phase(gate) = Phase::Stop;
+            gate.1.notify_all();
             if let Some(worker) = worker.take() {
                 let _ = worker.join();
             }
+        }
+    }
+}
+
+/// The input device whose description name is exactly `wanted`, if any.
+fn input_named(host: &cpal::Host, wanted: &str) -> Result<Option<cpal::Device>, AudioError> {
+    let devices = host
+        .input_devices()
+        .map_err(|error| AudioError::Config(error.to_string()))?;
+    for device in devices {
+        if let Ok(d) = device.description()
+            && d.name() == wanted
+        {
+            return Ok(Some(device));
+        }
+    }
+    Ok(None)
+}
+
+/// Average each whole `ch`-sample frame of `input` into `mono` (a partial tail is dropped).
+fn downmix<T: Copy>(input: &[T], ch: usize, convert: impl Fn(T) -> f32, mono: &mut Vec<f32>) {
+    mono.clear();
+    let inv_channels = 1.0 / ch as f32;
+    let mut acc = 0.0;
+    for (i, &sample) in input.iter().enumerate() {
+        acc += convert(sample);
+        if (i + 1) % ch == 0 {
+            mono.push(acc * inv_channels);
+            acc = 0.0;
         }
     }
 }
@@ -222,6 +307,7 @@ fn open_cpal(
     samples: Arc<Mutex<SampleQueue>>,
     failure: Arc<Mutex<Option<String>>>,
 ) -> Result<(cpal::Stream, String), AudioError> {
+    use cpal::SampleFormat::{F32, I16, I32, U16};
     let host = cpal::default_host();
     let device = match requested {
         None => host.default_input_device().ok_or(AudioError::NoDevice)?,
@@ -235,14 +321,7 @@ fn open_cpal(
         }
         Some(name) => {
             let name = name.strip_prefix("cpal:").unwrap_or(name);
-            host.input_devices()
-                .map_err(|error| AudioError::Config(error.to_string()))?
-                .find(|device| {
-                    device
-                        .description()
-                        .is_ok_and(|description| description.name() == name)
-                })
-                .ok_or_else(|| AudioError::DeviceMissing(name.to_owned()))?
+            input_named(&host, name)?.ok_or_else(|| AudioError::DeviceMissing(name.to_owned()))?
         }
     };
     let name = device
@@ -253,76 +332,41 @@ fn open_cpal(
         .default_input_config()
         .map_err(|error| AudioError::Config(error.to_string()))?;
     let format = supported.sample_format();
+    if !matches!(format, F32 | I16 | U16 | I32) {
+        return Err(AudioError::Format(format.to_string()));
+    }
     let config = supported.config();
-    let channels = usize::from(config.channels);
-    let rate = config.sample_rate;
-    let stream = match format {
-        cpal::SampleFormat::F32 => build_stream(
-            &device,
-            config,
-            channels,
-            rate,
-            samples,
-            failure,
-            |value: f32| value,
-        ),
-        cpal::SampleFormat::I16 => build_stream(
-            &device,
-            config,
-            channels,
-            rate,
-            samples,
-            failure,
-            |value: i16| f32::from(value) / 32768.0,
-        ),
-        cpal::SampleFormat::U16 => build_stream(
-            &device,
-            config,
-            channels,
-            rate,
-            samples,
-            failure,
-            |value: u16| (f32::from(value) - 32768.0) / 32768.0,
-        ),
-        cpal::SampleFormat::I32 => build_stream(
-            &device,
-            config,
-            channels,
-            rate,
-            samples,
-            failure,
-            |value: i32| value as f32 / 2147483648.0,
-        ),
-        other => return Err(AudioError::Format(other.to_string())),
-    }?;
-    stream
-        .play()
-        .map_err(|error| AudioError::Startup(error.to_string()))?;
-    Ok((stream, name))
-}
-
-fn build_stream<T: cpal::SizedSample + Copy + Send + 'static>(
-    device: &cpal::Device,
-    config: cpal::StreamConfig,
-    channels: usize,
-    rate: u32,
-    samples: Arc<Mutex<SampleQueue>>,
-    failure: Arc<Mutex<Option<String>>>,
-    convert: fn(T) -> f32,
-) -> Result<cpal::Stream, AudioError> {
-    let mut resampler = LinearResampler::new(rate);
+    let channels = usize::from(config.channels).max(1);
+    let mut resampler = LinearResampler::new(config.sample_rate);
     let mut mono = Vec::with_capacity(4096);
     let mut output = Vec::with_capacity(4096);
-    device
-        .build_input_stream(
+    let stream = device
+        .build_input_stream_raw(
             config,
-            move |input: &[T], _| {
-                mono.clear();
-                for frame in input.chunks_exact(channels.max(1)) {
-                    mono.push(
-                        frame.iter().map(|sample| convert(*sample)).sum::<f32>()
-                            / channels.max(1) as f32,
-                    );
+            format,
+            move |data, _| {
+                let mixed = match data.sample_format() {
+                    F32 => data
+                        .as_slice::<f32>()
+                        .map(|s| downmix(s, channels, |v| v, &mut mono)),
+                    I16 => data
+                        .as_slice::<i16>()
+                        .map(|s| downmix(s, channels, |v| f32::from(v) / 32768.0, &mut mono)),
+                    U16 => data.as_slice::<u16>().map(|s| {
+                        downmix(
+                            s,
+                            channels,
+                            |v| (f32::from(v) - 32768.0) / 32768.0,
+                            &mut mono,
+                        )
+                    }),
+                    I32 => data
+                        .as_slice::<i32>()
+                        .map(|s| downmix(s, channels, |v| v as f32 / 2147483648.0, &mut mono)),
+                    _ => None,
+                };
+                if mixed.is_none() {
+                    return;
                 }
                 resampler.process_into(&mono, &mut output);
                 if let Ok(mut queue) = samples.lock() {
@@ -344,8 +388,13 @@ fn build_stream<T: cpal::SizedSample + Copy + Send + 'static>(
             },
             Some(Duration::from_secs(4)),
         )
-        .map_err(|error| AudioError::Startup(error.to_string()))
+        .map_err(|error| AudioError::Startup(error.to_string()))?;
+    stream
+        .play()
+        .map_err(|error| AudioError::Startup(error.to_string()))?;
+    Ok((stream, name))
 }
+
 /// The echo-cancelled virtual source written by the Home Manager module.
 const ECHO_CANCEL_SOURCE: &str = "meetingai-echo-cancel-source";
 
@@ -444,6 +493,30 @@ mod tests {
         assert!(
             matches!(Microphone::start(Some(name)), Err(AudioError::DeviceMissing(found)) if found == name)
         );
+    }
+
+    #[test]
+    fn queue_push_over_existing_content_drops_exactly_the_overflow() {
+        let mut queue = SampleQueue::new(5);
+        queue.push(&[1.0, 2.0, 3.0]);
+        queue.push(&[4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(queue.dropped(), 2);
+        assert_eq!(queue.take(99), [3.0, 4.0, 5.0, 6.0, 7.0]);
+        queue.push(&[0.0; 9]);
+        assert_eq!(queue.dropped(), 6);
+        assert_eq!(queue.take(99).len(), 5);
+        let shared = Mutex::new(SampleQueue::new(3));
+        shared.lock().unwrap().push(&[1.0, 2.0]);
+        assert_eq!(SampleQueue::take_from(&shared, 1), [1.0]);
+    }
+
+    #[test]
+    fn downmix_averages_whole_frames_and_drops_a_partial_tail() {
+        let mut mono = vec![9.0];
+        downmix(&[1.0_f32, 3.0, 2.0, 4.0, 8.0], 2, |v| v, &mut mono);
+        assert_eq!(mono, [2.0, 3.0]);
+        downmix(&[5_i16, 7], 1, f32::from, &mut mono);
+        assert_eq!(mono, [5.0, 7.0]);
     }
 
     #[test]
