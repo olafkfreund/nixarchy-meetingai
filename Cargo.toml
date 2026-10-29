@@ -4,7 +4,7 @@ version = "0.18.23"
 edition = "2024"
 rust-version = "1.99"
 description = "Ambient meeting copilot daemon: live transcripts, answers and recaps"
-license = "AGPL-3.0-or-later"
+license = "MIT"
 authors = ["nixarchy-meetingai contributors"]
 
 [dependencies]
