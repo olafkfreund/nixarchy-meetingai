@@ -1,8 +1,7 @@
-//! Encrypted vault and credential management.
+//! Credential storage and the encryption key vault.
 
 pub mod credentials;
 pub(crate) mod files;
-pub mod provider_import;
 pub mod vault;
 
 pub use credentials::*;

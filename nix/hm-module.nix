@@ -10,24 +10,18 @@ self: inputs:
 let
   cfg = config.programs.nixarchy-meetingai;
   sys = pkgs.stdenv.hostPlatform.system;
-  modelFile = "${cfg.whisper.model}/ggml-${cfg.whisper.model.modelName}.bin";
   bin = lib.getExe cfg.package;
-  # The daemon dials 127.0.0.1 (or ::1) when the server listens on every address; IPv6 gets brackets.
-  daemonHost =
-    {
-      "0.0.0.0" = "127.0.0.1";
-      "::" = "::1";
-    }
-    .${cfg.whisper.host} or cfg.whisper.host;
-  whisperAddr =
-    (if lib.hasInfix ":" daemonHost && !lib.hasPrefix "[" daemonHost then "[${daemonHost}]" else daemonHost)
-    + ":${toString cfg.whisper.port}";
-  # systemd expands % and $ in ExecStart words.
-  unitEscape = lib.replaceStrings [ "%" "$" ] [ "%%" "$$" ];
   # The app only offers an Ollama at https, or http on loopback (see endpoint_allowed in the daemon).
-  ollamaUrlOk = lib.match "(https://.*|http://(localhost|127\\.0\\.0\\.1|[[]::1[]])(:[0-9]+)?(/.*)?)" (
-    lib.toLower cfg.ollama.url
-  ) != null;
+  ollamaUrlOk =
+    lib.match "(https://.*|http://(localhost|127\\.0\\.0\\.1|[[]::1[]])(:[0-9]+)?(/.*)?)" (
+      lib.toLower cfg.ollama.url
+    ) != null;
+  speechBaseUrlOk =
+    cfg.settings.speechBaseUrl == null
+    ||
+      lib.match "(https://.*|http://(localhost|127\\.0\\.0\\.1|[[]::1[]])(:[0-9]+)?(/.*)?)" (
+        lib.toLower cfg.settings.speechBaseUrl
+      ) != null;
 
   # nixarchy (when imported) installs plugins; without it the plugin goes to omarchy's folder.
   hasPlugins = lib.hasAttrByPath [ "programs" "nixarchy" "plugins" ] options;
@@ -63,6 +57,8 @@ let
     speech_provider = speechProvider;
     speech_model = speechModel;
     speech_language = speechLanguage;
+    speech_base_url = speechBaseUrl;
+    deepgram_region = cfg.deepgram.region;
     text_scale = textScale;
     reduce_motion = reduceMotion;
     mcp_allow_record = mcpAllowRecord;
@@ -81,10 +77,13 @@ let
     "RUST_LOG=nixarchy_meetingai=${cfg.logLevel}"
   ]
   ++ [ "NIXARCHY_MEETINGAI_OLLAMA_URL=${cfg.ollama.url}" ]
-  ++ lib.optional cfg.whisper.enable "NIXARCHY_MEETINGAI_WHISPER_URL=http://${whisperAddr}"
+  ++ lib.optional cfg.parakeet.enable "NIXARCHY_MEETINGAI_PARAKEET_DIR=${cfg.parakeet.model}"
   ++ lib.optional (
     cfg.ollamaCloud.keyFile != null
   ) "NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE=${cfg.ollamaCloud.keyFile}"
+  ++ lib.optional (
+    cfg.deepgram.keyFile != null
+  ) "NIXARCHY_MEETINGAI_DEEPGRAM_KEY_FILE=${cfg.deepgram.keyFile}"
   ++ lib.mapAttrsToList (n: v: "${n}=${v}") cfg.extraEnvironment;
 
   # option name -> [ description command ]
@@ -123,6 +122,12 @@ let
     "  o.bind(${builtins.toJSON key}, ${builtins.toJSON (builtins.elemAt spec 0)}, ${builtins.toJSON (builtins.elemAt spec 1)})";
 in
 {
+  imports = map (
+    name:
+    lib.mkRemovedOptionModule [ "programs" "nixarchy-meetingai" "whisper" name ]
+      "whisper.cpp was replaced by Parakeet (in-process); see programs.nixarchy-meetingai.parakeet.* — or use settings.speechProvider = \"openai-compatible-stt\" with your own server (settings.speechBaseUrl), or Deepgram (deepgram.keyFile)."
+  ) [ "enable" "host" "port" "threads" "extraArgs" "model" "package" ];
+
   options.programs.nixarchy-meetingai = {
     enable = lib.mkEnableOption "the nixarchy-meetingai daemon, its Quickshell plugin and local speech-to-text";
 
@@ -160,48 +165,17 @@ in
       description = "Extra environment for the daemon service. Never put secrets here: it lands in the Nix store.";
     };
 
-    whisper = {
-      enable = lib.mkOption {
-        type = lib.types.bool;
-        default = true;
-        description = "Run the local whisper.cpp server. Turn off when using Deepgram only.";
-      };
-      host = lib.mkOption {
-        type = lib.types.str;
-        default = "127.0.0.1";
-        description = ''
-          Listen address of the whisper server (keep it on loopback). The daemon is told 127.0.0.1
-          when this is `0.0.0.0` and `::1` when it is `::`; an IPv6 address is bracketed in its URL.
-        '';
-      };
-      port = lib.mkOption {
-        type = lib.types.port;
-        default = 8178;
-        description = "Port of the whisper server; the daemon is told the same address.";
-      };
-      threads = lib.mkOption {
-        type = lib.types.nullOr lib.types.ints.positive;
-        default = null;
-        description = "Threads for the whisper server (`-t`); null leaves the default.";
-      };
-      extraArgs = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        default = [ ];
-        description = "Extra `whisper-server` flags.";
-      };
-      model = lib.mkOption {
-        type = lib.types.package;
-        # Default per docs/whisper-bench.md; built here, not via flake packages.
-        default = (pkgs.callPackage ./whisper-model.nix { })."large-v3-turbo";
-        defaultText = lib.literalExpression ''(pkgs.callPackage ./whisper-model.nix { })."large-v3-turbo"'';
-        description = "A whisper.cpp model package (one with `passthru.modelName`).";
-      };
-      package = lib.mkOption {
-        type = lib.types.package;
-        default = pkgs.whisper-cpp-vulkan;
-        defaultText = lib.literalExpression "pkgs.whisper-cpp-vulkan";
-        description = "whisper.cpp build providing `whisper-server`.";
-      };
+    parakeet.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Give the daemon the local Parakeet speech model (640 MB in the closure). Turn off only for Deepgram or OpenAI-compatible setups; the daemon then reports Parakeet as not ready.";
+    };
+
+    parakeet.model = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.callPackage ./parakeet-model.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./nix/parakeet-model.nix { }";
+      description = "The Parakeet speech model for `speechProvider = \"parakeet-local\"`: a directory with `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt` (NVIDIA Parakeet TDT 0.6B v3, CC-BY-4.0). The daemon gets it as `NIXARCHY_MEETINGAI_PARAKEET_DIR`. Once Parakeet has been used the model stays loaded (about 1.1 GB RAM) while the daemon runs.";
     };
 
     ollamaCloud.environmentFile = lib.mkOption {
@@ -225,6 +199,24 @@ in
         store; a missing file just means no key (logged once at warn). It wins over `environmentFile`
         and the key added in the app; do not set both options.
       '';
+    };
+
+    deepgram.keyFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/run/agenix/deepgram";
+      description = "Path to a Deepgram key file, read by the daemon at runtime. A vault key takes precedence.";
+    };
+
+    deepgram.region = lib.mkOption {
+      type = lib.types.nullOr (
+        lib.types.enum [
+          "us"
+          "eu"
+        ]
+      );
+      default = null;
+      description = "Deepgram API region; EU requests opt out of model improvement.";
     };
 
     ollama.url = lib.mkOption {
@@ -251,9 +243,10 @@ in
       smartFollowUps = nullable bool "Suggest follow-up questions.";
       autoRecordOnCall = nullable bool "Start recording when a call begins.";
       calendarEnabled = nullable bool "Name sessions from the calendar (read-only, through `gog`; off by default).";
-      speechProvider = nullable str "Speech-to-text provider (`whisper-local` or `deepgram-stt`).";
+      speechProvider = nullable str "Speech-to-text provider (`parakeet-local` (the default), `deepgram-stt`, or `openai-compatible-stt`).";
       speechModel = nullable str "Speech-to-text model.";
       speechLanguage = nullable str "Speech language code; empty detects it.";
+      speechBaseUrl = nullable str "Base URL for OpenAI-compatible speech; must be set for that provider.";
       textScale = nullable (lib.types.ints.between 80 160) "Overlay text size in percent.";
       reduceMotion = nullable bool "Reduce motion.";
       mcpAllowRecord = nullable bool "Let MCP clients start recording.";
@@ -290,6 +283,28 @@ in
       '';
     };
 
+    skills.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Link the `meetingai` agent skill into {file}`~/.claude/skills`, {file}`~/.agents/skills` (Codex)
+        and {file}`~/.gemini/antigravity/skills` (agy), so they can read your meetings through `ctl`.
+        Existing files at those paths make activation fail.
+      '';
+    };
+
+    echoCancel.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Load PipeWire's WebRTC echo canceller with the default sink's monitor as the reference and
+        expose the result as the `meetingai-echo-cancel-source` source, which the daemon records as the
+        microphone when present. The system default source is not changed.
+        It takes effect after PipeWire restarts or at the next login
+        (`systemctl --user restart pipewire pipewire-pulse wireplumber`).
+      '';
+    };
+
     callDetection.enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -320,8 +335,12 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = cfg.whisper.enable || cfg.settings.speechProvider != "whisper-local";
-        message = "programs.nixarchy-meetingai: settings.speechProvider = \"whisper-local\" needs whisper.enable = true.";
+        assertion = cfg.settings.speechProvider != "whisper-local";
+        message = "programs.nixarchy-meetingai: settings.speechProvider = \"whisper-local\" was removed: whisper.cpp was replaced by Parakeet (in-process). Use \"parakeet-local\", \"deepgram-stt\" or \"openai-compatible-stt\".";
+      }
+      {
+        assertion = cfg.parakeet.enable || (cfg.settings.speechProvider != null && cfg.settings.speechProvider != "parakeet-local");
+        message = "programs.nixarchy-meetingai: parakeet.enable = false needs settings.speechProvider = \"deepgram-stt\" or \"openai-compatible-stt\" (the default provider is parakeet-local).";
       }
       {
         assertion = !(cfg.settings.extra ? api_key);
@@ -332,6 +351,10 @@ in
         message = "programs.nixarchy-meetingai: ollama.url must be https, or http on localhost, 127.0.0.1 or [::1].";
       }
       {
+        assertion = speechBaseUrlOk;
+        message = "programs.nixarchy-meetingai: settings.speechBaseUrl must be https, or http on localhost, 127.0.0.1 or [::1].";
+      }
+      {
         assertion = cfg.ollamaCloud.keyFile == null || cfg.ollamaCloud.environmentFile == null;
         message = "programs.nixarchy-meetingai: set only one of ollamaCloud.keyFile and ollamaCloud.environmentFile.";
       }
@@ -339,12 +362,49 @@ in
 
     home.packages = [ cfg.package ];
 
+    home.file = lib.mkIf cfg.skills.enable (
+      lib.genAttrs [
+        ".claude/skills/meetingai"
+        ".agents/skills/meetingai"
+        ".gemini/antigravity/skills/meetingai"
+      ] (_: { source = "${cfg.package}/share/nixarchy-meetingai/skills/meetingai"; })
+    );
+
     xdg.configFile = lib.mkMerge [
       (lib.mkIf (cfg.plugin.enable && !hasPlugins) {
         "omarchy/plugins/nixarchy.meetingai".source = plugin;
       })
       (lib.mkIf (settingValues != { }) {
         "nixarchy-meetingai/settings.json".text = settingsFile;
+      })
+      (lib.mkIf cfg.echoCancel.enable {
+        "pipewire/pipewire.conf.d/60-meetingai-echo-cancel.conf".text = ''
+          # Generated by programs.nixarchy-meetingai. Edits are overwritten.
+          context.modules = [
+            {
+              name = libpipewire-module-echo-cancel
+              # A missing or failing module must never stop PipeWire at login.
+              flags = [ ifexists nofail ]
+              args = {
+                library.name = aec/libspa-aec-webrtc
+                # The default sink's monitor is the reference; the capture side follows the default source.
+                monitor.mode = true
+                capture.props = {
+                  node.name = "meetingai-echo-cancel-capture"
+                }
+                source.props = {
+                  node.name = "meetingai-echo-cancel-source"
+                  node.description = "Meeting AI echo-cancelled mic"
+                }
+                # The module always makes a sink too; name it so it is recognisable in the sound menu.
+                sink.props = {
+                  node.name = "meetingai-echo-cancel-sink"
+                  node.description = "Meeting AI echo canceller (not an output)"
+                }
+              }
+            }
+          ]
+        '';
       })
       {
         "hypr/meetingai-binds.lua".text = ''
@@ -362,7 +422,9 @@ in
       nixarchy.plugins = lib.mkMerge [
         (lib.mkIf cfg.plugin.enable { "nixarchy.meetingai".src = plugin; })
         # Keyed by the id in its manifest, as owners declare it; mkDefault lets their entry win, so it is never added twice.
-        (lib.mkIf cfg.callDetection.enable { "nixarchy.meeting-mode".src = lib.mkDefault callDetectionPlugin; })
+        (lib.mkIf cfg.callDetection.enable {
+          "nixarchy.meeting-mode".src = lib.mkDefault callDetectionPlugin;
+        })
       ];
     };
 
@@ -370,17 +432,12 @@ in
       nixarchy-meetingai = {
         Unit = {
           Description = "nixarchy-meetingai daemon";
-          # autostart = false must not leave speech-to-text off.
-          Wants = lib.optional cfg.whisper.enable "nixarchy-meetingai-whisper.service";
           # A rebuild with other settings or environment restarts the daemon.
           X-Restart-Triggers = [
             (pkgs.writeText "nixarchy-meetingai-settings.json" settingsFile)
             (builtins.toJSON daemonEnv)
           ];
-          After = [
-            "graphical-session.target"
-            "nixarchy-meetingai-whisper.service"
-          ];
+          After = [ "graphical-session.target" ];
           PartOf = [ "graphical-session.target" ];
         };
         Service = {
@@ -395,32 +452,6 @@ in
           EnvironmentFile = [ "-${cfg.ollamaCloud.environmentFile}" ];
         };
         Install.WantedBy = lib.optional cfg.autostart "graphical-session.target";
-      };
-    }
-    // lib.optionalAttrs cfg.whisper.enable {
-      nixarchy-meetingai-whisper = {
-        Unit.Description = "whisper.cpp server for nixarchy-meetingai";
-        Service = {
-          ExecStart = lib.escapeShellArgs (
-            [
-              "${cfg.whisper.package}/bin/whisper-server"
-              "-m"
-              modelFile
-              "--host"
-              cfg.whisper.host
-              "--port"
-              (toString cfg.whisper.port)
-            ]
-            ++ lib.optionals (cfg.whisper.threads != null) [
-              "-t"
-              (toString cfg.whisper.threads)
-            ]
-            ++ map unitEscape cfg.whisper.extraArgs
-          );
-          Restart = "on-failure";
-          RestartSec = 2;
-        };
-        Install.WantedBy = lib.optional cfg.autostart "default.target";
       };
     };
   };

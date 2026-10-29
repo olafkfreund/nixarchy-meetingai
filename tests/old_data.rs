@@ -54,6 +54,32 @@ fn shape(c: &Connection) -> Vec<String> {
                 .map(Result::unwrap)
                 .collect();
             out.push(format!("table {name} {}", cols.join(",")));
+            // Foreign keys and UNIQUE/PRIMARY KEY constraints do not show in table_info.
+            let mut keys = c
+                .prepare(
+                    "SELECT \"table\" || '.' || \"from\" || '>' || coalesce(\"to\", '') || ':' || on_update || ':' || on_delete
+                     FROM pragma_foreign_key_list(?1) ORDER BY 1",
+                )
+                .unwrap();
+            let fks: Vec<String> = keys
+                .query_map([&name], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            out.push(format!("fk {name} {}", fks.join(",")));
+            let mut uniques = c
+                .prepare(
+                    "SELECT l.\"unique\" || l.origin || ':' || group_concat(i.name, '+')
+                     FROM pragma_index_list(?1) l, pragma_index_info(l.name) i
+                     WHERE l.origin != 'c' GROUP BY l.name ORDER BY 1",
+                )
+                .unwrap();
+            let keys: Vec<String> = uniques
+                .query_map([&name], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            out.push(format!("keys {name} {}", keys.join(",")));
         } else {
             out.push(format!(
                 "{kind} {name} {}",
@@ -291,4 +317,40 @@ fn write_fixture() {
     c.execute_batch("DETACH DATABASE plaintext").unwrap();
     drop(db);
     let _ = std::fs::remove_file(format!("{}.open.lock", path.display()));
+}
+
+const VAULT_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/old-vault");
+// Dummy values only: the fixture is committed.
+const VAULT_KEY: &str = "fixture-not-a-real-key-0001";
+
+/// A vault written before rewrite step 6 still opens and gives its credentials back.
+#[test]
+fn old_vault_reads_back() {
+    use nixarchy_meetingai::core::security::{Kind, Vault, credentials};
+    let dir = std::env::temp_dir().join(format!("nm-old-vault-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    for name in ["vault.bin", "vault.key"] {
+        std::fs::copy(Path::new(VAULT_FIXTURE).join(name), dir.join(name)).unwrap();
+    }
+    let vault = Vault::open(&dir).unwrap();
+    let speech = credentials::load(&vault, Kind::Speech, "deepgram-stt")
+        .unwrap()
+        .unwrap();
+    assert_eq!(speech.api_key, VAULT_KEY);
+    let all = credentials::list(&vault, Kind::Speech).unwrap();
+    assert_eq!(all.len(), 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+#[ignore]
+fn write_vault_fixture() {
+    use nixarchy_meetingai::core::security::{Credential, Vault, credentials};
+    if std::env::var_os("OLD_DATA_WRITE").is_none() {
+        return;
+    }
+    let dir = Path::new(VAULT_FIXTURE);
+    let _ = std::fs::remove_dir_all(dir);
+    let vault = Vault::open(dir).unwrap();
+    credentials::save(&vault, &Credential::speech("deepgram-stt", VAULT_KEY)).unwrap();
 }

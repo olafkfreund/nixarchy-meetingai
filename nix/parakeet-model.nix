@@ -32,7 +32,6 @@ let
     ''
       mkdir -p $out
       tar -xjf $src --strip-components=1 -C $out
-      rm -rf $out/test_wavs
     '';
 in
 self

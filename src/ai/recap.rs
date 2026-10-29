@@ -3,20 +3,18 @@
 //! While recording, `maybe_chunk` summarises each new slice of final lines into
 //! `meeting_note_chunks`. `generate` summarises what is left, then consolidates
 //! every chunk into the recap, so a 3-hour meeting never needs one giant prompt.
-use crate::{
-    ai::{engine, guard, providers::ProviderConfig},
-    core::{
-        domain::Message,
-        settings::{MeetingMode, Settings},
-    },
-    db::{
-        Database,
-        items::{self, ItemRecord, NewItem, Scope},
-        meetings::{self, LineRecord, NoteChunk},
-        repos::candidates,
-    },
-    speech::stt::filter::{similarity, tokens},
+use crate::ai::{engine, guard, providers::ProviderConfig};
+use crate::core::{
+    domain::Message,
+    settings::{MeetingMode, Settings},
 };
+use crate::db::{
+    Database,
+    items::{self, ItemRecord, NewItem, Scope},
+    meetings::{self, LineRecord, NoteChunk},
+    repos::candidates,
+};
+use crate::speech::stt::filter::{similarity, tokens};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::{path::Path, sync::Arc, time::Duration};
@@ -233,21 +231,20 @@ async fn ask(config: &ProviderConfig, system: String, user: String) -> Result<St
         system: Some(system),
         images: Vec::new(),
     };
-    let result = tokio::time::timeout(
-        Duration::from_secs(120),
-        engine::stream_chat(
-            &engine::http_client(),
-            config,
-            &[Message::user(user)],
-            &context,
-            Arc::new(tokio::sync::watch::channel(false).1),
-            |_| {},
-        ),
-    )
-    .await;
-    match result {
-        Ok(Ok(text)) => Ok(text),
-        Ok(Err(error)) => Err(error.to_string()),
+    // `_keep` holds the sender but never signals, so this turn only ends by finishing or timing out.
+    let (_keep, cancel) = tokio::sync::watch::channel(false);
+    let client = engine::http_client();
+    let history = [Message::user(user)];
+    let turn = engine::stream_chat(
+        &client,
+        config,
+        &history,
+        &context,
+        Arc::new(cancel),
+        |_| {},
+    );
+    match tokio::time::timeout(Duration::from_secs(120), turn).await {
+        Ok(done) => done.map_err(|e| e.to_string()),
         Err(_) => Err("The recap request timed out. You can retry from the saved meeting.".into()),
     }
 }

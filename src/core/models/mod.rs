@@ -1,4 +1,4 @@
-//! Core domain models and user configuration settings.
+//! Plain data types and user settings.
 
 pub mod domain;
 pub mod settings;

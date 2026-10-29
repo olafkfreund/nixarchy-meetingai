@@ -1,96 +1,55 @@
-//! Conversation state.
-//!
-//! Holds the current thread and the composer draft. Pure state transitions so
-//! they can be unit-tested without a window.
+//! Bounded in-memory transcript of the active chat exchange for the UI.
 
 use crate::core::domain::Message;
 
-/// The active conversation.
+const MAX_STORED_MESSAGES: usize = 200;
+const MAX_STORED_BYTES: usize = 2 * 1024 * 1024;
+
+fn message_footprint(msg: &Message) -> usize {
+    msg.content.len() + msg.images.iter().map(String::len).sum::<usize>()
+}
+
+/// Holds the visible messages of the current chat session within count and memory bounds.
 #[derive(Debug, Default, Clone)]
 pub struct Conversation {
-    messages: Vec<Message>,
-    draft: String,
-    revision: usize,
-    eviction_generation: usize,
+    items: Vec<Message>,
 }
 
 impl Conversation {
+    /// Creates an empty conversation list.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Returns the stored messages ordered from oldest to newest.
     pub fn messages(&self) -> &[Message] {
-        &self.messages
+        &self.items
     }
 
-    pub fn draft(&self) -> &str {
-        &self.draft
-    }
-
-    pub fn revision(&self) -> usize {
-        self.revision
-    }
-    pub fn eviction_generation(&self) -> usize {
-        self.eviction_generation
-    }
-
+    /// Appends a non-empty message and evicts the oldest entries to stay within bounds.
     pub fn push(&mut self, message: Message) {
-        if !message.is_empty() {
-            self.messages.push(message);
-            self.revision = self.revision.wrapping_add(1);
-            // UI history has its own bound; complete turns remain in the database.
-            let mut bytes = 0usize;
-            let mut keep_from = self.messages.len();
-            for (index, message) in self.messages.iter().enumerate().rev().take(200) {
-                let size =
-                    message.content.len() + message.images.iter().map(String::len).sum::<usize>();
-                if bytes + size > 2 * 1024 * 1024 && keep_from < self.messages.len() {
-                    break;
-                }
-                bytes += size;
-                keep_from = index;
-            }
-            if keep_from > 0 {
-                self.messages.drain(..keep_from);
-                self.eviction_generation = self.eviction_generation.wrapping_add(1);
-            }
+        if message.is_empty() {
+            return;
+        }
+        self.items.push(message);
+
+        let mut total_bytes: usize = self.items.iter().map(message_footprint).sum();
+        let mut drop_count = 0;
+        while self.items.len() - drop_count > 1
+            && (self.items.len() - drop_count > MAX_STORED_MESSAGES
+                || total_bytes > MAX_STORED_BYTES)
+        {
+            total_bytes -= message_footprint(&self.items[drop_count]);
+            drop_count += 1;
+        }
+        if drop_count > 0 {
+            self.items.drain(..drop_count);
         }
     }
 
+    /// Removes every message from the in-memory list.
     pub fn clear(&mut self) {
-        self.messages.clear();
-        self.draft.clear();
-        self.revision = self.revision.wrapping_add(1);
-        self.eviction_generation = self.eviction_generation.wrapping_add(1);
-    }
-
-    /// Append every non-empty draft chunk.
-    pub fn set_draft(&mut self, value: impl Into<String>) {
-        self.draft = value.into();
-    }
-
-    pub fn extend_draft(&mut self, chunk: &str) {
-        self.draft.push_str(chunk);
-    }
-
-    /// Whether the composer currently holds something worth sending.
-    pub fn can_submit(&self) -> bool {
-        !self.draft.trim().is_empty()
-    }
-
-    /// Take the draft as a user message. Returns `None` when the draft is blank,
-    /// so callers can ignore accidental empty submits.
-    pub fn submit(&mut self) -> Option<&Message> {
-        if !self.can_submit() {
-            return None;
-        }
-        let content = std::mem::take(&mut self.draft);
-        self.push(Message::user(content.trim().to_owned()));
-        self.messages.last()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.messages.is_empty()
+        self.items.clear();
     }
 }
 
@@ -99,72 +58,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blank_submit_is_ignored() {
-        let mut c = Conversation::new();
-        c.set_draft("   ");
-        assert!(c.submit().is_none());
-        assert!(c.is_empty());
+    fn blank_assistant_reply_is_ignored() {
+        let mut conv = Conversation::new();
+        conv.push(Message::assistant("   \n\t "));
+        assert!(conv.messages().is_empty());
     }
 
     #[test]
-    fn submit_trims_and_takes_draft() {
-        let mut c = Conversation::new();
-        c.set_draft("  hello  ");
-        let msg = c.submit().expect("message");
-        assert_eq!(msg.content, "hello");
-        assert_eq!(c.draft(), "");
-        assert_eq!(c.messages().len(), 1);
+    fn clearing_removes_previously_pushed_entries() {
+        let mut conv = Conversation::new();
+        conv.push(Message::user("first question"));
+        conv.push(Message::assistant("first reply"));
+        assert_eq!(conv.messages().len(), 2);
+        conv.clear();
+        assert!(conv.messages().is_empty());
     }
 
     #[test]
-    fn streaming_appends_to_draft() {
-        let mut c = Conversation::new();
-        c.extend_draft("a");
-        c.extend_draft("bc");
-        assert_eq!(c.draft(), "abc");
-    }
-
-    #[test]
-    fn clear_resets_everything() {
-        let mut c = Conversation::new();
-        c.set_draft("x");
-        c.submit();
-        c.clear();
-        assert!(c.is_empty());
-        assert_eq!(c.draft(), "");
-    }
-
-    #[test]
-    fn empty_messages_are_not_stored() {
-        let mut c = Conversation::new();
-        c.push(Message::assistant("  "));
-        assert!(c.is_empty());
-    }
-
-    #[test]
-    fn long_meetings_bound_visible_history_and_invalidate_evicted_documents() {
-        let mut conversation = Conversation::new();
-        for i in 0..10_000 {
-            conversation.push(Message::user(format!("Turn {i}: {}", "x".repeat(12_000))));
+    fn bulk_pushes_enforce_count_and_byte_caps_while_keeping_latest() {
+        let mut conv = Conversation::new();
+        let chunk = "m".repeat(12 * 1024);
+        for idx in 0..260 {
+            conv.push(Message::user(format!("{idx}:{chunk}")));
         }
-        assert!(conversation.messages().len() <= 200);
-        assert!(
-            conversation
-                .messages()
-                .iter()
-                .map(|m| m.content.len())
-                .sum::<usize>()
-                <= 2 * 1024 * 1024
-        );
-        assert!(
-            conversation
-                .messages()
-                .last()
-                .unwrap()
-                .content
-                .starts_with("Turn 9999:")
-        );
-        assert!(conversation.eviction_generation() > 0);
-        assert_eq!(conversation.revision(), 10_000);
+        let kept = conv.messages();
+        assert!(kept.len() <= MAX_STORED_MESSAGES);
+        let bytes: usize = kept.iter().map(message_footprint).sum();
+        assert!(bytes <= MAX_STORED_BYTES);
+        assert!(kept.last().unwrap().content.starts_with("259:"));
+    }
+
+    #[test]
+    fn single_oversized_entry_evicts_all_older_entries_and_stays() {
+        let mut conv = Conversation::new();
+        conv.push(Message::user("small intro"));
+        conv.push(Message::assistant("small reply"));
+        let huge = "z".repeat(MAX_STORED_BYTES + 512);
+        conv.push(Message::user(huge.clone()));
+        assert_eq!(conv.messages().len(), 1);
+        assert_eq!(conv.messages()[0].content, huge);
     }
 }

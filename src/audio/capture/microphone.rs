@@ -1,439 +1,621 @@
-//! Microphone capture through CPAL.
-//!
-//! Opens a real input device, downmixes to mono and resamples to 16 kHz, pushing
-//! frames into a bounded buffer. A dedicated worker thread owns the stream, so a
-//! blocked driver call cannot stall the UI.
-//!
-//! Startup failures are reported synchronously: [`Microphone::start`] only returns
-//! once the stream is actually running, so "Listening" never appears over a device
-//! that never opened.
+//! Opens a microphone through Pulse or CPAL and stores short 16 kHz mono chunks.
 
 use std::collections::VecDeque;
-use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use cpal::FromSample;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::audio::{LinearResampler, SAMPLE_RATE, rms};
+use crate::audio::system_audio::SystemAudio;
+use crate::audio::{LinearResampler, SAMPLE_RATE};
 
-/// How long startup may take before it is treated as a failure.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Errors from microphone capture.
+/// Errors that prevent microphone capture from starting or continuing.
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
-    #[error("no microphone is available")]
+    #[error("no default microphone is available")]
     NoDevice,
-    #[error("input device '{0}' is no longer available")]
+    #[error("microphone device was not found: {0}")]
     DeviceMissing(String),
-    #[error("the microphone does not support a configurable input: {0}")]
+    #[error("microphone configuration failed: {0}")]
     Config(String),
-    #[error("unsupported sample format: {0}")]
+    #[error("unsupported microphone sample format: {0}")]
     Format(String),
-    #[error("microphone startup failed: {0}")]
+    #[error("microphone could not start: {0}")]
     Startup(String),
-    #[error("the microphone stream reported an error: {0}")]
+    #[error("microphone stream failed: {0}")]
     Stream(String),
-    #[error("capture is not running")]
+    #[error("microphone capture is stopped")]
     NotRunning,
 }
 
-/// An input device the user can pick.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InputDevice {
-    /// Value accepted by `Microphone::start`, prefixed with `cpal:`.
-    pub id: String,
-    pub name: String,
-    pub is_default: bool,
-}
-
-/// Shared sample buffer between the audio callback and the consumer.
-struct Buffer {
-    samples: VecDeque<f32>,
-    /// Hard cap so an unread buffer can never grow without bound.
+/// Bounded FIFO of mono samples; the oldest ones are evicted when it is full.
+pub(crate) struct SampleQueue {
+    data: VecDeque<f32>,
     capacity: usize,
-    /// Number of frames dropped because the consumer fell behind.
     dropped: u64,
-    failure: Option<String>,
 }
 
-impl Buffer {
-    fn push(&mut self, samples: impl Iterator<Item = f32>) {
-        for sample in samples {
-            if self.samples.len() >= self.capacity {
-                self.samples.pop_front();
-                self.dropped += 1;
-            }
-            self.samples.push_back(sample);
+impl SampleQueue {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            data: VecDeque::with_capacity(capacity),
+            capacity,
+            dropped: 0,
         }
     }
 
-    fn take(&mut self, limit: usize) -> Vec<f32> {
-        let count = limit.min(self.samples.len());
-        self.samples.drain(..count).collect()
+    /// Append `samples`, evicting just enough of the oldest data to stay in bounds.
+    pub(crate) fn push(&mut self, samples: &[f32]) {
+        let len = self.data.len();
+        let n = samples.len();
+        let overflow = (len + n).saturating_sub(self.capacity);
+        self.data.drain(..overflow.min(len));
+        self.dropped += overflow as u64;
+        self.data.extend(&samples[n - n.min(self.capacity)..]);
+    }
+
+    pub(crate) fn take(&mut self, limit: usize) -> Vec<f32> {
+        self.data.drain(..limit.min(self.data.len())).collect()
+    }
+
+    /// `take` through a shared queue; a poisoned lock yields nothing.
+    pub(crate) fn take_from(queue: &Mutex<Self>, limit: usize) -> Vec<f32> {
+        queue
+            .lock()
+            .map(|mut queue| queue.take(limit))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.data.is_empty()
     }
 }
 
-/// A running microphone stream.
+/// How long `start` waits for the CPAL worker to report before giving up.
+const OPEN_DEADLINE: Duration = Duration::from_secs(7);
+
+/// Hand-over state between `start` and the thread that owns the CPAL stream.
+enum Phase {
+    Starting,
+    /// The stream is playing on the named device.
+    Live(String),
+    Failed(AudioError),
+    /// Set by the owner of the handle; the worker then drops the stream.
+    Stop,
+}
+
+type Gate = Arc<(Mutex<Phase>, Condvar)>;
+
+fn lock_phase(gate: &Gate) -> MutexGuard<'_, Phase> {
+    gate.0.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+enum Capture {
+    Pulse(SystemAudio),
+    Cpal {
+        gate: Gate,
+        worker: Option<JoinHandle<()>>,
+        samples: Arc<Mutex<SampleQueue>>,
+        failure: Arc<Mutex<Option<String>>>,
+    },
+}
+
+/// A microphone handle whose capture resources close when dropped.
 pub struct Microphone {
-    buffer: Arc<Mutex<Buffer>>,
-    stop: Option<std_mpsc::Sender<()>>,
-    worker: Option<thread::JoinHandle<()>>,
-    device_name: String,
+    capture: Capture,
+    name: String,
+    bypassed: bool,
 }
 
 impl Microphone {
-    /// Start capturing from the named device, or the system default.
+    /// Open the saved device or choose an available default input.
     pub fn start(device: Option<&str>) -> Result<Self, AudioError> {
-        Self::start_device(device, false)
-    }
-
-    fn start_device(device: Option<&str>, loopback: bool) -> Result<Self, AudioError> {
-        let requested = device
+        let sources = pulse_source_names();
+        let explicit = device
             .map(str::trim)
-            .filter(|name| !name.is_empty() && *name != "default")
-            .map(str::to_owned);
-
-        let buffer = Arc::new(Mutex::new(Buffer {
-            samples: VecDeque::new(),
-            // About two seconds at 16 kHz: enough headroom for a slow consumer
-            // without letting a stall grow into a memory leak.
-            capacity: (SAMPLE_RATE as usize) * 2,
-            dropped: 0,
-            failure: None,
-        }));
-        let sink = Arc::clone(&buffer);
-        let (stop_tx, stop_rx) = std_mpsc::channel::<()>();
-        let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<String, AudioError>>(1);
-
-        let worker = thread::spawn(move || {
-            let outcome = run_capture(requested, loopback, sink, ready_tx.clone(), stop_rx);
-            if let Err(error) = outcome {
-                // If startup already succeeded, this is a runtime failure.
-                let _ = ready_tx.try_send(Err(error));
+            .is_some_and(|name| !name.is_empty() && name != "default");
+        match choose_backend(device, &sources) {
+            Backend::Pulse(source) => {
+                let (handle, name) = open_with_fallback(
+                    &source,
+                    |id| {
+                        SystemAudio::start_input(id)
+                            .map_err(|error| AudioError::Startup(error.to_string()))
+                    },
+                    SystemAudio::has_samples,
+                    FIRST_SAMPLES_WAIT,
+                )?;
+                Ok(Self {
+                    capture: Capture::Pulse(handle),
+                    name,
+                    bypassed: false,
+                })
             }
-        });
-
-        match ready_rx.recv_timeout(STARTUP_TIMEOUT) {
-            Ok(Ok(device_name)) => Ok(Self {
-                buffer,
-                stop: Some(stop_tx),
-                worker: Some(worker),
-                device_name,
-            }),
-            Ok(Err(error)) => {
-                let _ = worker.join();
-                Err(error)
-            }
-            Err(_) => {
-                let _ = stop_tx.send(());
-                Err(AudioError::Startup(format!(
-                    "the device did not start within {} seconds",
-                    STARTUP_TIMEOUT.as_secs()
-                )))
+            Backend::Cpal(requested) => {
+                let bypassed = explicit && sources.iter().any(|name| name == ECHO_CANCEL_SOURCE);
+                let samples = Arc::new(Mutex::new(SampleQueue::new(SAMPLE_RATE as usize * 2)));
+                let failure = Arc::new(Mutex::new(None));
+                let gate: Gate = Arc::new((Mutex::new(Phase::Starting), Condvar::new()));
+                let worker = {
+                    let (gate, samples, failure) = (
+                        Arc::clone(&gate),
+                        Arc::clone(&samples),
+                        Arc::clone(&failure),
+                    );
+                    thread::spawn(move || {
+                        let opened = open_cpal(requested.as_deref(), samples, failure);
+                        let mut phase = lock_phase(&gate);
+                        if matches!(*phase, Phase::Stop) {
+                            return; // start gave up; the stream is dropped here
+                        }
+                        match opened {
+                            Ok((stream, name)) => {
+                                *phase = Phase::Live(name);
+                                gate.1.notify_all();
+                                while !matches!(*phase, Phase::Stop) {
+                                    phase =
+                                        gate.1.wait(phase).unwrap_or_else(PoisonError::into_inner);
+                                }
+                                drop(phase);
+                                drop(stream);
+                            }
+                            Err(error) => {
+                                *phase = Phase::Failed(error);
+                                gate.1.notify_all();
+                            }
+                        }
+                    })
+                };
+                let name = {
+                    let guard = lock_phase(&gate);
+                    let (mut phase, _) = gate
+                        .1
+                        .wait_timeout_while(guard, OPEN_DEADLINE, |p| matches!(p, Phase::Starting))
+                        .unwrap_or_else(PoisonError::into_inner);
+                    match std::mem::replace(&mut *phase, Phase::Stop) {
+                        Phase::Live(name) => {
+                            *phase = Phase::Live(name.clone());
+                            name
+                        }
+                        Phase::Failed(error) => {
+                            drop(phase);
+                            let _ = worker.join();
+                            return Err(error);
+                        }
+                        _ => {
+                            drop(phase);
+                            gate.1.notify_all();
+                            return Err(AudioError::Startup(
+                                "the input stream did not report within 7 seconds".into(),
+                            ));
+                        }
+                    }
+                };
+                Ok(Self {
+                    capture: Capture::Cpal {
+                        gate,
+                        worker: Some(worker),
+                        samples,
+                        failure,
+                    },
+                    name,
+                    bypassed,
+                })
             }
         }
     }
 
-    /// The device actually opened.
+    /// Whether an explicit CPAL choice bypassed the virtual echo filter.
+    pub fn echo_cancel_bypassed(&self) -> bool {
+        self.bypassed
+    }
+    /// The source or device that was opened.
     pub fn device_name(&self) -> &str {
-        &self.device_name
+        &self.name
     }
-
-    /// Drain up to `limit` mono 16 kHz samples.
+    /// Drain up to `limit` oldest samples.
     pub fn take(&self, limit: usize) -> Vec<f32> {
-        self.buffer
-            .lock()
-            .map(|mut buffer| buffer.take(limit))
-            .unwrap_or_default()
+        match &self.capture {
+            Capture::Pulse(handle) => handle.take(limit),
+            Capture::Cpal { samples, .. } => SampleQueue::take_from(samples, limit),
+        }
     }
-
-    /// Current level of the most recent audio, for meters.
-    pub fn level(&self) -> f32 {
-        self.buffer
-            .lock()
-            .map(|buffer| {
-                let recent: Vec<f32> = buffer
-                    .samples
-                    .iter()
-                    .rev()
-                    .take(1600)
-                    .copied()
-                    .collect::<Vec<_>>();
-                rms(&recent)
-            })
-            .unwrap_or(0.0)
-    }
-
-    /// Frames dropped because the consumer fell behind.
+    /// Count samples displaced by newer audio.
     pub fn dropped(&self) -> u64 {
-        self.buffer
-            .lock()
-            .map(|buffer| buffer.dropped)
-            .unwrap_or_default()
+        match &self.capture {
+            Capture::Pulse(handle) => handle.dropped(),
+            Capture::Cpal { samples, .. } => {
+                samples.lock().map(|queue| queue.dropped()).unwrap_or(0)
+            }
+        }
     }
-
-    /// Whether the worker is still alive.
+    /// Whether capture is active and has no fatal stream error.
     pub fn is_running(&self) -> bool {
-        self.worker
-            .as_ref()
-            .is_some_and(|worker| !worker.is_finished())
-            && self.failure().is_none()
+        match &self.capture {
+            Capture::Pulse(handle) => handle.is_running(),
+            Capture::Cpal {
+                gate,
+                worker,
+                failure,
+                ..
+            } => {
+                let live = matches!(*lock_phase(gate), Phase::Live(_));
+                let thread_up = worker.as_ref().is_some_and(|w| !w.is_finished());
+                live && thread_up && failure.lock().is_ok_and(|slot| slot.is_none())
+            }
+        }
     }
-
+    /// Return the fatal capture error, if any.
     pub fn failure(&self) -> Option<String> {
-        self.buffer
-            .lock()
-            .ok()
-            .and_then(|buffer| buffer.failure.clone())
+        match &self.capture {
+            Capture::Pulse(handle) => handle.failure(),
+            Capture::Cpal { failure, .. } => failure.lock().ok().and_then(|error| error.clone()),
+        }
     }
-
-    /// Stop capturing and join the worker.
-    pub fn stop(mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+    /// End capture and release its device.
+    pub fn stop(self) {
+        drop(self);
     }
 }
 
 impl Drop for Microphone {
     fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        if let Capture::Cpal { gate, worker, .. } = &mut self.capture {
+            *lock_phase(gate) = Phase::Stop;
+            gate.1.notify_all();
+            if let Some(worker) = worker.take() {
+                let _ = worker.join();
+            }
         }
     }
 }
 
-fn run_capture(
-    requested: Option<String>,
-    loopback: bool,
-    sink: Arc<Mutex<Buffer>>,
-    ready: std_mpsc::SyncSender<Result<String, AudioError>>,
-    stop: std_mpsc::Receiver<()>,
-) -> Result<(), AudioError> {
-    let host = cpal::default_host();
-    let device = match &requested {
-        Some(name) => {
-            let bare = name.strip_prefix("cpal:").unwrap_or(name);
-            if let Some(id) = bare.strip_prefix("id:") {
-                id.parse::<cpal::DeviceId>()
-                    .ok()
-                    .and_then(|id| host.device_by_id(&id))
-                    .ok_or_else(|| AudioError::DeviceMissing(name.clone()))?
-            } else {
-                (if loopback {
-                    host.output_devices()
-                } else {
-                    host.input_devices()
-                })
-                .map_err(|error| AudioError::Config(error.to_string()))?
-                .find(|device| {
-                    device
-                        .description()
-                        .is_ok_and(|description| description.name() == bare)
-                })
-                .ok_or_else(|| AudioError::DeviceMissing(bare.to_owned()))?
-            }
+/// The input device whose description name is exactly `wanted`, if any.
+fn input_named(host: &cpal::Host, wanted: &str) -> Result<Option<cpal::Device>, AudioError> {
+    let devices = host
+        .input_devices()
+        .map_err(|error| AudioError::Config(error.to_string()))?;
+    for device in devices {
+        if let Ok(d) = device.description()
+            && d.name() == wanted
+        {
+            return Ok(Some(device));
         }
-        None => (if loopback {
-            host.default_output_device()
-        } else {
-            host.default_input_device()
-        })
-        .ok_or(AudioError::NoDevice)?,
+    }
+    Ok(None)
+}
+
+/// A requested device name without its optional `cpal:` prefix.
+fn bare_device_name(requested: &str) -> &str {
+    match requested.split_once(':') {
+        Some(("cpal", rest)) => rest,
+        _ => requested,
+    }
+}
+
+/// Average each whole `ch`-sample frame of `input` into `mono` (a partial tail is dropped).
+fn downmix<T: Copy>(input: &[T], ch: usize, convert: impl Fn(T) -> f32, mono: &mut Vec<f32>) {
+    mono.clear();
+    let inv_channels = 1.0 / ch as f32;
+    let mut acc = 0.0;
+    for (i, &sample) in input.iter().enumerate() {
+        acc += convert(sample);
+        if (i + 1) % ch == 0 {
+            mono.push(acc * inv_channels);
+            acc = 0.0;
+        }
+    }
+}
+
+fn open_cpal(
+    requested: Option<&str>,
+    samples: Arc<Mutex<SampleQueue>>,
+    failure: Arc<Mutex<Option<String>>>,
+) -> Result<(cpal::Stream, String), AudioError> {
+    use cpal::SampleFormat::{F32, I16, I32, U16};
+    let host = cpal::default_host();
+    let device = match requested {
+        None => host.default_input_device().ok_or(AudioError::NoDevice)?,
+        Some(name) if name.starts_with("cpal:id:") => {
+            let id = name[8..]
+                .parse::<cpal::DeviceId>()
+                .map_err(|_| AudioError::DeviceMissing(name.to_owned()))?;
+            host.device_by_id(&id)
+                .filter(DeviceTrait::supports_input)
+                .ok_or_else(|| AudioError::DeviceMissing(name.to_owned()))?
+        }
+        Some(name) => {
+            let name = bare_device_name(name);
+            input_named(&host, name)?.ok_or_else(|| AudioError::DeviceMissing(name.to_owned()))?
+        }
     };
-    let device_name = device
-        .description()
-        .map(|description| description.name().to_owned())
-        .unwrap_or_else(|_| "Microphone".to_owned());
-
-    let supported = (if loopback {
-        device.default_output_config()
-    } else {
-        device.default_input_config()
-    })
-    .map_err(|error| AudioError::Config(error.to_string()))?;
-    let format = supported.sample_format();
-    let config: cpal::StreamConfig = supported.into();
-    let channels = config.channels as usize;
-    let input_rate = config.sample_rate;
-
-    let stream = match format {
-        cpal::SampleFormat::F32 => build::<f32>(device, config, channels, input_rate, sink),
-        cpal::SampleFormat::I16 => build::<i16>(device, config, channels, input_rate, sink),
-        cpal::SampleFormat::U16 => build::<u16>(device, config, channels, input_rate, sink),
-        cpal::SampleFormat::I32 => build::<i32>(device, config, channels, input_rate, sink),
-        other => return Err(AudioError::Format(other.to_string())),
-    }?;
-
+    let name = match device.description() {
+        Ok(description) => description.name().to_owned(),
+        Err(_) => "Input device (unnamed)".to_owned(),
+    };
+    let default_input = device
+        .default_input_config()
+        .map_err(|error| AudioError::Config(error.to_string()))?;
+    let (format, stream_config) = (default_input.sample_format(), default_input.config());
+    if !matches!(format, F32 | I16 | U16 | I32) {
+        return Err(AudioError::Format(format.to_string()));
+    }
+    let channels = usize::from(stream_config.channels).max(1);
+    let mut resampler = LinearResampler::new(stream_config.sample_rate);
+    let mut frames = Vec::with_capacity(4096);
+    let mut output = Vec::with_capacity(4096);
+    let stream = device
+        .build_input_stream_raw(
+            stream_config,
+            format,
+            move |data, _| {
+                let mixed = match data.sample_format() {
+                    F32 => data
+                        .as_slice::<f32>()
+                        .map(|s| downmix(s, channels, |v| v, &mut frames)),
+                    I16 => data
+                        .as_slice::<i16>()
+                        .map(|s| downmix(s, channels, |v| f32::from(v) / 32768.0, &mut frames)),
+                    U16 => data.as_slice::<u16>().map(|s| {
+                        downmix(
+                            s,
+                            channels,
+                            |v| (f32::from(v) - 32768.0) / 32768.0,
+                            &mut frames,
+                        )
+                    }),
+                    I32 => data
+                        .as_slice::<i32>()
+                        .map(|s| downmix(s, channels, |v| v as f32 / 2147483648.0, &mut frames)),
+                    _ => None,
+                };
+                if mixed.is_none() {
+                    return;
+                }
+                resampler.process_into(&frames, &mut output);
+                if let Ok(mut queue) = samples.lock() {
+                    queue.push(&output);
+                }
+            },
+            move |error| match error.kind() {
+                cpal::ErrorKind::Xrun
+                | cpal::ErrorKind::DeviceChanged
+                | cpal::ErrorKind::RealtimeDenied => {
+                    tracing::warn!("microphone notification: {error}")
+                }
+                _ => {
+                    tracing::error!("microphone stream stopped: {error}");
+                    if let Ok(mut slot) = failure.lock() {
+                        *slot = Some(error.to_string());
+                    }
+                }
+            },
+            Some(Duration::from_secs(4)),
+        )
+        .map_err(|error| AudioError::Startup(error.to_string()))?;
     stream
         .play()
         .map_err(|error| AudioError::Startup(error.to_string()))?;
-    let _ = ready.send(Ok(device_name));
-
-    // Park until asked to stop; dropping the stream closes the device.
-    let _ = stop.recv();
-    drop(stream);
-    Ok(())
+    Ok((stream, name))
 }
 
-/// Build a stream for any supported sample type.
+/// The echo-cancelled virtual source written by the Home Manager module.
+const ECHO_CANCEL_SOURCE: &str = "meetingai-echo-cancel-source";
+
+/// Which capture path serves a requested input device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Backend {
+    /// CPAL, with the requested device (None = host default).
+    Cpal(Option<String>),
+    /// `parec` on a Pulse/PipeWire source name.
+    Pulse(String),
+}
+
+/// Pick the capture path. `sources` are the non-monitor Pulse source names.
 ///
-/// Callbacks arrive as interleaved frames; each is downmixed, resampled and
-/// appended, so consumers always see 16 kHz mono.
-fn build<T>(
-    device: cpal::Device,
-    config: cpal::StreamConfig,
-    channels: usize,
-    input_rate: u32,
-    sink: Arc<Mutex<Buffer>>,
-) -> Result<cpal::Stream, AudioError>
-where
-    T: cpal::SizedSample + cpal::Sample,
-    f32: cpal::FromSample<T>,
-{
-    let mut resampler = LinearResampler::new(input_rate);
-    let mut mono = Vec::new();
-    let mut resampled = Vec::new();
-
-    let error_sink = sink.clone();
-    device
-        .build_input_stream(
-            config,
-            move |data: &[T], _| {
-                mono.clear();
-                mono.extend(data.chunks_exact(channels).map(|frame| {
-                    frame
-                        .iter()
-                        .map(|sample| f32::from_sample_(*sample))
-                        .sum::<f32>()
-                        / channels as f32
-                }));
-                resampler.process_into(&mono, &mut resampled);
-                if let Ok(mut buffer) = sink.lock() {
-                    buffer.push(resampled.iter().copied());
-                }
-            },
-            move |error| {
-                // WASAPI reports recoverable discontinuities through this same
-                // callback. They do not mean the capture stream has stopped.
-                if matches!(
-                    error.kind(),
-                    cpal::ErrorKind::Xrun
-                        | cpal::ErrorKind::DeviceChanged
-                        | cpal::ErrorKind::RealtimeDenied
-                ) {
-                    tracing::warn!(%error, "audio capture recovered from a driver notification");
-                    return;
-                }
-                tracing::error!(%error, "microphone stream error");
-                if let Ok(mut buffer) = error_sink.lock() {
-                    buffer.failure = Some(error.to_string());
-                }
-            },
-            None::<Duration>,
-        )
-        .map_err(|error| AudioError::Startup(error.to_string()))
+/// An explicit `cpal:` device keeps CPAL. Otherwise the echo-cancelled source is
+/// the default when present, then the server's default source. With no Pulse
+/// server (no sources) everything stays on CPAL, as before.
+fn choose_backend(requested: Option<&str>, sources: &[String]) -> Backend {
+    let requested = requested
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "default");
+    match requested {
+        Some(name) if name.starts_with("cpal:") => Backend::Cpal(Some(name.to_owned())),
+        // A bare name that is not a Pulse source is a legacy CPAL device name.
+        Some(name) if sources.iter().any(|source| source == name) => {
+            Backend::Pulse(name.to_owned())
+        }
+        Some(name) => Backend::Cpal(Some(name.to_owned())),
+        None if sources.is_empty() => Backend::Cpal(None),
+        None if sources.iter().any(|source| source == ECHO_CANCEL_SOURCE) => {
+            Backend::Pulse(ECHO_CANCEL_SOURCE.to_owned())
+        }
+        None => Backend::Pulse("@DEFAULT_SOURCE@".to_owned()),
+    }
 }
 
-/// List input devices through CPAL.
-pub fn input_devices() -> Vec<InputDevice> {
-    let host = cpal::default_host();
-    let default_id = host
-        .default_input_device()
-        .and_then(|device| device.id().ok());
-    let Ok(devices) = host.input_devices() else {
-        return Vec::new();
-    };
-    devices
-        .filter_map(|device| {
-            let name = device.description().ok()?.name().to_owned();
-            let id = device.id().ok()?;
-            Some(InputDevice {
-                is_default: default_id.as_ref() == Some(&id),
-                id: format!("cpal:id:{id}"),
-                name,
-            })
-        })
+/// How long a Pulse source may stay silent-of-data before falling back.
+const FIRST_SAMPLES_WAIT: Duration = Duration::from_millis(500);
+
+/// Open `source`; if it delivers nothing within `wait` (present but not driven),
+/// reopen on `@DEFAULT_SOURCE@`. Returns the handle and the source really used.
+fn open_with_fallback<T>(
+    source: &str,
+    open: impl Fn(&str) -> Result<T, AudioError>,
+    has_samples: impl Fn(&T) -> bool,
+    wait: Duration,
+) -> Result<(T, String), AudioError> {
+    const DEFAULT: &str = "@DEFAULT_SOURCE@";
+    let first = open(source)?;
+    let deadline = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < deadline {
+        if has_samples(&first) {
+            return Ok((first, source.to_owned()));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if has_samples(&first) || source == DEFAULT {
+        return Ok((first, source.to_owned()));
+    }
+    tracing::warn!(
+        source,
+        "microphone source delivered no audio; using the default source"
+    );
+    drop(first);
+    Ok((open(DEFAULT)?, DEFAULT.to_owned()))
+}
+
+/// Non-monitor Pulse source names, empty when there is no server.
+fn pulse_source_names() -> Vec<String> {
+    super::devices::pactl(&["--format=json", "list", "sources"])
+        .ok()
+        .and_then(|text| super::devices::parse_sources(&text).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|device| device.id)
         .collect()
-}
-
-/// Whether any input device exists at all.
-pub fn microphone_available() -> bool {
-    cpal::default_host().default_input_device().is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn buffer() -> Buffer {
-        Buffer {
-            samples: VecDeque::new(),
-            capacity: 8,
-            dropped: 0,
-            failure: None,
-        }
+    #[test]
+    fn queue_evicts_oldest_and_drains_in_order() {
+        let mut queue = SampleQueue::new(4);
+        queue.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(queue.dropped(), 2);
+        assert!(queue.take(0).is_empty());
+        assert_eq!(queue.take(1), [3.0]);
+        assert_eq!(queue.take(99), [4.0, 5.0, 6.0]);
+        assert!(queue.is_empty());
     }
 
     #[test]
-    fn buffer_drops_oldest_when_full() {
-        let mut buffer = buffer();
-        buffer.push((0..8).map(|i| i as f32));
-        buffer.push(std::iter::once(99.0));
-        assert_eq!(buffer.samples.len(), 8);
-        assert_eq!(buffer.dropped, 1);
-        // Oldest sample went first, newest is present.
-        assert_eq!(buffer.samples.front().copied(), Some(1.0));
-        assert_eq!(buffer.samples.back().copied(), Some(99.0));
+    fn missing_bare_device_keeps_its_name() {
+        let name = "Fictional Juniper Microphone 834";
+        assert!(
+            matches!(Microphone::start(Some(name)), Err(AudioError::DeviceMissing(found)) if found == name)
+        );
     }
 
     #[test]
-    fn take_limits_and_drains() {
-        let mut buffer = buffer();
-        buffer.push((0..5).map(|i| i as f32));
-        assert_eq!(buffer.take(2), vec![0.0, 1.0]);
-        assert_eq!(buffer.samples.len(), 3);
-        assert_eq!(buffer.take(100).len(), 3);
-        assert!(buffer.samples.is_empty());
+    fn queue_push_over_existing_content_drops_exactly_the_overflow() {
+        let mut queue = SampleQueue::new(5);
+        queue.push(&[1.0, 2.0, 3.0]);
+        queue.push(&[4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(queue.dropped(), 2);
+        assert_eq!(queue.take(99), [3.0, 4.0, 5.0, 6.0, 7.0]);
+        queue.push(&[0.0; 9]);
+        assert_eq!(queue.dropped(), 6);
+        assert_eq!(queue.take(99).len(), 5);
+        let shared = Mutex::new(SampleQueue::new(3));
+        shared.lock().unwrap().push(&[1.0, 2.0]);
+        assert_eq!(SampleQueue::take_from(&shared, 1), [1.0]);
     }
 
     #[test]
-    fn missing_device_is_reported_by_name() {
-        // A name that cannot exist: this must fail before any stream is built.
-        let error = Microphone::start(Some("nixarchy-meetingai-nonexistent-input-xyz"))
-            .err()
-            .expect("a missing device must not start");
-        match error {
-            AudioError::DeviceMissing(name) => {
-                assert_eq!(name, "nixarchy-meetingai-nonexistent-input-xyz")
-            }
-            other => panic!("unexpected error: {other}"),
-        }
+    fn downmix_averages_whole_frames_and_drops_a_partial_tail() {
+        let mut mono = vec![9.0];
+        downmix(&[1.0_f32, 3.0, 2.0, 4.0, 8.0], 2, |v| v, &mut mono);
+        assert_eq!(mono, [2.0, 3.0]);
+        downmix(&[5_i16, 7], 1, f32::from, &mut mono);
+        assert_eq!(mono, [5.0, 7.0]);
     }
 
     #[test]
-    fn device_listing_is_consistent() {
-        let devices = input_devices();
-        for device in &devices {
-            assert!(device.id.starts_with("cpal:"));
-            assert!(!device.name.is_empty());
-        }
-        // At most one default.
-        assert!(devices.iter().filter(|device| device.is_default).count() <= 1);
+    fn handles_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Microphone>();
+        assert_send::<SystemAudio>();
+    }
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
     }
 
     #[test]
-    fn availability_probe_never_panics() {
-        let _ = microphone_available();
+    fn echo_cancel_source_is_the_default_when_present() {
+        let sources = names(&["alsa_input.pci", ECHO_CANCEL_SOURCE]);
+        assert_eq!(
+            choose_backend(None, &sources),
+            Backend::Pulse(ECHO_CANCEL_SOURCE.into())
+        );
+        assert_eq!(
+            choose_backend(Some("default"), &sources),
+            Backend::Pulse(ECHO_CANCEL_SOURCE.into())
+        );
+    }
+
+    #[test]
+    fn default_source_is_used_without_echo_cancel() {
+        assert_eq!(
+            choose_backend(None, &names(&["alsa_input.pci"])),
+            Backend::Pulse("@DEFAULT_SOURCE@".into())
+        );
+    }
+
+    #[test]
+    fn no_pulse_server_stays_on_cpal() {
+        assert_eq!(choose_backend(None, &[]), Backend::Cpal(None));
+    }
+
+    #[test]
+    fn explicit_cpal_device_keeps_cpal() {
+        let sources = names(&[ECHO_CANCEL_SOURCE]);
+        assert_eq!(
+            choose_backend(Some("cpal:id:alsa:x"), &sources),
+            Backend::Cpal(Some("cpal:id:alsa:x".into()))
+        );
+    }
+
+    #[test]
+    fn named_source_is_pulse_and_unknown_bare_name_is_legacy_cpal() {
+        let sources = names(&["alsa_input.usb", ECHO_CANCEL_SOURCE]);
+        assert_eq!(
+            choose_backend(Some("alsa_input.usb"), &sources),
+            Backend::Pulse("alsa_input.usb".into())
+        );
+        assert_eq!(
+            choose_backend(Some("Old Device"), &sources),
+            Backend::Cpal(Some("Old Device".into()))
+        );
+    }
+
+    #[test]
+    fn silent_source_falls_back_to_the_default_source() {
+        use std::cell::RefCell;
+        let opened = RefCell::new(Vec::new());
+        let (handle, used) = open_with_fallback(
+            ECHO_CANCEL_SOURCE,
+            |name| {
+                opened.borrow_mut().push(name.to_owned());
+                Ok(name.to_owned())
+            },
+            |name: &String| name == "@DEFAULT_SOURCE@",
+            Duration::from_millis(60),
+        )
+        .unwrap();
+        assert_eq!(
+            (handle.as_str(), used.as_str()),
+            ("@DEFAULT_SOURCE@", "@DEFAULT_SOURCE@")
+        );
+        assert_eq!(*opened.borrow(), [ECHO_CANCEL_SOURCE, "@DEFAULT_SOURCE@"]);
+    }
+
+    #[test]
+    fn live_source_is_kept() {
+        let (_, used) = open_with_fallback(
+            ECHO_CANCEL_SOURCE,
+            |name| Ok(name.to_owned()),
+            |_: &String| true,
+            Duration::from_millis(60),
+        )
+        .unwrap();
+        assert_eq!(used, ECHO_CANCEL_SOURCE);
     }
 }

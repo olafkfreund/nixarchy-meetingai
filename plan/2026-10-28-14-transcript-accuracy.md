@@ -158,3 +158,92 @@ is reported, not replaced.
   against library 1.13.8 may break on a nixpkgs bump) and the package's
   `cargoLock`. Not measured: cold-disk load, two channels at
   once, real meeting audio (step 5 / evaluation set).
+- **Step 5:** sherpa-onnx is a normal dependency (spike feature and
+  example removed); the sandboxed `nix build` and a `parakeet-decode`
+  flake check (real model, the archive's `test_wavs/en.wav`, 2.9 s incl.
+  load) prove the no-download build. `nix/parakeet-model.nix` keeps
+  `test_wavs` (~0.7 MB) for that check. The model env var is always set,
+  so every HM closure carries the 640 MB model until step 7 makes it
+  conditional on the provider. Default provider stays `whisper-local`
+  until step 7; chunks are WAV-encoded and decoded again for the
+  in-process wire (cheap, left as is). Not measured yet: daemon RSS with
+  two channels on the real model.
+- Step 6: local-only interviews may use `openai-compatible-stt` only with a loopback base URL. `deepgram.region` is nullable in Home Manager; `null` leaves settings.json absent in a minimal configuration, while the daemon defaults to `us`.
+- Step 2: a saved `cpal:` input device keeps CPAL and so runs without echo
+  cancelling (the user's explicit choice is kept). The picker still lists and
+  selects it, labelled "(no echo cancelling)", and Listen start emits one
+  notice suggesting "Meeting AI echo-cancelled mic".
+- Step 2: the parec mic falls back to `@DEFAULT_SOURCE@` when the chosen
+  source delivers no samples within 500 ms. The drop-in module entry carries
+  `flags = [ ifexists nofail ]`. `pactl list sources` has a 2 s timeout and
+  dictation start opens the mic outside the daemon lock.
+- **Step 2:** the module arguments were checked by loading the drop-in
+  into an isolated PipeWire 1.6.9 with the stock config: it creates
+  `meetingai-echo-cancel-source` and a sink it always makes, named
+  `meetingai-echo-cancel-sink` so it is recognisable. Mic capture goes
+  through `parec` for Pulse source names (echo-cancel source by default,
+  else `@DEFAULT_SOURCE@`); explicit `cpal:` devices and legacy names keep
+  CPAL; no Pulse server → CPAL. `Microphone::level()` is 0 on the parec
+  path (no callers). A parec failure on the default path is a start error,
+  not a CPAL fallback.
+- **Step 0:** the replay is `examples/accuracy_replay.rs`, which runs
+  `BatchChunks` → provider → `LineFilter` in sequence rather than the
+  spawned live task (same components, latency measured per chunk); this
+  made `BatchChunk`/`BatchChunks` `pub`. JSON lines also carry `latency`.
+  `score.py` scores by words (bleed: > ½ of a mic line's words in `them:`
+  text and < ½ in `me:`; invented: < ½ of its words anywhere in the
+  reference); `[silence]` markers are parsed but unused. `score.py` calls
+  `cargo run --example`, so it runs inside `devenv shell`.
+- **Step 0 review fixes** (Codex, Opus): recording no longer uses two
+  `parec` processes (channels were unaligned and the live mic does not go
+  through parec): a socket-only command `record.tap {path, seconds}` /
+  `{stop}` writes the exact interleaved frames the transcriber receives
+  (after `route_audio`) to a 0600 WAV, only during a running recording and
+  never for a local-only interview; not exposed over MCP. `record.sh`
+  wraps it. `score.py`: lost owner words by counts (not set membership),
+  bleed decided on words unique to one side, `[silence mm:ss-mm:ss]`
+  spans for invented-on-silence, latency over every request, release
+  build. The replay runs 4 requests in flight with prompts built ahead,
+  like live, and uses the live retry helper. The synthetic fixtures feed
+  step 1's Rust tests; no separate CI job.
+- Step 1: the gate analyzes 1 ms envelopes in the existing 50 ms capture blocks rather than emitting 20 ms blocks. It holds one block for lookahead, adding 50 ms of gate-only output latency so a quiet owner onset can restore the preceding block. The gate remains off by default.
+- **Step 1:** the gate analyses 1 ms envelopes inside the existing 50 ms
+  capture blocks instead of emitting 20 ms blocks; it holds one block for
+  lookahead (50 ms extra latency, gate on only) so a quiet owner onset can
+  restore the block before it. Off by default.
+- **Step 4:** echo needs a run of 3 consecutive words plus content-word
+  containment ≥ 0.6 (stop words ignored), so short owner replies survive;
+  mic lines are held until 3 s after they arrive (audio clock) and while
+  an overlapping system chunk is open or in flight (15 s cap); `accept`
+  returns released lines, `tick`/`flush` release the rest. The step 0
+  replay now prints request and released-line records separately and
+  flushes at the end; `score.py` reads them.
+- **Step 7 (redone on main fe61632, after steps 0-6 merged; the first
+  attempt on a step-5 branch is superseded):** whisper removed: provider
+  `whisper-local`, `SttWire::WhisperServer`, `apply_whisper_url`, the
+  loopback retry (`transcribe_with_retry`, which only retried whisper; the
+  live loop and `accuracy_replay` now call `transcribe_chunk`), the whisper
+  service and `whisper.*` options (`mkRemovedOptionModule`, naming
+  `parakeet.*`, `openai-compatible-stt` and `deepgram.keyFile`),
+  `nix/whisper-model.nix`, `whisper-model-*` packages, `docs/whisper-bench.md`,
+  `tools/whisper-bench.sh`, the SetupCard whisper command. The OpenAI
+  multipart path is kept and no longer shares branches with whisper (the
+  `prompt` argument is unused now: Parakeet, Deepgram and OpenAI ignore it).
+  `accuracy_replay` uses `openai-compatible-stt` (`--url` is a base URL now;
+  `tools/accuracy/README.md` updated). Default `speech_provider` is
+  `parakeet-local`; `migrate_whisper` rewrites a saved `whisper-local` at
+  daemon start and appends its notice to the startup notice. New
+  `parakeet.enable` (default true) gates `NIXARCHY_MEETINGAI_PARAKEET_DIR`;
+  the not-ready reason says so. **Pending decision:** `echo_gate` stays off;
+  the evaluation set is not recorded yet. Not done here: final real-set
+  numbers and the p620 deploy.
+- **Step 7 review fixes:** HM assertions refuse `settings.speechProvider =
+  "whisper-local"` and `parakeet.enable = false` with Parakeet as the
+  effective provider (both in the flake `wrong` list). The migration also
+  shows its notice once to users who never stored a provider (marker setting
+  `whisper_notice_shown`, no provider value written; only when a meeting or
+  conversation already exists, a fresh install is marked silently) and clears an old `ggml-*` `speech_model`. The OpenAI multipart
+  path sends the glossary/recent-text `prompt` form field when non-empty.
+  The two network tests are back against `openai-compatible-stt` (the retry
+  test stays gone: nothing retries now). README notes `whisper-server` needs
+  `--inference-path /v1/audio/transcriptions` and `--model`.

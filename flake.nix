@@ -70,7 +70,9 @@
           (python3.withPackages (ps: [ ps.pillow ]))
         ];
       shellTestEnv = pkgs: {
-        OMARCHY_SHELL_TREE = "${nixarchy.packages.${pkgs.stdenv.hostPlatform.system}.omarchy}/share/omarchy/shell";
+        OMARCHY_SHELL_TREE = "${
+          nixarchy.packages.${pkgs.stdenv.hostPlatform.system}.omarchy
+        }/share/omarchy/shell";
         QMLLINT = "${pkgs.qt6.qtdeclarative}/bin/qmllint";
         QT_QML = "${pkgs.qt6.qtdeclarative}";
         QUICKSHELL_QML = "${pkgs.quickshell}/lib/qt-6/qml";
@@ -84,17 +86,10 @@
     in
     {
       packages = eachSystem (
-        pkgs:
-        let
-          models = pkgs.callPackage ./nix/whisper-model.nix { };
-        in
-        {
+        pkgs: {
           default = self.packages.${pkgs.stdenv.hostPlatform.system}.nixarchy-meetingai;
           nixarchy-meetingai = pkgs.callPackage ./nix/package.nix { };
           plugin = pkgs.callPackage ./nix/plugin.nix { };
-          whisper-model-small-en = models."small.en";
-          whisper-model-small = models."small";
-          whisper-model-large-v3-turbo = models."large-v3-turbo";
           docs = optionsDoc pkgs;
         }
       );
@@ -127,6 +122,7 @@
             BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
             PKG_CONFIG_PATH = "${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.pipewire.dev}/lib/pkgconfig";
+            SHERPA_ONNX_LIB_DIR = "${pkgs.callPackage ./nix/sherpa-lib.nix { }}/lib";
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             NIX_SSL_CERT_FILE = SSL_CERT_FILE;
           };
@@ -146,7 +142,6 @@
       overlays.default = final: _prev: {
         nixarchy-meetingai = final.callPackage ./nix/package.nix { };
         nixarchy-meetingai-plugin = final.callPackage ./nix/plugin.nix { };
-        whisper-models = final.callPackage ./nix/whisper-model.nix { };
       };
 
       # A module nothing evaluates is a module nothing checks.
@@ -177,6 +172,8 @@
               logLevel = "debug";
               extraEnvironment.FOO = "bar";
               ollamaCloud.keyFile = "/run/agenix/ollama-cloud";
+              deepgram.keyFile = "/run/agenix/deepgram";
+              deepgram.region = "eu";
               ollama.url = "http://127.0.0.1:12345";
               settings = {
                 enforce = true;
@@ -192,17 +189,12 @@
                 smartFollowUps = false;
                 autoRecordOnCall = true;
                 calendarEnabled = true;
-                speechProvider = "whisper-local";
-                speechModel = "ggml-large-v3-turbo";
+                speechProvider = "parakeet-local";
+                speechModel = "parakeet-tdt-0.6b-v3";
                 speechLanguage = "en";
                 textScale = 120;
                 reduceMotion = true;
                 mcpAllowRecord = false;
-              };
-              whisper = {
-                port = 9000;
-                threads = 4;
-                extraArgs = [ "--no-gpu" ];
               };
             };
           };
@@ -216,21 +208,23 @@
             };
           };
           withPlugins = evalHm stubPlugins;
+          noSkills = evalHm { programs.nixarchy-meetingai.skills.enable = false; };
           userMeetingMode = evalHm {
             imports = [ stubPlugins ];
             programs.nixarchy.plugins."nixarchy.meeting-mode".src = "/user/meeting-mode";
           };
+          echoOff = evalHm { programs.nixarchy-meetingai.echoCancel.enable = false; };
+          echoFile = "pipewire/pipewire.conf.d/60-meetingai-echo-cancel.conf";
           svc = c: c.systemd.user.services;
           assertThat =
             name: cond: msg:
             pkgs.writeText name (if cond then "ok" else throw "${name}: ${msg}");
           fullDaemon = (svc full).nixarchy-meetingai.Service;
-          fullWhisper = (svc full).nixarchy-meetingai-whisper;
           sysPkgs = self.packages.${pkgs.stdenv.hostPlatform.system};
-          ipv6 = evalHm {
-            programs.nixarchy-meetingai.whisper = {
-              host = "::";
-              extraArgs = [ "--prompt=100%$HOME" ];
+          noParakeet = evalHm {
+            programs.nixarchy-meetingai = {
+              parakeet.enable = false;
+              settings.speechProvider = "deepgram-stt";
             };
           };
         in
@@ -255,10 +249,38 @@
                 chmod -R u+w shell
                 bash shell/tests/ci.sh $out
               '';
+          # The package's decode test against the real model and a clip shipped in its archive: a
+          # nixpkgs bump of sherpa-onnx/onnxruntime that breaks the crate (2.0.1 vs library 1.13.x) fails here.
+          parakeet-decode =
+            let
+              model = pkgs.callPackage ./nix/parakeet-model.nix { };
+            in
+            sysPkgs.default.overrideAttrs (_: {
+              doCheck = true;
+              cargoTestFlags = [
+                "--test"
+                "parakeet_decode"
+              ];
+              NIXARCHY_MEETINGAI_PARAKEET_DIR = "${model}";
+              NIXARCHY_MEETINGAI_PARAKEET_WAV = "${model}/test_wavs/en.wav";
+            });
           # So `nix flake check` builds them.
           package = sysPkgs.default;
           plugin = sysPkgs.plugin;
           hm-module = pkgs.writeText "hm-module-check" (builtins.toJSON (builtins.attrNames (svc minimal)));
+          hm-skills = assertThat "hm-skills" (
+            builtins.all (p: minimal.home.file ? ${p} && !(noSkills.home.file ? ${p})) [
+              ".claude/skills/meetingai"
+              ".agents/skills/meetingai"
+              ".gemini/antigravity/skills/meetingai"
+            ]
+          ) "skills.enable must link all three agent skill directories, and skills.enable = false none";
+          hm-echo-cancel = assertThat "hm-echo-cancel" (
+            minimal.xdg.configFile ? ${echoFile}
+            && !(echoOff.xdg.configFile ? ${echoFile})
+            && lib.hasInfix "meetingai-echo-cancel-source" minimal.xdg.configFile.${echoFile}.text
+            && lib.hasInfix "flags = [ ifexists nofail ]" minimal.xdg.configFile.${echoFile}.text
+          ) "echo-cancel conf must exist with echoCancel on and be absent when off";
           hm-plugin-nixarchy = assertThat "hm-plugin-nixarchy" (
             withPlugins.programs.nixarchy.plugins."nixarchy.meetingai".src
             == self.packages.${pkgs.stdenv.hostPlatform.system}.plugin
@@ -281,14 +303,18 @@
             let
               evaluates = extra: (builtins.tryEval (evalHm extra).home.username).success;
               wrong = [
+                { programs.nixarchy-meetingai.whisper.enable = false; }
+                { programs.nixarchy-meetingai.settings.speechProvider = "whisper-local"; }
+                { programs.nixarchy-meetingai.parakeet.enable = false; }
                 {
                   programs.nixarchy-meetingai = {
-                    whisper.enable = false;
-                    settings.speechProvider = "whisper-local";
+                    parakeet.enable = false;
+                    settings.speechProvider = "parakeet-local";
                   };
                 }
                 { programs.nixarchy-meetingai.settings.extra.api_key = "fake-key"; }
                 { programs.nixarchy-meetingai.ollama.url = "http://10.0.0.5:11434"; }
+                { programs.nixarchy-meetingai.settings.speechBaseUrl = "http://10.0.0.5:8000"; }
                 {
                   programs.nixarchy-meetingai.ollamaCloud = {
                     keyFile = "/run/fake";
@@ -302,9 +328,13 @@
               && lib.all (c: !evaluates c) wrong
               && evaluates { programs.nixarchy-meetingai.ollama.url = "https://ollama.example.com"; }
               && evaluates { programs.nixarchy-meetingai.ollama.url = "http://[::1]:11434"; }
+              && evaluates { programs.nixarchy-meetingai.settings.speechBaseUrl = "http://127.0.0.1:8000/v1"; }
+              && evaluates {
+                programs.nixarchy-meetingai.settings.speechBaseUrl = "https://speech.example.com/v1";
+              }
               && evaluates {
                 programs.nixarchy-meetingai = {
-                  whisper.enable = false;
+                  parakeet.enable = false;
                   settings.speechProvider = "deepgram-stt";
                 };
               }
@@ -329,18 +359,18 @@
             && !(minimal.xdg.configFile ? "nixarchy-meetingai/settings.json")
           ) "settings.json differs from tests/fixtures/nix-settings.json";
           hm-service-options = assertThat "hm-service-options" (
-            lib.hasInfix "--port 9000 -t 4 --no-gpu" (toString fullWhisper.Service.ExecStart)
-            && fullWhisper.Install.WantedBy == [ ]
-            && builtins.elem "NIXARCHY_MEETINGAI_WHISPER_URL=http://127.0.0.1:9000" fullDaemon.Environment
+            builtins.elem "NIXARCHY_MEETINGAI_PARAKEET_DIR=${full.programs.nixarchy-meetingai.parakeet.model}" fullDaemon.Environment
             && builtins.elem "RUST_LOG=nixarchy_meetingai=debug" fullDaemon.Environment
             && builtins.elem "FOO=bar" fullDaemon.Environment
             && builtins.elem "NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE=/run/agenix/ollama-cloud" fullDaemon.Environment
+            && builtins.elem "NIXARCHY_MEETINGAI_DEEPGRAM_KEY_FILE=/run/agenix/deepgram" fullDaemon.Environment
+            && !(lib.hasInfix "DEEPGRAM_KEY=" (toString fullDaemon.Environment))
             && !(fullDaemon ? LoadCredential)
-            && (svc full).nixarchy-meetingai.Unit.Wants == [ "nixarchy-meetingai-whisper.service" ]
+            && !(builtins.any (lib.hasPrefix "NIXARCHY_MEETINGAI_PARAKEET_DIR=") (
+              (svc noParakeet).nixarchy-meetingai.Service.Environment
+            ))
+            && !(svc full ? nixarchy-meetingai-whisper)
             && builtins.length (svc full).nixarchy-meetingai.Unit.X-Restart-Triggers == 2
-            && builtins.elem "NIXARCHY_MEETINGAI_WHISPER_URL=http://[::1]:8178" (svc ipv6).nixarchy-meetingai.Service.Environment
-            && lib.hasInfix "--host :: --port" (toString (svc ipv6).nixarchy-meetingai-whisper.Service.ExecStart)
-            && lib.hasInfix "'--prompt=100%%$$HOME'" (toString (svc ipv6).nixarchy-meetingai-whisper.Service.ExecStart)
             && builtins.elem "NIXARCHY_MEETINGAI_OLLAMA_URL=http://127.0.0.1:12345" fullDaemon.Environment
             && (svc full).nixarchy-meetingai.Install.WantedBy == [ ]
           ) "service options not applied";

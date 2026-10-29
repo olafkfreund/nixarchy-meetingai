@@ -1,3 +1,0 @@
-# Unified patches contain a required space prefix on empty context lines.
-packaging/hyprland/private-overlay.patch -whitespace
-packaging/hyprland/plugin-compat.patch -whitespace

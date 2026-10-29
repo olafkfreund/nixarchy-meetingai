@@ -6,6 +6,7 @@ pub mod nix_settings;
 pub mod protocol;
 pub mod server;
 pub mod session;
+pub mod tap;
 
 pub use session::{Daemon, Options};
 

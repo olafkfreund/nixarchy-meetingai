@@ -1,370 +1,328 @@
-//! System audio capture (the far side of a call).
-//!
-//! On Linux this records a PulseAudio/PipeWire **monitor** source with `parec`,
-//! which is what lets Listen hear the other participants rather than only the
-//! microphone.
-//!
-//! Monitor sources are the output device played back, so this only works where a
-//! Pulse server is reachable. Every failure is reported, never papered over.
+//! Captures a Pulse or PipeWire source with `parec`, including call audio monitors.
 
-use std::collections::VecDeque;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-use crate::audio::{LinearResampler, SAMPLE_RATE};
+use super::devices::{is_speaker_monitor, label};
+use super::microphone::SampleQueue;
 
-/// How much audio to keep, in samples (about two seconds at 16 kHz).
-const BUFFER_CAPACITY: usize = (SAMPLE_RATE as usize) * 2;
-
-/// Errors from system audio capture.
+/// Problems encountered while opening a server source.
 #[derive(Debug, thiserror::Error)]
 pub enum SystemAudioError {
-    #[error("system audio needs a PulseAudio or PipeWire server, which was not reachable")]
+    #[error("no audio server or parec recorder is available")]
     NoServer,
-    #[error("no monitor source was found for any output device")]
+    #[error("no output monitor source is available")]
     NoMonitor,
-    #[error("could not start the system audio recorder: {0}")]
+    #[error("could not launch audio recorder: {0}")]
     Spawn(String),
-    #[error("system audio is not implemented on this platform yet")]
+    #[error("server audio capture requires Linux")]
     Unsupported,
 }
 
-/// One monitor source, i.e. a sink's output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MonitorSource {
-    pub id: String,
-    pub name: String,
-}
-
-/// Find monitor sources through `pactl`.
-pub fn monitor_sources() -> Vec<MonitorSource> {
-    let output = match Command::new("pactl")
-        .args(["--format=json", "list", "sources"])
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        _ => return Vec::new(),
-    };
-    let json = String::from_utf8_lossy(&output.stdout);
-    parse_monitors(&json)
-}
-
-/// Parse monitor entries out of `pactl list sources` JSON.
-pub fn parse_monitors(json: &str) -> Vec<MonitorSource> {
-    #[derive(serde::Deserialize)]
-    struct Source {
-        name: String,
-        #[serde(default)]
-        description: Option<String>,
-        // Older PulseAudio reports `monitor_of_sink`; PipeWire reports
-        // `monitor_source`. Accept either, and fall back to the `.monitor`
-        // naming convention so a third variant still works.
-        #[serde(default)]
-        monitor_of_sink: Option<serde_json::Value>,
-        #[serde(default)]
-        monitor_source: Option<serde_json::Value>,
-    }
-
-    impl Source {
-        fn is_monitor(&self) -> bool {
-            self.monitor_of_sink.is_some()
-                || self.monitor_source.is_some()
-                || self.name.ends_with(".monitor")
-        }
-    }
-    let Ok(sources) = serde_json::from_str::<Vec<Source>>(json) else {
-        return Vec::new();
-    };
-    sources
-        .into_iter()
-        .filter(|source| source.is_monitor())
-        .map(|source| MonitorSource {
-            name: source
-                .description
-                .filter(|text| !text.is_empty())
-                .unwrap_or_else(|| source.name.clone()),
-            id: source.name,
-        })
-        .collect()
-}
-
-/// A running system-audio recorder.
+/// A running `parec` process and its buffered samples.
 pub struct SystemAudio {
-    buffer: Arc<Mutex<VecDeque<f32>>>,
-    dropped: Arc<Mutex<u64>>,
-    stop: Arc<AtomicBool>,
-    child: Arc<Mutex<Option<Child>>>,
-    reader: Option<thread::JoinHandle<()>>,
     source: String,
+    samples: Arc<Mutex<SampleQueue>>,
+    child: Mutex<Child>,
+    reader: Option<JoinHandle<()>>,
+    exited: AtomicBool,
 }
 
 impl SystemAudio {
-    /// Start recording the default monitor source, or a named one.
+    /// Start recording a selected output sink or the best available monitor.
     pub fn start(source: Option<&str>) -> Result<Self, SystemAudioError> {
         if !cfg!(target_os = "linux") {
             return Err(SystemAudioError::Unsupported);
         }
+        if let Some(id) = source.filter(|id| !id.trim().is_empty()) {
+            return Self::launch("parec", &monitor_id(id), id);
+        }
+        let text = super::devices::pactl(&["--format=json", "list", "sources"])
+            .map_err(|_| SystemAudioError::NoMonitor)?;
+        let monitors = monitor_sources(&text);
+        let preferred = super::devices::pactl(&["get-default-sink"])
+            .ok()
+            .and_then(|text| text.lines().next().map(|line| monitor_id(line.trim())));
+        let (id, name) = monitors
+            .iter()
+            .min_by_key(|(id, _)| Some(id.as_str()) != preferred.as_deref())
+            .ok_or(SystemAudioError::NoMonitor)?;
+        Self::launch("parec", id, name)
+    }
 
-        let chosen = match source {
-            Some(id) if !id.trim().is_empty() => MonitorSource {
-                id: if id.ends_with(".monitor") {
-                    id.to_owned()
-                } else {
-                    format!("{id}.monitor")
-                },
-                name: id.to_owned(),
-            },
-            _ => {
-                let default = Command::new("pactl")
-                    .arg("get-default-sink")
-                    .output()
-                    .ok()
-                    .filter(|out| out.status.success())
-                    .map(|out| format!("{}.monitor", String::from_utf8_lossy(&out.stdout).trim()));
-                let monitors = monitor_sources();
-                default
-                    .and_then(|id| monitors.iter().find(|m| m.id == id).cloned())
-                    .or_else(|| monitors.into_iter().next())
-                    .ok_or(SystemAudioError::NoMonitor)?
-            }
-        };
+    /// Record one input source exactly as named by the server.
+    pub fn start_input(source: &str) -> Result<Self, SystemAudioError> {
+        if !cfg!(target_os = "linux") {
+            return Err(SystemAudioError::Unsupported);
+        }
+        Self::launch("parec", source, source)
+    }
 
-        // Ask parec for 16 kHz mono directly: it resamples in the server, so no
-        // extra conversion is needed here.
-        let mut child = Command::new("parec")
+    /// Run `program` (normally `parec`) on `device` and wait briefly to see that it stays up.
+    fn launch(program: &str, device: &str, shown: &str) -> Result<Self, SystemAudioError> {
+        let mut child = Command::new(program)
             .args([
-                "--device",
-                &chosen.id,
+                "--latency-msec=50",
                 "--format=float32le",
                 "--rate=16000",
                 "--channels=1",
-                "--latency-msec=50",
+                "--device",
+                device,
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::NotFound => SystemAudioError::NoServer,
-                _ => SystemAudioError::Spawn(error.to_string()),
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    SystemAudioError::NoServer
+                } else {
+                    SystemAudioError::Spawn(format!("{program} could not start: {error}"))
+                }
             })?;
-
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| SystemAudioError::Spawn("no audio stream from parec".into()))?;
-
-        let buffer = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(BUFFER_CAPACITY)));
-        let dropped = Arc::new(Mutex::new(0u64));
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let reader = {
-            let buffer = buffer.clone();
-            let dropped = dropped.clone();
-            let stop = stop.clone();
-            thread::spawn(move || {
-                let mut raw = vec![0u8; 4096];
-                let mut leftover: Vec<u8> = Vec::new();
-                while !stop.load(Ordering::Relaxed) {
-                    match stdout.read(&mut raw) {
-                        Ok(0) => break,
-                        Ok(read) => {
-                            let mut bytes = std::mem::take(&mut leftover);
-                            bytes.extend_from_slice(&raw[..read]);
-                            // f32 little-endian: keep whole samples only.
-                            let complete = bytes.len() - (bytes.len() % 4);
-                            let samples: Vec<f32> = bytes[..complete]
-                                .as_chunks::<4>()
-                                .0
-                                .iter()
-                                .map(|chunk| f32::from_le_bytes(*chunk))
-                                .collect();
-                            leftover = bytes[complete..].to_vec();
-                            if let Ok(mut sink) = buffer.lock() {
-                                for sample in samples {
-                                    if sink.len() >= BUFFER_CAPACITY {
-                                        sink.pop_front();
-                                        if let Ok(mut count) = dropped.lock() {
-                                            *count += 1;
-                                        }
-                                    }
-                                    sink.push_back(sample);
-                                }
-                            }
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(SystemAudioError::Spawn(format!(
+                "{program} did not provide an output pipe"
+            )));
+        };
+        let samples = Arc::new(Mutex::new(SampleQueue::new(
+            crate::audio::SAMPLE_RATE as usize * 2,
+        )));
+        let queue = Arc::clone(&samples);
+        // Ends at EOF, which killing the child (see Drop) or its own exit produces.
+        let reader = thread::spawn(move || {
+            let mut input = BufReader::with_capacity(16 * 1024, stdout);
+            let mut frame = [0_u8; 2048];
+            let mut carry = Vec::new();
+            let mut decoded = Vec::with_capacity(frame.len() / 4);
+            loop {
+                match input.read(&mut frame) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => {
+                        decoded.clear();
+                        decode_samples(&mut carry, &frame[..count], &mut decoded);
+                        if let Ok(mut queue) = queue.lock() {
+                            queue.push(&decoded);
                         }
-                        Err(_) => break,
                     }
                 }
-            })
+            }
+        });
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let verdict = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break Err(SystemAudioError::NoServer),
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+                Ok(None) => break Ok(()),
+                Err(error) => {
+                    break Err(SystemAudioError::Spawn(format!(
+                        "could not inspect {program}: {error}"
+                    )));
+                }
+            }
         };
-
-        // Give parec a moment to fail loudly if the server is unreachable, so a
-        // dead recorder is reported here instead of recording silence.
-        thread::sleep(Duration::from_millis(150));
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            stop.store(true, Ordering::Relaxed);
+        if let Err(error) = verdict {
+            let _ = child.kill();
+            let _ = child.wait();
             let _ = reader.join();
-            return Err(SystemAudioError::NoServer);
+            return Err(error);
         }
-
         Ok(Self {
-            buffer,
-            dropped,
-            stop,
-            child: Arc::new(Mutex::new(Some(child))),
+            source: shown.to_owned(),
+            samples,
+            child: Mutex::new(child),
             reader: Some(reader),
-            source: chosen.name,
+            exited: AtomicBool::new(false),
         })
     }
 
-    /// The source being recorded.
+    /// The chosen sink label or exact input source.
     pub fn source(&self) -> &str {
         &self.source
     }
 
-    /// Drain buffered samples.
-    pub fn take(&mut self, limit: usize) -> Vec<f32> {
-        match self.buffer.lock() {
-            Ok(mut buffer) => {
-                let count = limit.min(buffer.len());
-                buffer.drain(..count).collect()
-            }
-            Err(_) => Vec::new(),
-        }
+    /// Remove up to `limit` oldest samples.
+    pub fn take(&self, limit: usize) -> Vec<f32> {
+        SampleQueue::take_from(&self.samples, limit)
     }
 
-    /// Check whether the capture subprocess is still producing audio.
+    /// Whether the recorder process is still alive.
     pub fn is_running(&self) -> bool {
-        self.child.lock().ok().is_some_and(|mut guard| {
-            guard
-                .as_mut()
-                .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
-        })
-    }
-
-    /// Samples discarded because the consumer fell behind.
-    pub fn dropped(&self) -> u64 {
-        self.dropped.lock().map(|count| *count).unwrap_or_default()
-    }
-    pub fn failure(&self) -> Option<String> {
-        (!self.is_running()).then(|| "The system audio recorder stopped.".into())
-    }
-
-    /// Stop recording and reap the child process.
-    pub fn stop(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Ok(mut guard) = self.child.lock()
-            && let Some(mut child) = guard.take()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
+        if self.exited.load(Ordering::Relaxed) {
+            return false;
         }
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
+        let alive = self
+            .child
+            .lock()
+            .is_ok_and(|mut child| child.try_wait().is_ok_and(|status| status.is_none()));
+        if !alive {
+            self.exited.store(true, Ordering::Relaxed);
+        }
+        alive
+    }
+
+    /// Whether unread samples are available.
+    pub fn has_samples(&self) -> bool {
+        self.samples.lock().is_ok_and(|queue| !queue.is_empty())
+    }
+
+    /// Number of samples evicted by the bounded buffer.
+    pub fn dropped(&self) -> u64 {
+        self.samples
+            .lock()
+            .map(|queue| queue.dropped())
+            .unwrap_or(0)
+    }
+
+    /// Report an ended recorder to the caller.
+    pub fn failure(&self) -> Option<String> {
+        self.is_running();
+        if self.exited.load(Ordering::Relaxed) {
+            Some("audio recorder has stopped".to_owned())
+        } else {
+            None
         }
     }
 }
 
 impl Drop for SystemAudio {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Ok(mut guard) = self.child.lock()
-            && let Some(mut child) = guard.take()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        let mut child = self
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = child.kill();
+        let _ = child.wait();
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
     }
 }
 
-/// Merge microphone and system samples, clamped, for one stream.
-pub fn mix(microphone: &[f32], system: &[f32]) -> Vec<f32> {
-    let length = microphone.len().max(system.len());
-    (0..length)
-        .map(|index| {
-            let mic = microphone.get(index).copied().unwrap_or(0.0);
-            let sys = system.get(index).copied().unwrap_or(0.0);
-            (mic + sys).clamp(-1.0, 1.0)
+/// The monitor source of an output sink; `.monitor` is never appended twice.
+fn monitor_id(id: &str) -> String {
+    format!("{}.monitor", id.strip_suffix(".monitor").unwrap_or(id))
+}
+
+/// `(id, display name)` of every monitor in a `pactl --format=json list sources` dump.
+fn monitor_sources(json: &str) -> Vec<(String, String)> {
+    let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(json)
+    else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let id = entry.get("name")?.as_str()?;
+            (is_speaker_monitor(entry) || id.ends_with(".monitor"))
+                .then(|| (id.to_owned(), label(entry, id).to_owned()))
         })
         .collect()
 }
 
-/// A resampler is kept available for servers that ignore the requested rate.
-pub fn resampler(input_rate: u32) -> LinearResampler {
-    LinearResampler::new(input_rate)
+/// Append the whole little-endian f32 samples in `carry + bytes` to `out`, keeping the remainder.
+fn decode_samples(carry: &mut Vec<u8>, bytes: &[u8], out: &mut Vec<f32>) {
+    carry.extend_from_slice(bytes);
+    let (whole, _) = carry.as_chunks::<4>();
+    out.extend(whole.iter().map(|raw| f32::from_le_bytes(*raw)));
+    let used = whole.len() * 4;
+    carry.drain(..used);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const WITH_MONITOR: &str = r#"[
-      {"name":"alsa_input.pci","description":"Mic","monitor_of_sink":null},
-      {"name":"alsa_output.pci.monitor","description":"Monitor of Speakers","monitor_of_sink":"alsa_output.pci"}
-    ]"#;
-
     #[test]
-    fn only_monitors_are_returned() {
-        let monitors = parse_monitors(WITH_MONITOR);
-        assert_eq!(monitors.len(), 1);
-        assert_eq!(monitors[0].id, "alsa_output.pci.monitor");
-        assert_eq!(monitors[0].name, "Monitor of Speakers");
-    }
-
-    #[test]
-    fn pipewire_monitor_source_field_is_recognised() {
+    fn monitor_rules() {
         let json = r#"[
-          {"name":"alsa_output.usb.monitor","description":"Monitor of USB","monitor_source":"alsa_output.usb"},
-          {"name":"alsa_input.usb","description":"Mic"}
+          {"name":"birch.out","monitor_of_sink":"birch"},
+          {"name":"cedar.out","monitor_source":"cedar","description":"Cedar Output"},
+          {"name":"elm.monitor"},
+          {"name":"plain.in"},
+          {"name":"fennel-desk-mic","description":"Fennel Desk Mic","monitor_of_sink":null,"monitor_source":"","state":"SUSPENDED"},
+          {"name":"quince-hdmi-out.monitor","description":"Monitor of Quince HDMI","monitor_of_sink":null,"monitor_source":"quince-hdmi-out"}
         ]"#;
-        let monitors = parse_monitors(json);
-        assert_eq!(monitors.len(), 1);
-        assert_eq!(monitors[0].name, "Monitor of USB");
+        assert_eq!(
+            monitor_sources(json),
+            [
+                ("birch.out".into(), "birch.out".into()),
+                ("cedar.out".into(), "Cedar Output".into()),
+                ("elm.monitor".into(), "elm.monitor".into()),
+                (
+                    "quince-hdmi-out.monitor".into(),
+                    "Monitor of Quince HDMI".into()
+                )
+            ]
+        );
+        assert!(monitor_sources("bad").is_empty());
     }
 
     #[test]
-    fn dot_monitor_naming_is_recognised_without_a_field() {
-        let json = r#"[{"name":"alsa_output.pci.monitor","description":"Speakers"}]"#;
-        assert_eq!(parse_monitors(json).len(), 1);
+    fn monitor_suffix_once() {
+        assert_eq!(monitor_id("cedar"), "cedar.monitor");
+        assert_eq!(monitor_id("cedar.monitor"), "cedar.monitor");
     }
 
     #[test]
-    fn malformed_output_yields_nothing() {
-        assert!(parse_monitors("not json").is_empty());
-    }
-
-    #[test]
-    fn mixing_clamps_instead_of_clipping_through() {
-        let mixed = mix(&[0.8, -0.9, 0.0], &[0.8, -0.9, 0.5]);
-        assert_eq!(mixed[0], 1.0);
-        assert_eq!(mixed[1], -1.0);
-        assert_eq!(mixed[2], 0.5);
-    }
-
-    #[test]
-    fn mixing_handles_unequal_lengths() {
-        let mixed = mix(&[0.1, 0.2, 0.3], &[0.1]);
-        assert_eq!(mixed.len(), 3);
-        assert_eq!(mixed[2], 0.3);
-        let other = mix(&[0.1], &[0.2, 0.3]);
-        assert_eq!(other.len(), 2);
-        assert_eq!(other[1], 0.3);
-    }
-
-    #[test]
-    fn missing_server_is_reported_not_panicked() {
-        // On a machine without a Pulse server this must return an error.
-        match SystemAudio::start(None) {
-            Ok(audio) => audio.stop(),
-            Err(error) => {
-                assert!(!error.to_string().is_empty());
+    fn decoding_is_independent_of_how_reads_are_cut() {
+        let bytes: Vec<u8> = (0..500_i16)
+            .map(|n| f32::from(n) * 0.5 - 100.0)
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let mut whole = Vec::new();
+        decode_samples(&mut Vec::new(), &bytes, &mut whole);
+        assert_eq!(whole.len(), 500);
+        for size in [1, 3, 7, 1021] {
+            let (mut carry, mut split) = (Vec::new(), Vec::new());
+            for chunk in bytes.chunks(size) {
+                decode_samples(&mut carry, chunk, &mut split);
             }
+            assert_eq!(split, whole, "chunk size {size}");
+            assert!(carry.is_empty());
         }
+    }
+
+    #[test]
+    fn recorder_that_exits_or_is_absent_is_an_error_and_a_live_one_is_reaped() {
+        let absent = SystemAudio::launch("no-such-recorder-8841", "x", "x");
+        assert!(matches!(absent, Err(SystemAudioError::NoServer)));
+        // `true` ignores its arguments and exits at once.
+        let quitter = SystemAudio::launch("true", "x", "x");
+        assert!(matches!(quitter, Err(SystemAudioError::NoServer)));
+        // A stand-in recorder that ignores its arguments and stays up.
+        let script = std::env::temp_dir().join(format!("fake-parec-{}", std::process::id()));
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let mut attempt = 0;
+        let launched = loop {
+            let result = SystemAudio::launch(script.to_str().unwrap(), "x", "shown");
+            attempt += 1;
+            match &result {
+                // Another test forking while the script was open for writing gives ETXTBSY.
+                Err(SystemAudioError::Spawn(text))
+                    if text.contains("Text file busy") && attempt < 5 =>
+                {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                _ => break result,
+            }
+        };
+        let _ = std::fs::remove_file(&script);
+        let live = launched.unwrap();
+        let pid = live.child.lock().unwrap().id();
+        drop(live);
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "child {pid} still exists"
+        );
     }
 }

@@ -55,6 +55,7 @@ fn valid(key: &str, value: &str) -> bool {
             | "auto_record_on_call"
             | "calendar_enabled"
             | "reduce_motion"
+            | "echo_gate"
             | "mcp_allow_record" => {
                 matches!(value, "true" | "false")
             }

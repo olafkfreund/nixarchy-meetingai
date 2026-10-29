@@ -9,6 +9,7 @@
   pipewire,
   openssl,
   makeWrapper,
+  callPackage,
   grim,
   slurp,
   libnotify,
@@ -25,6 +26,8 @@ rustPlatform.buildRustPackage {
       ../Cargo.lock
       ../src
       ../packaging
+      ../skills
+      ../tests/parakeet_decode.rs # run by the parakeet-decode flake check
     ];
   };
 
@@ -41,6 +44,8 @@ rustPlatform.buildRustPackage {
     pipewire
     openssl
   ];
+  # The sherpa-onnx crate would download its library at build time; use nixpkgs' instead.
+  SHERPA_ONNX_LIB_DIR = "${callPackage ./sherpa-lib.nix { }}/lib";
   LIBCLANG_PATH = "${libclang.lib}/lib";
 
   # Tests open sockets and audio devices; they run in the dev shell.
@@ -51,6 +56,8 @@ rustPlatform.buildRustPackage {
       $out/share/applications/dev.nixarchy.meetingai.desktop
     install -Dm644 packaging/nixarchy-meetingai.svg \
       $out/share/icons/hicolor/scalable/apps/dev.nixarchy.meetingai.svg
+    install -Dm644 skills/meetingai/SKILL.md \
+      $out/share/nixarchy-meetingai/skills/meetingai/SKILL.md
     wrapProgram $out/bin/nixarchy-meetingai \
       --prefix PATH : ${
         lib.makeBinPath [
@@ -63,7 +70,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Ambient real-time meeting copilot daemon for Omarchy";
-    license = lib.licenses.agpl3Plus;
+    license = lib.licenses.mit;
     mainProgram = "nixarchy-meetingai";
     platforms = lib.platforms.linux;
   };

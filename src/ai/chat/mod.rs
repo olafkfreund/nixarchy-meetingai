@@ -1,4 +1,4 @@
-//! Active conversations, streaming completion engine, and chat sessions.
+//! Chat: conversations, the streaming engine and CLI-backed providers.
 
 pub mod cli;
 pub mod conversation;

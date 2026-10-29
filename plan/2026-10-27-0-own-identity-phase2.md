@@ -9,8 +9,12 @@ coders:        # owner asked 2026-10-28 for agy and codex to share the coding
   7: agy       # core/models: plain data types and serde
   8: codex     # ai/catalog: provider/model lists, many small functions
   9: agy       # ai/chat: engine and session over the catalog
-  # 0, 1, 3, 6, 10, 11, 12 stay with coder (Sonnet): tooling, audio
-  # capture, the vault and STT need the p620 checks run from this session
+  # owner 2026-10-29 ("use agent teams with agy and codex to solve them all"):
+  3: codex     # audio/capture: devices, microphone, system audio
+  6: agy       # core/security: vault, credentials, provider import
+  10: codex+agy  # transcription.rs to codex; listen.rs and cli.rs to agy
+  # 0, 1, 11, 12 stay with coder (Sonnet). The p620 checks of 3, 6 and 10
+  # are still run from this session before each merge.
 reviewers:     # every step, read-only, on top of the Opus review
   - codex      # codex review --base main, sandbox read-only
   - agy        # agy --mode plan with the allowlist settings overlay
@@ -212,3 +216,153 @@ commit and reverts alone.
   database (`history-plain.db`) is encrypted and kept. "Settings file"
   in step 0 means the settings rows in the database, which is where the
   app keeps them.
+- **Step 5** (Codex): the first version followed the old bodies'
+  structure in several functions and reused old test values, although
+  Codex's command log shows it never read the old files (the original
+  project is public, so model recall is the likely source; the brief
+  also gave `migrate_legacy`'s steps in order, against the Briefs rule).
+  Codex rewrote those functions with a different structure from their
+  names only. The kept "ours" tests for note chunks and profile documents
+  were replaced by new tests; `format_lines` has its own test again.
+  Accepted differences: new marker and error wording, a 16,000/16,000
+  head/tail split in `recent_messages`, `sessions::save`,
+  `delete_prompt` and `index_notes` in one transaction, rowid
+  tie-breaks, `untitled` matching the `Session · ` prefix exactly.
+  `--copies` leaves 4 boilerplate lines in `conversations.rs`.
+- **Step 7** (agy): the dead-code rule is read as "items nothing outside
+  their file calls", so `Mode`, `OverlaySize`, `Role::is_user`,
+  `AutoResponse::label`, `RESPONSE_LANGUAGES`, `load_from_path` and
+  `save_changed` are deleted. The follow-up prompt gets new text; both old
+  defaults are recognised by SHA-256. Only the fixture path is tested: a
+  test for the short old default would put its old text back in the code.
+  Review fixes by the lead: two `load` helpers and one test rewritten so
+  they no longer match the old bodies.
+- **Step 9** (agy, then a fresh Claude `coder`): agy's version kept the
+  old `recent_history` loop shape and old statement shapes in the
+  Anthropic SSE arm, error redaction and the size check. A fresh `coder`
+  rewrote `window_history` (two passes), Anthropic event parsing (serde
+  types), redaction (`Redactor`), the size check (`fits`), request
+  building (`RequestParts`) and the stream loop (`StreamReader`).
+  `shorten_middle` keeps the old 1/3 head, 2/3 tail. Accepted
+  differences: blank earlier messages and empty deltas are skipped;
+  Anthropic skips empty system parts; `ChatError::Request` has no
+  `From<reqwest::Error>`; new log and error wording (the matched
+  substrings stay). Dead items deleted: `Conversation` draft/submit/
+  revision/eviction methods and `is_empty`, `ChatSession::{rename,
+  delete}`; `build_body`, `parse_sse_line`, `ChatEvent` made private.
+  `--copies` leaves 31 lines in `cli.rs`/`opencode.rs`, outside this step.
+  Re-review (ready): also changed, all harmless: `fail` treats a
+  whitespace-only partial answer as no answer; the shortening notice is
+  4 characters longer; redaction also replaces the trimmed key; a
+  trailing `\r` is stripped from a final unterminated stream line.
+- **Step 8** (Codex, then a fresh Claude `coder`): Codex's version again
+  matched old statements and step order (model recall; its log shows no
+  access to the old files). Per the handoff fallback, a fresh `coder`
+  rewrote titling cleanup and the title call, model discovery
+  (pagination, status and body errors, id collection, auth headers, the
+  overall limit), `is_usable`'s custom branch, `speech_usable_in` and the
+  preset response path, from the brief. Behaviour kept from the old code:
+  a page over 2,000 ids keeps the first 2,000; the 10,000 cap applies
+  only when another page follows; a custom config without a `custom-` id
+  falls back to the catalogue; an unknown auth value sends the key as is.
+  Accepted differences: the title instruction is in the user message as
+  the brief says; new error wording; an unencodable key fails the refresh
+  before sending. The cache key is pinned by a test. Dead items deleted:
+  `models::label`, `models::is_known_provider`,
+  `titling::name_untitled_meetings`, `Preset::docs`, which leaves
+  `db::meetings::untitled` without a caller.
+  Second re-review: `CustomProvider::header`, the Anthropic text join,
+  `models_endpoint`, id extraction, title prompt building and the test
+  server were reworded again. Also changed: title cleanup strips a
+  trailing quote after a full stop and cuts on characters; the title
+  prompt uses a `<transcript>` tag; ids are de-duplicated across pages
+  before the 10,000 cap; a non-array `data` falls back to `models`; an
+  Anthropic reply without `content` reports "no content blocks". The
+  `--copies` count is a lower bound: it cannot see code deleted in the
+  removal commit and retyped later, so the reviewer's text comparison
+  is the real check.
+
+### Step 10 (transcription, listen, cli), 2026-10-29
+
+- Codex wrote transcription.rs and agy listen.rs and cli.rs in parallel
+  from two briefs sharing one interface section. The Opus review found
+  transcribe_custom, socket_task, BatchChunks push/finish and
+  channel_number too close to the old code; a fresh Claude coder
+  rewrote them from explicit designs (handoff fallback); the lead fixed
+  clippy lints, one wrong test input and the re-review's last names and
+  texts.
+- Bugs fixed on the way: TCP_NODELAY on the live socket (Codex had left
+  Nagle on); the 4 s finish deadline starts at stop and covers draining
+  queued audio (Codex review; tested); events may wait until that
+  deadline while finishing; the live URL is built with Url, not string
+  replacement (a query keeps its own text).
+- Dead code removed: LiveTranscriber::connect, transcribe_samples,
+  local_chunk_payload, ListenSession::elapsed, interleave,
+  SharedSession/shared_session; instance_lock_path made private.
+- Kept although unused inside listen.rs: SessionConfig::speech and the
+  SessionEvent variants the daemon matches on (removing them means
+  editing the daemon, not in this step).
+- The plan's extra check ("a live whisper session") is now a live
+  Deepgram and Parakeet session on p620 with the owner (whisper was
+  removed in #14).
+
+### Step 11 (tests and build files), 2026-10-29
+
+- The Claude coder wrote the three integration tests from behaviour lists
+  and the build files from contracts; the Opus review's value/structure
+  matches and the broken `.envrc` (`source_url` with a script) were fixed
+  by the same coder.
+- Deleted as unused (nothing in the flake, CI, docs or installed hooks
+  refers to them): justfile, lefthook.yml, scripts/pre-push-checks.sh,
+  rust-toolchain.toml, .gitattributes. `SKIP_BUMP` therefore does nothing
+  any more.
+- Lock files are not regenerated (the plan said "regenerated"): both are
+  machine-written, `origin-lines.sh --total` does not count them, and a
+  regenerate would upgrade every crate inside a rewrite PR. A separate
+  dependency refresh can reset their blame later.
+- devenv kept (README uses it). provider_flow has 13 tests (the speech
+  formats are one test each).
+### Step 3 (audio/capture), 2026-10-29
+- Codex implemented the step. The Opus review found recalled shapes and
+  constants in it, so a fresh Claude coder rewrote those parts from explicit
+  designs (the handoff fallback).
+- Behaviour deviation, monitor rule: a source is a monitor if and only if
+  `monitor_of_sink` or `monitor_source` is a non-empty string. PipeWire on
+  p620 reports `monitor_of_sink: null` for every source, so the brief's rule
+  would have counted every microphone as a monitor.
+- Brief test 12 (`SystemAudio::start(None)`) is replaced by a fake-recorder
+  test, because the real call records on a host with Pulse.
+- `pactl` gets its 2 s timeout in `SystemAudio::start` too (brief decision).
+- The dead device-listing code was removed.
+### Owner decision, 2026-10-29: finish #3 without the pre-merge p620 checks
+- Owner: "Rewrite remaining lennette-authored code, then relicense MIT —
+  #3 approved." Steps 3, 10 and 11 merge after their reviews without the
+  live recording / live transcript checks on p620; those checks run after
+  the deploy instead (a short recording on Parakeet and Deepgram), and a
+  regression is fixed forward. Step 12 follows once origin-lines is 0.
+### Step 6 (core/security), 2026-10-29
+- agy implemented from the brief; the Opus review found validate, list,
+  the atomic write and several texts/names too close to the old code; a
+  fresh Claude coder rewrote them from explicit designs (handoff
+  fallback); the lead renamed the last four items the re-review listed.
+- Deliberate tightenings for the no-leak rule (same interface): a
+  hand-written Debug for Credential hides api_key; no serde error text
+  from stored data in errors; a failed open leaves no vault.key; a
+  half-written new key file is removed.
+- provider_import.rs deleted (nothing called parse or guide); dead
+  Vault::open_default, Vault::directory, Credential::masked_key removed;
+  Vault::write/update/Store made private.
+- New gate: tests/fixtures/old-vault (written by the old code, dummy
+  credential, synthetic key tracked like history.db.key) and
+  old_vault_reads_back.
+- p620 check done by the lead: a copy of the real vault opened with the
+  new code (1 record, 1 speech credential read back; counts only, copy
+  deleted).
+
+### Step 12 (licence), 2026-10-29
+
+- `tools/origin-lines.sh` reports total 0 after step 11. LICENSE is the MIT
+  text (Copyright (c) 2026 Olaf K. Freund, the name in shell/manifest.json);
+  Cargo.toml, nix/package.nix and shell/manifest.json say MIT; README's
+  "License and history" explains the clean-room rewrite and that releases
+  before it stay AGPL-3.0. Owner approved 2026-10-29. Closes #3.
