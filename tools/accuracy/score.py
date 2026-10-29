@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Score the daemon's batch transcription of a stereo WAV against a reference file.
 
-Usage: python3 -I score.py FILE.wav REFERENCE.txt (--url URL | --fake TEXT) [--model M] [--language L] [--glossary G]
+Usage: python3 -I score.py FILE.wav REFERENCE.txt (--url URL | --fake TEXT | --parakeet) [--model-dir DIR] [--model M] [--language L] [--glossary G]
 Reference (see ref.example.txt): `me: words` / `them: words` per utterance (prefix case-insensitive),
 `[silence]` (ignored) or `[silence mm:ss-mm:ss]` (output lines inside the span are invented).
-Extra flags go to examples/accuracy_replay.rs, which runs the live batch path.
+Extra flags, including --parakeet and --model-dir, go to examples/accuracy_replay.rs,
+which runs the daemon's batch transcription path.
 """
 import json, re, subprocess, sys
 from collections import Counter
