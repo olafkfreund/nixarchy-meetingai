@@ -27,7 +27,7 @@ use tokio::time::timeout;
 /// Longest any single socket wait may take before the test is called hung.
 const HANG: Duration = Duration::from_secs(10);
 /// Replies leave the fake server this many bytes at a time.
-const FRAGMENT: usize = 7;
+const FRAGMENT: usize = 11;
 
 /// One request as the fake server received it.
 struct Seen {
@@ -82,7 +82,7 @@ fn declared_length(head: &[u8]) -> usize {
 async fn read_request(socket: &mut TcpStream) -> Vec<u8> {
     timeout(HANG, async {
         let mut raw = Vec::new();
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 3000];
         loop {
             if let Some(end) = find(&raw, b"\r\n\r\n")
                 && raw.len() >= end + 4 + declared_length(&raw[..end])
@@ -134,7 +134,7 @@ async fn serve(
     (host, task)
 }
 
-/// A cancel receiver whose sender is gone: it must never count as a cancel.
+/// Receiver half of a cancel channel that lost its sender; that is not a stop request.
 fn never_cancelled() -> Arc<watch::Receiver<bool>> {
     Arc::new(watch::channel(false).1)
 }
@@ -183,7 +183,7 @@ async fn anthropic_preset_keeps_only_visible_text_and_sends_its_wire_details() {
 
         let context = TurnContext {
             system: Some("Act as a release manager.".into()),
-            images: vec!["QUJDREVGRw==".into()],
+            images: vec!["cGl4ZWxzLWZvci10ZXN0".into()],
         };
         let answer = stream_chat(
             &http_client(),
@@ -208,7 +208,7 @@ async fn anthropic_preset_keeps_only_visible_text_and_sends_its_wire_details() {
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(
             body["messages"][0]["content"][1]["source"]["data"],
-            "QUJDREVGRw=="
+            "cGl4ZWxzLWZvci10ZXN0"
         );
         assert_eq!(body["max_tokens"], 4096);
         assert_eq!(body["stream"], streaming);
@@ -250,51 +250,58 @@ async fn custom_chat_provider_follows_its_method_header_and_reply_path() {
     assert_eq!(body["stream"], false);
 }
 
-#[tokio::test]
-async fn custom_speech_provider_uploads_in_each_format() {
+fn sample_wav() -> Vec<u8> {
     let samples: Vec<f32> = (0..900).map(|i| (i as f32 * 0.07).sin() * 0.35).collect();
-    let wav = encode_wav(&samples).unwrap();
-    for format in ["raw-wav", "multipart-wav", "json-wav"] {
-        let reply = json!({"result": {"transcript": "Numbers look fine."}}).to_string();
-        let (host, seen) = serve(200, "application/json", reply).await;
-        let mut config = ProviderConfig::new("custom-stt-4", "", "stt-large-2");
-        config.base_url = format!("http://{host}/transcribe");
-        config.custom = Some(CustomProvider {
-            auth: "none".into(),
-            request_format: format.into(),
-            response_path: "/result/transcript".into(),
-            ..CustomProvider::default()
-        });
+    encode_wav(&samples).unwrap()
+}
 
-        let text = transcribe(&config, wav.clone(), Some("pt-BR"))
-            .await
-            .unwrap();
-        assert_eq!(text, "Numbers look fine.", "{format}");
+/// Sends `sample_wav()` through a custom speech provider using `format`; returns what arrived.
+async fn upload_as(format: &str) -> Seen {
+    let reply = json!({"result": {"transcript": "Numbers look fine."}}).to_string();
+    let (host, seen) = serve(200, "application/json", reply).await;
+    let mut config = ProviderConfig::new("custom-stt-4", "", "stt-large-2");
+    config.base_url = format!("http://{host}/transcribe");
+    config.custom = Some(CustomProvider {
+        auth: "none".into(),
+        request_format: format.into(),
+        response_path: "/result/transcript".into(),
+        ..CustomProvider::default()
+    });
+    let text = transcribe(&config, sample_wav(), Some("pt-BR"))
+        .await
+        .unwrap();
+    assert_eq!(text, "Numbers look fine.", "{format}");
+    let seen = seen.await.unwrap();
+    assert!(seen.header("authorization").is_none(), "{format}");
+    seen
+}
 
-        let seen = seen.await.unwrap();
-        assert!(seen.header("authorization").is_none(), "{format}");
-        let content_type = seen.header("content-type").unwrap();
-        match format {
-            "raw-wav" => {
-                assert!(content_type.contains("audio/wav"));
-                assert_eq!(seen.body, wav);
-            }
-            "multipart-wav" => {
-                assert!(content_type.contains("multipart/form-data; boundary=nixarchy-meetingai-"));
-                assert!(find(&seen.body, &wav).is_some());
-                assert!(find(&seen.body, b"stt-large-2").is_some());
-            }
-            _ => {
-                let body = seen.json();
-                let audio = base64::engine::general_purpose::STANDARD
-                    .decode(body["audio"].as_str().unwrap())
-                    .unwrap();
-                assert_eq!(audio, wav);
-                assert_eq!(body["model"], "stt-large-2");
-                assert_eq!(body["language"], "pt-BR");
-            }
-        }
-    }
+#[tokio::test]
+async fn raw_speech_upload_is_the_wav_itself() {
+    let seen = upload_as("raw-wav").await;
+    assert!(seen.header("content-type").unwrap().contains("audio/wav"));
+    assert_eq!(seen.body, sample_wav());
+}
+
+#[tokio::test]
+async fn multipart_speech_upload_carries_wav_and_model() {
+    let seen = upload_as("multipart-wav").await;
+    let kind = seen.header("content-type").unwrap();
+    assert!(kind.contains("multipart/form-data; boundary=nixarchy-meetingai-"));
+    assert!(find(&seen.body, &sample_wav()).is_some());
+    assert!(find(&seen.body, b"stt-large-2").is_some());
+}
+
+#[tokio::test]
+async fn json_speech_upload_base64_encodes_the_wav() {
+    let seen = upload_as("json-wav").await;
+    let body = seen.json();
+    let audio = base64::engine::general_purpose::STANDARD
+        .decode(body["audio"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(audio, sample_wav());
+    assert_eq!(body["model"], "stt-large-2");
+    assert_eq!(body["language"], "pt-BR");
 }
 
 #[tokio::test]
@@ -376,7 +383,7 @@ async fn recap_includes_words_that_arrived_after_the_meeting_ended() {
         "## Decisions\nLaunch moves to autumn.\n## Action items\nNone recorded.",
     )
     .await;
-    let mut config = ProviderConfig::new("custom-recap-1", "", "recap-model");
+    let mut config = ProviderConfig::new("custom-notes-8", "", "recap-model");
     config.base_url = format!("http://{host}/recap");
     config.custom = Some(CustomProvider {
         auth: "none".into(),
@@ -436,12 +443,12 @@ async fn spoken_question_becomes_a_streamed_answer_in_a_finished_meeting() {
     ]}})
     .to_string();
     let (stt_host, stt_seen) = serve(200, "application/json", stt_reply).await;
-    let first = "Freeze starts ";
-    let second = "Friday – café closes";
+    let part_a = "Freeze starts ";
+    let part_b = "Friday – café closes";
     let chat_reply = format!(
         "data: {}\r\n\r\ndata: {}\n\ndata: [DONE]",
-        json!({"choices": [{"delta": {"content": first}}]}),
-        json!({"choices": [{"delta": {"content": second}}]}),
+        json!({"choices": [{"delta": {"content": part_a}}]}),
+        json!({"choices": [{"delta": {"content": part_b}}]}),
     );
     let (chat_host, chat_seen) = serve(200, "text/event-stream", chat_reply).await;
 
@@ -498,7 +505,7 @@ async fn spoken_question_becomes_a_streamed_answer_in_a_finished_meeting() {
     )
     .await
     .unwrap();
-    assert_eq!(answer, format!("{first}{second}"));
+    assert_eq!(answer, format!("{part_a}{part_b}"));
     session.finish();
     assert!(!session.is_streaming());
 
@@ -533,8 +540,8 @@ async fn provider_failures_reach_the_caller() {
         (200, "data: [DONE]\n\n", "without an answer"),
         (
             200,
-            "data: {\"error\":\"quota exhausted for tenant\"}\n\n",
-            "quota exhausted for tenant",
+            "data: {\"error\":\"monthly allowance used up\"}\n\n",
+            "monthly allowance used up",
         ),
     ];
     for (status, body, expected) in cases {
@@ -543,7 +550,7 @@ async fn provider_failures_reach_the_caller() {
         let error = stream_chat(
             &http_client(),
             &ollama(&host, "k", "tiny"),
-            &question_turn("hello"),
+            &question_turn("status please"),
             &TurnContext::default(),
             Arc::new(cancel),
             |_| {},
@@ -580,8 +587,8 @@ async fn cancelling_a_silent_provider_returns_at_once() {
 async fn deltas_are_delivered_while_the_provider_is_still_talking() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let config = ollama(&listener.local_addr().unwrap().to_string(), "k", "tiny");
-    let first = "Try this:\n```ru";
-    let second = "st\nprintln!(\"héllo\");\n```";
+    let part_a = "Try this:\n```ru";
+    let part_b = "st\nprintln!(\"señor\");\n```";
     let (go_tx, mut go_rx) = mpsc::unbounded_channel::<()>();
     let server_done = Arc::new(AtomicBool::new(false));
     let flag = server_done.clone();
@@ -598,13 +605,13 @@ async fn deltas_are_delivered_while_the_provider_is_still_talking() {
             .write_all(head(200, "text/event-stream").as_bytes())
             .await
             .unwrap();
-        socket.write_all(chunk(first).as_bytes()).await.unwrap();
+        socket.write_all(chunk(part_a).as_bytes()).await.unwrap();
         socket.flush().await.unwrap();
         timeout(HANG, go_rx.recv())
             .await
             .expect("the first delta never reached the caller");
         flag.store(true, Ordering::SeqCst);
-        socket.write_all(chunk(second).as_bytes()).await.unwrap();
+        socket.write_all(chunk(part_b).as_bytes()).await.unwrap();
         socket.write_all(b"data: [DONE]\n\n").await.unwrap();
         let _ = socket.shutdown().await;
     });
@@ -613,7 +620,7 @@ async fn deltas_are_delivered_while_the_provider_is_still_talking() {
     let answer = stream_chat(
         &http_client(),
         &config,
-        &question_turn("show code"),
+        &question_turn("print a snippet"),
         &TurnContext::default(),
         never_cancelled(),
         |delta| {
@@ -631,7 +638,7 @@ async fn deltas_are_delivered_while_the_provider_is_still_talking() {
     .unwrap();
     server.await.unwrap();
     assert_eq!(deltas.len(), 2);
-    assert_eq!(answer, format!("{first}{second}"));
+    assert_eq!(answer, format!("{part_a}{part_b}"));
 }
 
 #[tokio::test]

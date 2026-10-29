@@ -1,13 +1,14 @@
-# Build output
+# Rust and Nix build products
 target/
 result
 result-*
 
-# Dev environments
+# Per-developer environments
 .devenv/
 .direnv/
+.claude/worktrees/
 
-# Local secrets: the example file is the only one tracked
+# Secrets stay local; only the example env file is tracked
 .env
 .env.*
 !.env.example
@@ -15,7 +16,7 @@ result-*
 # Synthetic key for the old-data test fixture (#3), not a secret.
 !tests/fixtures/old-history/history.db.key
 
-# Editors, OS and logs
+# Editor, OS and log litter
 .idea/
 .vscode/
 *.swp
@@ -23,9 +24,6 @@ result-*
 *~
 .DS_Store
 *.log
-
-# Agent worktrees
-.claude/worktrees/
 
 # Accuracy evaluation audio is personal: never commit it (tools/accuracy/README.md).
 tools/accuracy/*.wav

@@ -23,6 +23,29 @@ struct Handshake {
     query: HashMap<String, String>,
 }
 
+/// Minimal percent-decoding for query values.
+fn unescape(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok());
+        match (bytes[i], hex.and_then(|h| u8::from_str_radix(h, 16).ok())) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[allow(clippy::result_large_err)]
 fn note_handshake(
     request: &Request,
@@ -39,8 +62,14 @@ fn note_handshake(
             )
         })
         .collect();
-    let url = reqwest::Url::parse(&format!("ws://peer{}", request.uri())).unwrap();
-    let query = url.query_pairs().into_owned().collect();
+    let query = request
+        .uri()
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(key, value)| (key.to_owned(), unescape(value)))
+        .collect();
     *into = Some(Handshake { headers, query });
     Ok(response)
 }
@@ -129,7 +158,7 @@ fn transcript(event: Option<LiveEvent>) -> TranscriptLine {
 #[tokio::test]
 async fn custom_streaming_provider_sends_its_header_and_query() {
     let (listener, base) = bind().await;
-    let mut config = ProviderConfig::new("custom-live-3", "live-key-6c1", "vendor/stt-v5");
+    let mut config = ProviderConfig::new("custom-rt-12", "live-key-6c1", "vendor/stt-v5");
     config.base_url = "http://127.0.0.1:9/batch".into();
     config.language = "nl-NL".into();
     config.custom = Some(CustomProvider {
@@ -138,7 +167,7 @@ async fn custom_streaming_provider_sends_its_header_and_query() {
         request_format: "raw-wav".into(),
         response_path: "/text".into(),
         streaming: true,
-        stream_url: format!("{base}/rt/listen?tenant=acme-9"),
+        stream_url: format!("{base}/rt/listen?region=eu-west-4"),
         ..CustomProvider::default()
     });
 
@@ -169,7 +198,7 @@ async fn custom_streaming_provider_sends_its_header_and_query() {
     assert_eq!(query["model"], "vendor/stt-v5");
     assert_eq!(query["channels"], "2");
     assert_eq!(query["sample_rate"], "16000");
-    assert_eq!(query["tenant"], "acme-9");
+    assert_eq!(query["region"], "eu-west-4");
     assert_eq!(query["language"], "nl-NL");
 }
 
@@ -215,21 +244,23 @@ async fn stereo_audio_goes_out_and_the_last_final_still_comes_back() {
     assert_eq!(interim.text, "so the");
     let done = transcript(next_event(&mut live).await);
     assert_eq!((done.channel, done.text.as_str()), (0, "Hello team."));
+    assert!(done.is_final && done.speech_final);
 
     live.finish();
     let tail = transcript(next_event(&mut live).await);
     assert_eq!(tail.text, "Agreed.");
     assert_eq!((tail.channel, tail.speaker), (1, Some(3)));
+    assert!(tail.is_final && tail.speech_final);
     assert_eq!(next_event(&mut live).await, None);
 
     let (handshake, pcm) = server.await.unwrap();
     assert_eq!(handshake.headers["authorization"], "Token tk-live-880");
-    let samples: Vec<i16> = pcm
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| i16::from_le_bytes(*pair))
-        .collect();
+    let mut samples = Vec::new();
+    let mut at = 0;
+    while at + 1 < pcm.len() {
+        samples.push(i16::from(pcm[at]) | (i16::from(pcm[at + 1]) << 8));
+        at += 2;
+    }
     assert_eq!(samples, [16383, -8191, 0, -32767]);
 }
 

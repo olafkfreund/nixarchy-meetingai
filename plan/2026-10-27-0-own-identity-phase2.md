@@ -301,3 +301,20 @@ commit and reverts alone.
 - The plan's extra check ("a live whisper session") is now a live
   Deepgram and Parakeet session on p620 with the owner (whisper was
   removed in #14).
+
+### Step 11 (tests and build files), 2026-10-29
+
+- The Claude coder wrote the three integration tests from behaviour lists
+  and the build files from contracts; the Opus review's value/structure
+  matches and the broken `.envrc` (`source_url` with a script) were fixed
+  by the same coder.
+- Deleted as unused (nothing in the flake, CI, docs or installed hooks
+  refers to them): justfile, lefthook.yml, scripts/pre-push-checks.sh,
+  rust-toolchain.toml, .gitattributes. `SKIP_BUMP` therefore does nothing
+  any more.
+- Lock files are not regenerated (the plan said "regenerated"): both are
+  machine-written, `origin-lines.sh --total` does not count them, and a
+  regenerate would upgrade every crate inside a rewrite PR. A separate
+  dependency refresh can reset their blame later.
+- devenv kept (README uses it). provider_flow has 13 tests (the speech
+  formats are one test each).

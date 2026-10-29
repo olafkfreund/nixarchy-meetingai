@@ -4,6 +4,7 @@ use nixarchy_meetingai::ai::engine::{
 };
 use nixarchy_meetingai::ai::providers::ProviderConfig;
 use nixarchy_meetingai::core::domain::Message;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,24 +14,34 @@ use tokio::sync::{mpsc, oneshot, watch};
 const WAIT: Duration = Duration::from_secs(5);
 const DELTA: &str = r#"data: {"choices":[{"delta":{"content":"pong"}}]}"#;
 
-fn blank_line_at(raw: &[u8]) -> Option<usize> {
-    raw.windows(4).position(|w| w == b"\r\n\r\n")
+fn headers_end(raw: &[u8]) -> Option<usize> {
+    raw.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|at| at + 4)
+}
+
+/// Header fields of a raw request head, names lowercased.
+fn header_map(head: &[u8]) -> HashMap<String, String> {
+    String::from_utf8_lossy(head)
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_lowercase(), value.trim().to_owned()))
+        .collect()
 }
 
 /// Reads one request (headers plus the declared body) off `socket`; a stall fails the test.
 async fn read_request(socket: &mut TcpStream) -> Vec<u8> {
     tokio::time::timeout(WAIT, async {
         let mut raw = Vec::new();
-        let mut buf = [0u8; 8192];
+        let mut buf = [0u8; 2048];
         loop {
-            if let Some(end) = blank_line_at(&raw) {
-                let head = String::from_utf8_lossy(&raw[..end]).to_lowercase();
-                let length: usize = head
-                    .lines()
-                    .find_map(|l| l.strip_prefix("content-length:"))
-                    .and_then(|v| v.trim().parse().ok())
+            if let Some(body_at) = headers_end(&raw) {
+                let declared = header_map(&raw[..body_at])
+                    .get("content-length")
+                    .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(0);
-                if raw.len() >= end + 4 + length {
+                if raw.len() - body_at >= declared {
                     return raw;
                 }
             }
@@ -123,12 +134,13 @@ async fn many_requests_are_in_flight_together_on_few_workers() {
         })
         .collect();
 
-    for _ in 0..CALLS {
-        tokio::time::timeout(WAIT, arrived_rx.recv())
-            .await
-            .expect("not every request reached the server while all were held")
-            .unwrap();
-    }
+    tokio::time::timeout(WAIT, async {
+        for _ in 0..CALLS {
+            arrived_rx.recv().await.unwrap();
+        }
+    })
+    .await
+    .expect("not every request reached the server while all were held");
     gate_tx.send(true).unwrap();
     for call in calls {
         assert_eq!(call.await.unwrap().unwrap(), "pong");
