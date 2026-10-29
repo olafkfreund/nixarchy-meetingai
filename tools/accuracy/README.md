@@ -21,7 +21,11 @@ With an OpenAI-compatible speech server running (`--url` is its base URL and `--
 
     python3 -I tools/accuracy/score.py tools/accuracy/data/set1.wav tools/accuracy/data/set1.txt --url http://127.0.0.1:8178 --model large-v3-turbo
 
-Prints bleed lines (decided on words unique to one side), lost owner words, remote words on the mic channel, invented lines on silence spans, lines of mostly unknown words, and inference latency per chunk. Extra flags: `--model`, `--language`, `--glossary`.
+With local Parakeet, use the model directory in `NIXARCHY_MEETINGAI_PARAKEET_DIR` (the same setting as the daemon), or override it for this run:
+
+    python3 -I tools/accuracy/score.py tools/accuracy/data/set1.wav tools/accuracy/data/set1.txt --parakeet --model-dir /path/to/parakeet-model
+
+Choose exactly one of `--url URL`, `--fake TEXT`, or `--parakeet`. Prints bleed lines (decided on words unique to one side), lost owner words, remote words on the mic channel, invented lines on silence spans, lines of mostly unknown words, and inference latency per chunk. Extra flags: `--model-dir`, `--model`, `--language`, `--glossary`.
 
 ## Without audio (CI, tests)
 
