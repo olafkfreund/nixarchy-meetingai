@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 4
 author: olafkfreund
 ---
@@ -66,3 +66,9 @@ their login status only:
    at once rather than in a meeting.
 3. **Several of the same preset** (e.g. two OpenRouter keys)? Recommended:
    allowed, each with its own name.
+
+## Decisions (owner, 2026-10-29: "approve #4", recommendations taken)
+
+1. Presets for chat and speech; the list shows which kind each is.
+2. An optional "Test connection" before saving.
+3. Several providers from the same preset are allowed, each with its own name.
