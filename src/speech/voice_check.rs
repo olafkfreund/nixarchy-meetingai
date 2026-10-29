@@ -271,20 +271,4 @@ mod tests {
                 .contains("8 seconds")
         );
     }
-
-    #[test]
-    #[ignore = "requires MEETINGAI_SPEAKER_MODEL from the voice-check flake check"]
-    fn real_model_extracts_embedding() {
-        let model =
-            std::env::var_os("MEETINGAI_SPEAKER_MODEL").expect("model path set by flake check");
-        let e = SherpaEmbedder::load(Path::new(&model)).unwrap();
-        let samples: Vec<f32> = (0..SAMPLE_RATE * 2)
-            .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32).sin() * 0.1)
-            .collect();
-        let embedding = e
-            .embed(&samples)
-            .expect("model accepts two seconds of audio");
-        assert!(!embedding.is_empty());
-        assert!(embedding.iter().all(|x| x.is_finite()));
-    }
 }

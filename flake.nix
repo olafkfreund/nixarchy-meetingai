@@ -268,10 +268,8 @@
           voice-check = sysPkgs.default.overrideAttrs (_: {
             doCheck = true;
             cargoTestFlags = [
-              "--lib"
-              "speech::voice_check"
-              "--"
-              "--ignored"
+              "--test"
+              "voice_model"
             ];
             MEETINGAI_SPEAKER_MODEL = "${pkgs.callPackage ./nix/speaker-model.nix { }}";
           });
