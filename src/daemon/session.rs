@@ -1102,7 +1102,10 @@ impl Daemon {
         if !s.speech_model.is_empty() && config.custom.is_none() {
             config.model.clone_from(&s.speech_model);
         }
-        (config.speech_usable() && (!local || stays_local(&config))).then_some(config)
+        // A streaming custom record sends audio to its stream_url, which stays_local does not
+        // see: local-only sessions never use one.
+        let streams = config.custom.as_ref().is_some_and(|c| c.streaming);
+        (config.speech_usable() && (!local || (stays_local(&config) && !streams))).then_some(config)
     }
 
     /// `live` builds the glanceable automatic-answer prompt: the `live_answer` text and Short length.
@@ -4773,6 +4776,30 @@ mod command_tests {
             (id, "sk-test")
         );
         assert!(d.speech_config(&s, true).is_none());
+    }
+
+    /// A streaming custom speech record sends audio to its stream_url, so a local base_url
+    /// must not let it into a local-only session.
+    #[tokio::test]
+    async fn local_only_never_uses_a_streaming_custom_speech_record() {
+        let d = daemon();
+        let mut record = crate::ai::presets::PRESETS
+            .iter()
+            .find(|p| p.speech)
+            .unwrap()
+            .draft();
+        record.base_url = "http://127.0.0.1:9/v1/audio/transcriptions".into();
+        let custom = record.custom.as_mut().unwrap();
+        custom.auth = "none".into();
+        custom.streaming = true;
+        custom.stream_url = "wss://speech.example.invalid/v1/listen".into();
+        credentials::save(&d.vault, &record).unwrap();
+        d.inner.lock().settings.speech_provider = record.provider.clone();
+        let s = d.inner.lock().settings.clone();
+        assert!(d.speech_config(&s, true).is_none());
+        record.custom.as_mut().unwrap().streaming = false;
+        credentials::save(&d.vault, &record).unwrap();
+        assert!(d.speech_config(&s, true).is_some());
     }
 
     #[tokio::test]

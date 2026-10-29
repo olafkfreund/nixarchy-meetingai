@@ -143,3 +143,10 @@ overlay loses the add/edit screens.
   `kind: "providers"` (shown as a banner).
 - "Use for chat" sets only `chat_provider`; `live_provider` stays (said in the
   README). Origin gate: the `cmd != "presets.list"` test was redundant and is gone.
+- Re-review: a streaming custom speech record sends audio to its
+  `stream_url`, which `stays_local` does not check, so local-only sessions
+  never use a streaming custom speech record (tested). The provider form is
+  cleared when the overlay closes. `fit_auth` sends no key to any localhost
+  `http://` endpoint, so a local proxy that needs a key (e.g. LiteLLM on
+  localhost) is not supported from presets; moving an endpoint back to
+  https restores the preset's auth, not a hand-edited one.

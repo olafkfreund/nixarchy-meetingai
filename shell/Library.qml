@@ -180,6 +180,7 @@ Item {
     property string error: ""   // the last failed request made from here, shown under the search field
     onProvModeChanged: { root.formEpoch++; if (root.provMode !== "form") { provKey.text = ""; root.testMessage = ""; root.testingProvider = false; } }
     onTabChanged: { root.error = ""; root.provMode = ""; root.load(); }
+    onVisibleChanged: if (!visible) root.provMode = ""   // closing the overlay drops a typed key
     onPromptModeChanged: root.loadPrompt()
     onPromptKindChanged: root.loadPrompt()
     Component.onCompleted: root.load()
