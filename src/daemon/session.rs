@@ -1867,7 +1867,6 @@ impl Daemon {
         }
         let me = self.clone();
         tokio::spawn(async move {
-            me.settle_checks().await;
             let (config, language) = {
                 let g = me.inner.lock();
                 (
@@ -1877,6 +1876,8 @@ impl Daemon {
             };
             if let Some(config) = config {
                 let _serial = me.notes.lock().await;
+                // After the notes lock, so a line that arrived while waiting for it is checked too.
+                me.settle_checks().await;
                 if let Ok((made, continued)) =
                     recap::maybe_chunk_items(&me.db_path, &meeting, &config, &language).await
                 {
@@ -2535,8 +2536,17 @@ impl Daemon {
             }
             Some(g.settings.input_device.clone()).filter(|d| !d.is_empty())
         };
-        let heard = self.capture_voice(device).await;
-        self.enrolling.store(false, Ordering::Release);
+        // Cleared on every exit, including a cancelled request.
+        struct Enrolling<'a>(&'a AtomicBool);
+        impl Drop for Enrolling<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let heard = {
+            let _enrolling = Enrolling(&self.enrolling);
+            self.capture_voice(device).await
+        };
         let heard = heard?;
         let me = self.clone();
         tokio::task::spawn_blocking(move || me.enroll_samples(&heard))
