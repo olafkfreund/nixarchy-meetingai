@@ -38,6 +38,7 @@ node_modules/
 .claude/worktrees/
 # Synthetic key for the old-data test fixture (#3), not a secret.
 !tests/fixtures/old-history/history.db.key
+!tests/fixtures/old-vault/vault.key
 
 # Accuracy evaluation audio is personal: never commit it (tools/accuracy/README.md).
 tools/accuracy/*.wav
