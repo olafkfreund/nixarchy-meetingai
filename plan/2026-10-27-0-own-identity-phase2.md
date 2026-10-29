@@ -358,3 +358,11 @@ commit and reverts alone.
 - p620 check done by the lead: a copy of the real vault opened with the
   new code (1 record, 1 speech credential read back; counts only, copy
   deleted).
+
+### Step 12 (licence), 2026-10-29
+
+- `tools/origin-lines.sh` reports total 0 after step 11. LICENSE is the MIT
+  text (Copyright (c) 2026 Olaf K. Freund, the name in shell/manifest.json);
+  Cargo.toml, nix/package.nix and shell/manifest.json say MIT; README's
+  "License and history" explains the clean-room rewrite and that releases
+  before it stay AGPL-3.0. Owner approved 2026-10-29. Closes #3.

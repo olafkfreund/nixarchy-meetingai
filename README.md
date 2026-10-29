@@ -1259,7 +1259,9 @@ two weeks.
 
 ## License and history
 
-AGPL-3.0 while original code remains; MIT once the rewrite is complete (see
-`LICENSE`).
+MIT (see `LICENSE`).
 
-Started from lennette (AGPL-3.0) by parazeeknova; being rewritten.
+The project started from lennette (AGPL-3.0) by parazeeknova. Every line of
+that code has since been rewritten clean-room (issue #3): `tools/origin-lines.sh`
+counts no line by its authors, so the AGPL no longer applies and the code is
+MIT. Releases before the rewrite remain under AGPL-3.0.
