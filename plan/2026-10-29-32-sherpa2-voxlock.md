@@ -118,4 +118,7 @@ the examples and scripts are standalone. Redeploy p620 from main.
 
 ## Deviations
 
-None yet.
+- Step 4 (Codex): the Alkove venv lives in `~/meetingai-eval/alkove-venv`
+  (owner-only, out of git) instead of the session scratchpad, so it
+  survives between measurement runs. Wheels pinned by hash (alkove 0.3.2,
+  numpy 2.2.6, checked against PyPI by the lead).
