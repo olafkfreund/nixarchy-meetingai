@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 4
 intent: intent/2026-10-29-4-preset-picker.md
 ---
