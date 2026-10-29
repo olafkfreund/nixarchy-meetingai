@@ -122,3 +122,9 @@ the examples and scripts are standalone. Redeploy p620 from main.
   (owner-only, out of git) instead of the session scratchpad, so it
   survives between measurement runs. Wheels pinned by hash (alkove 0.3.2,
   numpy 2.2.6, checked against PyPI by the lead).
+- Step 3: VoxLock models come from sherpa-onnx's release bundle
+  `speech-enhancement-models/sherpa-onnx-voxlock-int8.tar.bz2` (pinned by
+  hash), not the raw `arbazsiddiqui/voxlock` Hugging Face files: sherpa-onnx
+  adds metadata (`scripts/voxlock/add_meta_data.py`) its denoiser reads, and
+  the raw files live under `onnx/` with a v1/v2 split. Same weights,
+  Apache-2.0.
