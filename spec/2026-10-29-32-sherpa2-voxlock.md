@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 32
 intent: intent/2026-10-29-32-sherpa2-voxlock.md
 ---
