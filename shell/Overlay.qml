@@ -213,6 +213,7 @@ Item {
     Connections {
         target: backend
         function onConnectedChanged() { if (backend.connected) root.loadModels(); }
+        function onProvidersChanged() { root.loadModels(); }
     }
 
     PanelWindow { // qmllint disable uncreatable-type
@@ -487,7 +488,7 @@ Item {
                             theme: metrics; anchors.fill: parent
                             enabled: !backend.isLocked("chat_provider")
                             value: String(backend.settings.chat_provider || "")
-                            options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
+                            options: root.providers.filter(function(p) { return p.kind !== "speech"; }).map(function(p) { return { value: p.id, label: p.name || p.id }; })
                             onChanged: function(v) { root.setProvider(false, v); }
                         }
                     }
@@ -524,7 +525,7 @@ Item {
                             theme: metrics; anchors.fill: parent
                             enabled: !backend.isLocked("live_provider")
                             value: String(backend.settings.live_provider || "")
-                            options: root.providers.map(function(p) { return { value: p.id, label: p.name || p.id }; })
+                            options: root.providers.filter(function(p) { return p.kind !== "speech"; }).map(function(p) { return { value: p.id, label: p.name || p.id }; })
                             onChanged: function(v) { root.setProvider(true, v); }
                         }
                     }
