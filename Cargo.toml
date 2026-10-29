@@ -1,36 +1,45 @@
 [package]
 name = "nixarchy-meetingai"
-description = "An ambient real-time meeting and discussion copilot"
 version = "0.18.23"
 edition = "2024"
 rust-version = "1.99"
+description = "Ambient meeting copilot daemon: live transcripts, answers and recaps"
 license = "AGPL-3.0-or-later"
 authors = ["nixarchy-meetingai contributors"]
 
 [dependencies]
+# Runtime and errors
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process", "fs", "signal"] }
+futures-util = "0.3.34"
 thiserror = "2.0.21"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+parking_lot = "0.12.5"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process", "fs", "signal"] }
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "stream", "multipart"] }
-futures-util = "0.3.34"
+
+# Data formats
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 base64 = "0.23.1"
 uuid = { version = "1.28.0", features = ["v4", "serde"] }
-parking_lot = "0.12.5"
-directories = "6.0.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+pdf-extract = "0.12.1"
+
+# Network
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "stream", "multipart"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+rmcp = { version = "=3.8.0", features = ["server", "transport-io", "macros"] }
+
+# Storage and crypto
+rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher-vendored-openssl"] }
 aes-gcm = "0.11.1"
 rand = "0.10.3"
 sha2 = "0.11.1"
-hound = "3.5.1"
+directories = "6.0.0"
+
+# Audio and speech
 cpal = "0.18.2"
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
-rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
-rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher-vendored-openssl"] }
-pdf-extract = "0.12.1"
-rmcp = { version = "=3.8.0", features = ["server", "transport-io", "macros"] }
+hound = "3.5.1"
 # Parakeet. "shared" + SHERPA_ONNX_LIB_DIR (nix/sherpa-lib.nix) links the nixpkgs library; the default "static" downloads at build time.
 sherpa-onnx = { version = "2.0.1", default-features = false, features = ["shared"] }
 
