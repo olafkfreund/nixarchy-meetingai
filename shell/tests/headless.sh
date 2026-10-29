@@ -24,7 +24,7 @@ else
     # SWAY_BIN (the dev shell, the flake check) wins over building it.
     sway_bin=${SWAY_BIN:-$(nix build --no-link --print-out-paths --inputs-from "$repo" nixpkgs#sway | head -1)/bin/sway}
     mkdir -m 700 "$work/sway"
-    printf 'output HEADLESS-1 resolution 1920x1080 position 0 0\n' > "$work/sway.cfg"
+    printf '%s\n' 'output HEADLESS-1 resolution 1920x1080 position 0 0' 'xwayland disable' > "$work/sway.cfg"
     env -u WAYLAND_DISPLAY -u DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE -u SWAYSOCK \
         XDG_RUNTIME_DIR="$work/sway" WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
         "$sway_bin" -c "$work/sway.cfg" > "$work/sway.log" 2>&1 &
