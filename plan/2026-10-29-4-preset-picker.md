@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 4
 spec: spec/2026-10-29-4-preset-picker.md
 coders:
