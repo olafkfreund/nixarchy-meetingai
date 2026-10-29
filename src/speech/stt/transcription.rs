@@ -1172,19 +1172,33 @@ async fn batch_task(
             } }
         }
     }
+    // At stop every in-flight result is still handled: the final chunks wait for a free slot
+    // instead of counting as "fell behind".
+    let mut tail = if error.is_none() {
+        chunks.finish()
+    } else {
+        Vec::new()
+    };
+    tail.reverse();
+    // Waiting system chunks count for line ordering before they are sent.
+    system_requests.extend(tail.iter().rev().filter(|c| c.0 == 1).map(|c| c.1));
     if error.is_none() {
-        let ready = chunks.finish();
-        for chunk in &ready {
-            if chunk.0 == 1 {
-                system_requests.push_back(chunk.1);
+        loop {
+            while pending.len() < MAX_IN_FLIGHT
+                && let Some(chunk) = tail.pop()
+            {
+                if let Err(e) =
+                    queue_chunks(&mut pending, vec![chunk], &config, &filter, &hints.glossary)
+                {
+                    error = Some(e);
+                }
             }
-        }
-        if let Err(e) = queue_chunks(&mut pending, ready, &config, &filter, &hints.glossary) {
-            error = Some(e);
-        }
-    }
-    if error.is_none() {
-        while let Some((channel, start, end, result)) = pending.next().await {
+            if error.is_some() {
+                break;
+            }
+            let Some((channel, start, end, result)) = pending.next().await else {
+                break;
+            };
             if channel == 1 {
                 system_requests.pop_front();
             }
@@ -1544,8 +1558,12 @@ mod tests {
 
     /// Two channels through the batch path with a fake recogniser: channel and times survive,
     /// and `finish` flushes chunks that never saw trailing silence.
+    /// The fake Parakeet decoder is process-global: tests that install one run one at a time.
+    static DECODER_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn parakeet_batch_keeps_channel_and_times_and_flushes_on_stop() {
+        let _one_at_a_time = DECODER_TESTS.lock().await;
         crate::speech::stt::parakeet::set_decoder(Box::new(|_, samples| {
             let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
             if peak < 0.3 {
@@ -1586,6 +1604,55 @@ mod tests {
         );
         assert!((lines[0].start - 0.5).abs() < 0.01 && (lines[0].end - 1.5).abs() < 0.01);
         assert!(lines[1].start.abs() < 0.01 && lines[1].end > 1.0);
+    }
+
+    /// Stopping while the request slots are full still transcribes every utterance:
+    /// the final chunks wait for a slot instead of failing as "fell behind".
+    #[tokio::test]
+    async fn stop_with_full_request_slots_keeps_every_line() {
+        let _one_at_a_time = DECODER_TESTS.lock().await;
+        let mut said = 0;
+        crate::speech::stt::parakeet::set_decoder(Box::new(move |_, samples| {
+            std::thread::sleep(Duration::from_millis(150));
+            let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+            said += 1;
+            if peak > 0.3 {
+                format!("far side remark {said}")
+            } else {
+                format!("near side remark {said}")
+            }
+        }));
+        let config = ProviderConfig::new("parakeet-local", "", "");
+        let mut live = LiveTranscriber::connect_batch(config, SttHints::default());
+        // Four closed mic utterances (0.4 s speech, 0.8 s quiet each), then speech still open
+        // on both channels when recording stops.
+        let mut audio = Vec::new();
+        for _ in 0..4 {
+            audio.extend((0..6_400).flat_map(|_| [0.2_f32, 0.0]));
+            audio.extend((0..12_800).flat_map(|_| [0.0_f32, 0.0]));
+        }
+        audio.extend((0..6_400).flat_map(|_| [0.2_f32, 0.45]));
+        live.push(&audio).await.unwrap();
+        live.finish();
+        let (mut lines, mut failed) = (Vec::new(), None);
+        while let Some(event) = live.next_event().await {
+            match event {
+                LiveEvent::Transcript(line) => lines.push(line),
+                LiveEvent::Failed(message) => failed = Some(message),
+                _ => {}
+            }
+        }
+        assert_eq!(failed, None);
+        assert_eq!(
+            lines.iter().filter(|l| l.channel == 0).count(),
+            5,
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines.iter().filter(|l| l.channel == 1).count(),
+            1,
+            "{lines:?}"
+        );
     }
 
     /// The four-second finish deadline also covers draining queued audio into a sink
