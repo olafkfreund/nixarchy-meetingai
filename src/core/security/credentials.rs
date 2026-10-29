@@ -1,15 +1,14 @@
-//! Provider credentials, stored in the encrypted vault.
-//!
-//! One record per provider: which catalog entry it maps to, its key, an optional
-//! model override and an optional custom endpoint. Keys never leave the vault
-//! except to build a request.
-
-use serde::{Deserialize, Serialize};
+//! API keys and connection details per provider, kept as records in the vault.
 
 use super::vault::{Vault, VaultError};
-use crate::ai::providers::{ChatProvider, ProviderConfig, SttProvider};
+use crate::ai::{
+    catalog::custom::CustomProvider,
+    models,
+    providers::{ChatProvider, ProviderConfig, SttProvider, endpoint_allowed},
+};
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
-/// Where a credential is used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
@@ -17,8 +16,7 @@ pub enum Kind {
     Speech,
 }
 
-/// A stored credential.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
     pub kind: Kind,
     /// Catalog id, e.g. `claude-sub` or `deepgram-stt`.
@@ -29,7 +27,25 @@ pub struct Credential {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom: Option<crate::ai::catalog::custom::CustomProvider>,
+    pub custom: Option<CustomProvider>,
+}
+
+impl fmt::Debug for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let key_marker = if self.api_key.is_empty() {
+            "<empty>"
+        } else {
+            "<redacted>"
+        };
+        f.debug_struct("Credential")
+            .field("kind", &self.kind)
+            .field("provider", &self.provider)
+            .field("api_key", &key_marker)
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("custom", &self.custom)
+            .finish()
+    }
 }
 
 impl Credential {
@@ -55,174 +71,186 @@ impl Credential {
         }
     }
 
-    /// Convert to the provider config used by the request layers.
     pub fn to_config(&self) -> ProviderConfig {
+        let trimmed_model = self.model.trim();
+        let chosen_model = if !trimmed_model.is_empty() {
+            trimmed_model.to_owned()
+        } else if let Some(chat_default) = models::default_for(&self.provider) {
+            chat_default.to_owned()
+        } else if let Some(stt) = SttProvider::by_id(&self.provider) {
+            stt.default_model.to_owned()
+        } else {
+            String::new()
+        };
+
         ProviderConfig {
             id: self.provider.clone(),
             api_key: self.api_key.trim().to_owned(),
-            model: if self.model.trim().is_empty() {
-                crate::ai::models::default_for(&self.provider)
-                    .or_else(|| SttProvider::by_id(&self.provider).map(|p| p.default_model))
-                    .unwrap_or_default()
-                    .to_owned()
-            } else {
-                self.model.trim().to_owned()
-            },
+            model: chosen_model,
             base_url: self.base_url.clone(),
             custom: self.custom.clone(),
             language: String::new(),
         }
     }
 
-    /// Validation shared by both kinds.
     pub fn validate(&self) -> Result<(), String> {
         if self.provider.trim().is_empty() {
-            return Err("Choose a provider first.".to_owned());
+            return Err("The provider id is empty.".into());
         }
-        if let Some(custom) = &self.custom {
-            if !self.provider.starts_with("custom-") {
-                return Err("Custom providers need their own identifier.".into());
-            }
-            custom.validate(self.kind == Kind::Speech)?;
-            let url = reqwest::Url::parse(&self.base_url)
-                .map_err(|_| "Enter a complete HTTP endpoint.")?;
-            if !matches!(url.scheme(), "http" | "https") {
-                return Err("Use an http:// or https:// endpoint.".into());
-            }
-            if !crate::ai::providers::endpoint_allowed(&self.base_url) {
-                return Err("Plain http:// is only allowed for localhost; use https://.".into());
-            }
-            if custom.auth != "none" && self.api_key.trim().is_empty() {
-                return Err("Enter an API key or choose no authentication.".into());
-            }
-            if self.kind == Kind::Chat && self.model.trim().is_empty() {
-                return Err("Enter a model ID.".into());
-            }
-            return Ok(());
+        match &self.custom {
+            Some(custom) => self.check_custom(custom),
+            None => self.check_catalog(),
         }
-        match self.kind {
-            Kind::Chat => {
-                if ChatProvider::by_id(&self.provider).is_none() {
-                    return Err(format!("'{}' is not a known chat provider.", self.provider));
-                }
-            }
-            Kind::Speech => {
-                if SttProvider::by_id(&self.provider).is_none() {
-                    return Err(format!(
-                        "'{}' is not a known speech provider.",
-                        self.provider
-                    ));
-                }
-            }
-        }
-        let needs_key = ChatProvider::by_id(&self.provider)
-            .map(|provider| provider.requires_key)
-            .unwrap_or(true);
-        if needs_key && self.api_key.trim().is_empty() {
-            return Err("Enter an API key.".to_owned());
-        }
-        if !self.base_url.is_empty() && !crate::ai::providers::endpoint_allowed(&self.base_url) {
-            return Err(
-                "The custom endpoint must be https://, or http:// on localhost.".to_owned(),
-            );
-        }
-        Ok(())
     }
 
-    /// Mask a key for display: keep only the last four characters.
-    pub fn masked_key(&self) -> String {
-        let key = self.api_key.trim();
-        if key.is_empty() {
-            "Not set".to_owned()
-        } else if key.len() <= 4 {
-            "••••".to_owned()
-        } else {
-            format!("••••{}", &key[key.len() - 4..])
-        }
+    fn check_custom(&self, custom: &CustomProvider) -> Result<(), String> {
+        custom.validate(self.kind == Kind::Speech)?;
+        let url_problem = endpoint_error(&self.base_url);
+        first_failure(&[
+            (
+                !self.provider.starts_with("custom-"),
+                "A custom provider id has to begin with \"custom-\".",
+            ),
+            (url_problem.is_some(), url_problem.unwrap_or_default()),
+            (
+                custom.auth != "none" && self.api_key.trim().is_empty(),
+                "This authentication mode needs an API key.",
+            ),
+            (
+                self.kind == Kind::Chat && self.model.trim().is_empty(),
+                "A custom chat provider needs a model.",
+            ),
+        ])
+    }
+
+    fn check_catalog(&self) -> Result<(), String> {
+        let key_required = match self.kind {
+            Kind::Chat => ChatProvider::by_id(&self.provider).map(|p| p.requires_key),
+            Kind::Speech => SttProvider::by_id(&self.provider).map(|_| true),
+        };
+        let Some(key_required) = key_required else {
+            let what = if self.kind == Kind::Chat {
+                "chat"
+            } else {
+                "speech"
+            };
+            return Err(format!(
+                "There is no {what} provider named '{}'.",
+                self.provider
+            ));
+        };
+        let key_blank = self.api_key.trim().is_empty();
+        first_failure(&[
+            (key_required && key_blank, "This provider needs an API key."),
+            (
+                !self.base_url.is_empty() && !endpoint_allowed(&self.base_url),
+                "The custom endpoint must be https://, or http:// on localhost.",
+            ),
+        ])
     }
 }
 
-/// Vault key for a credential record.
-fn key(kind: Kind, provider: &str) -> String {
+/// Why `url` cannot be used as a provider endpoint, if it cannot.
+fn endpoint_error(url: &str) -> Option<&'static str> {
+    match reqwest::Url::parse(url) {
+        Err(_) => Some("The endpoint is not a well-formed URL."),
+        Ok(parsed) if !matches!(parsed.scheme(), "http" | "https") => {
+            Some("The endpoint has to start with http:// or https://.")
+        }
+        Ok(_) if !endpoint_allowed(url) => {
+            Some("Plain http:// is only allowed for localhost; use https://.")
+        }
+        Ok(_) => None,
+    }
+}
+
+/// The message of the first `(failed, message)` pair whose flag is set.
+fn first_failure(checks: &[(bool, &str)]) -> Result<(), String> {
+    match checks.iter().find(|(failed, _)| *failed) {
+        Some((_, message)) => Err((*message).to_owned()),
+        None => Ok(()),
+    }
+}
+
+fn kind_prefix(kind: Kind) -> &'static str {
     match kind {
-        Kind::Chat => format!("provider:chat:{provider}"),
-        Kind::Speech => format!("provider:speech:{provider}"),
-    }
-}
-
-/// Persist a credential.
-pub fn save(vault: &Vault, credential: &Credential) -> Result<(), String> {
-    credential.validate()?;
-    let value = serde_json::to_value(credential).map_err(|error| error.to_string())?;
-    vault
-        .set(&key(credential.kind, &credential.provider), value)
-        .map_err(describe)
-}
-
-/// Load one credential.
-pub fn load(vault: &Vault, kind: Kind, provider: &str) -> Result<Option<Credential>, String> {
-    let value = vault.get(&key(kind, provider)).map_err(describe)?;
-    match value {
-        Some(value) => serde_json::from_value(value)
-            .map(Some)
-            .map_err(|error| format!("stored credential is unreadable: {error}")),
-        None => Ok(None),
-    }
-}
-
-/// Every stored credential of a kind.
-pub fn list(vault: &Vault, kind: Kind) -> Result<Vec<Credential>, String> {
-    let store = vault.read().map_err(describe)?;
-    let prefix = match kind {
         Kind::Chat => "provider:chat:",
         Kind::Speech => "provider:speech:",
-    };
-    let mut credentials = Vec::new();
-    for (name, value) in store {
-        if !name.starts_with(prefix) {
-            continue;
-        }
-        match serde_json::from_value::<Credential>(value) {
-            Ok(credential) => {
-                let supported = credential.kind == kind
-                    && (credential.custom.is_some() && credential.provider.starts_with("custom-")
-                        || match kind {
-                            Kind::Chat => ChatProvider::by_id(&credential.provider).is_some(),
-                            Kind::Speech => SttProvider::by_id(&credential.provider).is_some(),
-                        });
-                if supported {
-                    credentials.push(credential);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, %name, "skipping unreadable credential");
-            }
-        }
     }
-    credentials.sort_by(|a, b| a.provider.cmp(&b.provider));
-    Ok(credentials)
 }
 
-/// Remove a credential.
+fn record_name(kind: Kind, provider: &str) -> String {
+    format!("{}{provider}", kind_prefix(kind))
+}
+
+fn vault_failure(err: VaultError) -> String {
+    format!("The credential vault is unavailable (read or write failed): {err}")
+}
+
+/// Decodes one stored record; a bad one is logged by name only.
+fn decode(name: &str, raw: serde_json::Value) -> Option<Credential> {
+    serde_json::from_value(raw)
+        .map_err(
+            |_| tracing::warn!(record = %name, "ignoring stored record that is not a credential"),
+        )
+        .ok()
+}
+
+/// Whether a decoded record may be offered for `kind`.
+fn usable(credential: &Credential, kind: Kind) -> bool {
+    let known = match kind {
+        Kind::Chat => ChatProvider::by_id(&credential.provider).is_some(),
+        Kind::Speech => SttProvider::by_id(&credential.provider).is_some(),
+    };
+    credential.kind == kind
+        && (known || credential.custom.is_some() && credential.provider.starts_with("custom-"))
+}
+
+pub fn save(vault: &Vault, credential: &Credential) -> Result<(), String> {
+    credential.validate()?;
+    let (name, value) = (
+        record_name(credential.kind, &credential.provider),
+        serde_json::to_value(credential).map_err(|_| "The credential could not be encoded.")?,
+    );
+    vault.set(&name, value).map_err(vault_failure)
+}
+
+pub fn load(vault: &Vault, kind: Kind, provider: &str) -> Result<Option<Credential>, String> {
+    let name = record_name(kind, provider);
+    vault
+        .get(&name)
+        .map_err(vault_failure)?
+        .map(|raw| {
+            serde_json::from_value(raw)
+                .map_err(|_| format!("Vault record '{name}' could not be decoded."))
+        })
+        .transpose()
+}
+
+pub fn list(vault: &Vault, kind: Kind) -> Result<Vec<Credential>, String> {
+    let wanted = kind_prefix(kind);
+    let mut found: Vec<Credential> = vault
+        .read()
+        .map_err(vault_failure)?
+        .into_iter()
+        .filter(|(name, _)| name.starts_with(wanted))
+        .filter_map(|(name, raw)| decode(&name, raw))
+        .filter(|credential| usable(credential, kind))
+        .collect();
+    found.sort_by_key(|credential| credential.provider.clone());
+    Ok(found)
+}
+
 pub fn remove(vault: &Vault, kind: Kind, provider: &str) -> Result<(), String> {
     vault
-        .remove(&[key(kind, provider).as_str()])
-        .map_err(describe)
-}
-
-fn describe(error: VaultError) -> String {
-    format!("The credential vault could not be read or written: {error}")
+        .remove(&[record_name(kind, provider).as_str()])
+        .map_err(vault_failure)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn vault() -> Vault {
-        let dir =
-            std::env::temp_dir().join(format!("nixarchy-meetingai-cred-{}", uuid::Uuid::new_v4()));
-        Vault::open(dir).unwrap()
-    }
+    use serde_json::json;
 
     /// A keyed chat credential; no keyed provider is built in.
     fn keyed(key: &str) -> Credential {
@@ -233,125 +261,185 @@ mod tests {
         credential
     }
 
-    #[test]
-    fn saves_and_loads_a_chat_key() {
-        let vault = vault();
-        let mut credential = keyed("sk-test-123");
-        credential.model = "gpt-4o".into();
-        save(&vault, &credential).unwrap();
-        let loaded = load(&vault, Kind::Chat, "custom-test").unwrap().unwrap();
-        assert_eq!(loaded.api_key, "sk-test-123");
-        assert_eq!(loaded.model, "gpt-4o");
-    }
-
-    #[test]
-    fn keys_are_never_stored_in_plaintext_in_settings_but_are_encrypted() {
-        let dir =
-            std::env::temp_dir().join(format!("nixarchy-meetingai-cred2-{}", uuid::Uuid::new_v4()));
+    fn temp_vault() -> (std::path::PathBuf, Vault) {
+        let dir = std::env::temp_dir().join(format!("nm-creds-{}", uuid::Uuid::new_v4()));
         let vault = Vault::open(&dir).unwrap();
-        save(&vault, &keyed("sk-secret-value")).unwrap();
-        let bytes = std::fs::read(dir.join("vault.bin")).unwrap();
-        assert!(
-            !bytes.windows(16).any(|w| w == b"sk-secret-value"),
-            "the key must not appear in ciphertext"
-        );
+        (dir, vault)
     }
 
     #[test]
-    fn empty_key_is_rejected_for_hosted_providers() {
-        let credential = keyed("");
-        assert!(credential.validate().unwrap_err().contains("API key"));
+    fn save_load_and_json_shape_without_leaking_key() {
+        let (dir, vault) = temp_vault();
+        let secret = "dummy-key-plaintext-55";
+        let mut cred = keyed(secret);
+        cred.model = "model-z".into();
+        save(&vault, &cred).unwrap();
+
+        let loaded = load(&vault, Kind::Chat, "custom-test").unwrap().unwrap();
+        assert_eq!(loaded, cred);
+
+        let bin = std::fs::read(dir.join("vault.bin")).unwrap();
+        assert!(!bin.windows(secret.len()).any(|w| w == secret.as_bytes()));
+
+        // Built-in record with empty model and no custom omits those fields
+        let builtin = Credential::chat("codex-sub", "");
+        save(&vault, &builtin).unwrap();
+        let raw_builtin = vault.get("provider:chat:codex-sub").unwrap().unwrap();
+        assert_eq!(raw_builtin.get("kind"), Some(&json!("chat")));
+        assert!(raw_builtin.get("model").is_none());
+        assert!(raw_builtin.get("custom").is_none());
+
+        // Also check provider:chat:custom-test has kind == "chat"
+        let raw_custom = vault.get("provider:chat:custom-test").unwrap().unwrap();
+        assert_eq!(raw_custom.get("kind"), Some(&json!("chat")));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn retired_provider_is_rejected() {
-        assert!(Credential::chat("openai", "key").validate().is_err());
-    }
+    fn legacy_shape_loads_and_resolves_catalog_default_model() {
+        let (dir, vault) = temp_vault();
+        vault
+            .set(
+                "provider:speech:deepgram-stt",
+                json!({
+                    "kind": "speech",
+                    "provider": "deepgram-stt",
+                    "api_key": "dummy-k"
+                }),
+            )
+            .unwrap();
 
-    #[test]
-    fn unknown_providers_are_rejected() {
-        assert!(Credential::chat("nope", "k").validate().is_err());
-        assert!(Credential::speech("nope", "k").validate().is_err());
-    }
-
-    #[test]
-    fn custom_endpoint_must_be_http() {
-        let mut credential = keyed("k");
-        credential.base_url = "ftp://nope".into();
-        assert!(credential.validate().unwrap_err().contains("http"));
-        credential.base_url = "http://localhost:1234/v1".into();
-        assert!(credential.validate().is_ok());
-        credential.base_url = "http://[::1]:1234/v1".into();
-        assert!(credential.validate().is_ok());
-        credential.base_url = "http://example.com/v1".into();
-        assert!(credential.validate().is_err());
-        let mut custom = Credential::chat("custom-x", "k");
-        custom.custom = Some(Default::default());
-        custom.model = "m".into();
-        custom.base_url = "http://example.com/v1".into();
-        assert!(custom.validate().is_err());
-        custom.base_url = "http://127.0.0.1:1/v1".into();
-        assert!(custom.validate().is_ok());
-    }
-
-    #[test]
-    fn listing_filters_by_kind() {
-        let vault = vault();
-        save(&vault, &keyed("a")).unwrap();
-        save(&vault, &Credential::speech("deepgram-stt", "b")).unwrap();
-        let chats = list(&vault, Kind::Chat).unwrap();
-        let speech = list(&vault, Kind::Speech).unwrap();
-        assert_eq!(chats.len(), 1);
-        assert_eq!(speech.len(), 1);
-        assert_eq!(chats[0].provider, "custom-test");
-        assert_eq!(speech[0].provider, "deepgram-stt");
-    }
-
-    #[test]
-    fn removing_clears_only_that_provider() {
-        let vault = vault();
-        save(&vault, &keyed("a")).unwrap();
-        save(&vault, &Credential::chat("ollama", "b")).unwrap();
-        remove(&vault, Kind::Chat, "custom-test").unwrap();
-        assert!(load(&vault, Kind::Chat, "custom-test").unwrap().is_none());
-        assert!(load(&vault, Kind::Chat, "ollama").unwrap().is_some());
-    }
-
-    #[test]
-    fn old_credentials_stay_encrypted_but_are_not_active() {
-        let vault = vault();
-        vault.set("provider:chat:openai", serde_json::json!({"kind":"chat","provider":"openai","api_key":"old-key","model":"old-model"})).unwrap();
-        assert!(list(&vault, Kind::Chat).unwrap().is_empty());
-        assert!(vault.get("provider:chat:openai").unwrap().is_some());
-        assert!(
-            !load(&vault, Kind::Chat, "openai")
-                .unwrap()
-                .unwrap()
-                .to_config()
-                .is_usable()
-        );
-    }
-
-    #[test]
-    fn models_are_selectable_and_blank_models_have_working_defaults() {
-        let config = Credential::chat("claude-sub", "").to_config();
-        assert_eq!(config.model, "sonnet");
-        assert!(config.is_usable());
-        let mut credential = Credential::chat("ollama", "");
-        credential.model = "some-other-model".into();
-        assert!(credential.validate().is_ok());
+        let loaded = load(&vault, Kind::Speech, "deepgram-stt").unwrap().unwrap();
         assert_eq!(
-            Credential::speech("deepgram-stt", "test-key")
-                .to_config()
-                .model,
-            "nova-3"
+            loaded.to_config().model,
+            SttProvider::by_id("deepgram-stt").unwrap().default_model
         );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn masked_keys_show_only_the_tail() {
-        let credential = keyed("sk-abcdefgh1234");
-        assert_eq!(credential.masked_key(), "••••1234");
-        assert_eq!(keyed("").masked_key(), "Not set");
+    fn validation_checks_keys_ids_and_urls() {
+        // Custom credential key and auth = "none"
+        let mut c = keyed("");
+        assert!(c.validate().is_err());
+        c.custom.as_mut().unwrap().auth = "none".into();
+        assert!(c.validate().is_ok());
+
+        // Built-in chat and speech key rules
+        assert!(Credential::chat("codex-sub", "   ").validate().is_ok());
+        assert!(Credential::chat("ollama-cloud", "  ").validate().is_err());
+        assert!(Credential::speech("parakeet-local", "").validate().is_err());
+
+        // Unknown ids and wrong kind
+        let err_chat = Credential::chat("zz-missing", "dummy-key-q9")
+            .validate()
+            .unwrap_err();
+        assert!(err_chat.contains("zz-missing"));
+        let err_speech = Credential::speech("zz-missing", "dummy-key-q9")
+            .validate()
+            .unwrap_err();
+        assert!(err_speech.contains("zz-missing"));
+        assert!(
+            Credential::chat("deepgram-stt", "dummy-key-q9")
+                .validate()
+                .is_err()
+        );
+
+        // base_url values for custom chat credential
+        for ok_url in ["https://api.invalid/v2", "http://localhost:8181/x"] {
+            let mut cred = keyed("dummy-key-q9");
+            cred.base_url = ok_url.into();
+            assert!(cred.validate().is_ok(), "{ok_url}");
+        }
+        for bad_url in ["http://10.1.2.3/x", "gopher://localhost/x", "not a url"] {
+            let mut cred = keyed("dummy-key-q9");
+            cred.base_url = bad_url.into();
+            assert!(cred.validate().is_err(), "{bad_url}");
+        }
+    }
+
+    #[test]
+    fn list_remove_retired_and_malformed_records() {
+        let (dir, vault) = temp_vault();
+
+        // Saving invalid credential writes nothing
+        let bad = Credential::chat("zz-missing", "dummy-key-q9");
+        assert!(save(&vault, &bad).is_err());
+        assert!(list(&vault, Kind::Chat).unwrap().is_empty());
+
+        // Two chat records and one speech record
+        let mut chat_b = keyed("dummy-key-b");
+        chat_b.provider = "custom-b-one".into();
+        let mut chat_a = keyed("dummy-key-a");
+        chat_a.provider = "custom-a-one".into();
+        let speech = Credential::speech("deepgram-stt", "dummy-key-s");
+
+        save(&vault, &chat_b).unwrap();
+        save(&vault, &chat_a).unwrap();
+        save(&vault, &speech).unwrap();
+
+        let chats = list(&vault, Kind::Chat).unwrap();
+        assert_eq!(chats, vec![chat_a.clone(), chat_b.clone()]);
+        let speeches = list(&vault, Kind::Speech).unwrap();
+        assert_eq!(speeches, vec![speech]);
+
+        // Retired chat id ("gemini")
+        vault
+            .set(
+                "provider:chat:gemini",
+                json!({
+                    "kind": "chat",
+                    "provider": "gemini",
+                    "api_key": "dummy-retired-key"
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            list(&vault, Kind::Chat).unwrap(),
+            vec![chat_a.clone(), chat_b.clone()]
+        );
+        assert!(vault.get("provider:chat:gemini").unwrap().is_some());
+        let retired = load(&vault, Kind::Chat, "gemini").unwrap().unwrap();
+        assert!(!retired.to_config().is_usable());
+
+        // Malformed record missing api_key with distinctive probe value
+        let probe = "leak-probe-41";
+        vault
+            .set(
+                "provider:chat:broken",
+                json!({
+                    "kind": "chat",
+                    "provider": probe
+                }),
+            )
+            .unwrap();
+        let listed = list(&vault, Kind::Chat).unwrap();
+        assert_eq!(listed.len(), 2);
+        let load_err = load(&vault, Kind::Chat, "broken").unwrap_err();
+        assert!(!load_err.contains(probe));
+
+        // Remove one id, leave the other; removing absent id is Ok
+        remove(&vault, Kind::Chat, "custom-a-one").unwrap();
+        assert_eq!(list(&vault, Kind::Chat).unwrap(), vec![chat_b]);
+        remove(&vault, Kind::Chat, "never-saved").unwrap();
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn to_config_trims_and_debug_redacts_key() {
+        let mut cred = Credential::chat("claude-sub", "  dummy-key-q9  ");
+        cred.model = "   ".into();
+        let cfg = cred.to_config();
+        assert_eq!(cfg.api_key, "dummy-key-q9");
+        assert_eq!(cfg.model, models::default_for("claude-sub").unwrap());
+
+        cred.model = "  opus  ".into();
+        assert_eq!(cred.to_config().model, "opus");
+
+        let dbg = format!("{cred:?}");
+        assert!(!dbg.contains("dummy-key-q9"));
     }
 }
