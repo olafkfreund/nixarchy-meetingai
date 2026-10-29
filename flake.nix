@@ -264,6 +264,18 @@
               NIXARCHY_MEETINGAI_PARAKEET_DIR = "${model}";
               NIXARCHY_MEETINGAI_PARAKEET_WAV = "${model}/test_wavs/en.wav";
             });
+          # The sherpa-onnx crate and the C library it links must be the same version (pure eval).
+          sherpa-version-match =
+            let
+              crate = (lib.findFirst (p: p.name == "sherpa-onnx") null (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package).version;
+              guard =
+                crateVersion:
+                assertThat "sherpa-version-match" (crateVersion == (pkgs.callPackage ./nix/sherpa-onnx.nix { }).version)
+                  "Cargo.lock sherpa-onnx ${crateVersion} != library ${(pkgs.callPackage ./nix/sherpa-onnx.nix { }).version}";
+            in
+            # The guard must also fail on a mismatch, else it proves nothing.
+            assert !(builtins.tryEval (builtins.readFile (guard "0.0.0"))).success;
+            guard crate;
           # So `nix flake check` builds them.
           package = sysPkgs.default;
           plugin = sysPkgs.plugin;
