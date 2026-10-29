@@ -23,6 +23,6 @@ for scale in 100 150; do
     done
 done
 step contrast
-t=$(dirname "$OMARCHY_SHELL_TREE")/themes
+t=$(dirname "${OMARCHY_SHELL_TREE:-/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/shell}")/themes
 python3 "$here/contrast.py" "$t/flexoki-light/colors.toml" "$t/catppuccin-latte/colors.toml" "$t/white/colors.toml"
 echo "shell suite ok"
