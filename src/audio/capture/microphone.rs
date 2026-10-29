@@ -77,7 +77,7 @@ impl SampleQueue {
 }
 
 /// How long `start` waits for the CPAL worker to report before giving up.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(7);
+const OPEN_DEADLINE: Duration = Duration::from_secs(7);
 
 /// Hand-over state between `start` and the thread that owns the CPAL stream.
 enum Phase {
@@ -175,9 +175,7 @@ impl Microphone {
                     let guard = lock_phase(&gate);
                     let (mut phase, _) = gate
                         .1
-                        .wait_timeout_while(guard, STARTUP_TIMEOUT, |p| {
-                            matches!(p, Phase::Starting)
-                        })
+                        .wait_timeout_while(guard, OPEN_DEADLINE, |p| matches!(p, Phase::Starting))
                         .unwrap_or_else(PoisonError::into_inner);
                     match std::mem::replace(&mut *phase, Phase::Stop) {
                         Phase::Live(name) => {
@@ -241,10 +239,14 @@ impl Microphone {
         match &self.capture {
             Capture::Pulse(handle) => handle.is_running(),
             Capture::Cpal {
-                worker, failure, ..
+                gate,
+                worker,
+                failure,
+                ..
             } => {
-                worker.as_ref().is_some_and(|worker| !worker.is_finished())
-                    && failure.lock().is_ok_and(|error| error.is_none())
+                let live = matches!(*lock_phase(gate), Phase::Live(_));
+                let thread_up = worker.as_ref().is_some_and(|w| !w.is_finished());
+                live && thread_up && failure.lock().is_ok_and(|slot| slot.is_none())
             }
         }
     }
@@ -288,6 +290,14 @@ fn input_named(host: &cpal::Host, wanted: &str) -> Result<Option<cpal::Device>, 
     Ok(None)
 }
 
+/// A requested device name without its optional `cpal:` prefix.
+fn bare_device_name(requested: &str) -> &str {
+    match requested.split_once(':') {
+        Some(("cpal", rest)) => rest,
+        _ => requested,
+    }
+}
+
 /// Average each whole `ch`-sample frame of `input` into `mono` (a partial tail is dropped).
 fn downmix<T: Copy>(input: &[T], ch: usize, convert: impl Fn(T) -> f32, mono: &mut Vec<f32>) {
     mono.clear();
@@ -320,55 +330,54 @@ fn open_cpal(
                 .ok_or_else(|| AudioError::DeviceMissing(name.to_owned()))?
         }
         Some(name) => {
-            let name = name.strip_prefix("cpal:").unwrap_or(name);
+            let name = bare_device_name(name);
             input_named(&host, name)?.ok_or_else(|| AudioError::DeviceMissing(name.to_owned()))?
         }
     };
-    let name = device
-        .description()
-        .map(|description| description.name().to_owned())
-        .unwrap_or_else(|_| "Unnamed microphone".into());
-    let supported = device
+    let name = match device.description() {
+        Ok(description) => description.name().to_owned(),
+        Err(_) => "Input device (unnamed)".to_owned(),
+    };
+    let default_input = device
         .default_input_config()
         .map_err(|error| AudioError::Config(error.to_string()))?;
-    let format = supported.sample_format();
+    let (format, stream_config) = (default_input.sample_format(), default_input.config());
     if !matches!(format, F32 | I16 | U16 | I32) {
         return Err(AudioError::Format(format.to_string()));
     }
-    let config = supported.config();
-    let channels = usize::from(config.channels).max(1);
-    let mut resampler = LinearResampler::new(config.sample_rate);
-    let mut mono = Vec::with_capacity(4096);
+    let channels = usize::from(stream_config.channels).max(1);
+    let mut resampler = LinearResampler::new(stream_config.sample_rate);
+    let mut frames = Vec::with_capacity(4096);
     let mut output = Vec::with_capacity(4096);
     let stream = device
         .build_input_stream_raw(
-            config,
+            stream_config,
             format,
             move |data, _| {
                 let mixed = match data.sample_format() {
                     F32 => data
                         .as_slice::<f32>()
-                        .map(|s| downmix(s, channels, |v| v, &mut mono)),
+                        .map(|s| downmix(s, channels, |v| v, &mut frames)),
                     I16 => data
                         .as_slice::<i16>()
-                        .map(|s| downmix(s, channels, |v| f32::from(v) / 32768.0, &mut mono)),
+                        .map(|s| downmix(s, channels, |v| f32::from(v) / 32768.0, &mut frames)),
                     U16 => data.as_slice::<u16>().map(|s| {
                         downmix(
                             s,
                             channels,
                             |v| (f32::from(v) - 32768.0) / 32768.0,
-                            &mut mono,
+                            &mut frames,
                         )
                     }),
                     I32 => data
                         .as_slice::<i32>()
-                        .map(|s| downmix(s, channels, |v| v as f32 / 2147483648.0, &mut mono)),
+                        .map(|s| downmix(s, channels, |v| v as f32 / 2147483648.0, &mut frames)),
                     _ => None,
                 };
                 if mixed.is_none() {
                     return;
                 }
-                resampler.process_into(&mono, &mut output);
+                resampler.process_into(&frames, &mut output);
                 if let Ok(mut queue) = samples.lock() {
                     queue.push(&output);
                 }
@@ -482,8 +491,8 @@ mod tests {
         queue.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(queue.dropped(), 2);
         assert!(queue.take(0).is_empty());
-        assert_eq!(queue.take(2), [3.0, 4.0]);
-        assert_eq!(queue.take(99), [5.0, 6.0]);
+        assert_eq!(queue.take(1), [3.0]);
+        assert_eq!(queue.take(99), [4.0, 5.0, 6.0]);
         assert!(queue.is_empty());
     }
 

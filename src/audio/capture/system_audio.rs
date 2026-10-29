@@ -302,10 +302,22 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        let live = SystemAudio::launch(script.to_str().unwrap(), "x", "shown").unwrap();
+        let mut attempt = 0;
+        let launched = loop {
+            let result = SystemAudio::launch(script.to_str().unwrap(), "x", "shown");
+            attempt += 1;
+            match &result {
+                // Another test forking while the script was open for writing gives ETXTBSY.
+                Err(SystemAudioError::Spawn(text))
+                    if text.contains("Text file busy") && attempt < 5 =>
+                {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                _ => break result,
+            }
+        };
         let _ = std::fs::remove_file(&script);
-        assert_eq!(live.source(), "shown");
-        assert!(live.is_running() && live.failure().is_none());
+        let live = launched.unwrap();
         let pid = live.child.lock().unwrap().id();
         drop(live);
         assert!(

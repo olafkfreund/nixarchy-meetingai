@@ -277,3 +277,17 @@ commit and reverts alone.
   `--copies` count is a lower bound: it cannot see code deleted in the
   removal commit and retyped later, so the reviewer's text comparison
   is the real check.
+
+### Step 3 (audio/capture), 2026-10-29
+
+- Codex implemented the step. The Opus review found recalled shapes and
+  constants in it, so a fresh Claude coder rewrote those parts from explicit
+  designs (the handoff fallback).
+- Behaviour deviation, monitor rule: a source is a monitor if and only if
+  `monitor_of_sink` or `monitor_source` is a non-empty string. PipeWire on
+  p620 reports `monitor_of_sink: null` for every source, so the brief's rule
+  would have counted every microphone as a monitor.
+- Brief test 12 (`SystemAudio::start(None)`) is replaced by a fake-recorder
+  test, because the real call records on a host with Pulse.
+- `pactl` gets its 2 s timeout in `SystemAudio::start` too (brief decision).
+- The dead device-listing code was removed.
