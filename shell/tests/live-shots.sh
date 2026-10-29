@@ -8,7 +8,7 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 out=${1:-/tmp/meetingai-live}
-scenario=${SCENARIO:-live}; [ "$scenario" = error ] && export MEETINGAI_ASK=1; scale=${SCALE:-100}; size=${SIZE:-}   # SCENARIO=r5 SIZE=700x520: resized card, Profiles and Prompts tabs
+scenario=${SCENARIO:-live}; [ "$scenario" = error ] && export MEETINGAI_ASK=1; scale=${SCALE:-100}; size=${CARD_SIZE:-}   # SCENARIO=r5 CARD_SIZE=700x520 (not SIZE: the Nix toolchain exports SIZE=size): resized card, Profiles and Prompts tabs
 tree=${OMARCHY_SHELL_TREE:-/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/shell}
 work=$(mktemp -d /tmp/nm.XXXX)   # short: unix socket paths cap at 108 bytes
 trap 'kill $(jobs -p) 2>/dev/null || true; chmod -R u+w "$work"; rm -rf "$work"' EXIT
