@@ -282,8 +282,30 @@ commit and reverts alone.
   removal commit and retyped later, so the reviewer's text comparison
   is the real check.
 
-### Step 3 (audio/capture), 2026-10-29
+### Step 10 (transcription, listen, cli), 2026-10-29
 
+- Codex wrote transcription.rs and agy listen.rs and cli.rs in parallel
+  from two briefs sharing one interface section. The Opus review found
+  transcribe_custom, socket_task, BatchChunks push/finish and
+  channel_number too close to the old code; a fresh Claude coder
+  rewrote them from explicit designs (handoff fallback); the lead fixed
+  clippy lints, one wrong test input and the re-review's last names and
+  texts.
+- Bugs fixed on the way: TCP_NODELAY on the live socket (Codex had left
+  Nagle on); the 4 s finish deadline starts at stop and covers draining
+  queued audio (Codex review; tested); events may wait until that
+  deadline while finishing; the live URL is built with Url, not string
+  replacement (a query keeps its own text).
+- Dead code removed: LiveTranscriber::connect, transcribe_samples,
+  local_chunk_payload, ListenSession::elapsed, interleave,
+  SharedSession/shared_session; instance_lock_path made private.
+- Kept although unused inside listen.rs: SessionConfig::speech and the
+  SessionEvent variants the daemon matches on (removing them means
+  editing the daemon, not in this step).
+- The plan's extra check ("a live whisper session") is now a live
+  Deepgram and Parakeet session on p620 with the owner (whisper was
+  removed in #14).
+### Step 3 (audio/capture), 2026-10-29
 - Codex implemented the step. The Opus review found recalled shapes and
   constants in it, so a fresh Claude coder rewrote those parts from explicit
   designs (the handoff fallback).
@@ -295,9 +317,7 @@ commit and reverts alone.
   test, because the real call records on a host with Pulse.
 - `pactl` gets its 2 s timeout in `SystemAudio::start` too (brief decision).
 - The dead device-listing code was removed.
-
 ### Owner decision, 2026-10-29: finish #3 without the pre-merge p620 checks
-
 - Owner: "Rewrite remaining lennette-authored code, then relicense MIT —
   #3 approved." Steps 3, 10 and 11 merge after their reviews without the
   live recording / live transcript checks on p620; those checks run after
