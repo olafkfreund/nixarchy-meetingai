@@ -5,7 +5,6 @@
 //! Usage: voice_filter IN.wav SAMPLE.wav OUT.wav --model-dir DIR
 
 use std::path::Path;
-use std::time::Instant;
 
 use sherpa_onnx::{
     OfflineSpeechDenoiserModelConfig, OfflineSpeechDenoiserVoxLockModelConfig,
@@ -31,6 +30,7 @@ impl SherpaDenoiser {
                 return Err(format!("missing file: {}", path.display()));
             }
         }
+        check_sample(voice_sample)?;
         let config = OnlineSpeechDenoiserConfig {
             model: OfflineSpeechDenoiserModelConfig {
                 voxlock: OfflineSpeechDenoiserVoxLockModelConfig {
@@ -55,6 +55,34 @@ impl SpeechDenoiser for SherpaDenoiser {
     fn flush(&mut self) -> Vec<f32> {
         self.0.flush().samples
     }
+}
+
+/// sherpa ignores an unreadable or short sample and then learns a voice from the input, which
+/// would measure the wrong speaker: refuse anything but at least 3 s of 16 kHz mono.
+fn check_sample(path: &Path) -> Result<(), String> {
+    let reader = hound::WavReader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let spec = reader.spec();
+    if spec.channels != 1 || spec.sample_rate != RATE {
+        return Err(format!("{}: need a mono 16 kHz WAV", path.display()));
+    }
+    if reader.duration() < 3 * RATE {
+        return Err(format!(
+            "{}: need at least 3 s of the owner's voice",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// CPU time of this process, so the cost matches the Alkove script's `process_time`.
+fn cpu_seconds() -> f64 {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid pointer to a timespec; CLOCK_PROCESS_CPUTIME_ID is always available on Linux.
+    unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut t) };
+    t.tv_sec as f64 + t.tv_nsec as f64 / 1e9
 }
 
 fn filter_wav(
@@ -83,17 +111,25 @@ fn filter_wav(
         right.push(pair[1]);
     }
 
-    let began = Instant::now();
+    let began = cpu_seconds();
     let mut filtered = Vec::with_capacity(frames);
     for chunk in left.chunks(CHUNK_SAMPLES) {
         filtered.extend(denoiser.run(chunk, RATE as i32));
     }
     filtered.extend(denoiser.flush());
-    let elapsed = began.elapsed().as_secs_f64();
+    let elapsed = cpu_seconds() - began;
 
     filtered.resize(frames, 0.0);
 
-    let mut writer = hound::WavWriter::create(out_path, spec)?;
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(out_path)?
+    };
+    let mut writer = hound::WavWriter::new(std::io::BufWriter::new(file), spec)?;
     let scale = f32::from(i16::MAX);
     for (&l, &r) in filtered.iter().zip(right.iter()) {
         let l_pcm = if l.is_finite() {
@@ -170,6 +206,32 @@ mod tests {
         fn flush(&mut self) -> Vec<f32> {
             std::mem::take(&mut self.tail)
         }
+    }
+
+    #[test]
+    fn owner_sample_must_be_mono_16k_and_long_enough() {
+        let dir = std::env::temp_dir().join(format!("voice-sample-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, channels: u16, frames: u32| {
+            let path = dir.join(name);
+            let spec = hound::WavSpec {
+                channels,
+                sample_rate: RATE,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut w = hound::WavWriter::create(&path, spec).unwrap();
+            for _ in 0..frames * u32::from(channels) {
+                w.write_sample(1_234_i16).unwrap();
+            }
+            w.finalize().unwrap();
+            path
+        };
+        assert!(check_sample(&write("short.wav", 1, RATE * 2)).is_err());
+        assert!(check_sample(&write("stereo.wav", 2, RATE * 4)).is_err());
+        assert!(check_sample(&dir.join("absent.wav")).is_err());
+        assert!(check_sample(&write("ok.wav", 1, RATE * 3)).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
