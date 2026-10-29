@@ -128,3 +128,9 @@ the examples and scripts are standalone. Redeploy p620 from main.
   adds metadata (`scripts/voxlock/add_meta_data.py`) its denoiser reads, and
   the raw files live under `onnx/` with a v1/v2 split. Same weights,
   Apache-2.0.
+- Step 1: the plan's first path worked: a source build of 2.0.1 with
+  nixpkgs' onnxruntime 1.27.1 (no 1.28.2 override, no prebuilt fallback).
+  2.0.1 needed `patches = []` (nixpkgs' espeak patch targets a file 2.0.1
+  no longer has) and two more FetchContent tarballs (kaldi-native-fbank
+  1.22.4, utf8proc 2.12.0). The version guard also asserts itself against
+  a wrong version on every evaluation (the negative test).
