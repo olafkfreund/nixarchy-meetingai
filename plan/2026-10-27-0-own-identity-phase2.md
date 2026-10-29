@@ -291,3 +291,11 @@ commit and reverts alone.
   test, because the real call records on a host with Pulse.
 - `pactl` gets its 2 s timeout in `SystemAudio::start` too (brief decision).
 - The dead device-listing code was removed.
+
+### Owner decision, 2026-10-29: finish #3 without the pre-merge p620 checks
+
+- Owner: "Rewrite remaining lennette-authored code, then relicense MIT —
+  #3 approved." Steps 3, 10 and 11 merge after their reviews without the
+  live recording / live transcript checks on p620; those checks run after
+  the deploy instead (a short recording on Parakeet and Deepgram), and a
+  regression is fixed forward. Step 12 follows once origin-lines is 0.
