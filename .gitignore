@@ -15,6 +15,7 @@ result-*
 *.key
 # Synthetic key for the old-data test fixture (#3), not a secret.
 !tests/fixtures/old-history/history.db.key
+!tests/fixtures/old-vault/vault.key
 
 # Editor, OS and log litter
 .idea/
