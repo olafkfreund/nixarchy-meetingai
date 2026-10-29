@@ -102,6 +102,15 @@ pub const PRESETS: &[Preset] = &[
 ];
 
 impl Preset {
+    pub fn slug(&self) -> String {
+        let slug = self.name.to_lowercase().replace(' ', "-");
+        if self.speech && PRESETS.iter().any(|p| !p.speech && p.name == self.name) {
+            format!("{slug}-speech")
+        } else {
+            slug
+        }
+    }
+
     pub fn draft(&self) -> Credential {
         let response_path = match (self.speech, self.wire) {
             (true, _) => "/text",
