@@ -233,6 +233,24 @@ commit and reverts alone.
   test for the short old default would put its old text back in the code.
   Review fixes by the lead: two `load` helpers and one test rewritten so
   they no longer match the old bodies.
+- **Step 9** (agy, then a fresh Claude `coder`): agy's version kept the
+  old `recent_history` loop shape and old statement shapes in the
+  Anthropic SSE arm, error redaction and the size check. A fresh `coder`
+  rewrote `window_history` (two passes), Anthropic event parsing (serde
+  types), redaction (`Redactor`), the size check (`fits`), request
+  building (`RequestParts`) and the stream loop (`StreamReader`).
+  `shorten_middle` keeps the old 1/3 head, 2/3 tail. Accepted
+  differences: blank earlier messages and empty deltas are skipped;
+  Anthropic skips empty system parts; `ChatError::Request` has no
+  `From<reqwest::Error>`; new log and error wording (the matched
+  substrings stay). Dead items deleted: `Conversation` draft/submit/
+  revision/eviction methods and `is_empty`, `ChatSession::{rename,
+  delete}`; `build_body`, `parse_sse_line`, `ChatEvent` made private.
+  `--copies` leaves 31 lines in `cli.rs`/`opencode.rs`, outside this step.
+  Re-review (ready): also changed, all harmless: `fail` treats a
+  whitespace-only partial answer as no answer; the shortening notice is
+  4 characters longer; redaction also replaces the trimmed key; a
+  trailing `\r` is stripped from a final unterminated stream line.
 - **Step 8** (Codex, then a fresh Claude `coder`): Codex's version again
   matched old statements and step order (model recall; its log shows no
   access to the old files). Per the handoff fallback, a fresh `coder`
