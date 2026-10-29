@@ -10,6 +10,7 @@ pub use repos::meetings;
 pub use repos::profiles;
 pub use repos::sessions;
 pub use repos::settings;
+pub use repos::voice;
 pub use schema::seed;
 
 use rusqlite::Connection;
