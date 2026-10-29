@@ -1195,11 +1195,18 @@ impl Daemon {
                 .map_err(|e| e.to_string())??;
             imported.push(item);
         }
-        if question.is_empty() && imported.is_empty() {
+        // A screenshot (waiting, or asked for now) is something to send on its own.
+        let image_only =
+            imported.is_empty() && (args.screenshot || self.inner.lock().pending_capture.is_some());
+        if question.is_empty() && imported.is_empty() && !image_only {
             return Err(SendError::Empty.message());
         }
         if question.is_empty() {
-            question = "Use the attached references.".into();
+            question = if image_only {
+                "Describe what this screenshot shows and how it relates to the meeting.".into()
+            } else {
+                "Use the attached references.".into()
+            };
         }
         // The screenshot is taken before the lock: grim/slurp can wait on the user.
         let (want_capture, delay) = {
@@ -4330,6 +4337,23 @@ mod command_tests {
         d.handle("capture.clear", json!({}), None).await.unwrap();
         let st = d.handle("state.get", json!({}), None).await.unwrap();
         assert_eq!(st["capture"], false);
+        assert!(d.inner.lock().pending_capture.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_waiting_screenshot_can_be_sent_without_text() {
+        let d = daemon();
+        let err = d
+            .handle("chat.send", json!({"text": " "}), None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("nothing to send"), "{err}");
+        d.inner.lock().pending_capture = Some(CapturedImage {
+            base64: "AA==".into(),
+            mime: "image/png",
+        });
+        let sent = d.handle("chat.send", json!({"text": ""}), None).await;
+        assert!(sent.is_ok(), "{sent:?}");
         assert!(d.inner.lock().pending_capture.is_none());
     }
 
