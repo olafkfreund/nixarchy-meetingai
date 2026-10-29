@@ -1,4 +1,4 @@
-//! Credential storage, the encryption key vault and provider-config import.
+//! Credential storage and the encryption key vault.
 
 pub mod credentials;
 pub(crate) mod files;
