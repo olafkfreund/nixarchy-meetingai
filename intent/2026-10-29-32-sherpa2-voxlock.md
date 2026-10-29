@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 32
 author: olafkfreund
 ---
@@ -70,3 +70,11 @@ author: olafkfreund
 3. **Scope of the follow-up:** decided after the numbers. If neither filter
    keeps the owner's words better than the voice check of #31, no filter is
    added.
+
+## Decisions (owner, 2026-10-29: "approve all", recommendations taken)
+
+1. The 2.0 library is built by an override in this flake now; the update is
+   offered to nixpkgs too.
+2. The second voice is test speech played from a second device (a phone).
+3. A filter is added only in a follow-up, and only if the numbers beat the
+   voice check of #31.
