@@ -9,8 +9,12 @@ coders:        # owner asked 2026-10-28 for agy and codex to share the coding
   7: agy       # core/models: plain data types and serde
   8: codex     # ai/catalog: provider/model lists, many small functions
   9: agy       # ai/chat: engine and session over the catalog
-  # 0, 1, 3, 6, 10, 11, 12 stay with coder (Sonnet): tooling, audio
-  # capture, the vault and STT need the p620 checks run from this session
+  # owner 2026-10-29 ("use agent teams with agy and codex to solve them all"):
+  3: codex     # audio/capture: devices, microphone, system audio
+  6: agy       # core/security: vault, credentials, provider import
+  10: codex+agy  # transcription.rs to codex; listen.rs and cli.rs to agy
+  # 0, 1, 11, 12 stay with coder (Sonnet). The p620 checks of 3, 6 and 10
+  # are still run from this session before each merge.
 reviewers:     # every step, read-only, on top of the Opus review
   - codex      # codex review --base main, sandbox read-only
   - agy        # agy --mode plan with the allowlist settings overlay
