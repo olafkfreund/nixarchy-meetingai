@@ -111,4 +111,13 @@ overlay loses the add/edit screens.
 
 ## Deviations
 
-None yet.
+- Step 1: OpenAI and Groq have both a chat and a speech preset with the
+  same name, so the speech slugs end in `-speech` (`openai-speech`,
+  `groq-speech`).
+- Step 1: `providers.update` with `api_key: null` is refused for a
+  provider that needs a key ("remove the provider instead"); the vault
+  keeps its rule that a keyed custom provider has a key. Keyless (local)
+  providers can drop a key.
+- Step 1: the speech test sends 0.5 s of silence; the custom wire reports
+  a blank transcript as "empty text", which the test counts as a working
+  connection (only that error).
