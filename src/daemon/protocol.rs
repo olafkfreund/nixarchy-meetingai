@@ -204,6 +204,7 @@ fn present_value<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Va
 pub struct ProviderTest {
     pub preset: Option<String>,
     pub id: Option<String>,
+    pub name: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub endpoint: Option<String>,

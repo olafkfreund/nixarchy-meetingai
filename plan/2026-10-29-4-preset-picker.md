@@ -121,3 +121,25 @@ overlay loses the add/edit screens.
 - Step 1: the speech test sends 0.5 s of silence; the custom wire reports
   a blank transcript as "empty text", which the test counts as a working
   connection (only that error).
+- Review fix: custom providers were never routed. `plan_chain` only knew
+  `CHAT_PROVIDERS`, so a `chat_provider` or `live_provider` of `custom-…`
+  was skipped (also for custom ids set through Nix before this PR). The chosen
+  custom id now leads the chain with the chosen model, ahead of the built-in
+  fallbacks, when its vault record is usable; local-only still filters it by
+  `stays_local`. `speech_config` also allows a custom speech id in a
+  local-only session when its endpoint is loopback.
+- Review fix: `provider_config` and `speech_config` ignore the `chat_model` /
+  `speech_model` setting for a custom provider; it uses its own saved model.
+  The overlay model picker shows that model instead of calling `models.list`.
+- Review fix, auth: a preset keeps the auth its draft gives (Anthropic:
+  `header` with `x-api-key`; others `bearer`). Only a localhost `http://`
+  endpoint switches to `none`; an https endpoint restores the preset's auth.
+  `providers.add`, `providers.update` (when the endpoint changes) and
+  `providers.test` use this one rule. Keys are trimmed once on input.
+  `providers.test` takes `name` and answers `{ok: false, message}` for a
+  missing key or a bad endpoint instead of an RPC error.
+- Review fix: `settings.set` with a `custom-…` id that has no record fails
+  with "This provider no longer exists."; the removal notice carries
+  `kind: "providers"` (shown as a banner).
+- "Use for chat" sets only `chat_provider`; `live_provider` stays (said in the
+  README). Origin gate: the `cmd != "presets.list"` test was redundant and is gone.

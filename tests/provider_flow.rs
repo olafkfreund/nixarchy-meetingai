@@ -66,7 +66,9 @@ async fn anthropic_preset_sends_native_messages_and_streams_only_visible_text() 
         let bytes = request.join().unwrap();
         let raw = String::from_utf8_lossy(&bytes);
         let headers = raw.split_once("\r\n\r\n").unwrap().0.to_lowercase();
-        assert!(headers.contains("authorization: bearer local-test-key"));
+        assert!(
+            headers.contains("x-api-key: local-test-key") && !headers.contains("authorization:")
+        );
         assert!(headers.contains("anthropic-version: 2026-10-21"));
         let body: serde_json::Value =
             serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();

@@ -34,7 +34,9 @@ Item {
     property string provMode: ""    // "" | "presets" | "form"
     property string editId: ""      // custom provider id being edited, or "" when adding from a preset
     property string formPreset: ""
-    property bool formNeedsKey: true
+    // The key field shows unless the endpoint, as typed, is a localhost http URL.
+    readonly property bool formNeedsKey: !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])([:\/]|$)/i.test(provEndpoint.text.trim())
+    property int formEpoch: 0       // bumped when the form opens or closes; a test reply from an older one is ignored
     property bool testingProvider: false
     property string testMessage: ""
     property Component settingsHeader: null   // controls shown above the Settings list
@@ -88,7 +90,6 @@ Item {
         root.error = "";
         root.editId = "";
         root.formPreset = String(p.preset || "");
-        root.formNeedsKey = p.local !== true && p.needs_key !== false;
         provName.text = String(p.name || "");
         provEndpoint.text = String(p.endpoint || "");
         provModel.text = String(p.model || "");
@@ -101,7 +102,6 @@ Item {
         root.error = "";
         root.editId = String(p.id || "");
         root.formPreset = "";
-        root.formNeedsKey = p.requires_key !== false;
         provName.text = String(p.name || "");
         provEndpoint.text = String(p.endpoint || "");
         provModel.text = String(p.model || "");
@@ -114,11 +114,13 @@ Item {
         root.error = "";
         root.testMessage = "";
         root.testingProvider = true;
-        var args = { model: provModel.text.trim(), endpoint: provEndpoint.text.trim() };
+        var epoch = root.formEpoch;
+        var args = { name: provName.text.trim(), model: provModel.text.trim(), endpoint: provEndpoint.text.trim() };
         if (root.editId !== "") args.id = root.editId;
         else args.preset = root.formPreset;
         if (root.formNeedsKey && provKey.text !== "") args.api_key = provKey.text;
         root.client.send("providers.test", args, function(r) {
+            if (epoch !== root.formEpoch) return;
             root.testingProvider = false;
             if (!r.ok) root.testMessage = "Error: " + String(r.error || "request failed");
             else if (r.data && r.data.message !== undefined) root.testMessage = String(r.data.message);
@@ -176,6 +178,7 @@ Item {
     }
 
     property string error: ""   // the last failed request made from here, shown under the search field
+    onProvModeChanged: { root.formEpoch++; if (root.provMode !== "form") { provKey.text = ""; root.testMessage = ""; root.testingProvider = false; } }
     onTabChanged: { root.error = ""; root.provMode = ""; root.load(); }
     onPromptModeChanged: root.loadPrompt()
     onPromptKindChanged: root.loadPrompt()
@@ -487,6 +490,8 @@ Item {
                     Column {
                         id: cprow
                         required property var modelData
+                        readonly property var usedBy: ["chat_provider", "live_provider", "speech_provider"].filter(function(k) { return String(root.client.settings[k] || "") === cprow.modelData.id; })
+                        readonly property bool removeLocked: usedBy.some(function(k) { return root.client.isLocked(k); })
                         width: parent.width
                         spacing: Style.spacing.xs
                         bottomPadding: Style.spacing.xs
@@ -527,6 +532,8 @@ Item {
                                 ts: root.theme.ts
                                 Layout.alignment: Qt.AlignVCenter
                                 text: "Remove"
+                                enabled: !cprow.removeLocked
+                                opacity: enabled ? 1 : 0.5
                                 onClicked: {
                                     var p = cprow.modelData;
                                     root.confirmRequested("Remove \"" + (p.name || p.id) + "\"?", "Remove", function() {
@@ -543,7 +550,7 @@ Item {
                             width: parent.width
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
-                            text: (cprow.modelData.kind === "speech" ? "Speech" : "Chat") + "  ·  " + String(cprow.modelData.model || "") + "  ·  " + root.endpointHost(cprow.modelData.endpoint) + "  ·  " + (cprow.modelData.requires_key === false ? "on this computer" : (cprow.modelData.has_key ? "key set" : "no key"))
+                            text: (cprow.modelData.kind === "speech" ? "Speech" : "Chat") + "  ·  " + String(cprow.modelData.model || "") + "  ·  " + root.endpointHost(cprow.modelData.endpoint) + "  ·  " + (cprow.modelData.requires_key === false ? "on this computer" : (cprow.modelData.has_key ? "key set" : "no key")) + (cprow.usedBy.length ? "  ·  in use for " + cprow.usedBy.map(function(k) { return k === "speech_provider" ? "speech" : (k === "live_provider" ? "live answers" : "chat"); }).join(", ") : "") + (cprow.removeLocked ? "  ·  set in Nix, so it cannot be removed" : "")
                             color: Commons.Color.popups.text
                             opacity: root.theme.dim
                             font.pixelSize: root.theme.caption
@@ -683,7 +690,7 @@ Item {
                     model: root.presets.filter(function(p) { return p.kind === "speech" && root.match(p.name); })
                     IconButton {
                         required property var modelData
-                        objectName: "preset-speech-" + modelData.preset
+                        objectName: "preset-" + modelData.preset
                         ts: root.theme.ts
                         leftAlign: true
                         width: parent.width

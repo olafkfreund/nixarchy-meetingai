@@ -94,6 +94,26 @@ fn recap_suffix(mode: MeetingMode) -> &'static str {
     }
 }
 
+/// No auth for a localhost `http://` endpoint; any other endpoint uses the provider's real auth
+/// (the preset's, restored when a keyless record moves to https).
+fn fit_auth(c: &mut Credential) {
+    let local_http = c.base_url.starts_with("http://") && endpoint_allowed(&c.base_url);
+    let Some(custom) = c.custom.as_mut() else {
+        return;
+    };
+    if local_http {
+        custom.auth = "none".into();
+    } else if custom.auth == "none" {
+        let (auth, header) = if custom.request_format == "anthropic" {
+            ("header", "x-api-key")
+        } else {
+            ("bearer", "Authorization")
+        };
+        custom.auth = auth.into();
+        custom.auth_header = header.into();
+    }
+}
+
 fn scrub_key(message: String, key: &str) -> String {
     if key.is_empty() {
         message
@@ -474,20 +494,25 @@ fn plan_chain(
     model: &str,
     live: bool,
     usable: impl Fn(&str) -> bool,
-) -> Vec<(&'static str, String)> {
-    let mut out: Vec<(&'static str, String)> = Vec::new();
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
     let candidates = CHAT_PROVIDERS.iter().map(|p| p.id);
-    let first = CHAT_PROVIDERS.iter().find(|p| p.id == chosen).map(|p| p.id);
+    // A saved custom provider is not in CHAT_PROVIDERS; its record decides if it is usable.
+    let first = if chosen.starts_with("custom-") {
+        Some(chosen)
+    } else {
+        CHAT_PROVIDERS.iter().find(|p| p.id == chosen).map(|p| p.id)
+    };
     for id in first.into_iter().chain(candidates) {
         if (live && matches!(id, "codex-sub" | "agy-sub"))
             || (live && id == "opencode" && Some(id) != first)
-            || out.iter().any(|(i, _)| *i == id)
+            || out.iter().any(|(i, _)| i == id)
             || !usable(id)
         {
             continue;
         }
         let m = if Some(id) == first { model } else { "" };
-        out.push((id, m.to_owned()));
+        out.push((id.to_owned(), m.to_owned()));
     }
     out
 }
@@ -985,7 +1010,7 @@ impl Daemon {
             (&s.chat_provider, &s.chat_model)
         };
         let usable = |id: &str| {
-            (!local || id == "ollama")
+            (!local || id == "ollama" || id.starts_with("custom-"))
                 && cli_binary(id).is_none_or(cli::on_path)
                 && self
                     .provider_config(id, if id == chosen { model } else { "" })
@@ -993,7 +1018,7 @@ impl Daemon {
         };
         plan_chain(chosen, model, live, usable)
             .into_iter()
-            .filter_map(|(id, m)| self.provider_config(id, &m))
+            .filter_map(|(id, m)| self.provider_config(&id, &m))
             .filter(|c| !local || stays_local(c))
             .collect()
     }
@@ -1045,7 +1070,10 @@ impl Daemon {
         } else {
             &s.speech_provider
         };
-        if local && !matches!(id, "parakeet-local" | "openai-compatible-stt") {
+        if local
+            && !matches!(id, "parakeet-local" | "openai-compatible-stt")
+            && !id.starts_with("custom-")
+        {
             return None;
         }
         let mut config = match credentials::load(&self.vault, Kind::Speech, id) {
@@ -2885,7 +2913,7 @@ impl Daemon {
             c.custom.as_mut().unwrap().name = name;
         }
         if let Some(key) = a.api_key {
-            c.api_key = key;
+            c.api_key = key.trim().to_owned();
         }
         if let Some(model) = a.model {
             c.model = model;
@@ -2893,12 +2921,7 @@ impl Daemon {
         if let Some(endpoint) = a.endpoint {
             c.base_url = endpoint;
         }
-        c.custom.as_mut().unwrap().auth = if c.base_url.starts_with("http://") {
-            "none"
-        } else {
-            "bearer"
-        }
-        .into();
+        fit_auth(&mut c);
         credentials::save(&self.vault, &c)?;
         self.emit("providers.changed", json!({}));
         self.emit_state(&self.inner.lock());
@@ -2918,7 +2941,7 @@ impl Daemon {
                     );
                 }
                 Value::Null => String::new(),
-                Value::String(s) => s,
+                Value::String(s) => s.trim().to_owned(),
                 _ => return Err("API key must be a string or null.".into()),
             };
         }
@@ -2927,6 +2950,7 @@ impl Daemon {
         }
         if let Some(endpoint) = a.endpoint {
             c.base_url = endpoint;
+            fit_auth(&mut c);
         }
         credentials::save(&self.vault, &c)?;
         self.emit("providers.changed", json!({}));
@@ -2965,7 +2989,7 @@ impl Daemon {
         if !used.is_empty() {
             g.settings = Settings::load(&g.db).map_err(|e| e.to_string())?;
             self.emit("settings", json!({"settings": self.settings_reply(&g)?}));
-            self.emit("notice", json!({"text": "The removed provider was in use. Its settings were reset to defaults."}));
+            self.emit("notice", json!({"kind": "providers", "text": "The removed provider was in use. Its settings were reset to defaults."}));
         }
         self.emit("providers.changed", json!({}));
         self.emit_state(&g);
@@ -3005,14 +3029,16 @@ impl Daemon {
         if self.local_now(&self.inner.lock()) {
             return Err("Connection tests are unavailable in local-only sessions.".into());
         }
-        let from_preset = a.preset.is_some();
         let mut c = if let Some(preset) = a.preset {
             self.preset(&preset)?
         } else {
             self.custom(a.id.as_deref().unwrap())?
         };
+        if let Some(name) = a.name {
+            c.custom.as_mut().unwrap().name = name;
+        }
         if let Some(key) = a.api_key {
-            c.api_key = key;
+            c.api_key = key.trim().to_owned();
         }
         if let Some(model) = a.model {
             c.model = model;
@@ -3020,24 +3046,10 @@ impl Daemon {
         if let Some(endpoint) = a.endpoint {
             c.base_url = endpoint;
         }
-        if from_preset {
-            c.custom.as_mut().unwrap().auth = if c.base_url.starts_with("http://") {
-                "none"
-            } else {
-                "bearer"
-            }
-            .into();
-        }
-        c.validate().map_err(|e| scrub_key(e, &c.api_key))?;
-        if c.custom
-            .as_ref()
-            .is_some_and(|custom| custom.auth != "none")
-            && c.api_key.trim().is_empty()
-        {
-            return Ok(json!({"ok": false, "message": "This provider needs an API key."}));
-        }
-        if !endpoint_allowed(&c.base_url) {
-            return Err("The endpoint must use HTTPS or localhost HTTP.".into());
+        fit_auth(&mut c);
+        // A missing key or a bad endpoint is a failed test, not a failed request.
+        if let Err(e) = c.validate() {
+            return Ok(json!({"ok": false, "message": scrub_key(e, &c.api_key)}));
         }
         let config = c.to_config();
         let result = tokio::time::timeout(Duration::from_secs(15), async {
@@ -3679,12 +3691,10 @@ impl Daemon {
             return self.dispatch(cmd, args).await;
         }
         // `ctl --agent`: the skill's read-only commands and nothing else.
-        if cmd != "presets.list"
-            && matches!(
-                cmd,
-                "providers.add" | "providers.update" | "providers.remove" | "providers.test"
-            )
-        {
+        if matches!(
+            cmd,
+            "providers.add" | "providers.update" | "providers.remove" | "providers.test"
+        ) {
             return Err("not allowed for agents".into());
         }
         if origin == Some("agent")
@@ -4027,7 +4037,7 @@ mod levels_tests {
 mod routing_tests {
     use super::*;
 
-    fn ids(v: Vec<(&'static str, String)>) -> Vec<&'static str> {
+    fn ids(v: Vec<(String, String)>) -> Vec<String> {
         v.into_iter().map(|(i, _)| i).collect()
     }
 
@@ -4254,10 +4264,12 @@ mod routing_tests {
         assert_eq!(ids(plan.clone()), ["claude-sub", "ollama-cloud", "ollama"]);
         assert_eq!(plan[0].1, "haiku");
         // Even when codex is chosen for live, it is skipped.
-        assert!(!ids(plan_chain("codex-sub", "", true, |_| true)).contains(&"codex-sub"));
+        assert!(
+            !ids(plan_chain("codex-sub", "", true, |_| true)).contains(&"codex-sub".to_owned())
+        );
         // OpenCode joins a live chain only when it is the chosen provider.
         let chosen = plan_chain("opencode", "p/m", true, |_| true);
-        assert_eq!(chosen[0], ("opencode", "p/m".to_owned()));
+        assert_eq!(chosen[0], ("opencode".to_owned(), "p/m".to_owned()));
     }
 
     fn cli_config(id: &str) -> ProviderConfig {
@@ -4665,6 +4677,205 @@ mod command_tests {
         assert!(!serialized.contains(secret));
         assert!(serialized.contains("providers.changed"));
         assert!(serialized.contains("notice"));
+    }
+
+    /// A saved custom chat provider on a local fake server (non-streaming).
+    async fn local_custom(d: &Arc<Daemon>, preset: &str, url: &str) -> String {
+        let added = d
+            .handle(
+                "providers.add",
+                json!({"preset":preset, "endpoint":url}),
+                None,
+            )
+            .await
+            .unwrap();
+        let id = added["id"].as_str().unwrap().to_owned();
+        let mut c = credentials::load(&d.vault, Kind::Chat, &id)
+            .unwrap()
+            .unwrap();
+        c.custom.as_mut().unwrap().streaming = false;
+        credentials::save(&d.vault, &c).unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn chosen_custom_providers_lead_the_chain_and_get_the_request() {
+        let d = daemon();
+        let body = r#"{"choices":[{"message":{"content":"yes"}}]}"#;
+        let (url, request) = provider_server(200, body);
+        let id = local_custom(&d, "lm-studio", &url).await;
+        for key in ["chat_provider", "live_provider"] {
+            d.handle("settings.set", json!({"key":key, "value":id}), None)
+                .await
+                .unwrap();
+        }
+        let s = d.inner.lock().settings.clone();
+        for live in [false, true] {
+            let chain = d.chain(&s, live, false);
+            assert_eq!(
+                (chain[0].id.as_str(), chain[0].model.as_str()),
+                (id.as_str(), "local-model")
+            );
+            assert!(chain.len() == 1 || chain[1].custom.is_none());
+            assert_eq!(d.chain(&s, live, true)[0].id, id);
+        }
+        d.handle("chat.send", json!({"text":"hello"}), None)
+            .await
+            .unwrap();
+        // The turn runs on this single-threaded runtime: wait off it.
+        let request = tokio::task::spawn_blocking(move || request.join().unwrap())
+            .await
+            .unwrap();
+        let sent = String::from_utf8_lossy(&request).into_owned();
+        assert!(sent.starts_with("POST /test"), "{sent}");
+        assert!(
+            sent.contains("hello") && sent.contains("local-model"),
+            "{sent}"
+        );
+        // A custom endpoint that is not on this machine is out of a local-only chain.
+        let mut c = credentials::load(&d.vault, Kind::Chat, &id)
+            .unwrap()
+            .unwrap();
+        c.base_url = "https://example.invalid/v1".into();
+        c.api_key = "k".into();
+        c.custom.as_mut().unwrap().auth = "bearer".into();
+        credentials::save(&d.vault, &c).unwrap();
+        assert!(d.chain(&s, false, true).iter().all(|c| c.id != id));
+        assert_eq!(d.chain(&s, false, false)[0].id, id);
+        // A removed record falls back to the built-in chain.
+        credentials::remove(&d.vault, Kind::Chat, &id).unwrap();
+        assert!(d.chain(&s, false, false).iter().all(|c| c.id != id));
+    }
+
+    #[tokio::test]
+    async fn speech_config_returns_the_chosen_custom_speech_provider() {
+        let d = daemon();
+        let added = d
+            .handle(
+                "providers.add",
+                json!({"preset":"openai-speech", "api_key":" sk-test "}),
+                None,
+            )
+            .await
+            .unwrap();
+        let id = added["id"].as_str().unwrap();
+        d.handle(
+            "settings.set",
+            json!({"key":"speech_provider", "value":id}),
+            None,
+        )
+        .await
+        .unwrap();
+        let s = d.inner.lock().settings.clone();
+        let config = d.speech_config(&s, false).unwrap();
+        assert_eq!(
+            (config.id.as_str(), config.api_key.as_str()),
+            (id, "sk-test")
+        );
+        assert!(d.speech_config(&s, true).is_none());
+    }
+
+    #[tokio::test]
+    async fn preset_auth_survives_add_and_follows_the_endpoint_scheme() {
+        let d = daemon();
+        let body = r#"{"content":[{"type":"text","text":"yes"}]}"#;
+        let added = d
+            .handle(
+                "providers.add",
+                json!({"preset":"anthropic", "api_key":"ant-key"}),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut c = credentials::load(&d.vault, Kind::Chat, added["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let custom = c.custom.clone().unwrap();
+        assert_eq!(
+            (custom.auth.as_str(), custom.auth_header.as_str()),
+            ("header", "x-api-key")
+        );
+        // The wire sends x-api-key (and the version header), never Authorization.
+        let (url, request) = provider_server(200, body);
+        c.base_url = url;
+        c.custom.as_mut().unwrap().streaming = false;
+        engine::stream_chat(
+            &engine::http_client(),
+            &c.to_config(),
+            &[Message::user("hi")],
+            &TurnContext::default(),
+            Arc::new(watch::channel(false).1),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let sent = String::from_utf8_lossy(&request.join().unwrap()).to_lowercase();
+        assert!(sent.contains("x-api-key: ant-key"), "{sent}");
+        assert!(sent.contains("anthropic-version:") && !sent.contains("authorization:"));
+        // Anthropic on localhost sends no key; back on https the preset auth returns.
+        let id = added["id"].as_str().unwrap();
+        d.handle(
+            "providers.update",
+            json!({"id":id, "endpoint":"http://127.0.0.1:9/v1/messages"}),
+            None,
+        )
+        .await
+        .unwrap();
+        let c = credentials::load(&d.vault, Kind::Chat, id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.custom.unwrap().auth, "none");
+        d.handle(
+            "providers.update",
+            json!({"id":id, "endpoint":"https://example.invalid/v1/messages"}),
+            None,
+        )
+        .await
+        .unwrap();
+        let custom = credentials::load(&d.vault, Kind::Chat, id)
+            .unwrap()
+            .unwrap()
+            .custom
+            .unwrap();
+        assert_eq!(
+            (custom.auth.as_str(), custom.auth_header.as_str()),
+            ("header", "x-api-key")
+        );
+        // An LM Studio provider moved to https needs a key and sends it as a bearer token.
+        let lm = d
+            .handle("providers.add", json!({"preset":"lm-studio"}), None)
+            .await
+            .unwrap();
+        let lm = lm["id"].as_str().unwrap();
+        let err = d
+            .handle(
+                "providers.update",
+                json!({"id":lm, "endpoint":"https://example.invalid/v1/chat/completions"}),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("API key"), "{err}");
+        d.handle("providers.update", json!({"id":lm, "endpoint":"https://example.invalid/v1/chat/completions", "api_key":" lm-key "}), None)
+            .await
+            .unwrap();
+        let c = credentials::load(&d.vault, Kind::Chat, lm)
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.api_key, "lm-key");
+        assert_eq!(
+            c.custom.unwrap().header(&c.api_key),
+            Some(("Authorization".to_owned(), "Bearer lm-key".to_owned()))
+        );
+        // A missing key or a bad endpoint is a failed test, not an RPC error.
+        for args in [
+            json!({"preset":"openai"}),
+            json!({"preset":"openai", "api_key":"k", "endpoint":"ftp://x"}),
+        ] {
+            let r = d.handle("providers.test", args, None).await.unwrap();
+            assert_eq!(r["ok"], false, "{r}");
+            assert!(!r["message"].as_str().unwrap().is_empty());
+        }
     }
 
     fn daemon() -> Arc<Daemon> {

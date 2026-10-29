@@ -119,12 +119,17 @@ impl Preset {
         };
         let custom = CustomProvider {
             name: self.name.into(),
-            auth: if self.endpoint.starts_with("http://") {
-                "none"
-            } else {
-                "bearer"
+            auth: match (self.endpoint.starts_with("http://"), self.wire) {
+                (true, _) => "none",
+                (_, "anthropic") => "header",
+                _ => "bearer",
             }
             .into(),
+            auth_header: if self.wire == "anthropic" {
+                "x-api-key".into()
+            } else {
+                "Authorization".into()
+            },
             request_format: self.wire.into(),
             response_path: response_path.into(),
             streaming: !self.speech,

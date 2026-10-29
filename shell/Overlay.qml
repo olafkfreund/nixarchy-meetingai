@@ -166,7 +166,12 @@ Item {
     onLiveProviderChanged: root.loadModelList(true, true)
 
     function loadModels() {
-        backend.send("providers.list", {}, function(r) { if (r.ok) root.providers = r.data || []; });
+        backend.send("providers.list", {}, function(r) {
+            if (!r.ok) return;
+            root.providers = r.data || [];
+            if (root.chatProvider.indexOf("custom-") === 0) root.loadModelList(false, false);
+            if (root.liveProvider.indexOf("custom-") === 0) root.loadModelList(true, false);
+        });
         root.loadModelList(false, false);
         root.loadModelList(true, false);
     }
@@ -174,6 +179,12 @@ Item {
         var p = live ? root.liveProvider : root.chatProvider;
         if (clear) { if (live) { root.liveModels = []; root.liveModelsError = ""; } else { root.models = []; root.modelsError = ""; } }
         if (p === "") return;
+        if (p.indexOf("custom-") === 0) {   // a custom endpoint has no model list: show the provider's own model
+            var row = root.providers.filter(function(x) { return x.id === p; })[0];
+            var own = row && row.model ? [String(row.model)] : [];
+            if (live) { root.liveModels = own; root.resetLive = ""; } else { root.models = own; root.resetChat = ""; }
+            return;
+        }
         backend.send("models.list", { provider: p }, function(r) {
             if ((live ? root.liveProvider : root.chatProvider) !== p || (r.provider !== undefined && r.provider !== p)) return;
             var list = r.ok ? (r.data || []).map(String) : [], err = r.ok ? "" : String(r.error || "request failed"), reset = (live ? root.resetLive : root.resetChat) === p;
