@@ -277,3 +277,27 @@ commit and reverts alone.
   `--copies` count is a lower bound: it cannot see code deleted in the
   removal commit and retyped later, so the reviewer's text comparison
   is the real check.
+
+### Step 10 (transcription, listen, cli), 2026-10-29
+
+- Codex wrote transcription.rs and agy listen.rs and cli.rs in parallel
+  from two briefs sharing one interface section. The Opus review found
+  transcribe_custom, socket_task, BatchChunks push/finish and
+  channel_number too close to the old code; a fresh Claude coder
+  rewrote them from explicit designs (handoff fallback); the lead fixed
+  clippy lints, one wrong test input and the re-review's last names and
+  texts.
+- Bugs fixed on the way: TCP_NODELAY on the live socket (Codex had left
+  Nagle on); the 4 s finish deadline starts at stop and covers draining
+  queued audio (Codex review; tested); events may wait until that
+  deadline while finishing; the live URL is built with Url, not string
+  replacement (a query keeps its own text).
+- Dead code removed: LiveTranscriber::connect, transcribe_samples,
+  local_chunk_payload, ListenSession::elapsed, interleave,
+  SharedSession/shared_session; instance_lock_path made private.
+- Kept although unused inside listen.rs: SessionConfig::speech and the
+  SessionEvent variants the daemon matches on (removing them means
+  editing the daemon, not in this step).
+- The plan's extra check ("a live whisper session") is now a live
+  Deepgram and Parakeet session on p620 with the owner (whisper was
+  removed in #14).

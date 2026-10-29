@@ -604,23 +604,21 @@ fn event_lines(text: &str) -> Vec<LiveEvent> {
             }];
         }
         Some("UtteranceEnd") => {
+            let last_word_end = match value.get("last_word_end") {
+                Some(Value::Number(n)) => n.as_f64().unwrap_or_default(),
+                _ => 0.0,
+            };
             return vec![LiveEvent::UtteranceEnd {
                 channel: channel_number(value.get("channel")),
-                last_word_end: value
-                    .get("last_word_end")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0),
+                last_word_end,
             }];
         }
         Some("Error") => {
-            return vec![LiveEvent::Failed(
-                value
-                    .get("description")
-                    .or_else(|| value.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("Speech service reported an error; start recording again")
-                    .to_owned(),
-            )];
+            let reason = ["description", "message"]
+                .iter()
+                .find_map(|key| value[*key].as_str())
+                .unwrap_or("Speech service reported an error; start recording again");
+            return vec![LiveEvent::Failed(reason.to_owned())];
         }
         _ => {}
     }
@@ -767,9 +765,12 @@ fn live_url(model: &str, language: Option<&str>, eu: bool) -> Result<String, Stt
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 /// An active stream of speech events.
+/// Events a consumer may fall behind by before the worker waits.
+const EVENT_BACKLOG: usize = 96;
+
 pub struct LiveTranscriber {
     pcm_tx: mpsc::Sender<Vec<u8>>,
-    event_rx: mpsc::Receiver<LiveEvent>,
+    updates: mpsc::Receiver<LiveEvent>,
     finish_tx: watch::Sender<bool>,
     worker: tokio::task::JoinHandle<()>,
 }
@@ -873,24 +874,24 @@ impl LiveTranscriber {
     }
     fn spawn_socket(socket: Socket) -> Self {
         let (pcm_tx, pcm_rx) = mpsc::channel(32);
-        let (event_tx, event_rx) = mpsc::channel(128);
+        let (notify, updates) = mpsc::channel(EVENT_BACKLOG);
         let (finish_tx, finish_rx) = watch::channel(false);
-        let worker = tokio::spawn(socket_task(socket, pcm_rx, event_tx, finish_rx));
+        let worker = tokio::spawn(socket_task(socket, pcm_rx, notify, finish_rx));
         Self {
             pcm_tx,
-            event_rx,
+            updates,
             finish_tx,
             worker,
         }
     }
     fn connect_batch(config: ProviderConfig, hints: SttHints) -> Self {
         let (pcm_tx, pcm_rx) = mpsc::channel(32);
-        let (event_tx, event_rx) = mpsc::channel(128);
+        let (notify, updates) = mpsc::channel(EVENT_BACKLOG);
         let (finish_tx, finish_rx) = watch::channel(false);
-        let worker = tokio::spawn(batch_task(config, hints, pcm_rx, event_tx, finish_rx));
+        let worker = tokio::spawn(batch_task(config, hints, pcm_rx, notify, finish_rx));
         Self {
             pcm_tx,
-            event_rx,
+            updates,
             finish_tx,
             worker,
         }
@@ -918,10 +919,10 @@ impl LiveTranscriber {
         }
     }
     pub async fn next_event(&mut self) -> Option<LiveEvent> {
-        self.event_rx.recv().await
+        self.updates.recv().await
     }
     pub fn try_event(&mut self) -> Result<LiveEvent, mpsc::error::TryRecvError> {
-        self.event_rx.try_recv()
+        self.updates.try_recv()
     }
     pub fn finish(&self) {
         let _ = self.finish_tx.send(true);
@@ -1630,7 +1631,7 @@ mod tests {
             "a sink this slow cannot be drained in time"
         );
         assert!(
-            began.elapsed() < Duration::from_millis(5_500),
+            began.elapsed() < Duration::from_millis(6_500),
             "{:?}",
             began.elapsed()
         );

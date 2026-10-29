@@ -99,9 +99,11 @@ impl InstanceLock {
                 return None;
             }
         };
-        handle.try_lock().ok()?;
-        // Best effort: record our pid for whoever inspects the lock.
-        let _ = handle.set_len(0);
+        if handle.try_lock().is_err() {
+            return None;
+        }
+        // Best effort: leave only our pid in the file for whoever inspects the lock.
+        handle.set_len(0).ok();
         let _ = std::os::unix::fs::FileExt::write_all_at(
             &handle,
             format!("{}\n", std::process::id()).as_bytes(),

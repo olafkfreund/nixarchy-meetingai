@@ -48,9 +48,9 @@ pub enum SessionEvent {
 /// Configuration for opening a [`ListenSession`].
 #[derive(Debug, Clone, Default)]
 pub struct SessionConfig {
-    /// Input device identifier, or `None` for the system default microphone.
+    /// Which input to open; `None` lets the capture layer pick (echo-cancelled source first).
     pub device: Option<String>,
-    /// Whether to also capture the far side of the call from a monitor source.
+    /// Also record what the speakers play (the remote side) on the right channel.
     pub system_audio: bool,
     /// Monitor source identifier for system audio, or `None` for the default output.
     pub output_device: Option<String>,
@@ -170,7 +170,9 @@ fn format_combined_device(mic_name: &str, sys_source: &str) -> String {
 }
 
 fn format_mic_only_notice(err: &SystemAudioError) -> String {
-    format!("System audio is unavailable ({err}); recording microphone only.")
+    format!(
+        "Only your microphone is being recorded: the speaker output could not be opened ({err})."
+    )
 }
 
 fn format_interrupted_failure() -> String {
