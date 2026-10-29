@@ -183,7 +183,7 @@ in
       type = lib.types.package;
       default = pkgs.callPackage ./speaker-model.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ./nix/speaker-model.nix { }";
-      description = "The speaker-embedding model (3D-Speaker CAM++, Apache-2.0, 26 MB) used to tell the owner's voice from others in the room. The daemon gets the file path as `MEETINGAI_SPEAKER_MODEL`; it is only loaded once a voice sample exists.";
+      description = "The speaker-embedding model (3D-Speaker CAM++, Apache-2.0, 28 MB) used to tell the owner's voice from others in the room. The daemon gets the file path as `MEETINGAI_SPEAKER_MODEL`; it is only loaded once a voice sample exists.";
     };
 
     ollamaCloud.environmentFile = lib.mkOption {

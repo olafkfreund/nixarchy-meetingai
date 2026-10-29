@@ -99,11 +99,11 @@ pub fn set_local_only(connection: &Connection, id: &str, on: bool) -> Result<boo
     )? > 0)
 }
 
-/// What the candidate said (channel 1) in a meeting: the only text a quote may come from.
+/// What the candidate said (far side, or `room`: beside the mic) in a meeting: the only text a quote may come from.
 pub fn said(connection: &Connection, meeting: &str) -> Vec<String> {
-    let Ok(mut statement) =
-        connection.prepare("SELECT text FROM meeting_lines WHERE meeting_id = ?1 AND who = 'them'")
-    else {
+    let Ok(mut statement) = connection.prepare(
+        "SELECT text FROM meeting_lines WHERE meeting_id = ?1 AND who IN ('them', 'room')",
+    ) else {
         return Vec::new();
     };
     statement

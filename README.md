@@ -1182,7 +1182,7 @@ true
 
 
 
-The speaker-embedding model (3D-Speaker CAM++, Apache-2\.0, 26 MB) used to tell the owner’s voice from others in the room\. The daemon gets the file path as ` MEETINGAI_SPEAKER_MODEL `; it is only loaded once a voice sample exists\.
+The speaker-embedding model (3D-Speaker CAM++, Apache-2\.0, 28 MB) used to tell the owner’s voice from others in the room\. The daemon gets the file path as ` MEETINGAI_SPEAKER_MODEL `; it is only loaded once a voice sample exists\.
 
 
 

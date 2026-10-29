@@ -271,6 +271,7 @@ Item {
         case "transcript.partial": root.pushLine(ev, true); break;
         case "transcript.final": root.pushLine(ev, false); break;
         case "transcript.relabel":
+            if (String(ev.meeting || "") !== root.currentMeeting) break;
             for (var r = lines.count - 1; r >= 0; r--) {
                 var row = lines.get(r);
                 if (row.who === "mic" && row.t0 === Number(ev.t0) && row.t1 === Number(ev.t1)) {

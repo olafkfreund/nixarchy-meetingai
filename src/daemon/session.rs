@@ -148,8 +148,8 @@ struct Entry {
     text: String,
     who: &'static str,
     speaker: Option<i64>,
-    /// Start time as stored with the line, to find it again when it is relabelled.
-    start: f64,
+    /// Stored row, to find the line again when it is relabelled.
+    id: Option<String>,
 }
 
 /// The `who` label the clients see for a stored `who`.
@@ -161,13 +161,34 @@ fn who_label(stored: &str) -> &'static str {
     }
 }
 
-/// Owner voice check: the speaker model, and its embedder once loaded (or given by a test).
+/// Owner voice check: the speaker model and its embedder. Nothing here is locked on the audio
+/// path: the model name is fixed at start, and the embedder loads under `load`, which only the
+/// blocking check threads take.
 #[derive(Default)]
 struct VoiceCheck {
-    model: Option<PathBuf>,
-    embedder: Option<Arc<dyn Embedder + Send + Sync>>,
-    failed: bool,
+    model: std::sync::OnceLock<PathBuf>,
+    /// File name of `model`; a sample is only valid for the model that made it.
+    name: std::sync::OnceLock<String>,
+    embedder: std::sync::OnceLock<Arc<dyn Embedder + Send + Sync>>,
+    failed: AtomicBool,
+    load: Mutex<()>,
+    /// Checks still running, and the wake-up for whoever waits for them.
+    pending: std::sync::atomic::AtomicUsize,
+    done: tokio::sync::Notify,
 }
+
+/// Counts a running check; dropping it (even on a panic) lets waiters go on.
+struct CheckGuard(Arc<Daemon>);
+
+impl Drop for CheckGuard {
+    fn drop(&mut self) {
+        self.0.voice.pending.fetch_sub(1, Ordering::AcqRel);
+        self.0.voice.done.notify_waiters();
+    }
+}
+
+/// Longest notes wait for a voice check, so a stuck one cannot stop them.
+const CHECK_WAIT: Duration = Duration::from_secs(10);
 
 /// Seconds of microphone history kept for the owner voice check.
 const VOICE_RING_SECONDS: f64 = 30.0;
@@ -292,7 +313,7 @@ pub struct Daemon {
     notes: tokio::sync::Mutex<()>,
     /// Serialises calendar lookups so an older `gog` result never overwrites a newer one.
     calendar_gate: tokio::sync::Mutex<()>,
-    voice: Mutex<VoiceCheck>,
+    voice: VoiceCheck,
     enrolling: AtomicBool,
     inner: Mutex<Inner>,
 }
@@ -783,10 +804,16 @@ impl Daemon {
             startup_notice: Mutex::new(startup_notice),
             notes: tokio::sync::Mutex::new(()),
             calendar_gate: tokio::sync::Mutex::new(()),
-            voice: Mutex::new(VoiceCheck {
-                model: std::env::var_os("MEETINGAI_SPEAKER_MODEL").map(PathBuf::from),
-                ..Default::default()
-            }),
+            voice: {
+                let v = VoiceCheck::default();
+                if let Some(path) = std::env::var_os("MEETINGAI_SPEAKER_MODEL").map(PathBuf::from) {
+                    if let Some(name) = path.file_name() {
+                        let _ = v.name.set(name.to_string_lossy().into_owned());
+                    }
+                    let _ = v.model.set(path);
+                }
+                v
+            },
             enrolling: AtomicBool::new(false),
             inner: Mutex::new(Inner {
                 db,
@@ -1719,7 +1746,7 @@ impl Daemon {
                     if !line.text.is_empty() {
                         let (offset, speaker) = (g.meeting_offset, g.speaker_offset);
                         let (start, end) = (line.start + offset, line.end + offset);
-                        self.push_transcript(
+                        let row = self.push_transcript(
                             g,
                             &line.text,
                             start,
@@ -1727,8 +1754,10 @@ impl Daemon {
                             line.channel,
                             line.speaker.map(|s| s + speaker),
                         );
-                        if line.channel == 0 {
-                            self.voice_check(g, (line.start, line.end), (start, end));
+                        if line.channel == 0
+                            && let Some(row) = row
+                        {
+                            self.voice_check(g, row, (line.start, line.end), (start, end));
                         }
                         if line.channel == 0 && g.settings.meeting_mode == MeetingMode::Interviewer
                         {
@@ -1794,14 +1823,17 @@ impl Daemon {
         end: f64,
         channel: u8,
         speaker: Option<i64>,
-    ) {
+    ) -> Option<String> {
         let who = if channel == 0 { "me" } else { "them" };
-        if let Some(id) = &g.meeting_id
-            && let Err(error) =
-                meetings::add_line(g.db.connection(), id, who, speaker, text, start, end)
-        {
-            tracing::warn!(%error, "could not save a transcript line");
-            self.error("Could not save the transcript. Check available disk space and local storage access.");
+        let mut row = None;
+        if let Some(id) = &g.meeting_id {
+            match meetings::add_line(g.db.connection(), id, who, speaker, text, start, end) {
+                Ok(line) => row = Some(line),
+                Err(error) => {
+                    tracing::warn!(%error, "could not save a transcript line");
+                    self.error("Could not save the transcript. Check available disk space and local storage access.");
+                }
+            }
         }
         if g.transcript.len() >= 500 {
             g.transcript.drain(..100);
@@ -1823,8 +1855,9 @@ impl Daemon {
             text: shown,
             who,
             speaker,
-            start,
+            id: row.clone(),
         });
+        row
     }
 
     /// Write a rolling-notes chunk when 8k characters or 5 minutes have built up.
@@ -1834,6 +1867,7 @@ impl Daemon {
         }
         let me = self.clone();
         tokio::spawn(async move {
+            me.settle_checks().await;
             let (config, language) = {
                 let g = me.inner.lock();
                 (
@@ -1904,6 +1938,10 @@ impl Daemon {
             }
             if g.dictation.is_some() {
                 return Err("Finish or cancel dictation before starting a meeting.".into());
+            }
+            // Checked under the lock `voice_enroll` sets the flag under.
+            if self.enrolling.load(Ordering::Acquire) {
+                return Err("Wait for your voice sample to finish recording.".into());
             }
             g.settings = Settings::load(&g.db).unwrap_or_default();
             let local = self.local_now(g);
@@ -2274,6 +2312,7 @@ impl Daemon {
             }
             let _ = meetings::finish(g.db.connection(), meeting, g.last_elapsed as i64);
             g.meeting_id = None;
+            g.ring = MicRing::new(VOICE_RING_SECONDS, audio::SAMPLE_RATE);
             // Retain the session so Play resumes the same meeting.
             g.resume_meeting = Some(meeting.to_owned());
             g.live_active = [false; 2];
@@ -2293,6 +2332,7 @@ impl Daemon {
 
     /// Name the meeting, then summarise what is left and consolidate every chunk.
     async fn finish_meeting_artifacts(self: &Arc<Self>, meeting: &str) {
+        self.settle_checks().await;
         let (config, language, body, local, interview, said, named) = {
             let g = self.inner.lock();
             let c = g.db.connection();
@@ -2348,28 +2388,31 @@ impl Daemon {
 
     // ----- owner voice ----------------------------------------------------
 
-    /// The embedder, loaded on first use. A load failure skips checks and says so once.
+    /// The embedder, loaded on first use by a blocking thread. A load failure skips checks and
+    /// says so once. Only loaders wait on `load`; the audio path never touches it.
     fn embedder(&self) -> Option<Arc<dyn Embedder + Send + Sync>> {
-        let mut v = self.voice.lock();
-        if let Some(e) = &v.embedder {
+        if let Some(e) = self.voice.embedder.get() {
             return Some(e.clone());
         }
-        if v.failed {
+        let _loading = self.voice.load.lock();
+        if let Some(e) = self.voice.embedder.get() {
+            return Some(e.clone());
+        }
+        if self.voice.failed.load(Ordering::Acquire) {
             return None;
         }
-        let loaded = match &v.model {
+        let loaded = match self.voice.model.get() {
             Some(path) => SherpaEmbedder::load(path),
             None => Err("no speaker model is configured".to_owned()),
         };
         match loaded {
             Ok(e) => {
                 let e: Arc<dyn Embedder + Send + Sync> = Arc::new(e);
-                v.embedder = Some(e.clone());
+                let _ = self.voice.embedder.set(e.clone());
                 Some(e)
             }
             Err(error) => {
-                v.failed = true;
-                drop(v);
+                self.voice.failed.store(true, Ordering::Release);
                 tracing::warn!(%error, "owner voice check unavailable");
                 self.error(
                     "The owner voice check is unavailable: the speaker model could not be loaded.",
@@ -2380,14 +2423,28 @@ impl Daemon {
     }
 
     /// File name of the speaker model; a sample is only valid for the model that made it.
-    fn model_name(&self) -> Option<String> {
-        let v = self.voice.lock();
-        let name = v.model.as_ref()?.file_name()?;
-        Some(name.to_string_lossy().into_owned())
+    fn model_name(&self) -> Option<&str> {
+        self.voice.name.get().map(String::as_str)
     }
 
-    /// Check a final mic line off the audio thread; `Room` relabels the stored line.
-    fn voice_check(self: &Arc<Self>, g: &Inner, span: (f64, f64), stored: (f64, f64)) {
+    /// Wait (bounded) until no voice check is running, so notes read the final labels.
+    async fn settle_checks(&self) {
+        let wait = async {
+            loop {
+                let woken = self.voice.done.notified();
+                tokio::pin!(woken);
+                woken.as_mut().enable();
+                if self.voice.pending.load(Ordering::Acquire) == 0 {
+                    return;
+                }
+                woken.await;
+            }
+        };
+        let _ = tokio::time::timeout(CHECK_WAIT, wait).await;
+    }
+
+    /// Check a final mic line off the audio thread; `Room` relabels the stored line `row`.
+    fn voice_check(self: &Arc<Self>, g: &Inner, row: String, span: (f64, f64), stored: (f64, f64)) {
         if g.settings.voice_check_paused {
             return;
         }
@@ -2398,43 +2455,50 @@ impl Daemon {
         ) else {
             return;
         };
-        if Some(&sample.model) != self.model_name().as_ref() {
+        if Some(sample.model.as_str()) != self.model_name() {
             return;
         }
         let Some(heard) = g.ring.cut(span.0, span.1) else {
             return;
         };
+        self.voice.pending.fetch_add(1, Ordering::AcqRel);
+        let guard = CheckGuard(self.clone());
         let me = self.clone();
         drop(runtime.spawn_blocking(move || {
+            let _guard = guard;
             let Some(e) = me.embedder() else { return };
             if voice_check::check(&*e, &sample.embedding, &heard, audio::SAMPLE_RATE)
                 == Verdict::Room
             {
-                me.relabel_room(&meeting, stored);
+                me.relabel_room(&meeting, &row, stored);
             }
         }));
     }
 
-    fn relabel_room(&self, meeting: &str, (start, end): (f64, f64)) {
+    fn relabel_room(&self, meeting: &str, row: &str, (t0, t1): (f64, f64)) {
         let mut guard = self.inner.lock();
         let g = &mut *guard;
         let changed = g.db.connection().execute(
-            "UPDATE meeting_lines SET who='room' WHERE meeting_id=?1 AND who='me' AND start_time=?2 AND end_time=?3",
-            rusqlite::params![meeting, start, end],
+            "UPDATE meeting_lines SET who='room' WHERE id=?1 AND who='me'",
+            [row],
         );
         if !matches!(changed, Ok(n) if n > 0) {
+            return;
+        }
+        // Another meeting may be on screen by now: the row is fixed, the screen is not.
+        if g.meeting_id.as_deref().or(g.resume_meeting.as_deref()) != Some(meeting) {
             return;
         }
         for e in g
             .transcript
             .iter_mut()
-            .filter(|e| e.who == "me" && e.start == start)
+            .filter(|e| e.id.as_deref() == Some(row))
         {
             e.who = "room";
         }
         self.emit(
             "transcript.relabel",
-            json!({"t0": start, "t1": end, "who": "room"}),
+            json!({"meeting": meeting, "t0": t0, "t1": t1, "who": "room"}),
         );
     }
 
@@ -2443,7 +2507,7 @@ impl Daemon {
         let sample = voice::load(g.db.connection()).map_err(|e| e.to_string())?;
         let enrolled = sample
             .as_ref()
-            .is_some_and(|s| Some(&s.model) == self.model_name().as_ref());
+            .is_some_and(|s| Some(s.model.as_str()) == self.model_name());
         Ok(json!({
             "enrolled": enrolled,
             "model": sample.as_ref().map(|s| &s.model),
@@ -2454,6 +2518,10 @@ impl Daemon {
 
     /// Record 12 s from the current microphone, outside any meeting, and store the voice sample.
     async fn voice_enroll(self: &Arc<Self>) -> Result<Value, String> {
+        if self.voice.model.get().is_none() {
+            return Err("The speaker model is not installed.".into());
+        }
+        // The flag is set under the lock that record and dictation starts check it under.
         let device = {
             let g = self.inner.lock();
             if g.recording.is_some() || g.dictation.is_some() {
@@ -2462,14 +2530,11 @@ impl Daemon {
             if !self.capture {
                 return Err("Audio capture is off.".into());
             }
+            if self.enrolling.swap(true, Ordering::AcqRel) {
+                return Err("Already recording your voice.".into());
+            }
             Some(g.settings.input_device.clone()).filter(|d| !d.is_empty())
         };
-        if self.voice.lock().model.is_none() {
-            return Err("The speaker model is not installed.".into());
-        }
-        if self.enrolling.swap(true, Ordering::AcqRel) {
-            return Err("Already recording your voice.".into());
-        }
         let heard = self.capture_voice(device).await;
         self.enrolling.store(false, Ordering::Release);
         let heard = heard?;
@@ -2510,7 +2575,7 @@ impl Daemon {
             g.db.connection(),
             &voice::VoiceSample {
                 embedding,
-                model,
+                model: model.to_owned(),
                 created: now_ms(),
             },
         )
@@ -2526,6 +2591,9 @@ impl Daemon {
             let g = self.inner.lock();
             if g.dictation.is_some() {
                 return Err("Dictation is already running.".into());
+            }
+            if self.enrolling.load(Ordering::Acquire) {
+                return Err("Wait for your voice sample to finish recording.".into());
             }
             if self
                 .speech_config(&g.settings, self.local_now(&g))
@@ -2564,6 +2632,9 @@ impl Daemon {
         let g = &mut *guard;
         if g.dictation.is_some() {
             return Err("Dictation is already running.".into());
+        }
+        if self.enrolling.load(Ordering::Acquire) {
+            return Err("Wait for your voice sample to finish recording.".into());
         }
         g.pending_question = None;
         g.pending_created = None;
@@ -2755,7 +2826,7 @@ impl Daemon {
                     _ => "them",
                 },
                 speaker: line.speaker,
-                start: line.start_time,
+                id: Some(line.id.clone()),
             });
         }
         // Keep the recap plus beginning and recent speech as bounded background.
@@ -4540,15 +4611,26 @@ mod command_tests {
         })
     }
 
+    fn use_fake(d: &Daemon, e: impl Embedder + Send + Sync + 'static) {
+        let _ = d.voice.model.set(PathBuf::from("/models/m.onnx"));
+        let _ = d.voice.name.set("m.onnx".into());
+        let _ = d.voice.embedder.set(Arc::new(e));
+    }
+
+    /// Sounds like `Fake`, slowly.
+    struct Slow;
+    impl Embedder for Slow {
+        fn embed(&self, samples: &[f32]) -> Option<Vec<f32>> {
+            std::thread::sleep(Duration::from_millis(300));
+            Fake.embed(samples)
+        }
+    }
+
     /// Recording with a fake embedder, a sample, and 3 s of mic at `level` in the ring.
     async fn voice_daemon(sample: bool, level: f32) -> Arc<Daemon> {
         let d = daemon();
         d.handle("record.start", json!({}), None).await.unwrap();
-        {
-            let mut v = d.voice.lock();
-            v.model = Some(PathBuf::from("/models/m.onnx"));
-            v.embedder = Some(Arc::new(Fake));
-        }
+        use_fake(&d, Fake);
         if sample {
             let g = d.inner.lock();
             voice::save(
@@ -4599,6 +4681,163 @@ mod command_tests {
     }
 
     #[tokio::test]
+    async fn relabel_uses_the_row_and_the_stored_times_with_a_meeting_offset() {
+        let d = voice_daemon(true, 0.2).await;
+        d.inner.lock().meeting_offset = 100.0;
+        let meeting = d.inner.lock().meeting_id.clone().unwrap();
+        let mut rx = d.subscribe();
+        d.inject_live(mic_line("hello", 0.0));
+        let ev = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let e = rx.recv().await.unwrap();
+                if e["event"] == "transcript.relabel" {
+                    return e;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            (ev["meeting"].as_str(), ev["t0"].as_f64(), ev["t1"].as_f64()),
+            (Some(meeting.as_str()), Some(100.0), Some(102.0))
+        );
+        let g = d.inner.lock();
+        let lines = meetings::lines(g.db.connection(), &meeting).unwrap();
+        assert_eq!(lines[0].who, "room");
+        assert_eq!(g.transcript[0].who, "room");
+    }
+
+    #[tokio::test]
+    async fn another_displayed_meeting_is_not_relabelled_on_screen() {
+        let d = voice_daemon(true, 0.2).await;
+        let meeting = d.inner.lock().meeting_id.clone().unwrap();
+        let mut rx = d.subscribe();
+        d.settle_checks().await;
+        {
+            // The screen moved to another meeting while the check ran.
+            let mut g = d.inner.lock();
+            let row =
+                meetings::add_line(g.db.connection(), &meeting, "me", None, "x", 0.0, 2.0).unwrap();
+            g.meeting_id = None;
+            g.resume_meeting = Some("other".into());
+            g.transcript.push(Entry {
+                text: "x".into(),
+                who: "me",
+                speaker: None,
+                id: Some(row.clone()),
+            });
+            drop(g);
+            d.relabel_room(&meeting, &row, (0.0, 2.0));
+        }
+        assert!(!relabelled(&mut rx).await);
+        let g = d.inner.lock();
+        assert_eq!(g.transcript[0].who, "me");
+        assert_eq!(
+            meetings::lines(g.db.connection(), &meeting).unwrap()[0].who,
+            "room"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sample_from_another_model_file_means_no_check() {
+        let d = voice_daemon(true, 0.2).await;
+        {
+            let g = d.inner.lock();
+            voice::save(
+                g.db.connection(),
+                &voice::VoiceSample {
+                    embedding: vec![1.0, 0.0],
+                    model: "old.onnx".into(),
+                    created: 1,
+                },
+            )
+            .unwrap();
+        }
+        let mut rx = d.subscribe();
+        d.inject_live(mic_line("hello", 0.0));
+        d.settle_checks().await;
+        assert!(!relabelled(&mut rx).await);
+        let status = d.handle("voice.status", json!({}), None).await.unwrap();
+        assert_eq!(status["enrolled"], false);
+    }
+
+    #[tokio::test]
+    async fn events_never_carry_the_vector() {
+        let d = voice_daemon(true, 0.2).await;
+        let mut rx = d.subscribe();
+        d.inject_live(mic_line("hello", 0.0));
+        d.settle_checks().await;
+        let mut seen = 0;
+        while let Ok(e) = rx.try_recv() {
+            seen += 1;
+            let text = e.to_string();
+            assert!(
+                !text.contains("embedding") && !text.contains("1.0,0.0"),
+                "{text}"
+            );
+        }
+        assert!(seen > 0);
+    }
+
+    #[tokio::test]
+    async fn restore_keeps_room_lines() {
+        let d = daemon();
+        let m = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let m = meetings::start(c, "R", "", "en", None, Default::default()).unwrap();
+            meetings::add_line(c, &m, "room", None, "phone", 0.0, 1.0).unwrap();
+            m
+        };
+        d.handle("session.restore", json!({"id": m}), None)
+            .await
+            .unwrap();
+        assert_eq!(d.inner.lock().transcript[0].who, "room");
+    }
+
+    #[tokio::test]
+    async fn notes_wait_for_a_pending_check_and_see_room() {
+        let d2 = daemon();
+        d2.handle("record.start", json!({}), None).await.unwrap();
+        use_fake(&d2, Slow);
+        {
+            let g = d2.inner.lock();
+            voice::save(
+                g.db.connection(),
+                &voice::VoiceSample {
+                    embedding: vec![1.0, 0.0],
+                    model: "m.onnx".into(),
+                    created: 1,
+                },
+            )
+            .unwrap();
+        }
+        d2.inner
+            .lock()
+            .ring
+            .push_interleaved(&vec![0.2; 2 * 16_000 * 3]);
+        d2.inject_live(mic_line("hello", 0.0));
+        assert_eq!(d2.voice.pending.load(Ordering::Acquire), 1);
+        d2.settle_checks().await;
+        assert_eq!(d2.voice.pending.load(Ordering::Acquire), 0);
+        let meeting = d2.inner.lock().meeting_id.clone().unwrap();
+        let g = d2.inner.lock();
+        assert_eq!(candidates::said(g.db.connection(), &meeting), vec!["hello"]);
+    }
+
+    #[tokio::test]
+    async fn enrolling_refuses_recording_and_dictation() {
+        let d = daemon();
+        d.enrolling.store(true, Ordering::Release);
+        for cmd in ["record.start", "dictate.start"] {
+            let err = d.handle(cmd, json!({}), None).await.unwrap_err();
+            assert!(err.contains("voice sample"), "{cmd}: {err}");
+        }
+        d.enrolling.store(false, Ordering::Release);
+        d.handle("record.start", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn paused_or_no_sample_means_no_check() {
         let d = voice_daemon(true, 0.2).await;
         d.inner.lock().settings.voice_check_paused = true;
@@ -4634,11 +4873,7 @@ mod command_tests {
     #[tokio::test]
     async fn enrolling_stores_a_sample_and_the_ring_restarts_with_each_recording() {
         let d = daemon();
-        {
-            let mut v = d.voice.lock();
-            v.model = Some(PathBuf::from("/models/m.onnx"));
-            v.embedder = Some(Arc::new(Fake));
-        }
+        use_fake(&d, Fake);
         d.enroll_samples(&vec![0.8; 16_000 * 12]).unwrap();
         let status = d.handle("voice.status", json!({}), None).await.unwrap();
         assert_eq!(status["enrolled"], true);

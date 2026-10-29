@@ -76,6 +76,10 @@ VOICE = {"enrolled": False, "model": "", "created": 0}
 settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced", "text_scale": scale, "voice_check_paused": False}
 
 
+if voice_mode:
+    state["meeting"] = "m1"
+
+
 def voice_status():
     return {"enrolled": VOICE["enrolled"], "model": VOICE["model"], "created": VOICE["created"], "paused": bool(settings.get("voice_check_paused", False))}
 DATA = {
@@ -299,7 +303,7 @@ class Handler(socketserver.StreamRequestHandler):
             ("mic", "", "Coffee is ready in the kitchen.", 11, 13),
         ]:
             self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": t0, "t1": t1})
-        self.send({"event": "transcript.relabel", "t0": 11, "t1": 13, "who": "room"})
+        self.send({"event": "transcript.relabel", "meeting": state.get("meeting", ""), "t0": 11, "t1": 13, "who": "room"})
         self.send({"event": "notice", "text": "An agent started recording"})
         if providers and not NOTICED:   # the daemon tells its first client, once
             NOTICED.append(1)
@@ -374,7 +378,7 @@ class Handler(socketserver.StreamRequestHandler):
         self.send({"event": "state", **state})
         self.send({"event": "transcript.final", "who": "mic", "speaker": "", "text": "My own first line", "t0": 5.5, "t1": 8.0})
         self.send({"event": "transcript.final", "who": "mic", "speaker": "", "text": "Someone else in the room", "t0": 5.5, "t1": 8.0})
-        self.send({"event": "transcript.relabel", "t0": 5.5, "t1": 8.0, "who": "room"})
+        self.send({"event": "transcript.relabel", "meeting": "m1", "t0": 5.5, "t1": 8.0, "who": "room"})
         self.send({"event": "transcript.final", "who": "room", "speaker": "", "text": "Direct room line", "t0": 8.5, "t1": 10.0})
 
     def stream_iv_call(self):
@@ -478,7 +482,7 @@ class Handler(socketserver.StreamRequestHandler):
                 if state["recording"]:
                     self.send({"id": req["id"], "ok": False, "error": "Stop recording before enrolling your voice."})
                 else:
-                    VOICE.update(enrolled=True, model="3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx", created=1761700000)
+                    VOICE.update(enrolled=True, model="3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx", created=1761700000000)
                     threading.Timer(0.3, self.send, args=({"id": req["id"], "ok": True, "data": voice_status()},)).start()
                 continue
             if cmd == "voice.delete":
