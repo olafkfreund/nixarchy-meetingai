@@ -40,6 +40,9 @@ Item {
     property var candidates: []    // candidates.list rows (interviewer mode)
     property var cand: null        // candidate.get of the current candidate: { candidate, documents, questions }
     property string consentPrompt: ""   // set while the daemon asks for "recording is announced"
+    property var voice: ({ enrolled: false, model: "", created: 0, paused: false })
+    property bool voiceEnrolling: false
+    property string voiceError: ""
     signal notesUpdated(var meeting)
     readonly property string currentMeeting: String(state.meeting || "")
     // While an item's text is being edited a refresh waits, so typing is not lost.
@@ -58,7 +61,7 @@ Item {
     property var pending: ({})
     property int delay: 500
 
-    ListModel { id: lines }
+    ListModel { id: lines; dynamicRoles: true }
 
     // The reply goes to cb({ok, data, error}); cb may be omitted.
     function send(cmd, args, cb) {
@@ -76,9 +79,40 @@ Item {
     function refresh() {
         root.send("state.get", {}, function(r) { if (r.ok) root.state = r.data || {}; });
         root.send("settings.get", {}, function(r) { if (r.ok) { root.settings = r.data || {}; root.settingsReady = true; } });
+        root.refreshVoice();
         root.refreshProfiles();
         root.refreshSeries();
         root.refreshCandidates();
+    }
+
+    function refreshVoice() {
+        root.send("voice.status", {}, function(r) { if (r.ok && r.data) root.voice = r.data; });
+    }
+
+    function enrollVoice() {
+        if (root.voiceEnrolling) return;
+        root.voiceEnrolling = true;
+        root.voiceError = "";
+        root.send("voice.enroll", {}, function(r) {
+            root.voiceEnrolling = false;
+            if (!r.ok) root.voiceError = String(r.error || "enrollment failed");
+            root.refreshVoice();
+        });
+    }
+
+    function deleteVoice() {
+        root.voiceError = "";
+        root.send("voice.delete", {}, function(r) {
+            if (!r.ok) root.voiceError = String(r.error || "request failed");
+            else root.voice = Object.assign({}, root.voice, { enrolled: false, model: "", created: 0 });
+            root.refreshVoice();
+        });
+    }
+
+    function setVoicePaused(paused) {
+        if (root.isLocked("voice_check_paused")) return;
+        root.voice = Object.assign({}, root.voice, { paused: paused });
+        root.setSetting("voice_check_paused", paused);
     }
 
     function refreshSeries() {
@@ -184,7 +218,7 @@ Item {
                 if (first) lines.clear();
                 for (var i = 0; i < rows.length; i++) {
                     if (rows[i].who === "system" && rows[i].speaker) root.lastSpeaker = String(rows[i].speaker);
-                    root.addRow(String(rows[i].who), String(rows[i].speaker || ""), String(rows[i].text), false);
+                    root.addRow(String(rows[i].who), String(rows[i].speaker || ""), String(rows[i].text), false, -1, rows[i].t0, rows[i].t1);
                 }
                 if (rows.length >= root.maxLines) page(rows[rows.length - 1].line, false);
             });
@@ -207,17 +241,17 @@ Item {
     function pushLine(ev, partial) {
         if (!partial && ev.who === "system" && ev.speaker) root.lastSpeaker = String(ev.speaker);
         for (var i = lines.count - 1; i >= 0 && i >= lines.count - 4; i--) {
-            if (lines.get(i).partial && lines.get(i).who === ev.who) {
+            if (lines.get(i).partial && (lines.get(i).who === ev.who || (ev.who === "room" && lines.get(i).who === "mic"))) {
                 lines.remove(i);
                 break;
             }
         }
-        root.addRow(String(ev.who || ""), String(ev.speaker || ""), String(ev.text || ""), partial);
+        root.addRow(String(ev.who || ""), String(ev.speaker || ""), String(ev.text || ""), partial, -1, ev.t0, ev.t1);
     }
 
     // Answers and errors share the transcript model: one virtualized list.
-    function addRow(who, speaker, body, partial, turn) {
-        lines.append({ who: who, speaker: speaker, body: body, partial: partial, turn: turn === undefined ? -1 : turn });
+    function addRow(who, speaker, body, partial, turn, t0, t1) {
+        lines.append({ who: who, speaker: speaker, body: body, partial: partial, turn: turn === undefined ? -1 : turn, t0: t0 === undefined ? -1 : Number(t0), t1: t1 === undefined ? -1 : Number(t1) });
         while (lines.count > root.maxLines) lines.remove(0);
     }
 
@@ -226,7 +260,7 @@ Item {
         if (ev.turn !== undefined && ev.turn === root.staleTurn && (ev.event === "answer.delta" || ev.event === "answer.done" || ev.event === "answer.error")) return;
         if (ev.turn !== undefined && ev.turn < root.minTurn && (ev.event === "answer.delta" || ev.event === "answer.done" || ev.event === "answer.error")) return;
         switch (ev.event) {
-        case "settings": root.settings = ev.settings || ({}); root.settingsReady = true; break;
+        case "settings": root.settings = ev.settings || ({}); root.settingsReady = true; if (root.settings.voice_check_paused !== undefined) root.voice = Object.assign({}, root.voice, { paused: root.settings.voice_check_paused === true }); break;
         case "session.reset": root.resetSession(); root.state = Object.assign({}, root.state, { capture: false }); break;
         case "history":
             lines.clear();   // a reconnect replays the history: it replaces the transcript, it does not add to it
@@ -236,6 +270,15 @@ Item {
         case "levels": root.micLevel = Number(ev.mic) || 0; root.systemLevel = Number(ev.system) || 0; break;
         case "transcript.partial": root.pushLine(ev, true); break;
         case "transcript.final": root.pushLine(ev, false); break;
+        case "transcript.relabel":
+            for (var r = lines.count - 1; r >= 0; r--) {
+                var row = lines.get(r);
+                if (row.who === "mic" && row.t0 === Number(ev.t0) && row.t1 === Number(ev.t1)) {
+                    lines.setProperty(r, "who", String(ev.who || "room"));
+                    break;
+                }
+            }
+            break;
         case "answer.started":
             root.minTurn = Math.max(root.minTurn, ev.turn);
             root.archiveNow();

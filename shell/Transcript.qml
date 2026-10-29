@@ -67,8 +67,8 @@ Item {
                 property bool expanded: false
                 readonly property bool answer: who === "answer"
                 readonly property bool mine: who === "mic" || who === "asked"
-                readonly property bool bubble: who === "mic" || who === "system" || who === "asked"
-                readonly property string label: who === "asked" ? "You · Asked" : who === "mic" ? "You · Spoke" : (speaker !== "" ? speaker : "Them")
+                readonly property bool bubble: who === "mic" || who === "system" || who === "room" || who === "asked"
+                readonly property string label: who === "asked" ? "You · Asked" : who === "mic" ? "You · Spoke" : who === "room" ? "Room" : (speaker !== "" ? speaker : "Them")
                 width: ListView.view.width
                 height: answer ? card2.height : bubble ? bub.height : err.implicitHeight
                 // Markdown and line height settle after layout; keep the end pinned while following.
