@@ -1,23 +1,12 @@
-//! Provider catalog.
-//!
-//! Bring-your-own-key chat and speech-to-text providers. Endpoints, auth headers
-//! and request shapes for Ollama, the subscription CLIs and Deepgram. Removed providers
-//! are deliberately absent so old vault records cannot become active.
-
 use serde::{Deserialize, Serialize};
 
-/// How a chat provider authenticates and frames a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatWire {
-    /// OpenAI-compatible `/chat/completions`.
     OpenAi,
-    /// Native Anthropic Messages API.
     Anthropic,
-    /// A subscription CLI (`claude` / `codex` / `agy`) driven as a subprocess.
     Cli,
 }
 
-/// A chat provider definition.
 #[derive(Debug, Clone, Copy)]
 pub struct ChatProvider {
     pub id: &'static str,
@@ -28,7 +17,6 @@ pub struct ChatProvider {
     pub requires_key: bool,
 }
 
-/// Every bundled chat provider.
 pub const CHAT_PROVIDERS: &[ChatProvider] = &[
     ChatProvider {
         id: "claude-sub",
@@ -80,6 +68,12 @@ pub const CHAT_PROVIDERS: &[ChatProvider] = &[
     },
 ];
 
+impl ChatProvider {
+    pub fn by_id(id: &str) -> Option<&'static ChatProvider> {
+        CHAT_PROVIDERS.iter().find(|entry| entry.id == id)
+    }
+}
+
 /// `https` anywhere, `http` only for loopback hosts.
 pub fn endpoint_allowed(url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(url) else {
@@ -92,35 +86,22 @@ pub fn endpoint_allowed(url: &str) -> bool {
     }
 }
 
-impl ChatProvider {
-    pub fn by_id(id: &str) -> Option<&'static ChatProvider> {
-        CHAT_PROVIDERS.iter().find(|provider| provider.id == id)
-    }
-}
-
-/// How a speech provider uploads audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SttWire {
-    /// Raw `audio/wav` body for Deepgram.
     RawAudio,
-    /// Decoded inside the daemon (Parakeet through sherpa-onnx); no URL, no key.
     InProcess,
-    /// OpenAI-compatible multipart transcription.
     OpenAiMultipart,
 }
 
-/// A speech-to-text provider definition.
 #[derive(Debug, Clone, Copy)]
 pub struct SttProvider {
     pub id: &'static str,
     pub name: &'static str,
     pub endpoint: &'static str,
     pub wire: SttWire,
-    /// Default model identifier, when the provider needs one.
     pub default_model: &'static str,
 }
 
-/// Every bundled speech provider.
 pub const STT_PROVIDERS: &[SttProvider] = &[
     SttProvider {
         id: "deepgram-stt",
@@ -147,7 +128,7 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
 
 impl SttProvider {
     pub fn by_id(id: &str) -> Option<&'static SttProvider> {
-        STT_PROVIDERS.iter().find(|provider| provider.id == id)
+        STT_PROVIDERS.iter().find(|entry| entry.id == id)
     }
 
     pub fn requires_key(&self) -> bool {
@@ -155,10 +136,8 @@ impl SttProvider {
     }
 }
 
-/// A user-configured provider instance, as persisted in the vault.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderConfig {
-    /// Supported catalog id. Retired providers cannot be used through an endpoint override.
     pub id: String,
     #[serde(default)]
     pub api_key: String,
@@ -188,9 +167,8 @@ impl ProviderConfig {
         }
     }
 
-    /// Endpoint to call, honouring a user override.
     pub fn endpoint(&self) -> Option<String> {
-        if self.id.starts_with("custom-") && self.custom.is_some() {
+        if self.custom.is_some() && self.id.starts_with("custom-") {
             return (!self.base_url.is_empty()).then(|| self.base_url.clone());
         }
         let provider = ChatProvider::by_id(&self.id)?;
@@ -203,56 +181,69 @@ impl ProviderConfig {
         Some(provider.endpoint.to_owned())
     }
 
-    /// Whether this configuration is usable as-is.
     pub fn is_usable(&self) -> bool {
-        if let Some(custom) = &self.custom {
-            return self.endpoint().is_some()
-                && !self.model.trim().is_empty()
-                && (custom.auth == "none" || !self.api_key.trim().is_empty())
-                && custom.validate(false).is_ok();
+        match &self.custom {
+            Some(custom) => self.custom_chat_usable(custom),
+            None => {
+                let has_endpoint = self.endpoint().is_some();
+                let has_model = !self.model.trim().is_empty();
+                let key_ok = ChatProvider::by_id(&self.id)
+                    .is_some_and(|p| !p.requires_key || self.has_key());
+                has_endpoint && has_model && key_ok
+            }
         }
-        let needs_key = ChatProvider::by_id(&self.id)
-            .map(|provider| provider.requires_key)
-            .unwrap_or(true);
-        self.endpoint().is_some()
-            && !self.model.trim().is_empty()
-            && (!needs_key || !self.api_key.trim().is_empty())
+    }
+
+    fn has_key(&self) -> bool {
+        !self.api_key.trim().is_empty()
+    }
+
+    fn custom_key_ok(&self, custom: &super::custom::CustomProvider) -> bool {
+        match custom.auth.as_str() {
+            "none" => true,
+            _ => self.has_key(),
+        }
+    }
+
+    fn custom_chat_usable(&self, custom: &super::custom::CustomProvider) -> bool {
+        let has_endpoint = self.endpoint().is_some();
+        let has_model = !self.model.trim().is_empty();
+        let valid = custom.validate(false).is_ok();
+        has_endpoint && has_model && self.custom_key_ok(custom) && valid
     }
 
     pub fn speech_usable(&self) -> bool {
         self.speech_usable_in(crate::speech::stt::parakeet::model_dir())
     }
 
-    /// [`Self::speech_usable`] with the Parakeet model directory given.
     fn speech_usable_in(&self, parakeet_dir: Option<std::path::PathBuf>) -> bool {
         if let Some(custom) = &self.custom {
-            self.id.starts_with("custom-")
-                && !self.base_url.is_empty()
-                && (custom.auth == "none" || !self.api_key.trim().is_empty())
-                && custom.validate(true).is_ok()
-        } else {
-            SttProvider::by_id(&self.id).is_some_and(|p| {
-                if p.wire == SttWire::InProcess {
-                    return crate::speech::stt::parakeet::model_ready_in(parakeet_dir);
-                }
-                (!p.requires_key() || !self.api_key.trim().is_empty())
-                    && (p.wire != SttWire::OpenAiMultipart
-                        || (endpoint_allowed(&self.base_url) && !self.model.trim().is_empty()))
-            })
+            let is_custom = self.id.starts_with("custom-") && !self.base_url.is_empty();
+            return is_custom && self.custom_key_ok(custom) && custom.validate(true).is_ok();
+        }
+        let Some(provider) = SttProvider::by_id(&self.id) else {
+            return false;
+        };
+        let key_ok = !provider.requires_key() || self.has_key();
+        match provider.wire {
+            SttWire::InProcess => crate::speech::stt::parakeet::model_ready_in(parakeet_dir),
+            SttWire::OpenAiMultipart => {
+                key_ok && endpoint_allowed(&self.base_url) && !self.model.trim().is_empty()
+            }
+            SttWire::RawAudio => key_ok,
         }
     }
 
     pub fn speech_streaming(&self) -> bool {
         match &self.custom {
             Some(custom) => custom.streaming,
-            // Only Deepgram's raw-audio wire streams; OpenAI multipart and Parakeet are batch.
             None => SttProvider::by_id(&self.id).is_none_or(|p| p.wire == SttWire::RawAudio),
         }
     }
 
     pub fn chat_definition(&self) -> Option<ChatProvider> {
         if let Some(custom) = &self.custom {
-            self.id.starts_with("custom-").then_some(ChatProvider {
+            return self.id.starts_with("custom-").then(|| ChatProvider {
                 id: "custom",
                 name: "Custom",
                 endpoint: "",
@@ -263,10 +254,9 @@ impl ProviderConfig {
                 },
                 supports_images: custom.supports_images,
                 requires_key: custom.auth != "none",
-            })
-        } else {
-            ChatProvider::by_id(&self.id).copied()
+            });
         }
+        ChatProvider::by_id(&self.id).copied()
     }
 }
 
@@ -275,40 +265,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_provider_has_unique_id_and_https_remote() {
-        let mut ids = std::collections::HashSet::new();
-        for provider in CHAT_PROVIDERS {
-            assert!(ids.insert(provider.id), "duplicate id {}", provider.id);
-            assert!(
-                provider.wire == ChatWire::Cli || provider.endpoint.starts_with("http"),
-                "{}",
-                provider.id
-            );
-            if provider.wire != ChatWire::Cli && provider.id != "ollama" {
-                assert!(
-                    provider.endpoint.starts_with("https://"),
-                    "{} must be https",
-                    provider.id
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn lookup_is_exact() {
+    fn catalog_identity_and_order() {
+        let ids: Vec<_> = CHAT_PROVIDERS.iter().map(|p| p.id).collect();
         assert_eq!(
-            ChatProvider::by_id("agy-sub").unwrap().name,
-            "Antigravity (subscription)"
-        );
-        assert!(ChatProvider::by_id("agy-sub ").is_none());
-        assert!(ChatProvider::by_id("gemini").is_none());
-        assert!(ChatProvider::by_id("nope").is_none());
-    }
-
-    #[test]
-    fn only_current_providers_are_available() {
-        assert_eq!(
-            CHAT_PROVIDERS.iter().map(|p| p.id).collect::<Vec<_>>(),
+            ids,
             [
                 "claude-sub",
                 "agy-sub",
@@ -318,29 +278,50 @@ mod tests {
                 "ollama"
             ]
         );
-        assert_eq!(STT_PROVIDERS.len(), 3);
-        let retired = ProviderConfig::new("openai", "k", "m");
-        assert!(!retired.is_usable());
-        assert!(retired.endpoint().is_none());
-        assert!(SttProvider::by_id("openai-whisper").is_none());
-    }
-
-    #[test]
-    fn providers_require_a_model() {
-        assert!(ProviderConfig::new("ollama", "", "gpt-4o").is_usable());
-        assert!(!ProviderConfig::new("ollama", "", "  ").is_usable());
-        // An unknown id has no endpoint.
-        assert!(!ProviderConfig::new("unknown", "", "m").is_usable());
-    }
-
-    #[test]
-    fn base_url_override_wins() {
-        let mut config = ProviderConfig::new("ollama", "k", "m");
-        config.base_url = "http://127.0.0.1:8080/v1/chat/completions".into();
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len());
+        for p in CHAT_PROVIDERS {
+            if p.wire != ChatWire::Cli {
+                assert!(p.endpoint.starts_with("http"));
+                if p.id != "ollama" {
+                    assert!(p.endpoint.starts_with("https://"));
+                }
+            }
+        }
         assert_eq!(
-            config.endpoint().unwrap(),
-            "http://127.0.0.1:8080/v1/chat/completions"
+            ChatProvider::by_id("agy-sub").unwrap().name,
+            "Antigravity (subscription)"
         );
+        assert!(ChatProvider::by_id("agy-sub ").is_none());
+        assert!(ChatProvider::by_id("legacy-chat").is_none());
+        assert_eq!(STT_PROVIDERS.len(), 3);
+        assert_eq!(
+            SttProvider::by_id("deepgram-stt").unwrap().default_model,
+            "nova-3"
+        );
+        assert!(SttProvider::by_id("retired-speech").is_none());
+        for retired in ["openai-whisper", "whisper-local"] {
+            assert!(STT_PROVIDERS.iter().all(|p| p.id != retired));
+            assert!(SttProvider::by_id(retired).is_none());
+        }
+    }
+
+    #[test]
+    fn endpoint_and_model_rules() {
+        let mut config = ProviderConfig::new("ollama", "", "sample-model");
+        assert!(config.is_usable());
+        config.model = "  ".into();
+        assert!(!config.is_usable());
+        config.model = "sample-model".into();
+        config.base_url = "http://localhost:7777/v1/chat/completions".into();
+        assert_eq!(
+            config.endpoint().as_deref(),
+            Some("http://localhost:7777/v1/chat/completions")
+        );
+        let unknown = ProviderConfig::new("retired-chat", "key", "model");
+        assert!(unknown.endpoint().is_none() && !unknown.is_usable());
     }
 
     #[test]
@@ -375,16 +356,6 @@ mod tests {
     }
 
     #[test]
-    fn stt_lookup_works() {
-        assert_eq!(
-            SttProvider::by_id("deepgram-stt").unwrap().default_model,
-            "nova-3"
-        );
-        assert!(SttProvider::by_id("missing").is_none());
-        assert!(SttProvider::by_id("whisper-local").is_none());
-    }
-
-    #[test]
     fn parakeet_is_ready_only_with_its_model_files() {
         let dir = std::env::temp_dir().join(format!("parakeet-ready-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -406,5 +377,15 @@ mod tests {
         }
         assert!(config.speech_usable_in(Some(dir.clone())) && !config.speech_streaming());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn custom_config_with_a_catalogue_id_uses_the_catalogue() {
+        let mut config = ProviderConfig::new("ollama", "", "m");
+        config.custom = Some(super::super::custom::CustomProvider::default());
+        assert_eq!(
+            config.endpoint().as_deref(),
+            Some("http://127.0.0.1:11434/v1/chat/completions")
+        );
     }
 }

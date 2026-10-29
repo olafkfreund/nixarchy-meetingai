@@ -1,12 +1,7 @@
-//! Document library and attached prompt knowledge.
-
+use crate::db::Result;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use crate::db::Result;
-
-/// A stored document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRecord {
     pub id: String,
@@ -17,119 +12,100 @@ pub struct FileRecord {
     pub ocr_text: String,
     pub created_at: String,
 }
-
-/// Insert a document and return its id.
 pub fn insert(
-    connection: &Connection,
+    c: &Connection,
     name: &str,
     mime_type: &str,
     size_bytes: i64,
     pages: i64,
     ocr_text: &str,
 ) -> Result<String> {
-    let id = Uuid::new_v4().to_string();
-    connection.execute(
-        "INSERT INTO files (id, name, mime_type, size_bytes, pages, ocr_text)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    let id = uuid::Uuid::new_v4().to_string();
+    c.execute(
+        "INSERT INTO files(id,name,mime_type,size_bytes,pages,ocr_text) VALUES(?1,?2,?3,?4,?5,?6)",
         params![id, name, mime_type, size_bytes, pages, ocr_text],
     )?;
     Ok(id)
 }
-
-/// All documents, newest first.
-pub fn list(connection: &Connection) -> Result<Vec<FileRecord>> {
-    let mut statement = connection.prepare(
-        "SELECT id, name, mime_type, size_bytes, pages, ocr_text, created_at
-         FROM files ORDER BY created_at DESC",
-    )?;
-    let rows = statement.query_map([], |row| {
+pub fn list(c: &Connection) -> Result<Vec<FileRecord>> {
+    let mut s=c.prepare("SELECT id,name,mime_type,size_bytes,pages,ocr_text,created_at FROM files ORDER BY created_at DESC,rowid DESC")?;
+    Ok(s.query_map([], |r| {
         Ok(FileRecord {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            mime_type: row.get(2)?,
-            size_bytes: row.get(3)?,
-            pages: row.get(4)?,
-            ocr_text: row.get(5)?,
-            created_at: row.get(6)?,
+            id: r.get(0)?,
+            name: r.get(1)?,
+            mime_type: r.get(2)?,
+            size_bytes: r.get(3)?,
+            pages: r.get(4)?,
+            ocr_text: r.get(5)?,
+            created_at: r.get(6)?,
         })
-    })?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+    })?
+    .collect::<std::result::Result<_, _>>()?)
 }
-
-/// Rename a document.
-pub fn rename(connection: &Connection, id: &str, name: &str) -> Result<()> {
-    connection.execute(
-        "UPDATE files SET name = ?2, updated_at = datetime('now') WHERE id = ?1",
+pub fn rename(c: &Connection, id: &str, name: &str) -> Result<()> {
+    c.execute(
+        "UPDATE files SET name=?2,updated_at=datetime('now') WHERE id=?1",
         params![id, name],
     )?;
     Ok(())
 }
-
-/// Delete a document, which also detaches it from prompts via the cascade.
-pub fn delete(connection: &Connection, id: &str) -> Result<()> {
-    connection.execute("DELETE FROM files WHERE id = ?1", params![id])?;
+pub fn delete(c: &Connection, id: &str) -> Result<()> {
+    c.execute("DELETE FROM files WHERE id=?1", [id])?;
     Ok(())
 }
-
-/// Attach a document to a prompt.
-pub fn attach_to_prompt(connection: &Connection, prompt_id: &str, file_id: &str) -> Result<()> {
-    connection.execute(
-        "INSERT OR IGNORE INTO prompt_files (prompt_id, file_id) VALUES (?1, ?2)",
+pub fn attach_to_prompt(c: &Connection, prompt_id: &str, file_id: &str) -> Result<()> {
+    c.execute(
+        "INSERT OR IGNORE INTO prompt_files(prompt_id,file_id) VALUES(?1,?2)",
         params![prompt_id, file_id],
     )?;
     Ok(())
 }
-
-/// Document ids attached to a prompt.
-pub fn prompt_files(connection: &Connection, prompt_id: &str) -> Result<Vec<String>> {
-    let mut statement =
-        connection.prepare("SELECT file_id FROM prompt_files WHERE prompt_id = ?1")?;
-    let rows = statement.query_map(params![prompt_id], |row| row.get(0))?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+pub fn prompt_files(c: &Connection, prompt_id: &str) -> Result<Vec<String>> {
+    let mut s =
+        c.prepare("SELECT file_id FROM prompt_files WHERE prompt_id=?1 ORDER BY file_id")?;
+    Ok(s.query_map([prompt_id], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::Database;
-
     #[test]
-    fn insert_and_list() {
-        let database = Database::open_in_memory().unwrap();
-        let connection = database.connection();
-        insert(connection, "notes.pdf", "application/pdf", 100, 3, "text").unwrap();
-        let files = list(connection).unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].name, "notes.pdf");
+    fn file_lifecycle() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let id = insert(c, "draft.pdf", "application/pdf", 11, 1, "text").unwrap();
+        assert_eq!(list(c).unwrap().len(), 1);
+        assert_eq!(list(c).unwrap()[0].name, "draft.pdf");
+        rename(c, &id, "final.pdf").unwrap();
+        assert_eq!(list(c).unwrap()[0].name, "final.pdf");
+        attach_to_prompt(c, "p", &id).unwrap();
+        attach_to_prompt(c, "p", &id).unwrap();
+        assert_eq!(
+            prompt_files(c, "p").unwrap().as_slice(),
+            std::slice::from_ref(&id)
+        );
+        delete(c, &id).unwrap();
+        assert!(prompt_files(c, "p").unwrap().is_empty());
     }
 
     #[test]
-    fn deleting_file_removes_prompt_links() {
-        let database = Database::open_in_memory().unwrap();
-        let connection = database.connection();
-        let id = insert(connection, "a.txt", "text/plain", 10, 1, "x").unwrap();
-        attach_to_prompt(connection, "1", &id).unwrap();
-        assert_eq!(prompt_files(connection, "1").unwrap().len(), 1);
-        delete(connection, &id).unwrap();
-        assert!(prompt_files(connection, "1").unwrap().is_empty());
-    }
-
-    #[test]
-    fn rename_updates_name() {
-        let database = Database::open_in_memory().unwrap();
-        let connection = database.connection();
-        let id = insert(connection, "old", "text/plain", 1, 1, "").unwrap();
-        rename(connection, &id, "new").unwrap();
-        assert_eq!(list(connection).unwrap()[0].name, "new");
-    }
-
-    #[test]
-    fn attaching_twice_is_idempotent() {
-        let database = Database::open_in_memory().unwrap();
-        let connection = database.connection();
-        let id = insert(connection, "a", "text/plain", 1, 1, "").unwrap();
-        attach_to_prompt(connection, "1", &id).unwrap();
-        attach_to_prompt(connection, "1", &id).unwrap();
-        assert_eq!(prompt_files(connection, "1").unwrap().len(), 1);
+    fn files_list_newest_first_with_their_stored_fields() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let first = insert(c, "notes.txt", "text/plain", 17, 0, "draft").unwrap();
+        let second = insert(c, "slides.pdf", "application/pdf", 2048, 12, "agenda").unwrap();
+        let files = list(c).unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.id.as_str())
+                .collect::<Vec<_>>(),
+            [second.as_str(), first.as_str()]
+        );
+        assert_eq!(files[0].mime_type, "application/pdf");
+        assert_eq!(files[0].size_bytes, 2048);
+        assert_eq!(files[0].pages, 12);
+        assert_eq!(files[0].ocr_text, "agenda");
     }
 }

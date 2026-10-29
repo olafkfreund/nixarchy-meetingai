@@ -212,6 +212,19 @@ commit and reverts alone.
   database (`history-plain.db`) is encrypted and kept. "Settings file"
   in step 0 means the settings rows in the database, which is where the
   app keeps them.
+- **Step 5** (Codex): the first version followed the old bodies'
+  structure in several functions and reused old test values, although
+  Codex's command log shows it never read the old files (the original
+  project is public, so model recall is the likely source; the brief
+  also gave `migrate_legacy`'s steps in order, against the Briefs rule).
+  Codex rewrote those functions with a different structure from their
+  names only. The kept "ours" tests for note chunks and profile documents
+  were replaced by new tests; `format_lines` has its own test again.
+  Accepted differences: new marker and error wording, a 16,000/16,000
+  head/tail split in `recent_messages`, `sessions::save`,
+  `delete_prompt` and `index_notes` in one transaction, rowid
+  tie-breaks, `untitled` matching the `Session · ` prefix exactly.
+  `--copies` leaves 4 boilerplate lines in `conversations.rs`.
 - **Step 7** (agy): the dead-code rule is read as "items nothing outside
   their file calls", so `Mode`, `OverlaySize`, `Role::is_user`,
   `AutoResponse::label`, `RESPONSE_LANGUAGES`, `load_from_path` and
@@ -238,3 +251,29 @@ commit and reverts alone.
   whitespace-only partial answer as no answer; the shortening notice is
   4 characters longer; redaction also replaces the trimmed key; a
   trailing `\r` is stripped from a final unterminated stream line.
+- **Step 8** (Codex, then a fresh Claude `coder`): Codex's version again
+  matched old statements and step order (model recall; its log shows no
+  access to the old files). Per the handoff fallback, a fresh `coder`
+  rewrote titling cleanup and the title call, model discovery
+  (pagination, status and body errors, id collection, auth headers, the
+  overall limit), `is_usable`'s custom branch, `speech_usable_in` and the
+  preset response path, from the brief. Behaviour kept from the old code:
+  a page over 2,000 ids keeps the first 2,000; the 10,000 cap applies
+  only when another page follows; a custom config without a `custom-` id
+  falls back to the catalogue; an unknown auth value sends the key as is.
+  Accepted differences: the title instruction is in the user message as
+  the brief says; new error wording; an unencodable key fails the refresh
+  before sending. The cache key is pinned by a test. Dead items deleted:
+  `models::label`, `models::is_known_provider`,
+  `titling::name_untitled_meetings`, `Preset::docs`, which leaves
+  `db::meetings::untitled` without a caller.
+  Second re-review: `CustomProvider::header`, the Anthropic text join,
+  `models_endpoint`, id extraction, title prompt building and the test
+  server were reworded again. Also changed: title cleanup strips a
+  trailing quote after a full stop and cuts on characters; the title
+  prompt uses a `<transcript>` tag; ids are de-duplicated across pages
+  before the 10,000 cap; a non-array `data` falls back to `models`; an
+  Anthropic reply without `content` reports "no content blocks". The
+  `--copies` count is a lower bound: it cannot see code deleted in the
+  removal commit and retyped later, so the reviewer's text comparison
+  is the real check.
