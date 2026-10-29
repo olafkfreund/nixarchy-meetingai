@@ -198,10 +198,9 @@ async fn anthropic_preset_keeps_only_visible_text_and_sends_its_wire_details() {
         assert_eq!(answer, "Ship on Thursday.", "streaming={streaming}");
 
         let seen = seen.await.unwrap();
-        assert_eq!(
-            seen.header("authorization").unwrap().to_lowercase(),
-            "bearer sk-quartz-5150"
-        );
+        // Anthropic takes its key in x-api-key, never as a bearer token.
+        assert_eq!(seen.header("x-api-key").unwrap(), "sk-quartz-5150");
+        assert!(seen.header("authorization").is_none());
         assert_eq!(seen.header("anthropic-version").unwrap(), "2026-10-21");
         let body = seen.json();
         assert_eq!(body["system"], "Act as a release manager.");

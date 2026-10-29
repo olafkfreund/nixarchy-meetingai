@@ -158,6 +158,15 @@ only as long as you need it, and make hiring decisions yourself.
 
 - **Settings, Providers** shows which providers are ready and the command
   to fix the ones that are not.
+- **Add provider** (same tab) picks a preset (chat or speech; the local ones
+  such as LM Studio and vLLM need no key), lets you change the name, endpoint
+  and model, and saves the key in the vault. **Test connection** sends one
+  short request to that provider with the key, only when you click it. Your
+  providers are listed under **Your providers**, with **Use for chat** or
+  **Use for speech** (**Use for chat** sets only the chat provider; the live-answer
+  provider stays as it is), **Edit** and **Remove**. Removing the one in use falls
+  back to the default; a provider fixed in your Nix settings is not changed.
+  Several providers from one preset are allowed (for example two keys).
 - **Fallback:** if the chosen provider fails, typed questions try Claude,
   Antigravity, OpenCode, Codex, Ollama Cloud, then Ollama. Live answers skip
   the slower Antigravity and Codex.

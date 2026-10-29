@@ -5,7 +5,7 @@
 //! to every client as `{"event":"…",…}`. The shapes follow what `shell/Client.qml`
 //! sends and expects.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 /// A request line longer than this closes the client.
@@ -175,6 +175,39 @@ pub struct PathArg {
 #[derive(Debug, Deserialize)]
 pub struct ProviderArg {
     pub provider: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProviderAdd {
+    pub preset: String,
+    pub name: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProviderUpdate {
+    pub id: String,
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "present_value")]
+    pub api_key: Option<Value>,
+    pub model: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+fn present_value<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProviderTest {
+    pub preset: Option<String>,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub endpoint: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
