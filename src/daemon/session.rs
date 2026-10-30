@@ -14,6 +14,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
+use rusqlite::OptionalExtension;
 use serde_json::{Map, Value, json};
 use tokio::{
     sync::{Notify, broadcast, mpsc, watch},
@@ -38,6 +39,7 @@ use crate::{
         context::{self, Attachment},
         credentials::{self, Credential, Kind},
         domain::{Message, Role},
+        export::{self, Doc, Export, Item, Line, Shot},
         settings::{
             AutoResponse, FOLLOW_UP_PROMPT, MeetingMode, RECAP_PROMPT_GENERAL,
             RECAP_PROMPT_INTERVIEW, RECAP_PROMPT_INTERVIEWER, RECAP_PROMPT_TEAM, ResponseLength,
@@ -47,7 +49,7 @@ use crate::{
     },
     db::{
         self, Database, conversations, items, meetings, profiles,
-        repos::{candidates, screenshots},
+        repos::{candidates, exports, screenshots},
         sessions, settings as store,
     },
     speech::{
@@ -2325,8 +2327,135 @@ impl Daemon {
         self.emit_state(&g); // the shell shows "Finishing" until it hears this
     }
 
+    async fn export_meeting(&self, meeting: &str) -> Result<PathBuf, String> {
+        let (root, previous, export) =
+            {
+                let g = self.inner.lock();
+                let root = g.settings.export_folder.trim();
+                if root.is_empty() {
+                    return Err("Choose an export folder first.".into());
+                }
+                let c = g.db.connection();
+                let row: Option<(String, String, Option<String>, i64, String, String)> = c
+                .query_row(
+                    "SELECT title, started_at, ended_at, duration_seconds, mode, datetime('now')
+                     FROM meetings WHERE id = ?1",
+                    [meeting],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+                let (title, started, ended, seconds, mode, exported) =
+                    row.ok_or("Meeting not found.")?;
+                let candidate = candidates::for_meeting(c, meeting).map_err(|e| e.to_string())?;
+                let docs = if let Some(candidate) = &candidate {
+                    candidates::documents(c, &candidate.id)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .map(|d| match d.original {
+                            Some(data) => Doc { name: d.name, data },
+                            None => Doc {
+                                name: format!("{}.md", d.name),
+                                data: d.text.into_bytes(),
+                            },
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let summary = match meetings::recap(c, meeting).map_err(|e| e.to_string())? {
+                    Some(r) if r.status == "ready" => r.content,
+                    _ => meetings::chunks(c, meeting)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .map(|chunk| chunk.body)
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                };
+                let items = items::list(c, items::Scope::Meeting(meeting), None)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|i| Item {
+                        kind: i.kind,
+                        text: i.text,
+                        owner: i.owner,
+                        due: i.due,
+                    })
+                    .collect();
+                let names = meetings::speaker_names(c, meeting).map_err(|e| e.to_string())?;
+                let lines = meetings::lines(c, meeting)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|l| {
+                        let name = if l.who == "me" {
+                            "You".to_owned()
+                        } else if let Some(speaker) = l.speaker {
+                            names
+                                .get(&speaker.to_string())
+                                .cloned()
+                                .unwrap_or_else(|| Self::who(1, Some(speaker)).1)
+                        } else {
+                            "Them".to_owned()
+                        };
+                        Line {
+                            at: l.start_time,
+                            speaker: name,
+                            text: l.text,
+                        }
+                    })
+                    .collect();
+                let shots = screenshots::list(c, meeting)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|s| Shot {
+                        taken_at: s.taken_at,
+                        question: s.question,
+                        mime: s.mime,
+                        data: s.data,
+                    })
+                    .collect();
+                let previous = exports::get(c, meeting).map_err(|e| e.to_string())?;
+                let export = Export {
+                    meeting_id: meeting.to_owned(),
+                    title,
+                    date: started.get(..10).unwrap_or(&started).to_owned(),
+                    start: format!("{}Z", started.replace(' ', "T")),
+                    end: ended.map_or_else(String::new, |v| format!("{}Z", v.replace(' ', "T"))),
+                    duration: format!(
+                        "{:02}:{:02}:{:02}",
+                        seconds / 3600,
+                        seconds / 60 % 60,
+                        seconds % 60
+                    ),
+                    mode,
+                    candidate: candidate.as_ref().map(|c| c.name.clone()),
+                    local_only: candidate.as_ref().is_some_and(|c| c.local_only),
+                    exported: format!("{}Z", exported.replace(' ', "T")),
+                    summary,
+                    items,
+                    lines,
+                    shots,
+                    docs,
+                };
+                (PathBuf::from(root), previous.map(PathBuf::from), export)
+            };
+        let path =
+            tokio::task::spawn_blocking(move || export::write(&root, previous.as_deref(), &export))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+        {
+            let g = self.inner.lock();
+            exports::set(g.db.connection(), meeting, &path.to_string_lossy())
+                .map_err(|e| e.to_string())?;
+        }
+        self.emit("export.done", json!({"meeting": meeting, "path": path}));
+        Ok(path)
+    }
+
     /// Name the meeting, then summarise what is left and consolidate every chunk.
     async fn finish_meeting_artifacts(self: &Arc<Self>, meeting: &str) {
+        let _serial = self.notes.lock().await;
         let (config, language, body, local, interview, said, named) = {
             let g = self.inner.lock();
             let c = g.db.connection();
@@ -2342,7 +2471,7 @@ impl Daemon {
             )
         };
         // Merging duplicates needs no model, so every path ends here, and tells the shell once.
-        let finalize = || {
+        let finalize = || async {
             {
                 let g = self.inner.lock();
                 let c = g.db.connection();
@@ -2353,15 +2482,28 @@ impl Daemon {
                 };
             }
             self.emit("items.updated", json!({"meeting": meeting}));
+            let (enabled, has_folder) = {
+                let g = self.inner.lock();
+                (
+                    g.settings.export_meetings,
+                    !g.settings.export_folder.trim().is_empty(),
+                )
+            };
+            if enabled {
+                if !has_folder {
+                    self.emit("export.folder_needed", json!({"meeting": meeting}));
+                } else if let Err(error) = self.export_meeting(meeting).await {
+                    self.error(format!("Could not export the meeting: {error}"));
+                }
+            }
         };
         let Some(config) = config else {
             if local {
                 self.error(no_model(true));
             }
-            finalize();
+            finalize().await;
             return;
         };
-        let _serial = self.notes.lock().await;
         if !named
             && !body.trim().is_empty()
             && let Some(title) =
@@ -2377,7 +2519,7 @@ impl Daemon {
             }
             Err(error) => self.error(format!("Could not write the meeting notes: {error}")),
         }
-        finalize();
+        finalize().await;
     }
 
     // ----- dictation ----------------------------------------------------
@@ -4049,6 +4191,12 @@ impl Daemon {
                 tokio::spawn(async move { me.finish_meeting_artifacts(&meeting).await });
                 Ok(json!({}))
             }
+            "meetings.export" => {
+                let meeting = parse::<protocol::MeetingArg>(args)?.meeting;
+                let _serial = self.notes.lock().await;
+                let path = self.export_meeting(&meeting).await?;
+                Ok(json!({"path": path}))
+            }
             other => Err(format!("unknown command '{other}'")),
         }
     }
@@ -4950,6 +5098,142 @@ mod command_tests {
             capture: false,
         })
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn export_writes_meeting_data_and_remembers_folder() {
+        let d = daemon();
+        let root = d.db_path.parent().unwrap().join("exports");
+        let meeting = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let meeting =
+                meetings::start(c, "Review", "", "en", None, MeetingMode::Interviewer).unwrap();
+            meetings::add_line(c, &meeting, "them", Some(1), "Hello", 3.0, 4.0).unwrap();
+            meetings::name_speaker(c, &meeting, "1", "Ada").unwrap();
+            let candidate = candidates::create(c, "Ada").unwrap();
+            candidates::link_meeting(c, &candidate.id, &meeting).unwrap();
+            candidates::add_document(c, &candidate.id, "cv", "cv.txt", "Past work", None, "")
+                .unwrap();
+            screenshots::add(c, &meeting, 2.0, "What is this?", "image/png", &[1, 2, 3]).unwrap();
+            meeting
+        };
+        d.handle(
+            "settings.set",
+            json!({"key": "export_folder", "value": root}),
+            None,
+        )
+        .await
+        .unwrap();
+        let result = d
+            .handle("meetings.export", json!({"meeting": meeting}), None)
+            .await
+            .unwrap();
+        let path = PathBuf::from(result["path"].as_str().unwrap());
+        assert!(path.join("attachments/shot-01.png").is_file());
+        assert_eq!(
+            std::fs::read(path.join("documents/cv.txt.md")).unwrap(),
+            b"Past work"
+        );
+        let notes = std::fs::read_to_string(path.join("notes.md")).unwrap();
+        assert!(notes.contains("[00:00:03] Ada: Hello"));
+        assert!(notes.contains("![00:00:02](attachments/shot-01.png)"));
+        assert!(!notes.contains("Past work"));
+        assert_eq!(
+            exports::get(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .as_deref(),
+            path.to_str()
+        );
+        let blocked = d.db_path.parent().unwrap().join("not-a-folder");
+        std::fs::write(&blocked, b"occupied").unwrap();
+        d.handle(
+            "settings.set",
+            json!({"key": "export_folder", "value": blocked}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            d.handle("meetings.export", json!({"meeting": meeting}), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            exports::get(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .as_deref(),
+            path.to_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_export_needs_folder_and_respects_switch() {
+        let d = daemon();
+        let meeting = {
+            let g = d.inner.lock();
+            meetings::start(
+                g.db.connection(),
+                "Review",
+                "",
+                "en",
+                None,
+                Default::default(),
+            )
+            .unwrap()
+        };
+        d.inner.lock().settings.chat_provider = "none".into();
+        let mut events = d.subscribe();
+        d.finish_meeting_artifacts(&meeting).await;
+        let mut folder_needed = false;
+        while let Ok(event) = events.try_recv() {
+            folder_needed |= event["event"] == "export.folder_needed";
+        }
+        assert!(folder_needed);
+        assert!(
+            exports::get(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .is_none()
+        );
+
+        let root = d.db_path.parent().unwrap().join("exports");
+        d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
+        d.finish_meeting_artifacts(&meeting).await;
+        assert!(
+            exports::get(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .is_some()
+        );
+
+        let other = {
+            let g = d.inner.lock();
+            meetings::start(
+                g.db.connection(),
+                "Other",
+                "",
+                "en",
+                None,
+                Default::default(),
+            )
+            .unwrap()
+        };
+        d.inner.lock().settings.export_meetings = false;
+        d.finish_meeting_artifacts(&other).await;
+        assert!(
+            exports::get(d.inner.lock().db.connection(), &other)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn agents_cannot_export_meetings() {
+        let d = daemon();
+        let result = d
+            .handle("meetings.export", json!({"meeting": "x"}), Some("agent"))
+            .await;
+        assert_eq!(result.unwrap_err(), "not allowed for agents");
     }
 
     #[tokio::test]

@@ -230,6 +230,8 @@ pub struct Settings {
     pub text_scale: u32,
     /// Whether MCP clients (AI agents) may start recording.
     pub mcp_allow_record: bool,
+    pub export_folder: String,
+    pub export_meetings: bool,
     /// Overlay position and size in pixels; -1 means the default, centred.
     pub overlay_x: i32,
     pub overlay_y: i32,
@@ -272,6 +274,8 @@ impl Default for Settings {
             meeting_mode: MeetingMode::General,
             text_scale: 100,
             mcp_allow_record: false,
+            export_folder: String::new(),
+            export_meetings: true,
             overlay_x: -1,
             overlay_y: -1,
             overlay_w: -1,
@@ -398,6 +402,8 @@ impl Settings {
                 .unwrap_or(defaults.meeting_mode),
             text_scale: number(keys::TEXT_SCALE, defaults.text_scale).clamp(80, 160),
             mcp_allow_record: flag(keys::MCP_ALLOW_RECORD, defaults.mcp_allow_record),
+            export_folder: text("export_folder", &defaults.export_folder),
+            export_meetings: flag("export_meetings", defaults.export_meetings),
             overlay_x: int("overlay_x"),
             overlay_y: int("overlay_y"),
             overlay_w: int("overlay_w"),
@@ -405,7 +411,7 @@ impl Settings {
         })
     }
 
-    fn pairs(&self) -> [(&'static str, String); 36] {
+    fn pairs(&self) -> [(&'static str, String); 38] {
         [
             ("chat_provider", self.chat_provider.clone()),
             ("reduce_motion", self.reduce_motion.to_string()),
@@ -471,6 +477,8 @@ impl Settings {
                     .to_string(),
             ),
             (keys::MCP_ALLOW_RECORD, self.mcp_allow_record.to_string()),
+            ("export_folder", self.export_folder.clone()),
+            ("export_meetings", self.export_meetings.to_string()),
             ("overlay_x", self.overlay_x.max(-1).to_string()),
             ("overlay_y", self.overlay_y.max(-1).to_string()),
             ("overlay_w", self.overlay_w.max(-1).to_string()),
@@ -478,7 +486,7 @@ impl Settings {
         ]
     }
 
-    /// Writes all 36 setting keys to `database`, normalizing bounded fields.
+    /// Writes all 38 setting keys to `database`, normalizing bounded fields.
     pub fn save(&self, database: &Database) -> Result<()> {
         let conn = database.connection();
         for (key, value) in self.pairs() {
@@ -546,6 +554,10 @@ mod tests {
         assert!(!settings.auto_record_on_call);
         assert_eq!(settings.recap_prompt_general, RECAP_PROMPT_GENERAL);
         assert_eq!(settings.meeting_mode, MeetingMode::General);
+        assert!(settings.export_folder.is_empty());
+        assert!(settings.export_meetings);
+        assert!(Settings::is_key("export_folder"));
+        assert!(Settings::is_key("export_meetings"));
         assert_eq!(
             (
                 settings.chat_provider.as_str(),
@@ -598,6 +610,8 @@ mod tests {
             meeting_mode: MeetingMode::TeamMeeting,
             text_scale: 130,
             mcp_allow_record: true,
+            export_folder: "/tmp/meetings".into(),
+            export_meetings: false,
             overlay_x: 10,
             overlay_y: 20,
             overlay_w: 700,
