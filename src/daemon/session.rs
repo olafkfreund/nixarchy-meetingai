@@ -46,8 +46,9 @@ use crate::{
         vault::Vault,
     },
     db::{
-        self, Database, conversations, items, meetings, profiles, repos::candidates, sessions,
-        settings as store,
+        self, Database, conversations, items, meetings, profiles,
+        repos::{candidates, screenshots},
+        sessions, settings as store,
     },
     speech::{
         listen::{ListenSession, SessionConfig, SessionEvent},
@@ -1278,6 +1279,33 @@ impl Daemon {
             let image = g.pending_capture.take();
             if image.is_some() {
                 self.emit_state(&g);
+            }
+            if let Some(image) = &image
+                && let Some(meeting) = g
+                    .meeting_id
+                    .as_deref()
+                    .or(g.finishing_meeting.as_deref())
+                    .or(g.resume_meeting.as_deref())
+            {
+                use base64::Engine;
+                match base64::engine::general_purpose::STANDARD.decode(&image.base64) {
+                    Ok(bytes) => {
+                        let taken_at = g.recording.as_ref().map_or(0.0, |recording| {
+                            g.meeting_offset + recording.started.elapsed().as_secs_f64()
+                        });
+                        if let Err(error) = screenshots::add(
+                            g.db.connection(),
+                            meeting,
+                            taken_at,
+                            &question,
+                            image.mime,
+                            &bytes,
+                        ) {
+                            tracing::warn!(%error, "could not store meeting screenshot");
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "could not decode meeting screenshot"),
+                }
             }
             image
         };
@@ -3364,8 +3392,16 @@ impl Daemon {
         candidates::get(c, &a.id)
             .map_err(|e| e.to_string())?
             .ok_or("No such candidate.")?;
-        let doc = candidates::add_document(c, &a.id, &a.kind, &item.name, &item.text, None, "")
-            .map_err(|e| e.to_string())?;
+        let doc = candidates::add_document(
+            c,
+            &a.id,
+            &a.kind,
+            &item.name,
+            &item.text,
+            Some(&item.bytes),
+            &item.mime,
+        )
+        .map_err(|e| e.to_string())?;
         Ok(
             json!({"id": doc.id, "kind": doc.kind, "name": doc.name, "chars": item.text.chars().count()}),
         )
@@ -5133,6 +5169,103 @@ mod command_tests {
         let sent = d.handle("chat.send", json!({"text": ""}), None).await;
         assert!(sent.is_ok(), "{sent:?}");
         assert!(d.inner.lock().pending_capture.is_none());
+    }
+
+    #[tokio::test]
+    async fn chat_screenshot_is_stored_only_with_a_meeting() {
+        let d = daemon();
+        d.inner.lock().pending_capture = Some(CapturedImage {
+            base64: "AA==".into(),
+            mime: "image/png",
+        });
+        d.handle("chat.send", json!({"text": "Before meeting?"}), None)
+            .await
+            .unwrap();
+        {
+            let g = d.inner.lock();
+            let count: i64 =
+                g.db.connection()
+                    .query_row("SELECT count(*) FROM meeting_screenshots", [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+            assert_eq!(count, 0);
+        }
+
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let meeting = d.inner.lock().meeting_id.clone().unwrap();
+        {
+            let mut g = d.inner.lock();
+            g.meeting_offset = 3.0;
+            g.pending_capture = Some(CapturedImage {
+                base64: "AA==".into(),
+                mime: "image/png",
+            });
+        }
+        d.handle("chat.send", json!({"text": "What is shown?"}), None)
+            .await
+            .unwrap();
+        let g = d.inner.lock();
+        let shots = screenshots::list(g.db.connection(), &meeting).unwrap();
+        assert_eq!(shots.len(), 1);
+        assert_eq!(shots[0].question, "What is shown?");
+        assert_eq!(shots[0].mime, "image/png");
+        assert!(shots[0].data == [0]);
+        assert!(shots[0].taken_at >= 3.0);
+    }
+
+    #[tokio::test]
+    async fn candidate_pdf_attachment_keeps_original_bytes() {
+        let d = daemon();
+        let candidate = d
+            .handle("candidate.create", json!({"name": "Ada"}), None)
+            .await
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let stream = "BT /F1 18 Tf 20 100 Td (Original PDF text) Tj ET";
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (index, body) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.push_str(&format!("{} 0 obj\n{body}\nendobj\n", index + 1));
+        }
+        let xref = pdf.len();
+        pdf.push_str(&format!(
+            "xref\n0 {}\n0000000000 65535 f \n",
+            objects.len() + 1
+        ));
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        ));
+        let path = std::env::temp_dir().join(format!("nm-cv-{}.pdf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, pdf.as_bytes()).unwrap();
+        let attached = d
+            .handle(
+                "candidate.attach",
+                json!({"id": candidate, "kind": "cv", "path": path}),
+                None,
+            )
+            .await;
+        std::fs::remove_file(&path).unwrap();
+        attached.unwrap();
+        let g = d.inner.lock();
+        let documents = candidates::documents(g.db.connection(), &candidate).unwrap();
+        assert_eq!(documents.len(), 1);
+        assert!(documents[0].original.as_deref() == Some(pdf.as_bytes()));
+        assert_eq!(documents[0].mime, "application/pdf");
     }
 
     #[tokio::test]
