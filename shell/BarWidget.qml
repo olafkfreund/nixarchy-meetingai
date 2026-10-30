@@ -81,7 +81,7 @@ BarWidget {
         BarIconButton {
             id: button
             bar: root.bar
-            text: "\u{F0A2E}"   // nf-md-microphone_message
+            text: "\u{F0C46}"   // nf-md-calendar_text_outline: meeting notes (the microphone_message glyph read as a bug at bar size)
             active: client.recording
             dimmed: !client.connected
             tooltipText: !client.connected ? "Meeting AI: daemon not running" : (client.recording ? "Taking notes · " + root.timer : root.finishing ? "Meeting AI: finishing the notes" : calls.call !== "none" ? root.callTip : "Meeting AI")
