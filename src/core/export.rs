@@ -158,8 +158,13 @@ pub fn render(e: &Export) -> String {
         q(&e.exported),
         e.title
     );
-    if !e.summary.trim().is_empty() {
-        o += &format!("\n## Summary\n\n{}\n", e.summary.trim());
+    // The recap usually opens with its own "## Summary" heading; keep one.
+    let summary = e.summary.trim();
+    let summary = summary
+        .strip_prefix("## Summary")
+        .map_or(summary, str::trim_start);
+    if !summary.is_empty() {
+        o += &format!("\n## Summary\n\n{summary}\n");
     }
     for (kind, head) in [
         ("action", "Action items"),
@@ -454,6 +459,11 @@ mod tests {
         assert!(s.starts_with("---\ntitle: \"Sync\"\ndate: 2026-10-30\n"));
         assert!(s.contains("candidate: \"Ada\"\nlocal_only: true\nmeeting_id: \"m-7\"\n"));
         assert!(s.contains("# Sync\n\n## Summary\n\nWe shipped it.\n"));
+        let mut headed = fixture("Sync");
+        headed.summary = "## Summary\n\nWe shipped it.".into();
+        let h = render(&headed);
+        assert_eq!(h.matches("## Summary").count(), 1);
+        assert!(h.contains("## Summary\n\nWe shipped it.\n"));
         assert!(s.contains("## Action items\n\n- Send CV (owner: Bo) (due: Friday) (done)\n"));
         assert!(s.contains("## Decisions\n\n- Go\n"));
         assert!(!s.contains("## Open questions") && !s.contains("Stop"));
