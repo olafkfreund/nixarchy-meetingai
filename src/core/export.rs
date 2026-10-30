@@ -13,6 +13,8 @@ pub struct Item {
     pub text: String,
     pub owner: Option<String>,
     pub due: Option<String>,
+    /// "open", "done" or "dropped"; dropped items are left out.
+    pub status: String,
 }
 
 pub struct Line {
@@ -84,6 +86,18 @@ fn doc_names(docs: &[Doc]) -> Vec<String> {
     out
 }
 
+/// Percent-encode every byte but ASCII letters, digits and `-._~`.
+fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 fn cut(s: &str, max: usize) -> &str {
     let mut end = max.min(s.len());
     while !s.is_char_boundary(end) {
@@ -152,7 +166,11 @@ pub fn render(e: &Export) -> String {
         ("decision", "Decisions"),
         ("question", "Open questions"),
     ] {
-        let items: Vec<_> = e.items.iter().filter(|i| i.kind == kind).collect();
+        let items: Vec<_> = e
+            .items
+            .iter()
+            .filter(|i| i.kind == kind && i.status != "dropped")
+            .collect();
         if items.is_empty() {
             continue;
         }
@@ -165,6 +183,9 @@ pub fn render(e: &Export) -> String {
             if let Some(d) = &i.due {
                 o += &format!(" (due: {d})");
             }
+            if i.status == "done" {
+                o += " (done)";
+            }
             o += "\n";
         }
     }
@@ -173,7 +194,7 @@ pub fn render(e: &Export) -> String {
         for (i, s) in e.shots.iter().enumerate() {
             let t = clock(s.taken_at);
             o += &format!(
-                "![{t}](attachments/{})\n\n{t} {}\n\n",
+                "![{t}](screenshots/{})\n\n{t} {}\n\n",
                 shot_name(i, &s.mime),
                 s.question.trim()
             );
@@ -182,7 +203,11 @@ pub fn render(e: &Export) -> String {
     if !e.docs.is_empty() {
         o += "\n## Documents\n\n";
         for n in doc_names(&e.docs) {
-            o += &format!("- [{n}](documents/{})\n", n.replace(' ', "%20"));
+            let label = n
+                .replace('\\', "\\\\")
+                .replace('[', "\\[")
+                .replace(']', "\\]");
+            o += &format!("- [{label}](documents/{})\n", encode(&n));
         }
     }
     if !e.lines.is_empty() {
@@ -195,6 +220,7 @@ pub fn render(e: &Export) -> String {
 }
 
 /// Write `rel` under `dir` with mode 0600; refuses anything that is not a plain relative path.
+/// `create_new` (O_EXCL) never follows a symlink, so a planted one makes this fail.
 fn put(dir: &Path, rel: &Path, data: &[u8]) -> io::Result<()> {
     if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(io::Error::new(
@@ -204,8 +230,7 @@ fn put(dir: &Path, rel: &Path, data: &[u8]) -> io::Result<()> {
     }
     let mut f = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(dir.join(rel))?;
     f.write_all(data)
@@ -215,61 +240,114 @@ fn mkdir(p: &Path) -> io::Result<()> {
     DirBuilder::new().recursive(true).mode(0o700).create(p)
 }
 
-/// Replace `folder/name` with a directory holding `files`, built in a temporary sibling first.
-/// With no files the directory is removed: the app owns it.
-fn swap_dir(folder: &Path, name: &str, files: &[(String, &[u8])]) -> io::Result<()> {
-    let dest = folder.join(name);
-    if files.is_empty() {
-        return match fs::remove_dir_all(&dest) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        };
+/// Remove the entry itself (a symlink is unlinked, never followed); a missing one is fine.
+fn rm(p: &Path) -> io::Result<()> {
+    let r = match fs::symlink_metadata(p) {
+        Ok(m) if m.is_dir() => fs::remove_dir_all(p),
+        Ok(_) => fs::remove_file(p),
+        Err(e) => Err(e),
+    };
+    match r {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
-    let tmp = folder.join(format!(".{name}.tmp"));
-    let _ = fs::remove_dir_all(&tmp);
-    mkdir(&tmp)?;
+}
+
+fn real_dir(p: &Path) -> bool {
+    fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
+}
+
+/// Does `folder/notes.md` name this meeting in its frontmatter? `None` when there is no readable one.
+fn names(folder: &Path, id: &str) -> Option<bool> {
+    let text = fs::read_to_string(folder.join("notes.md")).ok()?;
+    let want = format!("meeting_id: {}", q(id));
+    let mut lines = text.lines();
+    Some(lines.next() == Some("---") && lines.take_while(|l| *l != "---").any(|l| l == want))
+}
+
+/// Build `files` in a temporary sibling, keep the old directory until the new one is in place.
+fn swap(dest: &Path, tmp: &Path, old: &Path, files: &[(String, &[u8])]) -> io::Result<()> {
+    mkdir(tmp)?;
     for (n, d) in files {
-        put(&tmp, Path::new(n), d)?;
+        put(tmp, Path::new(n), d)?;
     }
-    if dest.exists() {
-        fs::remove_dir_all(&dest)?;
+    match fs::symlink_metadata(dest) {
+        Ok(m) if m.is_dir() => fs::rename(dest, old)?,
+        Ok(_) => fs::remove_file(dest)?,
+        Err(_) => {}
     }
     fs::rename(tmp, dest)
 }
 
-/// Write the meeting under `root`, reusing (and renaming if needed) `previous`. Returns its folder.
-pub fn write(root: &Path, previous: Option<&Path>, e: &Export) -> io::Result<PathBuf> {
+/// Replace `folder/name` with a directory holding `files`; with no files it is removed (the app owns it).
+/// A failure leaves the previous directory in place.
+fn swap_dir(folder: &Path, name: &str, files: &[(String, &[u8])]) -> io::Result<()> {
+    let dest = folder.join(name);
+    if files.is_empty() {
+        return rm(&dest);
+    }
+    let tmp = folder.join(format!(".{name}.tmp"));
+    let old = folder.join(format!(".{name}.old"));
+    let r = swap(&dest, &tmp, &old, files);
+    if r.is_ok() {
+        let _ = rm(&old);
+    } else {
+        let _ = rm(&tmp);
+        if fs::symlink_metadata(&dest).is_err() {
+            let _ = fs::rename(&old, &dest);
+        }
+    }
+    r
+}
+
+/// Choose, rename or create the meeting folder under `root`. Returns it; writes no contents.
+pub fn place(root: &Path, previous: Option<&Path>, e: &Export) -> io::Result<PathBuf> {
     mkdir(root)?;
     let base = cut(&format!("{} {}", e.date, safe_name(&e.title)), MAX_NAME)
         .trim_end()
         .to_string();
-    let prev = previous.filter(|p| p.is_dir() && p.parent() == Some(root));
+    // Someone else's folder (another meeting, a symlink, elsewhere) is never reused.
+    let prev = previous.filter(|p| {
+        p.parent() == Some(root) && real_dir(p) && names(p, &e.meeting_id) != Some(false)
+    });
     let current = prev.and_then(|p| p.file_name()?.to_str());
     let keeps = |n: &str| {
         n == base
             || n.strip_prefix(&format!("{base} ("))
                 .is_some_and(|r| r.ends_with(')'))
     };
-    let folder = match (prev, current) {
-        (Some(p), Some(n)) if keeps(n) => p.to_path_buf(),
-        _ => {
-            let mut dest = root.join(&base);
-            for n in 2.. {
-                if !dest.exists() {
-                    break;
-                }
-                dest = root.join(format!("{base} ({n})"));
-            }
-            match prev {
-                Some(p) => fs::rename(p, &dest)?,
-                None => mkdir(&dest)?,
-            }
-            dest
+    if let (Some(p), Some(n)) = (prev, current)
+        && keeps(n)
+    {
+        return Ok(p.to_path_buf());
+    }
+    let mut dest = root.join(&base);
+    for n in 2.. {
+        let free = fs::symlink_metadata(&dest).is_err();
+        if free || (prev.is_none() && real_dir(&dest) && names(&dest, &e.meeting_id) == Some(true))
+        {
+            break;
         }
-    };
-    let tmp = ".notes.md.tmp";
-    put(&folder, Path::new(tmp), render(e).as_bytes())?;
-    fs::rename(folder.join(tmp), folder.join("notes.md"))?;
+        dest = root.join(format!("{base} ({n})"));
+    }
+    match prev {
+        Some(p) => fs::rename(p, &dest)?,
+        None => mkdir(&dest)?,
+    }
+    Ok(dest)
+}
+
+/// Write the meeting's files into `folder`: screenshots and documents first, `notes.md` last.
+pub fn fill(folder: &Path, e: &Export) -> io::Result<()> {
+    for n in [
+        ".notes.md.tmp",
+        ".screenshots.tmp",
+        ".screenshots.old",
+        ".documents.tmp",
+        ".documents.old",
+    ] {
+        rm(&folder.join(n))?; // leftovers of a crash
+    }
     let shots: Vec<_> = e
         .shots
         .iter()
@@ -280,9 +358,15 @@ pub fn write(root: &Path, previous: Option<&Path>, e: &Export) -> io::Result<Pat
         .into_iter()
         .zip(e.docs.iter().map(|d| d.data.as_slice()))
         .collect();
-    swap_dir(&folder, "attachments", &shots)?;
-    swap_dir(&folder, "documents", &docs)?;
-    Ok(folder)
+    swap_dir(folder, "screenshots", &shots)?;
+    swap_dir(folder, "documents", &docs)?;
+    let tmp = ".notes.md.tmp";
+    put(folder, Path::new(tmp), render(e).as_bytes())?;
+    if let Err(err) = fs::rename(folder.join(tmp), folder.join("notes.md")) {
+        let _ = rm(&folder.join(tmp));
+        return Err(err);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -304,6 +388,12 @@ mod tests {
         }
     }
 
+    fn write(root: &Path, previous: Option<&Path>, e: &Export) -> io::Result<PathBuf> {
+        let f = place(root, previous, e)?;
+        fill(&f, e)?;
+        Ok(f)
+    }
+
     fn fixture(title: &str) -> Export {
         Export {
             meeting_id: "m-7".into(),
@@ -323,12 +413,21 @@ mod tests {
                     text: "Send CV".into(),
                     owner: Some("Bo".into()),
                     due: Some("Friday".into()),
+                    status: "done".into(),
                 },
                 Item {
                     kind: "decision".into(),
                     text: "Go".into(),
                     owner: None,
                     due: None,
+                    status: "open".into(),
+                },
+                Item {
+                    kind: "decision".into(),
+                    text: "Stop".into(),
+                    owner: None,
+                    due: None,
+                    status: "dropped".into(),
                 },
             ],
             lines: vec![Line {
@@ -355,10 +454,10 @@ mod tests {
         assert!(s.starts_with("---\ntitle: \"Sync\"\ndate: 2026-10-30\n"));
         assert!(s.contains("candidate: \"Ada\"\nlocal_only: true\nmeeting_id: \"m-7\"\n"));
         assert!(s.contains("# Sync\n\n## Summary\n\nWe shipped it.\n"));
-        assert!(s.contains("## Action items\n\n- Send CV (owner: Bo) (due: Friday)\n"));
+        assert!(s.contains("## Action items\n\n- Send CV (owner: Bo) (due: Friday) (done)\n"));
         assert!(s.contains("## Decisions\n\n- Go\n"));
-        assert!(!s.contains("## Open questions"));
-        assert!(s.contains("![00:01:01](attachments/shot-01.png)"));
+        assert!(!s.contains("## Open questions") && !s.contains("Stop"));
+        assert!(s.contains("![00:01:01](screenshots/shot-01.png)"));
         assert!(s.contains("- [cv.pdf](documents/cv.pdf)"));
         assert!(s.contains("[01:02:05] Ada: Hello\n"));
         assert!(!s.contains("![["));
@@ -404,14 +503,79 @@ mod tests {
         assert_eq!(fs::read_to_string(b.join("mine.txt")).unwrap(), "keep");
         assert!(
             b.join("notes.md").is_file()
-                && b.join("attachments/shot-01.png").is_file()
+                && b.join("screenshots/shot-01.png").is_file()
                 && b.join("documents/cv.pdf").is_file()
         );
-        // same name, no previous: another folder is taken, so (2); re-export keeps it
-        let c = write(&root, None, &fixture("New")).unwrap();
+        // our own folder is reused even without a record; another meeting's gets (2)
+        assert_eq!(write(&root, None, &fixture("New")).unwrap(), b);
+        let mut other = fixture("New");
+        other.meeting_id = "m-8".into();
+        let c = write(&root, None, &other).unwrap();
         assert_eq!(c, root.join("2026-10-30 New (2)"));
-        assert_eq!(write(&root, Some(&c), &fixture("New")).unwrap(), c);
+        assert_eq!(write(&root, Some(&c), &other).unwrap(), c);
         assert_eq!(write(&root, Some(&b), &fixture("New")).unwrap(), b);
+        // a recorded folder that belongs to another meeting is not reused or renamed
+        let d = write(&root, Some(&b), &other).unwrap();
+        assert_eq!(d, c);
+        assert!(b.join("notes.md").is_file());
+        // nor is a symlink, or a folder outside the root
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&b, &link).unwrap();
+        let e = place(&root, Some(&link), &fixture("Linked")).unwrap();
+        assert_eq!(e, root.join("2026-10-30 Linked"));
+        assert!(link.exists() && b.exists());
+    }
+
+    #[test]
+    fn links_are_encoded_and_escaped() {
+        let mut e = fixture("Links");
+        e.docs = ["C# CV (final) [v2].pdf", "C# CV (final) [v2].pdf"]
+            .map(|n| Doc {
+                name: n.into(),
+                data: vec![],
+            })
+            .into();
+        let s = render(&e);
+        assert!(s.contains(
+            "- [C# CV (final) \\[v2\\].pdf](documents/C%23%20CV%20%28final%29%20%5Bv2%5D.pdf)\n"
+        ));
+        assert!(s.contains("(documents/C%23%20CV%20%28final%29%20%5Bv2%5D%20%282%29.pdf)"));
+    }
+
+    #[test]
+    fn failed_swap_keeps_previous_and_symlinks_are_not_followed() {
+        let t = Tmp::new();
+        let f = write(&t.0, None, &fixture("Safe")).unwrap();
+        // a file in the way of the new screenshots tmp folder makes the swap fail
+        let mut bad = fixture("Safe");
+        bad.shots.push(Shot {
+            taken_at: 1.0,
+            question: String::new(),
+            mime: "image/png".into(),
+            data: vec![9],
+        });
+        let (files, tmp, old) = (
+            [
+                ("shot-01.png".to_string(), &b"x"[..]),
+                ("shot-01.png".to_string(), &b"y"[..]),
+            ],
+            f.join(".screenshots.tmp"),
+            f.join(".screenshots.old"),
+        );
+        assert!(swap_dir(&f, "screenshots", &files).is_err());
+        assert!(f.join("screenshots/shot-01.png").is_file() && !tmp.exists() && !old.exists());
+        // a symlink at the destination is unlinked, its target untouched
+        let target = t.0.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep"), "k").unwrap();
+        fs::remove_dir_all(f.join("screenshots")).unwrap();
+        std::os::unix::fs::symlink(&target, f.join("screenshots")).unwrap();
+        fill(&f, &bad).unwrap();
+        assert!(target.join("keep").is_file() && f.join("screenshots/shot-02.png").is_file());
+        // a planted symlink at the tmp name is cleared, not followed
+        std::os::unix::fs::symlink(&target, f.join(".notes.md.tmp")).unwrap();
+        fill(&f, &bad).unwrap();
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
     }
 
     #[test]
@@ -423,14 +587,14 @@ mod tests {
         for d in [
             root.clone(),
             f.clone(),
-            f.join("attachments"),
+            f.join("screenshots"),
             f.join("documents"),
         ] {
             assert_eq!(mode(&d), 0o700, "{d:?}");
         }
         for p in [
             f.join("notes.md"),
-            f.join("attachments/shot-01.png"),
+            f.join("screenshots/shot-01.png"),
             f.join("documents/cv.pdf"),
         ] {
             assert_eq!(mode(&p), 0o600, "{p:?}");
@@ -454,12 +618,12 @@ mod tests {
         );
         let t = Tmp::new();
         let first = write(&t.0, None, &fixture("Sync")).unwrap();
-        assert!(first.join("attachments").is_dir() && first.join("documents").is_dir());
+        assert!(first.join("screenshots").is_dir() && first.join("documents").is_dir());
         let mut bare = fixture("Sync");
         bare.shots.clear();
         bare.docs.clear();
         let again = write(&t.0, Some(&first), &bare).unwrap();
         assert_eq!(again, first);
-        assert!(!again.join("attachments").exists() && !again.join("documents").exists());
+        assert!(!again.join("screenshots").exists() && !again.join("documents").exists());
     }
 }

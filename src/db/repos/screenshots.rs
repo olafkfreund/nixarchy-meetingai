@@ -33,7 +33,7 @@ pub fn add(
 pub fn list(connection: &Connection, meeting_id: &str) -> Result<Vec<Screenshot>> {
     let mut statement = connection.prepare(
         "SELECT id, meeting_id, taken_at, question, mime, data
-         FROM meeting_screenshots WHERE meeting_id = ?1 ORDER BY taken_at, id",
+         FROM meeting_screenshots WHERE meeting_id = ?1 ORDER BY id",
     )?;
     let rows = statement.query_map([meeting_id], |row| {
         Ok(Screenshot {
@@ -54,7 +54,7 @@ mod tests {
     use crate::db::{Database, meetings};
 
     #[test]
-    fn round_trip_orders_by_time_and_cascades_on_delete() {
+    fn round_trip_orders_by_id_and_cascades_on_delete() {
         let db = Database::in_memory().unwrap();
         let connection = db.connection();
         let meeting =
@@ -68,10 +68,10 @@ mod tests {
         let shots = list(connection, &meeting).unwrap();
         assert_eq!(
             shots.iter().map(|shot| shot.id).collect::<Vec<_>>(),
-            [earlier, later]
+            [later, earlier]
         );
-        assert_eq!(shots[0].question, "earlier?");
-        assert_eq!(shots[0].data, [2, 3]);
+        assert_eq!(shots[0].question, "later?");
+        assert_eq!(shots[1].data, [2, 3]);
         assert_eq!(shots[1].mime, "image/png");
         meetings::delete(connection, &meeting).unwrap();
         assert!(list(connection, &meeting).unwrap().is_empty());

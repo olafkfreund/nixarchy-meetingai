@@ -247,7 +247,7 @@ written again whenever its notes are regenerated:
 ```text
 <export folder>/2026-10-30 Staff platform interview/
 ├── notes.md        # summary, action items, decisions, open questions, transcript
-├── attachments/    # the screenshots taken during the meeting
+├── screenshots/    # the screenshots taken during the meeting
 └── documents/      # for an interview: the CV and job description as attached
 ```
 
@@ -259,7 +259,7 @@ written again whenever its notes are regenerated:
   and original documents are only kept from this version on, so older
   meetings export without them (a document's text is exported as `.md`).
 - A renamed meeting's folder is renamed with it. The app rewrites
-  `notes.md`, `attachments/` and `documents/`; any other file you put in
+  `notes.md`, `screenshots/` and `documents/`; any other file you put in
   the folder is left alone.
 - The export is the one place meeting data leaves the encrypted database.
   The files are readable by you only, but if the folder syncs, they sync.

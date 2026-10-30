@@ -908,17 +908,16 @@ Item {
                         visible: srow.modelData.key === "export_folder"
                         anchors.fill: parent
                         spacing: root.theme.gap
-                        Input {
-                            id: folderField
+                        UiText {
                             objectName: "exportFolderField"
-                            accessibleName: String(srow.modelData.label || srow.modelData.key)
-                            ts: root.theme.ts
-                            enabled: !root.client.isLocked("export_folder")
                             Layout.fillWidth: true
                             Layout.alignment: Qt.AlignVCenter
-                            placeholderText: "Not set"
-                            text: String(srow.modelData.value || "")
-                            onEditingFinished: { root.client.setSetting("export_folder", text); root.search(); }
+                            textFormat: Text.PlainText
+                            elide: Text.ElideMiddle
+                            mayCut: true
+                            text: String(srow.modelData.value || "") || "Not set"
+                            color: Commons.Color.popups.text
+                            font.pixelSize: root.theme.body
                         }
                         IconButton {
                             objectName: "exportFolderChange"

@@ -38,7 +38,7 @@ reviewers:
 - `notes.md`: frontmatter (`title, date, start, end, duration, mode,
   candidate, local_only, meeting_id, exported`), then Summary (recap, else
   rolling notes), Action items, Decisions, Open questions, Screenshots
-  (`![<time>](attachments/shot-NN.png)` + question), Documents (links into
+  (`![<time>](screenshots/shot-NN.png)` + question), Documents (links into
   `documents/`), Transcript (`[hh:mm:ss] <name>: text`). Empty sections
   left out. Standard Markdown links, never `![[…]]`.
 - The app owns `notes.md`, `attachments/`, `documents/` only; each written
@@ -205,3 +205,23 @@ step before it must pass).
   `consentPrompt` and `notesUpdated` are wired. Step 5 was started
   alongside steps 1–2 rather than with step 4: it only needs the fake
   daemon.
+- **Review fixes:**
+  - `export::write` is split into `place` (choose, rename or create the
+    folder; reuses `previous` only if it is a real directory directly under
+    the root whose `notes.md` is missing or names this meeting) and `fill`
+    (screenshots and documents first, `notes.md` last; crash leftovers
+    removed). `export_meeting` calls `place`, then `exports::set`, then
+    `fill`, reading the meeting on its own connection off the lock.
+    Replaced directories keep the old one until the new one is in place;
+    symlinks are unlinked, never followed (`create_new`).
+  - `screenshots/` replaces `attachments/` (Obsidian uses `attachments`
+    for the user's own images). Document links are percent-encoded and
+    labels escaped.
+  - `meetings.export` uses `notes.try_lock()`: busy returns "The notes are
+    being written; try again in a moment." instead of stalling the
+    connection. It is refused for `mcp` as well as `agent`.
+  - The Settings "Export folder" row is read-only text (or "Not set") plus
+    **Change…**; `export_folder` must be an absolute path.
+  - Items carry their status: `dropped` are left out, `done` get
+    " (done)". Screenshots list by `id`; the folder date is local time.
+    Chat attachments drop their raw bytes before joining the context.

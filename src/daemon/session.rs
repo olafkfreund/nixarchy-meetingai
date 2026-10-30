@@ -1258,7 +1258,8 @@ impl Daemon {
         let (want_capture, delay) = {
             let mut g = self.inner.lock();
             self.sync_profile(&mut g);
-            for item in imported {
+            for mut item in imported {
+                item.bytes = Vec::new(); // only candidate_attach needs them
                 context::add(&mut g.sources, item)?;
             }
             let s = &g.settings;
@@ -2328,129 +2329,146 @@ impl Daemon {
     }
 
     async fn export_meeting(&self, meeting: &str) -> Result<PathBuf, String> {
-        let (root, previous, export) =
-            {
-                let g = self.inner.lock();
-                let root = g.settings.export_folder.trim();
-                if root.is_empty() {
-                    return Err("Choose an export folder first.".into());
-                }
-                let c = g.db.connection();
-                let row: Option<(String, String, Option<String>, i64, String, String)> = c
+        let (root, db_path) = {
+            let g = self.inner.lock();
+            let root = g.settings.export_folder.trim();
+            if root.is_empty() {
+                return Err("Choose an export folder first.".into());
+            }
+            if !Path::new(root).is_absolute() {
+                return Err("Choose an absolute folder.".into());
+            }
+            (PathBuf::from(root), self.db_path.clone())
+        };
+        let id = meeting.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let db = Database::open(&db_path).map_err(|e| e.to_string())?;
+            let c = db.connection();
+            type Row = (String, String, Option<String>, i64, String, String, String);
+            let row: Option<Row> = c
                 .query_row(
-                    "SELECT title, started_at, ended_at, duration_seconds, mode, datetime('now')
-                     FROM meetings WHERE id = ?1",
-                    [meeting],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                    "SELECT title, started_at, ended_at, duration_seconds, mode, datetime('now'),
+                                date(started_at, 'localtime')
+                         FROM meetings WHERE id = ?1",
+                    [&id],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                        ))
+                    },
                 )
                 .optional()
                 .map_err(|e| e.to_string())?;
-                let (title, started, ended, seconds, mode, exported) =
-                    row.ok_or("Meeting not found.")?;
-                let candidate = candidates::for_meeting(c, meeting).map_err(|e| e.to_string())?;
-                let docs = if let Some(candidate) = &candidate {
-                    candidates::documents(c, &candidate.id)
-                        .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .map(|d| match d.original {
-                            Some(data) => Doc { name: d.name, data },
-                            None => Doc {
-                                name: format!("{}.md", d.name),
-                                data: d.text.into_bytes(),
-                            },
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let summary = match meetings::recap(c, meeting).map_err(|e| e.to_string())? {
-                    Some(r) if r.status == "ready" => r.content,
-                    _ => meetings::chunks(c, meeting)
-                        .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .map(|chunk| chunk.body)
-                        .collect::<Vec<_>>()
-                        .join("\n\n"),
-                };
-                let items = items::list(c, items::Scope::Meeting(meeting), None)
+            let (title, started, ended, seconds, mode, exported, date) =
+                row.ok_or("Meeting not found.")?;
+            let candidate = candidates::for_meeting(c, &id).map_err(|e| e.to_string())?;
+            let docs = if let Some(candidate) = &candidate {
+                candidates::documents(c, &candidate.id)
                     .map_err(|e| e.to_string())?
                     .into_iter()
-                    .map(|i| Item {
-                        kind: i.kind,
-                        text: i.text,
-                        owner: i.owner,
-                        due: i.due,
+                    .map(|d| match d.original {
+                        Some(data) => Doc { name: d.name, data },
+                        None => Doc {
+                            name: format!("{}.md", d.name),
+                            data: d.text.into_bytes(),
+                        },
                     })
-                    .collect();
-                let names = meetings::speaker_names(c, meeting).map_err(|e| e.to_string())?;
-                let lines = meetings::lines(c, meeting)
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .map(|l| {
-                        let name = if l.who == "me" {
-                            "You".to_owned()
-                        } else if let Some(speaker) = l.speaker {
-                            names
-                                .get(&speaker.to_string())
-                                .cloned()
-                                .unwrap_or_else(|| Self::who(1, Some(speaker)).1)
-                        } else {
-                            "Them".to_owned()
-                        };
-                        Line {
-                            at: l.start_time,
-                            speaker: name,
-                            text: l.text,
-                        }
-                    })
-                    .collect();
-                let shots = screenshots::list(c, meeting)
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .map(|s| Shot {
-                        taken_at: s.taken_at,
-                        question: s.question,
-                        mime: s.mime,
-                        data: s.data,
-                    })
-                    .collect();
-                let previous = exports::get(c, meeting).map_err(|e| e.to_string())?;
-                let export = Export {
-                    meeting_id: meeting.to_owned(),
-                    title,
-                    date: started.get(..10).unwrap_or(&started).to_owned(),
-                    start: format!("{}Z", started.replace(' ', "T")),
-                    end: ended.map_or_else(String::new, |v| format!("{}Z", v.replace(' ', "T"))),
-                    duration: format!(
-                        "{:02}:{:02}:{:02}",
-                        seconds / 3600,
-                        seconds / 60 % 60,
-                        seconds % 60
-                    ),
-                    mode,
-                    candidate: candidate.as_ref().map(|c| c.name.clone()),
-                    local_only: candidate.as_ref().is_some_and(|c| c.local_only),
-                    exported: format!("{}Z", exported.replace(' ', "T")),
-                    summary,
-                    items,
-                    lines,
-                    shots,
-                    docs,
-                };
-                (PathBuf::from(root), previous.map(PathBuf::from), export)
+                    .collect()
+            } else {
+                Vec::new()
             };
-        let path =
-            tokio::task::spawn_blocking(move || export::write(&root, previous.as_deref(), &export))
-                .await
+            let summary = match meetings::recap(c, &id).map_err(|e| e.to_string())? {
+                Some(r) if r.status == "ready" => r.content,
+                _ => meetings::chunks(c, &id)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|chunk| chunk.body)
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            };
+            let items = items::list(c, items::Scope::Meeting(&id), None)
                 .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|i| Item {
+                    kind: i.kind,
+                    text: i.text,
+                    owner: i.owner,
+                    due: i.due,
+                    status: i.status,
+                })
+                .collect();
+            let names = meetings::speaker_names(c, &id).map_err(|e| e.to_string())?;
+            let lines = meetings::lines(c, &id)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|l| {
+                    let name = if l.who == "me" {
+                        "You".to_owned()
+                    } else if let Some(speaker) = l.speaker {
+                        names
+                            .get(&speaker.to_string())
+                            .cloned()
+                            .unwrap_or_else(|| Self::who(1, Some(speaker)).1)
+                    } else {
+                        "Them".to_owned()
+                    };
+                    Line {
+                        at: l.start_time,
+                        speaker: name,
+                        text: l.text,
+                    }
+                })
+                .collect();
+            let shots = screenshots::list(c, &id)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|s| Shot {
+                    taken_at: s.taken_at,
+                    question: s.question,
+                    mime: s.mime,
+                    data: s.data,
+                })
+                .collect();
+            let previous = exports::get(c, &id).map_err(|e| e.to_string())?;
+            let export = Export {
+                meeting_id: id.clone(),
+                title,
+                date,
+                start: format!("{}Z", started.replace(' ', "T")),
+                end: ended.map_or_else(String::new, |v| format!("{}Z", v.replace(' ', "T"))),
+                duration: format!(
+                    "{:02}:{:02}:{:02}",
+                    seconds / 3600,
+                    seconds / 60 % 60,
+                    seconds % 60
+                ),
+                mode,
+                candidate: candidate.as_ref().map(|c| c.name.clone()),
+                local_only: candidate.as_ref().is_some_and(|c| c.local_only),
+                exported: format!("{}Z", exported.replace(' ', "T")),
+                summary,
+                items,
+                lines,
+                shots,
+                docs,
+            };
+
+            let folder = export::place(&root, previous.as_deref().map(Path::new), &export)
                 .map_err(|e| e.to_string())?;
-        {
-            let g = self.inner.lock();
-            exports::set(g.db.connection(), meeting, &path.to_string_lossy())
-                .map_err(|e| e.to_string())?;
-        }
-        self.emit("export.done", json!({"meeting": meeting, "path": path}));
-        Ok(path)
+            // Remember the folder before filling it, so a failed fill never orphans it.
+            exports::set(c, &id, &folder.to_string_lossy()).map_err(|e| e.to_string())?;
+            export::fill(&folder, &export).map_err(|e| e.to_string())?;
+            Ok::<_, String>(folder)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .inspect(|path| self.emit("export.done", json!({"meeting": meeting, "path": path})))
     }
 
     /// Name the meeting, then summarise what is left and consolidate every chunk.
@@ -2991,6 +3009,9 @@ impl Daemon {
             {
                 return Err("This provider no longer exists.".into());
             }
+        }
+        if args.key == "export_folder" && !text.is_empty() && !Path::new(&text).is_absolute() {
+            return Err("Choose an absolute folder.".into());
         }
         Settings::set(&g.db, &args.key, &text).map_err(|e| e.to_string())?;
         g.settings = Settings::load(&g.db).unwrap_or_default();
@@ -3871,6 +3892,9 @@ impl Daemon {
         if !matches!(origin, Some("mcp" | "agent")) {
             return self.dispatch(cmd, args).await;
         }
+        if cmd == "meetings.export" {
+            return Err("not allowed for agents".into());
+        }
         // `ctl --agent`: the skill's read-only commands and nothing else.
         if matches!(
             cmd,
@@ -4193,7 +4217,9 @@ impl Daemon {
             }
             "meetings.export" => {
                 let meeting = parse::<protocol::MeetingArg>(args)?.meeting;
-                let _serial = self.notes.lock().await;
+                let Ok(_serial) = self.notes.try_lock() else {
+                    return Err("The notes are being written; try again in a moment.".into());
+                };
                 let path = self.export_meeting(&meeting).await?;
                 Ok(json!({"path": path}))
             }
@@ -5130,14 +5156,14 @@ mod command_tests {
             .await
             .unwrap();
         let path = PathBuf::from(result["path"].as_str().unwrap());
-        assert!(path.join("attachments/shot-01.png").is_file());
+        assert!(path.join("screenshots/shot-01.png").is_file());
         assert_eq!(
             std::fs::read(path.join("documents/cv.txt.md")).unwrap(),
             b"Past work"
         );
         let notes = std::fs::read_to_string(path.join("notes.md")).unwrap();
         assert!(notes.contains("[00:00:03] Ada: Hello"));
-        assert!(notes.contains("![00:00:02](attachments/shot-01.png)"));
+        assert!(notes.contains("![00:00:02](screenshots/shot-01.png)"));
         assert!(!notes.contains("Past work"));
         assert_eq!(
             exports::get(d.inner.lock().db.connection(), &meeting)
@@ -5230,10 +5256,38 @@ mod command_tests {
     #[tokio::test]
     async fn agents_cannot_export_meetings() {
         let d = daemon();
+        for origin in ["agent", "mcp"] {
+            let result = d
+                .handle("meetings.export", json!({"meeting": "x"}), Some(origin))
+                .await;
+            assert_eq!(result.unwrap_err(), "not allowed for agents");
+        }
+    }
+
+    #[tokio::test]
+    async fn export_now_does_not_wait_for_the_notes_and_needs_an_absolute_folder() {
+        let d = daemon();
+        let _busy = d.notes.lock().await;
         let result = d
-            .handle("meetings.export", json!({"meeting": "x"}), Some("agent"))
+            .handle("meetings.export", json!({"meeting": "x"}), None)
             .await;
-        assert_eq!(result.unwrap_err(), "not allowed for agents");
+        assert_eq!(
+            result.unwrap_err(),
+            "The notes are being written; try again in a moment."
+        );
+        let result = d
+            .handle(
+                "settings.set",
+                json!({"key": "export_folder", "value": "relative/dir"}),
+                None,
+            )
+            .await;
+        assert_eq!(result.unwrap_err(), "Choose an absolute folder.");
+        d.inner.lock().settings.export_folder = "relative/dir".into();
+        assert_eq!(
+            d.export_meeting("x").await.unwrap_err(),
+            "Choose an absolute folder."
+        );
     }
 
     #[tokio::test]
