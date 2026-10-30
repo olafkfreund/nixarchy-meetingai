@@ -40,7 +40,10 @@ Item {
     property var candidates: []    // candidates.list rows (interviewer mode)
     property var cand: null        // candidate.get of the current candidate: { candidate, documents, questions }
     property string consentPrompt: ""   // set while the daemon asks for "recording is announced"
+    property string exportPromptMeeting: ""   // set once per session when the daemon emits export.folder_needed
+    property bool exportPromptAnswered: false
     signal notesUpdated(var meeting)
+    signal exportDone(var meeting, string path)
     signal providersChanged()
     readonly property string currentMeeting: String(state.meeting || "")
     // While an item's text is being edited a refresh waits, so typing is not lost.
@@ -259,6 +262,10 @@ Item {
         case "earlier_item": if (ev.meeting === root.state.meeting) root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
         case "questions.updated": if (ev.candidate === root.shownCandidate) root.refreshCand(); break;
         case "notes.updated": root.notesUpdated(ev.meeting); break;
+        case "export.folder_needed":
+            if (!root.exportPromptAnswered && !root.isLocked("export_folder")) root.exportPromptMeeting = String(ev.meeting || "");
+            break;
+        case "export.done": root.exportDone(ev.meeting, String(ev.path || "")); break;
         case "providers.changed": root.providersChanged(); break;
         case "error": root.addRow("error", "", String(ev.message || ""), false); break;
         }
