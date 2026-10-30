@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 44
 spec: spec/2026-10-30-44-meeting-export.md
 coders:
