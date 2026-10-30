@@ -52,6 +52,7 @@ providers = "--providers" in sys.argv
 call = "--call" in sys.argv
 slow = "--slow-settings" in sys.argv   # settings.get answers after 2.5 s and no settings event is pushed: the client must wait for them
 locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, meeting_mode, text_scale
+voice_mode = "--voice" in sys.argv     # transcript.get room row, transcript.relabel, direct room final, and voice.* commands
 export_ask = "--export-ask" in sys.argv   # emit export.folder_needed after connect
 live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
@@ -72,7 +73,16 @@ ANSWER = {"question": "", "body": "", "streaming": False, "suggestions": []}   #
 NOTICED = []
 TURNS = itertools.count(2)
 HANDLERS = set()   # connected clients: --drop's answer goes to whoever is connected, as the real daemon's does
-settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced", "text_scale": scale, "export_meetings": True, "export_folder": ""}
+VOICE = {"enrolled": False, "model": "", "created": 0}
+settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced", "text_scale": scale, "voice_check_paused": False, "export_meetings": True, "export_folder": ""}
+
+
+if voice_mode:
+    state["meeting"] = "m1"
+
+
+def voice_status():
+    return {"enrolled": VOICE["enrolled"], "model": VOICE["model"], "created": VOICE["created"], "paused": bool(settings.get("voice_check_paused", False))}
 DATA = {
     # The real daemon's providers (src/ai/catalog/providers.rs).
     "providers.list": [
@@ -409,12 +419,14 @@ class Handler(socketserver.StreamRequestHandler):
         self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})
         self.send({"event": "transcript.final", "who": "system", "speaker": "Alex", "text": "What is the plan?", "t0": 0, "t1": 2})
         self.send({"event": "transcript.partial", "who": "mic", "speaker": "", "text": "We should", "t0": 2, "t1": 3})
-        for who, speaker, text in [
-            ("mic", "", "I think we can ship this on Friday if QA signs off, but the migration needs another look."),
-            ("system", "Sam", "Agreed. Last time the migration took two days longer than planned, so let us pad it."),
-            ("mic", "", "Fine, let us say next Tuesday."),
+        for who, speaker, text, t0, t1 in [
+            ("mic", "", "I think we can ship this on Friday if QA signs off, but the migration needs another look.", 3, 6),
+            ("system", "Sam", "Agreed. Last time the migration took two days longer than planned, so let us pad it.", 6, 9),
+            ("mic", "", "Fine, let us say next Tuesday.", 9, 11),
+            ("mic", "", "Coffee is ready in the kitchen.", 11, 13),
         ]:
-            self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": 3, "t1": 6})
+            self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": t0, "t1": t1})
+        self.send({"event": "transcript.relabel", "meeting": state.get("meeting", ""), "t0": 11, "t1": 13, "who": "room"})
         self.send({"event": "notice", "text": "An agent started recording"})
         if providers and not NOTICED:   # the daemon tells its first client, once
             NOTICED.append(1)
@@ -484,6 +496,15 @@ class Handler(socketserver.StreamRequestHandler):
         time.sleep(0.3)
         self.send({"event": "settings", "settings": settings})
         self.send({"event": "state", **state})
+
+    def stream_voice(self):
+        time.sleep(0.3)
+        self.send({"event": "settings", "settings": settings})
+        self.send({"event": "state", **state})
+        self.send({"event": "transcript.final", "who": "mic", "speaker": "", "text": "My own first line", "t0": 5.5, "t1": 8.0})
+        self.send({"event": "transcript.final", "who": "mic", "speaker": "", "text": "Someone else in the room", "t0": 5.5, "t1": 8.0})
+        self.send({"event": "transcript.relabel", "meeting": "m1", "t0": 5.5, "t1": 8.0, "who": "room"})
+        self.send({"event": "transcript.final", "who": "room", "speaker": "", "text": "Direct room line", "t0": 8.5, "t1": 10.0})
 
     def stream_iv_call(self):
         """After record.start: the candidate answers, then one automatic probe grounded in a quote."""
@@ -575,8 +596,24 @@ class Handler(socketserver.StreamRequestHandler):
                 continue
             if drop and cmd == "transcript.get":
                 data = {"meeting": "m1", "lines": [l for l in SPOKEN if l["line"] > req.get("args", {}).get("after_line", 0)]}
+            elif voice_mode and cmd == "transcript.get":
+                data = {"meeting": "m1", "lines": [{"line": 1, "who": "room", "speaker": "", "text": "Earlier room remark", "t0": 1.0, "t1": 2.5}] if req.get("args", {}).get("after_line", 0) == 0 else []}
             elif drop and cmd == "now.get":
                 data = {"status": "writing" if ANSWER["streaming"] else "ready" if ANSWER["body"] else "idle", "question": ANSWER["question"], "answer": ANSWER["body"], "provider": PROVIDER["provider"], "model": PROVIDER["model"], "suggestions": ANSWER["suggestions"]}
+            if cmd == "voice.status":
+                self.send({"id": req["id"], "ok": True, "data": voice_status()})
+                continue
+            if cmd == "voice.enroll":
+                if state["recording"]:
+                    self.send({"id": req["id"], "ok": False, "error": "Stop recording before enrolling your voice."})
+                else:
+                    VOICE.update(enrolled=True, model="3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx", created=1761700000000)
+                    threading.Timer(0.3, self.send, args=({"id": req["id"], "ok": True, "data": voice_status()},)).start()
+                continue
+            if cmd == "voice.delete":
+                VOICE.update(enrolled=False, model="", created=0)
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                continue
             if iv and cmd.startswith(("candidate", "questions.")):
                 ok, data, announce = iv_cmd(cmd, req.get("args", {}))
                 self.send({"id": req["id"], "ok": ok, **({"data": data} if ok else {"error": data})})
@@ -636,7 +673,7 @@ class Handler(socketserver.StreamRequestHandler):
             if cmd == "chat.send":
                 threading.Thread(target=self.typed, args=(req["args"].get("text", ""),), daemon=True).start()
             if cmd == "state.get":
-                threading.Thread(target=self.stream_stale if stale else self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
+                threading.Thread(target=self.stream_stale if stale else self.stream_voice if voice_mode else self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

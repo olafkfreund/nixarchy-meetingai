@@ -12,6 +12,7 @@ pub use repos::profiles;
 pub use repos::screenshots;
 pub use repos::sessions;
 pub use repos::settings;
+pub use repos::voice;
 pub use schema::seed;
 
 use rusqlite::Connection;

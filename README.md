@@ -1235,6 +1235,27 @@ true
 ```
 
 
+
+## programs\.nixarchy-meetingai\.speakerModel
+
+
+
+The speaker-embedding model (3D-Speaker CAM++, Apache-2\.0, 28 MB) used to tell the owner’s voice from others in the room\. The daemon gets the file path as ` MEETINGAI_SPEAKER_MODEL `; it is only loaded once a voice sample exists\.
+
+
+
+*Type:*
+package
+
+
+
+*Default:*
+
+```nix
+pkgs.callPackage ./nix/speaker-model.nix { }
+```
+
+
 <!-- nix-options:end -->
 
 ## Use from AI agents

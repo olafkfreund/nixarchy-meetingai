@@ -230,6 +230,8 @@ pub struct Settings {
     pub text_scale: u32,
     /// Whether MCP clients (AI agents) may start recording.
     pub mcp_allow_record: bool,
+    /// Temporarily skip checking recorded speech against the owner's voice.
+    pub voice_check_paused: bool,
     pub export_folder: String,
     pub export_meetings: bool,
     /// Overlay position and size in pixels; -1 means the default, centred.
@@ -274,6 +276,7 @@ impl Default for Settings {
             meeting_mode: MeetingMode::General,
             text_scale: 100,
             mcp_allow_record: false,
+            voice_check_paused: false,
             export_folder: String::new(),
             export_meetings: true,
             overlay_x: -1,
@@ -296,6 +299,7 @@ mod keys {
     pub const MEETING_MODE: &str = "meeting_mode";
     pub const TEXT_SCALE: &str = "text_scale";
     pub const MCP_ALLOW_RECORD: &str = "mcp_allow_record";
+    pub const VOICE_CHECK_PAUSED: &str = "voice_check_paused";
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
@@ -402,6 +406,7 @@ impl Settings {
                 .unwrap_or(defaults.meeting_mode),
             text_scale: number(keys::TEXT_SCALE, defaults.text_scale).clamp(80, 160),
             mcp_allow_record: flag(keys::MCP_ALLOW_RECORD, defaults.mcp_allow_record),
+            voice_check_paused: flag(keys::VOICE_CHECK_PAUSED, defaults.voice_check_paused),
             export_folder: text("export_folder", &defaults.export_folder),
             export_meetings: flag("export_meetings", defaults.export_meetings),
             overlay_x: int("overlay_x"),
@@ -411,7 +416,7 @@ impl Settings {
         })
     }
 
-    fn pairs(&self) -> [(&'static str, String); 38] {
+    fn pairs(&self) -> [(&'static str, String); 39] {
         [
             ("chat_provider", self.chat_provider.clone()),
             ("reduce_motion", self.reduce_motion.to_string()),
@@ -477,6 +482,10 @@ impl Settings {
                     .to_string(),
             ),
             (keys::MCP_ALLOW_RECORD, self.mcp_allow_record.to_string()),
+            (
+                keys::VOICE_CHECK_PAUSED,
+                self.voice_check_paused.to_string(),
+            ),
             ("export_folder", self.export_folder.clone()),
             ("export_meetings", self.export_meetings.to_string()),
             ("overlay_x", self.overlay_x.max(-1).to_string()),
@@ -486,7 +495,7 @@ impl Settings {
         ]
     }
 
-    /// Writes all 38 setting keys to `database`, normalizing bounded fields.
+    /// Writes all 39 setting keys to `database`, normalizing bounded fields.
     pub fn save(&self, database: &Database) -> Result<()> {
         let conn = database.connection();
         for (key, value) in self.pairs() {
@@ -552,6 +561,7 @@ mod tests {
         let settings = Settings::load(&database).unwrap();
         assert_eq!(settings.speech_provider, "parakeet-local");
         assert!(!settings.auto_record_on_call);
+        assert!(!settings.voice_check_paused);
         assert_eq!(settings.recap_prompt_general, RECAP_PROMPT_GENERAL);
         assert_eq!(settings.meeting_mode, MeetingMode::General);
         assert!(settings.export_folder.is_empty());
@@ -572,6 +582,17 @@ mod tests {
             ),
             ("claude-sub", "haiku")
         );
+    }
+
+    #[test]
+    fn voice_check_paused_defaults_and_round_trips() {
+        let database = database();
+        assert!(!Settings::load(&database).unwrap().voice_check_paused);
+        assert!(Settings::is_key("voice_check_paused"));
+        Settings::set(&database, "voice_check_paused", "true").unwrap();
+        assert!(Settings::load(&database).unwrap().voice_check_paused);
+        Settings::set(&database, "voice_check_paused", "false").unwrap();
+        assert!(!Settings::load(&database).unwrap().voice_check_paused);
     }
 
     #[test]
@@ -610,6 +631,7 @@ mod tests {
             meeting_mode: MeetingMode::TeamMeeting,
             text_scale: 130,
             mcp_allow_record: true,
+            voice_check_paused: true,
             export_folder: "/tmp/meetings".into(),
             export_meetings: false,
             overlay_x: 10,

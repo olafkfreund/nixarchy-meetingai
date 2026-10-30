@@ -79,6 +79,7 @@ let
   ]
   ++ [ "NIXARCHY_MEETINGAI_OLLAMA_URL=${cfg.ollama.url}" ]
   ++ lib.optional cfg.parakeet.enable "NIXARCHY_MEETINGAI_PARAKEET_DIR=${cfg.parakeet.model}"
+  ++ [ "MEETINGAI_SPEAKER_MODEL=${cfg.speakerModel}" ]
   ++ lib.optional (
     cfg.ollamaCloud.keyFile != null
   ) "NIXARCHY_MEETINGAI_OLLAMA_KEY_FILE=${cfg.ollamaCloud.keyFile}"
@@ -177,6 +178,13 @@ in
       default = pkgs.callPackage ./parakeet-model.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ./nix/parakeet-model.nix { }";
       description = "The Parakeet speech model for `speechProvider = \"parakeet-local\"`: a directory with `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt` (NVIDIA Parakeet TDT 0.6B v3, CC-BY-4.0). The daemon gets it as `NIXARCHY_MEETINGAI_PARAKEET_DIR`. Once Parakeet has been used the model stays loaded (about 1.1 GB RAM) while the daemon runs.";
+    };
+
+    speakerModel = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.callPackage ./speaker-model.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./nix/speaker-model.nix { }";
+      description = "The speaker-embedding model (3D-Speaker CAM++, Apache-2.0, 28 MB) used to tell the owner's voice from others in the room. The daemon gets the file path as `MEETINGAI_SPEAKER_MODEL`; it is only loaded once a voice sample exists.";
     };
 
     ollamaCloud.environmentFile = lib.mkOption {

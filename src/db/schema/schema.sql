@@ -168,6 +168,13 @@ CREATE TABLE IF NOT EXISTS app_settings (
 , PRIMARY KEY (key)
 );
 
+CREATE TABLE IF NOT EXISTS voice_sample (
+  id INTEGER PRIMARY KEY CHECK (id = 1)
+, embedding BLOB NOT NULL
+, model TEXT NOT NULL
+, created INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS cached_summaries (
   kind TEXT NOT NULL
 , ref_id TEXT NOT NULL

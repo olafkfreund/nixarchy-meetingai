@@ -10,6 +10,7 @@ pub mod profiles;
 pub mod screenshots;
 pub mod sessions;
 pub mod settings;
+pub mod voice;
 
 pub use conversations::ConversationRecord;
 pub use library::FileRecord;
