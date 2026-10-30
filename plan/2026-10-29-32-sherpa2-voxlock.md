@@ -138,3 +138,8 @@ the examples and scripts are standalone. Redeploy p620 from main.
   (`aec-parakeet-tap.wav`, speakers playing `speech.wav`) replayed with
   `accuracy_replay --parakeet` on the 1.13.8 library (commit fb778ff) and
   on the 2.0.1 library: the same 6 lines, byte for byte (diff empty).
+- Step 5c-e (owner, 2026-10-30: "drive it all", chose the public-dataset
+  option): no owner recordings. The set is built from LibriSpeech
+  test-clean: mic = one speaker plus another speaker's speech delayed and
+  attenuated as speaker bleed, system = that other speaker, references
+  from the LibriSpeech transcripts. Same three variants and decision rule.
