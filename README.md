@@ -237,6 +237,34 @@ them locked with "Set in Nix". Profiles and prompts stay in the app.
 - **Let AI agents start recording:** off by default.
 - **Prompts:** every prompt per mode, editable, with a reset.
 - **Profiles:** your role, context and documents, reused across meetings.
+- **Export meetings** and **Export folder:** see below.
+
+### Exporting meetings
+
+When a meeting finishes, it is written to a folder of plain files, and
+written again whenever its notes are regenerated:
+
+```text
+<export folder>/2026-10-30 Staff platform interview/
+├── notes.md        # summary, action items, decisions, open questions, transcript
+├── screenshots/    # the screenshots taken during the meeting
+└── documents/      # for an interview: the CV and job description as attached
+```
+
+- The first time, the overlay asks where to save them (**Choose folder…**
+  or **Not now**). Change it later in Settings, or fix it with
+  `settings.exportFolder`. Any folder works, including an Obsidian vault:
+  the links are standard Markdown.
+- **Export now** in the Library exports any meeting on demand. Screenshots
+  and original documents are only kept from this version on, so older
+  meetings export without them (a document's text is exported as `.md`).
+- A renamed meeting's folder is renamed with it. The app rewrites
+  `notes.md`, `screenshots/` and `documents/`; any other file you put in
+  the folder is left alone.
+- The export is the one place meeting data leaves the encrypted database.
+  The files are readable by you only, but if the folder syncs, they sync.
+  Interviews are exported too (`local_only: true` in the frontmatter marks
+  a local-only one). Voice data, keys and settings are never exported.
 
 ### Keybindings
 
@@ -835,6 +863,27 @@ boolean
 
 ```nix
 false
+```
+
+
+
+## programs\.nixarchy-meetingai\.settings\.exportFolder
+
+
+
+Folder for exported meeting notes, screenshots and documents (plain files; readable by you only)\.
+
+
+
+*Type:*
+null or string
+
+
+
+*Default:*
+
+```nix
+null
 ```
 
 
