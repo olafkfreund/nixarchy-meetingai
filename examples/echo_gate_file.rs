@@ -12,7 +12,10 @@ fn main() {
     };
     let mut reader = hound::WavReader::open(input).expect("input wav");
     let spec = reader.spec();
-    assert!(spec.channels == 2 && spec.sample_rate == 16_000, "need stereo 16 kHz");
+    assert!(
+        spec.channels == 2 && spec.sample_rate == 16_000,
+        "need stereo 16 kHz"
+    );
     let mut samples: Vec<f32> = reader
         .samples::<i16>()
         .map(|s| f32::from(s.unwrap()) / 32_768.0)
@@ -23,7 +26,9 @@ fn main() {
     }
     let mut writer = hound::WavWriter::create(output, spec).expect("output wav");
     for s in samples {
-        writer.write_sample((s.clamp(-1.0, 1.0) * 32_767.0) as i16).unwrap();
+        writer
+            .write_sample((s.clamp(-1.0, 1.0) * 32_767.0) as i16)
+            .unwrap();
     }
     writer.finalize().unwrap();
 }
