@@ -8,12 +8,15 @@ use crate::audio::dsp::{SAMPLE_RATE, rms};
 
 const FRAME_MS: u32 = 30;
 const WINDOW_SAMPLES: usize = SAMPLE_RATE as usize * 3 / 2;
-const MIN_ENROLL_SPEECH: usize = SAMPLE_RATE as usize * 8;
+const MIN_ENROLL_SPEECH: usize = SAMPLE_RATE as usize * 6;
 const MIN_CHECK_SPEECH: usize = WINDOW_SAMPLES;
-// Provisional until plan step 7 scores the owner's recordings.
-const SPEECH_RMS: f32 = 0.015;
-const ROOM_COSINE: f32 = 0.45;
-const OWNER_COSINE: f32 = 0.65;
+// Plan step 7, LibriSpeech test-clean, 40 speakers as owner (examples/voice_eval.rs):
+// at 0.015 / 8 s, 22 of 40 natural 12 s samples failed enrollment; at 0.005 / 6 s, none.
+const SPEECH_RMS: f32 = 0.005;
+// Owner lines labelled room: clean 0/2536, far-end bleed at -12 dB 0.6%, at -6 dB 4.2%,
+// all 121/7608 = 1.6% (bar 1 in 50). Other speakers caught: 78%; phone/speaker voices: 88%.
+// At 0.45 (provisional) owner lines were 2.4% clean, 4.9% / 12% with bleed.
+const ROOM_COSINE: f32 = 0.20;
 
 /// Fixed-size history of microphone samples, indexed from recording start.
 pub struct MicRing {
@@ -148,7 +151,7 @@ pub fn enroll(e: &dyn Embedder, mic: &[f32], rate: u32) -> Result<Vec<f32>, Stri
     }
     let voiced = speech(mic, rate);
     if voiced.len() < MIN_ENROLL_SPEECH {
-        return Err("need at least 8 seconds of speech".into());
+        return Err("need at least 6 seconds of speech".into());
     }
     let mut sum: Vec<f32> = Vec::new();
     let mut count = 0;
@@ -180,20 +183,21 @@ pub enum Verdict {
     Room,
 }
 
-/// Unclear or short audio keeps the initial owner label.
-pub fn check(e: &dyn Embedder, sample: &[f32], heard: &[f32], rate: u32) -> Verdict {
+/// Cosine of the heard speech against the sample, or `None` when too short or unclear.
+pub fn score(e: &dyn Embedder, sample: &[f32], heard: &[f32], rate: u32) -> Option<f32> {
     if rate != SAMPLE_RATE {
-        return Verdict::Owner;
+        return None;
     }
     let voiced = speech(heard, rate);
     if voiced.len() < MIN_CHECK_SPEECH {
-        return Verdict::Owner;
+        return None;
     }
-    let Some(embedding) = e.embed(&voiced) else {
-        return Verdict::Owner;
-    };
-    match cosine(sample, &embedding) {
-        Some(score) if score >= OWNER_COSINE => Verdict::Owner,
+    cosine(sample, &e.embed(&voiced)?)
+}
+
+/// Unclear or short audio keeps the initial owner label.
+pub fn check(e: &dyn Embedder, sample: &[f32], heard: &[f32], rate: u32) -> Verdict {
+    match score(e, sample, heard, rate) {
         Some(score) if score < ROOM_COSINE => Verdict::Room,
         _ => Verdict::Owner,
     }
@@ -250,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn enrollment_averages_normalized_windows_and_requires_eight_seconds_of_speech() {
+    fn enrollment_averages_normalized_windows_and_requires_six_seconds_of_speech() {
         let mut mic = vec![0.1; SAMPLE_RATE as usize * 10];
         mic[0..SAMPLE_RATE as usize].fill(0.0);
         let e = fake(vec![
@@ -264,11 +268,11 @@ mod tests {
         let embedding = enroll(&e, &mic, SAMPLE_RATE).unwrap();
         assert!((embedding[0] - 4.0 / 20.0_f32.sqrt()).abs() < 1e-6);
         assert!((embedding[1] - 2.0 / 20.0_f32.sqrt()).abs() < 1e-6);
-        mic[..SAMPLE_RATE as usize * 3].fill(0.0);
+        mic[..SAMPLE_RATE as usize * 5].fill(0.0);
         assert!(
             enroll(&e, &mic, SAMPLE_RATE)
                 .unwrap_err()
-                .contains("8 seconds")
+                .contains("6 seconds")
         );
     }
 }
