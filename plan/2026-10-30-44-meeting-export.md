@@ -200,3 +200,8 @@ step before it must pass).
   #31 and #44 meet (whichever merges second). Codex also changed
   `transcript.get` to apply saved speaker names; that was out of scope
   and was reverted (the export applies names itself).
+- **Step 5:** `shell/Client.qml` also changed (7 lines) to route the
+  `export.folder_needed` and `export.done` events, the same way
+  `consentPrompt` and `notesUpdated` are wired. Step 5 was started
+  alongside steps 1–2 rather than with step 4: it only needs the fake
+  daemon.

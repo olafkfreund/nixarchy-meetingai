@@ -358,4 +358,166 @@ kill "$fake" 2>/dev/null || true
 if grep -aE "$qml_bad" "$work/fixed.err" "$work/fixed.out"; then echo "FAIL (fixed): QML errors above" >&2; exit 1; fi
 grep -a 'FIXED {"use":false,"remove":false,"meta":".*set in Nix' "$work/fixed.out" > /dev/null || { echo "FAIL (fixed): Use/Remove not disabled with a reason: $(grep -a FIXED "$work/fixed.out")" >&2; exit 1; }
 echo "fixed: a Nix-fixed custom provider cannot be switched or removed"
+
+# export: first-time card ("Not now" turns export_meetings off; "Choose folder…" sets export_folder and exports),
+# Settings rows (export_meetings toggle + export_folder row with Change…), and Export now in Library notes view.
+cat > "$work/harness-export-notnow.qml" <<'QML'
+import QtQuick
+import Quickshell
+
+ShellRoot {
+    id: root
+    property int phase: 0
+    property var out: ({})
+    function find(it, name, depth) {
+        if (!it || !it.visible || (depth || 0) > 60) return null;
+        if (it.objectName === name) return it;
+        var kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) { var f = find(kids[i], name, (depth || 0) + 1); if (f) return f; }
+        return null;
+    }
+    Overlay {
+        id: overlay
+        Component.onCompleted: overlay.open("{}")
+    }
+    Timer {
+        interval: 450; repeat: true; running: true
+        onTriggered: {
+            var card = overlay.geometryRoot();
+            root.phase += 1;
+            if (root.phase === 3) {
+                var ec = root.find(card, "exportCard");
+                var et = root.find(card, "exportCardTitle");
+                var nn = root.find(card, "exportNotNow");
+                root.out.cardShown = !!ec;
+                root.out.title = et ? String(et.text) : "";
+                if (nn) nn.clicked();
+            } else if (root.phase === 5) {
+                root.out.cardAfter = !!root.find(card, "exportCard");
+                overlay.showLibrary("settings");
+            } else if (root.phase === 7) {
+                var sw = root.find(card, "exportMeetingsToggle");
+                root.out.toggleChecked = sw ? sw.checked : null;
+                console.log("EXPORT_NOTNOW " + JSON.stringify(root.out));
+                Qt.quit();
+            }
+        }
+    }
+}
+QML
+ln -sf "$work/harness-export-notnow.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-export-notnow"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/export-notnow.log" --export-ask &
+fake=$!
+sleep 0.5
+timeout 12 quickshell -p "$work/cfg" > "$work/export-notnow.out" 2> "$work/export-notnow.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/export-notnow.err" "$work/export-notnow.out"; then echo "FAIL (export-notnow): QML errors above" >&2; exit 1; fi
+grep -q "settings.set export_meetings" "$work/export-notnow.log" || { echo "FAIL (export-notnow): export_meetings not set" >&2; exit 1; }
+grep -a 'EXPORT_NOTNOW {"cardShown":true,"title":"Save meeting notes to a folder?","cardAfter":false,"toggleChecked":false}' "$work/export-notnow.out" > /dev/null || { echo "FAIL (export-notnow): unexpected dump: $(grep -a EXPORT_NOTNOW "$work/export-notnow.out")" >&2; exit 1; }
+
+cat > "$work/harness-export-flow.qml" <<'QML'
+import QtQuick
+import Quickshell
+
+ShellRoot {
+    id: root
+    property int phase: 0
+    property var out: ({})
+    function find(it, name, depth) {
+        if (!it || !it.visible || (depth || 0) > 60) return null;
+        if (it.objectName === name) return it;
+        var kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) { var f = find(kids[i], name, (depth || 0) + 1); if (f) return f; }
+        return null;
+    }
+    Overlay {
+        id: overlay
+        Component.onCompleted: overlay.open("{}")
+    }
+    Timer {
+        interval: 450; repeat: true; running: true
+        onTriggered: {
+            var card = overlay.geometryRoot();
+            root.phase += 1;
+            if (root.phase === 3) {
+                root.out.cardShown = !!root.find(card, "exportCard") && !!root.find(card, "exportChoose");
+                overlay.chooseExportFolder("/tmp/meetings");
+            } else if (root.phase === 5) {
+                root.out.cardAfterChoose = !!root.find(card, "exportCard");
+                overlay.showLibrary("settings");
+            } else if (root.phase === 7) {
+                var sw = root.find(card, "exportMeetingsToggle");
+                var ff = root.find(card, "exportFolderField");
+                var cb = root.find(card, "exportFolderChange");
+                root.out.settingsToggle = sw ? sw.checked : null;
+                root.out.settingsFolder = ff ? String(ff.text) : "";
+                root.out.hasChangeBtn = !!cb;
+                if (sw) sw.toggled();
+            } else if (root.phase === 9) {
+                var sw2 = root.find(card, "exportMeetingsToggle");
+                root.out.settingsToggleAfter = sw2 ? sw2.checked : null;
+                overlay.exportFolderHook("/tmp/vault");
+            } else if (root.phase === 11) {
+                var ff2 = root.find(card, "exportFolderField");
+                root.out.settingsFolderAfter = ff2 ? String(ff2.text) : "";
+                overlay.showLibrary("restore");
+            } else if (root.phase === 13) {
+                var eb = root.find(card, "exportNow");
+                root.out.hasExportNow = !!eb;
+                if (eb) eb.clicked();
+            } else if (root.phase === 15) {
+                var st = root.find(card, "exportStatus");
+                root.out.exportStatusOk = st ? String(st.text) : "";
+                overlay.exportFolderHook("/tmp/fail");
+            } else if (root.phase === 17) {
+                var eb2 = root.find(card, "exportNow");
+                if (eb2) eb2.clicked();
+            } else if (root.phase === 19) {
+                var st2 = root.find(card, "exportStatus");
+                root.out.exportStatusErr = st2 ? String(st2.text) : "";
+                console.log("EXPORT_FLOW " + JSON.stringify(root.out));
+                Qt.quit();
+            }
+        }
+    }
+}
+QML
+ln -sf "$work/harness-export-flow.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-export-flow"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/export-flow.log" --export-ask &
+fake=$!
+sleep 0.5
+timeout 16 quickshell -p "$work/cfg" > "$work/export-flow.out" 2> "$work/export-flow.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/export-flow.err" "$work/export-flow.out"; then echo "FAIL (export-flow): QML errors above" >&2; exit 1; fi
+python3 - "$work/export-flow.out" "$work/export-flow.log" <<'PY'
+import json, sys
+line = next((l for l in open(sys.argv[1], errors="replace") if "EXPORT_FLOW {" in l), None)
+if line is None:
+    sys.exit("FAIL (export-flow): no EXPORT_FLOW dump")
+d = json.loads(line[line.index("EXPORT_FLOW ") + 12:])
+log = open(sys.argv[2]).read().splitlines()
+bad = []
+if not d.get("cardShown") or d.get("cardAfterChoose") is not False:
+    bad.append(f"first-time export card check failed: {d}")
+if d.get("settingsToggle") is not True or d.get("settingsToggleAfter") is not False:
+    bad.append(f"export_meetings toggle failed: {d}")
+if d.get("settingsFolder") != "/tmp/meetings" or not d.get("hasChangeBtn") or d.get("settingsFolderAfter") != "/tmp/vault":
+    bad.append(f"export_folder row check failed: {d}")
+if not d.get("hasExportNow") or d.get("exportStatusOk") != "Exported to /tmp/vault/2026-10-30 Fake standup":
+    bad.append(f"Export now success check failed: {d}")
+if "Could not export the meeting" not in d.get("exportStatusErr", ""):
+    bad.append(f"Export now error check failed: {d}")
+for need in ("settings.set export_folder", "settings.set export_meetings", "meetings.export"):
+    if need not in log:
+        bad.append(f"daemon log missing {need!r}: {log}")
+if bad:
+    for b in bad:
+        print("FAIL (export-flow):", b, file=sys.stderr)
+    sys.exit(1)
+print("export: first-time card, Settings row, and Export now ok")
+PY
 echo "smoke ok"
