@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--call] [--providers] [--locked] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--call] [--providers] [--locked] [--export-ask] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -53,6 +53,7 @@ call = "--call" in sys.argv
 slow = "--slow-settings" in sys.argv   # settings.get answers after 2.5 s and no settings event is pushed: the client must wait for them
 locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, meeting_mode, text_scale
 voice_mode = "--voice" in sys.argv     # transcript.get room row, transcript.relabel, direct room final, and voice.* commands
+export_ask = "--export-ask" in sys.argv   # emit export.folder_needed after connect
 live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
@@ -73,7 +74,7 @@ NOTICED = []
 TURNS = itertools.count(2)
 HANDLERS = set()   # connected clients: --drop's answer goes to whoever is connected, as the real daemon's does
 VOICE = {"enrolled": False, "model": "", "created": 0}
-settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced", "text_scale": scale, "voice_check_paused": False}
+settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced", "text_scale": scale, "voice_check_paused": False, "export_meetings": True, "export_folder": ""}
 
 
 if voice_mode:
@@ -105,6 +106,8 @@ DATA = {
         {"key": "overlay_w", "label": "Overlay width", "value": -1},
         {"key": "auto_record_on_call", "label": "Take notes automatically when a call starts", "value": auto},
         {"key": "reduce_motion", "label": "Reduce motion", "value": False},
+        {"key": "export_meetings", "label": "Export meetings", "value": True},
+        {"key": "export_folder", "label": "Export folder", "value": ""},
     ],
     "series.list": [],
     "candidates.list": [],
@@ -112,7 +115,7 @@ DATA = {
     "notes.get": {"text": "## Summary\nfake"},
 }
 if locked:
-    settings["locked"] = ["chat_provider", "meeting_mode", "text_scale"]
+    settings["locked"] = ["chat_provider", "meeting_mode", "text_scale", "export_folder"]
 settings.update(overlay_x=-1, overlay_y=-1, overlay_w=-1, overlay_h=-1)
 size = next((a.split("=")[1] for a in sys.argv if a.startswith("--size=")), "")   # --size=WxH: start with a non-default card
 if size:
@@ -433,6 +436,8 @@ class Handler(socketserver.StreamRequestHandler):
             self.send({"event": "answer.delta", "turn": 1, "text": word, **PROVIDER})
         self.send({"event": "answer.done", "turn": 1, **PROVIDER})
         self.send({"event": "suggestion", "text": "Who owns it?"})
+        if export_ask:
+            self.send({"event": "export.folder_needed", "meeting": "1"})
 
     def say(self, who, speaker, text, t0, pace=0.12):
         words = text.split()
@@ -639,9 +644,28 @@ class Handler(socketserver.StreamRequestHandler):
                     if not any(c["id"] == val and c["kind"] == want_kind for c in CUSTOM_PROVIDERS):
                         self.send({"id": req["id"], "ok": False, "error": "This provider no longer exists."})
                         continue
+            if cmd == "meetings.export":
+                m = str(req.get("args", {}).get("meeting", "1"))
+                folder = (settings.get("export_folder") or "").strip()
+                if not folder:
+                    self.send({"id": req["id"], "ok": False, "error": "Choose an export folder first."})
+                    continue
+                if folder.endswith("/fail"):
+                    self.send({"id": req["id"], "ok": False, "error": "Could not export the meeting: permission denied"})
+                    continue
+                p = os.path.join(folder, "2026-10-30 Fake standup")
+                self.send({"id": req["id"], "ok": True, "data": {"path": p}})
+                self.send({"event": "export.done", "meeting": m, "path": p})
+                continue
+            if cmd == "settings.search":
+                q = (req.get("args", {}).get("query") or "").strip().lower()
+                data = [r for r in DATA["settings.search"] if not q or q in r["key"] or q in r["label"].lower()]
             self.send({"id": req["id"], "ok": True, "data": data})
             if cmd == "settings.set":
                 settings[req["args"]["key"]] = req["args"]["value"]
+                for r in DATA["settings.search"]:
+                    if r["key"] == req["args"]["key"]:
+                        r["value"] = req["args"]["value"]
                 self.send({"event": "settings", "settings": settings})
             elif cmd == "session.restore":
                 self.send({"event": "session.reset"})

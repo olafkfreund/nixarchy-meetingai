@@ -1,6 +1,7 @@
 //! Shared foundations: domain types, settings, secrets, attachments and HTTP plumbing.
 
 pub mod context;
+pub mod export;
 pub mod models;
 pub(crate) mod network;
 pub mod security;

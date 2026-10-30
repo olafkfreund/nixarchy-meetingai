@@ -97,6 +97,24 @@ CREATE INDEX IF NOT EXISTS idx_meeting_lines_meeting ON meeting_lines (meeting_i
 CREATE INDEX IF NOT EXISTS idx_meeting_lines_time ON meeting_lines (meeting_id, start_time);
 CREATE INDEX IF NOT EXISTS idx_meetings_started ON meetings (started_at DESC);
 
+CREATE TABLE IF NOT EXISTS meeting_screenshots (
+  id INTEGER PRIMARY KEY
+, meeting_id TEXT NOT NULL
+, taken_at REAL NOT NULL
+, question TEXT NOT NULL
+, mime TEXT NOT NULL
+, data BLOB NOT NULL
+, FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_screenshots_meeting
+    ON meeting_screenshots (meeting_id);
+
+CREATE TABLE IF NOT EXISTS meeting_exports (
+  meeting_id TEXT PRIMARY KEY
+, dir TEXT NOT NULL
+, FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS meeting_recaps (
   meeting_id TEXT
 , content TEXT NOT NULL DEFAULT ''

@@ -26,6 +26,9 @@ Item {
     property var found: []        // settings.search results: { key, label, value }
     property string promptMode: "general"
     property string notes: ""
+    property var notesMeeting: null
+    property string exportStatus: ""
+    property var exportAfterPick: null
     property string modelsText: ""
     property string modelsFor: ""   // the provider the Models button asked about; a reply for another one is stale
     property var status: ({})        // providers.status rows by id: ready / not installed / not logged in / no key, with the login command
@@ -74,6 +77,30 @@ Item {
     property string promptKind: "answer"
     signal confirmRequested(string message, string label, var yes)
     function candidateHook(what) { candTab.hook(what); }
+    function exportMeeting(id) {
+        root.notesMeeting = id;
+        var folder = String(root.client.settings.export_folder || "").trim();
+        if (folder === "") {
+            if (root.client.isLocked("export_folder")) {
+                root.exportStatus = "Choose an export folder first.";
+                return;
+            }
+            root.exportAfterPick = id;
+            exportFolderDialog.open();
+            return;
+        }
+        root.client.send("meetings.export", { meeting: id }, function(r) {
+            if (r.ok && r.data && r.data.path) root.exportStatus = "Exported to " + String(r.data.path);
+            else root.exportStatus = String(r.error || "Export failed.");
+        });
+    }
+    function setExportFolder(path) {
+        var m = root.exportAfterPick;
+        root.exportAfterPick = null;
+        root.client.setSetting("export_folder", path);
+        root.search();
+        if (m !== null) root.exportMeeting(m);
+    }
 
     function match(s) { return root.query === "" || String(s).toLowerCase().indexOf(root.query.toLowerCase()) >= 0; }
 
@@ -190,6 +217,7 @@ Item {
         target: root.client
         function onLibraryError(message) { root.error = message; }
         function onNotesUpdated() { root.load(); }
+        function onExportDone(meeting, path) { if (root.notesMeeting !== null && String(root.notesMeeting) === String(meeting) && path !== "") root.exportStatus = "Exported to " + path; }
         function onProvidersChanged() { root.load(); }
     }
 
@@ -234,7 +262,7 @@ Item {
         // Restore: chats and meetings with their notes.
         ListView {
             visible: root.tab === "restore"
-            width: parent.width; height: parent.height - y - notesBox.height
+            width: parent.width; height: parent.height - y - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - (notesBox.visible ? notesBox.height + Style.spacing.md : 0)
             clip: true
             model: root.sessions.filter(function(s) { return root.match(s.title); })
             delegate: RowLayout {
@@ -257,10 +285,32 @@ Item {
                 IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
                     text: "Notes"
                     visible: rrow.modelData.kind === "meeting"
-                    onClicked: root.client.send("notes.get", { meeting: rrow.modelData.id }, function(r) { root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; })
+                    onClicked: {
+                        root.notesMeeting = rrow.modelData.id;
+                        root.client.send("notes.get", { meeting: rrow.modelData.id }, function(r) { root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; });
+                    }
+                }
+                IconButton {
+                    objectName: "exportNow"
+                    ts: root.theme.ts
+                    Layout.alignment: Qt.AlignVCenter
+                    text: "Export now"
+                    visible: rrow.modelData.kind === "meeting"
+                    onClicked: root.exportMeeting(rrow.modelData.id)
                 }
                 IconButton { objectName: "deleteSession"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: root.confirmRequested("Delete \"" + rrow.modelData.title + "\"? " + (rrow.modelData.kind === "meeting" ? "The transcript, notes and items of this meeting are removed." : "This chat is removed."), "Delete", function() { root.client.send("session.delete", { id: rrow.modelData.id }); root.load(); }) }
             }
+        }
+        UiText {
+            id: exportStatusText
+            objectName: "exportStatus"
+            visible: root.tab === "restore" && root.exportStatus !== ""
+            width: parent.width
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: root.exportStatus
+            color: Commons.Color.popups.text
+            font.pixelSize: root.theme.caption
         }
         ScrollView {   // long notes scroll
             id: notesBox
@@ -845,7 +895,7 @@ Item {
                     Layout.preferredHeight: root.theme.ctl
                     Layout.alignment: Qt.AlignVCenter
                     Check {
-                        objectName: "settingToggle"
+                        objectName: srow.modelData.key === "export_meetings" ? "exportMeetingsToggle" : "settingToggle"
                         ts: root.theme.ts
                         accessibleName: String(srow.modelData.label || srow.modelData.key)
                         enabled: !root.client.isLocked(srow.modelData.key)
@@ -855,17 +905,49 @@ Item {
                         checked: srow.modelData.value === true
                         onToggled: { root.client.setSetting(srow.modelData.key, !srow.modelData.value); root.search(); }
                     }
+                    RowLayout {
+                        visible: srow.modelData.key === "export_folder"
+                        anchors.fill: parent
+                        spacing: root.theme.gap
+                        UiText {
+                            objectName: "exportFolderField"
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
+                            textFormat: Text.PlainText
+                            elide: Text.ElideMiddle
+                            mayCut: true
+                            text: String(srow.modelData.value || "") || "Not set"
+                            color: Commons.Color.popups.text
+                            font.pixelSize: root.theme.body
+                        }
+                        IconButton {
+                            objectName: "exportFolderChange"
+                            ts: root.theme.ts
+                            Layout.alignment: Qt.AlignVCenter
+                            text: "Change…"
+                            enabled: !root.client.isLocked("export_folder")
+                            opacity: enabled ? 1 : 0.5
+                            onClicked: { root.exportAfterPick = null; exportFolderDialog.open(); }
+                        }
+                    }
                     Input {
                         objectName: "settingField"
                         accessibleName: String(srow.modelData.label || srow.modelData.key)
                         ts: root.theme.ts
                         enabled: !root.client.isLocked(srow.modelData.key)
-                        visible: typeof srow.modelData.value !== "boolean"
+                        visible: typeof srow.modelData.value !== "boolean" && srow.modelData.key !== "export_folder"
                         anchors.fill: parent
                         text: String(srow.modelData.value)
                         onEditingFinished: root.client.setSetting(srow.modelData.key, typeof srow.modelData.value === "number" ? Number(text) : text)
                     }
                 }
+            }
+        }
+        FolderDialog {
+            id: exportFolderDialog
+            onAccepted: {
+                var p = decodeURIComponent(String(selectedFolder).replace(/^file:\/\//, ""));
+                root.setExportFolder(p);
             }
         }
     }

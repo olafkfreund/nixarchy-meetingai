@@ -36,7 +36,7 @@ def main(wavdir, out, extra):
     for n, path in enumerate(extra):
         data = frames(path)
         step = 6 * RATE * 2
-        for i in range(0, len(data) - step, step):
+        for i in range(0, len(data) - step + 1, step):
             write(f"{out}/cut/extra{n}-{i // step}.wav", data[i:i + step]); rooms.append(f"{out}/cut/extra{n}-{i // step}.wav")
     enroll, trials = [], []
     speakers = sorted(utts)

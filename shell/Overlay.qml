@@ -4,6 +4,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
@@ -132,6 +133,19 @@ Item {
         else if (what === "pause") backend.setVoicePaused(!root.voicePaused);
     }
     readonly property bool voicePaused: backend.settings.voice_check_paused === true || backend.voice.paused === true
+    function chooseExportFolder(path) {
+        var m = backend.exportPromptMeeting;
+        backend.exportPromptAnswered = true;
+        backend.exportPromptMeeting = "";
+        backend.setSetting("export_folder", path);
+        if (m !== "") backend.send("meetings.export", { meeting: m });
+    }
+    function dismissExportPrompt() {
+        backend.exportPromptAnswered = true;
+        backend.exportPromptMeeting = "";
+        backend.setSetting("export_meetings", false);
+    }
+    function exportFolderHook(path) { lib.setExportFolder(path); }
     function modeHook() { hdr.openPicker(); }   // tests/harness-live.qml opens the mode list for a crop
     function ask(message, confirmText, yes) { confirm.ask(message, confirmText, yes); }   // the one confirmation dialog
     function focusProbe(next) {   // tests/keys.sh: what has the keyboard focus; next = do what Tab does first
@@ -324,6 +338,37 @@ Item {
                     daemon: backend
                     theme: metrics
                     width: parent.width
+                }
+
+                BorderSurface {   // first-time export folder prompt (once per session)
+                    id: exportBanner
+                    objectName: "exportCard"
+                    visible: backend.exportPromptMeeting !== "" && !backend.isLocked("export_folder")
+                    width: parent.width
+                    height: expCol.implicitHeight + metrics.padY * 2
+                    radius: metrics.radius
+                    color: Qt.alpha(Commons.Color.foreground, 0.10)
+                    borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
+                    Column {
+                        id: expCol
+                        x: metrics.padX; y: metrics.padY
+                        width: parent.width - metrics.padX * 2
+                        spacing: Style.space(6)
+                        UiText { objectName: "exportCardTitle"; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Save meeting notes to a folder?"; color: Commons.Color.popups.text; font.pixelSize: metrics.body; font.bold: true }
+                        UiText { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Notes, screenshots and attached documents are saved as plain files in a folder you choose."; color: Commons.Color.popups.text; opacity: metrics.dim; font.pixelSize: metrics.caption }
+                        Row {
+                            spacing: Style.spacing.xs
+                            IconButton { objectName: "exportChoose"; ts: metrics.ts; text: "Choose folder…"; bordered: true; onClicked: exportPromptDialog.open() }
+                            IconButton { objectName: "exportNotNow"; ts: metrics.ts; text: "Not now"; bordered: true; onClicked: root.dismissExportPrompt() }
+                        }
+                    }
+                    FolderDialog {
+                        id: exportPromptDialog
+                        onAccepted: {
+                            var p = decodeURIComponent(String(selectedFolder).replace(/^file:\/\//, ""));
+                            root.chooseExportFolder(p);
+                        }
+                    }
                 }
 
                 Library {
