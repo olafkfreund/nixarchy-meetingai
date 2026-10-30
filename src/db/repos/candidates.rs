@@ -21,6 +21,9 @@ pub struct Document {
     pub kind: String,
     pub name: String,
     pub text: String,
+    #[serde(skip_serializing)]
+    pub original: Option<Vec<u8>>,
+    pub mime: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -99,11 +102,11 @@ pub fn set_local_only(connection: &Connection, id: &str, on: bool) -> Result<boo
     )? > 0)
 }
 
-/// What the candidate said (channel 1) in a meeting: the only text a quote may come from.
+/// What the candidate said (far side, or `room`: beside the mic) in a meeting: the only text a quote may come from.
 pub fn said(connection: &Connection, meeting: &str) -> Vec<String> {
-    let Ok(mut statement) =
-        connection.prepare("SELECT text FROM meeting_lines WHERE meeting_id = ?1 AND who = 'them'")
-    else {
+    let Ok(mut statement) = connection.prepare(
+        "SELECT text FROM meeting_lines WHERE meeting_id = ?1 AND who IN ('them', 'room')",
+    ) else {
         return Vec::new();
     };
     statement
@@ -138,23 +141,29 @@ pub fn add_document(
     kind: &str,
     name: &str,
     text: &str,
+    original: Option<&[u8]>,
+    mime: &str,
 ) -> Result<Document> {
     let id = Uuid::new_v4().to_string();
     connection.execute(
-        "INSERT INTO candidate_documents (id, candidate_id, kind, name, text) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, candidate_id, kind, name, text],
+        "INSERT INTO candidate_documents (id, candidate_id, kind, name, text, original, mime)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, candidate_id, kind, name, text, original, mime],
     )?;
     Ok(Document {
         id,
         kind: kind.to_owned(),
         name: name.to_owned(),
         text: text.to_owned(),
+        original: original.map(Vec::from),
+        mime: mime.to_owned(),
     })
 }
 
 pub fn documents(connection: &Connection, candidate_id: &str) -> Result<Vec<Document>> {
     let mut statement = connection.prepare(
-        "SELECT id, kind, name, text FROM candidate_documents WHERE candidate_id = ?1 ORDER BY rowid",
+        "SELECT id, kind, name, text, original, mime FROM candidate_documents
+         WHERE candidate_id = ?1 ORDER BY rowid",
     )?;
     let rows = statement.query_map(params![candidate_id], |row| {
         Ok(Document {
@@ -162,6 +171,8 @@ pub fn documents(connection: &Connection, candidate_id: &str) -> Result<Vec<Docu
             kind: row.get(1)?,
             name: row.get(2)?,
             text: row.get(3)?,
+            original: row.get(4)?,
+            mime: row.get(5)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -332,8 +343,8 @@ mod tests {
         );
         assert!(!set_local_only(c, "nope", true).unwrap());
 
-        add_document(c, &a.id, "cv", "cv.md", "Built Rust").unwrap();
-        assert!(add_document(c, &a.id, "other", "x", "y").is_err());
+        add_document(c, &a.id, "cv", "cv.md", "Built Rust", None, "").unwrap();
+        assert!(add_document(c, &a.id, "other", "x", "y", None, "").is_err());
         assert_eq!(documents(c, &a.id).unwrap()[0].text, "Built Rust");
 
         let q1 = add_question(c, &a.id, "Q1?", "Built Rust", Some("rust")).unwrap();
@@ -365,6 +376,33 @@ mod tests {
         assert!(update_question(c, &q1.id, &bad).is_err());
         assert!(!update_question(c, "nope", &QuestionPatch::default()).unwrap());
         assert!(delete_question(c, &q2.id).unwrap() && !delete_question(c, &q2.id).unwrap());
+    }
+
+    #[test]
+    fn document_original_round_trips() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let candidate = create(c, "Ada").unwrap();
+        let bytes = [0, 255, 1, 128];
+        let added = add_document(
+            c,
+            &candidate.id,
+            "cv",
+            "cv.pdf",
+            "Extracted text",
+            Some(&bytes),
+            "application/pdf",
+        )
+        .unwrap();
+        let fetched = documents(c, &candidate.id).unwrap();
+        assert_eq!(fetched, [added]);
+        assert_eq!(fetched[0].original.as_deref(), Some(bytes.as_slice()));
+        assert_eq!(fetched[0].mime, "application/pdf");
+        assert!(
+            !serde_json::to_string(&fetched[0])
+                .unwrap()
+                .contains("original")
+        );
     }
 
     #[test]
@@ -405,7 +443,7 @@ mod tests {
         let a = create(c, "Ada").unwrap();
         let m = meetings::start(c, "Ada", "", "en", None, Default::default()).unwrap();
         link_meeting(c, &a.id, &m).unwrap();
-        add_document(c, &a.id, "cv", "cv.md", "Built Rust").unwrap();
+        add_document(c, &a.id, "cv", "cv.md", "Built Rust", None, "").unwrap();
         add_question(c, &a.id, "Q?", "Built Rust", None).unwrap();
         meetings::add_line(c, &m, "them", None, "I built it", 0.0, 1.0).unwrap();
         meetings::add_chunk(

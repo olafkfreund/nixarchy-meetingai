@@ -19,6 +19,10 @@ pub struct Attachment {
     pub text: String,
     /// Standard-alphabet base64 PNG without a `data:` prefix.
     pub image: Option<String>,
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
+    #[serde(skip)]
+    pub mime: String,
     pub truncated: bool,
 }
 
@@ -36,6 +40,8 @@ impl Attachment {
             name,
             text,
             image: None,
+            bytes: Vec::new(),
+            mime: String::new(),
             truncated,
         }
     }
@@ -141,6 +147,13 @@ pub fn import(path: &Path) -> Result<Attachment, String> {
                 name,
                 text: String::new(),
                 image: Some(encode_image(&bytes)?),
+                bytes,
+                mime: if extension == "png" {
+                    "image/png"
+                } else {
+                    "image/jpeg"
+                }
+                .into(),
                 truncated: false,
             });
         }
@@ -153,8 +166,9 @@ pub fn import(path: &Path) -> Result<Attachment, String> {
                         .into(),
                 );
             }
-            String::from_utf8(bytes)
+            std::str::from_utf8(&bytes)
                 .map_err(|_| "That file is not valid UTF-8 text.".to_string())?
+                .to_owned()
         }
     };
     if text.trim().is_empty() {
@@ -164,7 +178,17 @@ pub fn import(path: &Path) -> Result<Attachment, String> {
             "That file has no text.".into()
         });
     }
-    Ok(Attachment::text(id, name, text))
+    let mut item = Attachment::text(id, name, text);
+    item.bytes = bytes;
+    item.mime = if extension == "pdf" {
+        "application/pdf"
+    } else if matches!(extension.as_str(), "md" | "markdown") {
+        "text/markdown"
+    } else {
+        "text/plain"
+    }
+    .into();
+    Ok(item)
 }
 
 /// Decode, shrink to fit 1920x1920 and re-encode as base64 PNG.
@@ -331,6 +355,8 @@ mod tests {
         std::fs::write(&path, "Agenda for Tuesday").unwrap();
         let a = import(&path).unwrap();
         assert_eq!(a.text, "Agenda for Tuesday");
+        assert!(a.bytes == b"Agenda for Tuesday");
+        assert_eq!(a.mime, "text/plain");
         assert_eq!(a.id, format!("file:{}", path.display()));
         std::fs::write(&path, [0xffu8, 0, 0x7f, 0]).unwrap();
         assert!(import(&path).is_err());
@@ -343,6 +369,8 @@ mod tests {
         let path = temp("pdf");
         std::fs::write(&path, pdf_with("Harbor lighthouse inspection")).unwrap();
         let a = import(&path).unwrap();
+        assert!(a.bytes == std::fs::read(&path).unwrap());
+        assert_eq!(a.mime, "application/pdf");
         assert!(
             a.text.contains("Harbor lighthouse inspection"),
             "{:?}",

@@ -267,11 +267,11 @@ pub fn lines_after(
     })?
     .collect::<std::result::Result<_, _>>()?)
 }
-fn label(who: &str, speaker: Option<i64>) -> String {
-    if who == "me" {
-        "You".into()
-    } else {
-        speaker.map_or("Them".into(), |n| format!("Speaker {}", n + 1))
+pub fn label(who: &str, speaker: Option<i64>) -> String {
+    match who {
+        "me" => "You".into(),
+        "room" => "Someone in the room".into(),
+        _ => speaker.map_or("Them".into(), |n| format!("Speaker {}", n + 1)),
     }
 }
 pub fn format_lines(lines: &[LineRecord]) -> String {
@@ -600,10 +600,18 @@ mod tests {
                 start_time: 2.0,
                 end_time: 3.0,
             },
+            LineRecord {
+                id: "4".into(),
+                who: "room".into(),
+                speaker: Some(0),
+                text: "passing by".into(),
+                start_time: 3.0,
+                end_time: 4.0,
+            },
         ];
         assert_eq!(
             format_lines(&utterances),
-            "You: hello\nThem: welcome\nSpeaker 3: next\n"
+            "You: hello\nThem: welcome\nSpeaker 3: next\nSomeone in the room: passing by\n"
         );
     }
 }

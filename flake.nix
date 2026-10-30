@@ -276,6 +276,15 @@
             # The guard must also fail on a mismatch, else it proves nothing.
             assert !(builtins.tryEval (builtins.readFile (guard "0.0.0"))).success;
             guard crate;
+          # Real-model speaker-embedding test (src/speech/voice_check.rs, ignored by default).
+          voice-check = sysPkgs.default.overrideAttrs (_: {
+            doCheck = true;
+            cargoTestFlags = [
+              "--test"
+              "voice_model"
+            ];
+            MEETINGAI_SPEAKER_MODEL = "${pkgs.callPackage ./nix/speaker-model.nix { }}";
+          });
           # So `nix flake check` builds them.
           package = sysPkgs.default;
           plugin = sysPkgs.plugin;

@@ -4,6 +4,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
@@ -126,6 +127,25 @@ Item {
     function showLibrary(tab) { root.library = true; lib.tab = tab; }
     function recordHook(consent) { backend.startRecording(consent); }
     function candidateHook(what) { lib.candidateHook(what); }
+    function voiceHook(what) {
+        if (what === "enroll") backend.enrollVoice();
+        else if (what === "delete") backend.deleteVoice();
+        else if (what === "pause") backend.setVoicePaused(!root.voicePaused);
+    }
+    readonly property bool voicePaused: backend.settings.voice_check_paused === true || backend.voice.paused === true
+    function chooseExportFolder(path) {
+        var m = backend.exportPromptMeeting;
+        backend.exportPromptAnswered = true;
+        backend.exportPromptMeeting = "";
+        backend.setSetting("export_folder", path);
+        if (m !== "") backend.send("meetings.export", { meeting: m });
+    }
+    function dismissExportPrompt() {
+        backend.exportPromptAnswered = true;
+        backend.exportPromptMeeting = "";
+        backend.setSetting("export_meetings", false);
+    }
+    function exportFolderHook(path) { lib.setExportFolder(path); }
     function modeHook() { hdr.openPicker(); }   // tests/harness-live.qml opens the mode list for a crop
     function ask(message, confirmText, yes) { confirm.ask(message, confirmText, yes); }   // the one confirmation dialog
     function focusProbe(next) {   // tests/keys.sh: what has the keyboard focus; next = do what Tab does first
@@ -138,7 +158,7 @@ Item {
     function dropDump() {   // tests/smoke.sh --drop: what the transcript holds after a reconnect
         const rows = [];
         for (let i = 0; i < backend.transcript.count; i++) rows.push(backend.transcript.get(i).who + "|" + backend.transcript.get(i).body);
-        return JSON.stringify({ rows: rows, now: backend.now.body, error: backend.now.error || "", answering: backend.answering, connected: backend.connected });
+        return JSON.stringify({ rows: rows, now: backend.now.body, error: backend.now.error || "", answering: backend.answering, connected: backend.connected, voice: backend.voice, voiceEnrolling: backend.voiceEnrolling, voiceError: backend.voiceError });
     }
     function geometryRoot() { return card; }   // tests/geometry.js walks this item
     readonly property real ctl: metrics.ctl
@@ -318,6 +338,37 @@ Item {
                     daemon: backend
                     theme: metrics
                     width: parent.width
+                }
+
+                BorderSurface {   // first-time export folder prompt (once per session)
+                    id: exportBanner
+                    objectName: "exportCard"
+                    visible: backend.exportPromptMeeting !== "" && !backend.isLocked("export_folder")
+                    width: parent.width
+                    height: expCol.implicitHeight + metrics.padY * 2
+                    radius: metrics.radius
+                    color: Qt.alpha(Commons.Color.foreground, 0.10)
+                    borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
+                    Column {
+                        id: expCol
+                        x: metrics.padX; y: metrics.padY
+                        width: parent.width - metrics.padX * 2
+                        spacing: Style.space(6)
+                        UiText { objectName: "exportCardTitle"; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Save meeting notes to a folder?"; color: Commons.Color.popups.text; font.pixelSize: metrics.body; font.bold: true }
+                        UiText { width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Notes, screenshots and attached documents are saved as plain files in a folder you choose."; color: Commons.Color.popups.text; opacity: metrics.dim; font.pixelSize: metrics.caption }
+                        Row {
+                            spacing: Style.spacing.xs
+                            IconButton { objectName: "exportChoose"; ts: metrics.ts; text: "Choose folder…"; bordered: true; onClicked: exportPromptDialog.open() }
+                            IconButton { objectName: "exportNotNow"; ts: metrics.ts; text: "Not now"; bordered: true; onClicked: root.dismissExportPrompt() }
+                        }
+                    }
+                    FolderDialog {
+                        id: exportPromptDialog
+                        onAccepted: {
+                            var p = decodeURIComponent(String(selectedFolder).replace(/^file:\/\//, ""));
+                            root.chooseExportFolder(p);
+                        }
+                    }
                 }
 
                 Library {
@@ -594,6 +645,95 @@ Item {
                 }
                 UiText { visible: root.modelsError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Error: could not list chat models. " + root.modelsError + root.fix(root.chatProvider); color: Commons.Color.popups.text; font.pixelSize: metrics.caption }
                 UiText { visible: root.liveModelsError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Error: could not list live answer models. " + root.liveModelsError + root.fix(root.liveProvider); color: Commons.Color.popups.text; font.pixelSize: metrics.caption }
+                Column {
+                    width: parent.width
+                    spacing: Style.spacing.xs
+                    bottomPadding: metrics.gap
+                    UiText {
+                        objectName: "voiceStatus"
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        text: backend.voiceEnrolling ? "Owner voice: recording (12 s)\u2026" : backend.voice.enrolled ? (root.voicePaused ? "Owner voice: enrolled (check paused)" : "Owner voice: enrolled") : "Owner voice: not enrolled"
+                        color: Commons.Color.popups.text
+                        font.pixelSize: metrics.body
+                        font.bold: true
+                    }
+                    UiText {
+                        objectName: "voiceSentence"
+                        visible: backend.voiceEnrolling || !backend.voice.enrolled
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        text: "The quick brown fox jumps over the lazy dog while I read this sentence at my usual pace. In our next meeting we will review the plan, agree on the dates and write down who does what."
+                        color: Commons.Color.popups.text
+                        opacity: metrics.dim
+                        font.italic: true
+                        font.pixelSize: metrics.caption
+                    }
+                    UiText {
+                        objectName: "voiceError"
+                        visible: backend.voiceError !== ""
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        text: "Error: " + backend.voiceError
+                        color: Commons.Color.popups.text
+                        font.pixelSize: metrics.caption
+                    }
+                    RowLayout {
+                        width: parent.width
+                        height: metrics.ctl
+                        spacing: metrics.gap
+                        IconButton {
+                            objectName: "voiceRecord"
+                            ts: metrics.ts
+                            Layout.alignment: Qt.AlignVCenter
+                            visible: !backend.voice.enrolled
+                            enabled: !backend.voiceEnrolling && !backend.recording
+                            opacity: enabled ? 1 : 0.5
+                            text: "Record my voice"
+                            onClicked: backend.enrollVoice()
+                        }
+                        IconButton {
+                            objectName: "voiceRecordAgain"
+                            ts: metrics.ts
+                            Layout.alignment: Qt.AlignVCenter
+                            visible: backend.voice.enrolled === true
+                            enabled: !backend.voiceEnrolling && !backend.recording
+                            opacity: enabled ? 1 : 0.5
+                            text: "Record again"
+                            onClicked: backend.enrollVoice()
+                        }
+                        IconButton {
+                            objectName: "voiceDelete"
+                            ts: metrics.ts
+                            Layout.alignment: Qt.AlignVCenter
+                            visible: backend.voice.enrolled === true
+                            enabled: !backend.voiceEnrolling
+                            opacity: enabled ? 1 : 0.5
+                            text: "Delete"
+                            onClicked: backend.deleteVoice()
+                        }
+                        UiText {
+                            Layout.alignment: Qt.AlignVCenter
+                            textFormat: Text.PlainText
+                            text: backend.lockedLabel("voice_check_paused", "Pause check")
+                            color: Commons.Color.popups.text
+                            font.pixelSize: metrics.body
+                        }
+                        Check {
+                            objectName: "voicePause"
+                            ts: metrics.ts
+                            accessibleName: "Pause check"
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: !backend.isLocked("voice_check_paused")
+                            checked: root.voicePaused
+                            onToggled: backend.setVoicePaused(!root.voicePaused)
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+                }
                 }
             }
 
