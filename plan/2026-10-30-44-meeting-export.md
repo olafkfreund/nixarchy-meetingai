@@ -189,3 +189,14 @@ step before it must pass).
 - p620: revert the nixos PR (drops `exportFolder`), or set
   `export_meetings` off in Settings. Exported folders are the user's
   files and are never deleted by a rollback.
+
+## Deviations log
+
+- **Step 4:** `export_meeting` is `async` (it awaits `spawn_blocking`).
+  The notes lock is now taken at the top of `finish_meeting_artifacts`,
+  so the no-model path is serialised with exports too; no caller holds
+  it. The spec's "enrolled voice leaves no voice data" test needs the
+  voice tables, which are on the unmerged #31 branch: it is added when
+  #31 and #44 meet (whichever merges second). Codex also changed
+  `transcript.get` to apply saved speaker names; that was out of scope
+  and was reverted (the export applies names itself).
