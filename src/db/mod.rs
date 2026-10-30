@@ -4,10 +4,12 @@ pub mod repos;
 pub mod schema;
 
 pub use repos::conversations;
+pub use repos::exports;
 pub use repos::items;
 pub use repos::library;
 pub use repos::meetings;
 pub use repos::profiles;
+pub use repos::screenshots;
 pub use repos::sessions;
 pub use repos::settings;
 pub use schema::seed;
@@ -87,6 +89,27 @@ impl Database {
                     "ALTER TABLE meetings ADD COLUMN mode TEXT NOT NULL DEFAULT 'general'",
                 )?;
             }
+            let has_original: bool = connection.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('candidate_documents')
+                 WHERE name = 'original'",
+                [],
+                |r| r.get(0),
+            )?;
+            if !has_original {
+                connection
+                    .execute_batch("ALTER TABLE candidate_documents ADD COLUMN original BLOB")?;
+            }
+            let has_mime: bool = connection.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('candidate_documents')
+                 WHERE name = 'mime'",
+                [],
+                |r| r.get(0),
+            )?;
+            if !has_mime {
+                connection.execute_batch(
+                    "ALTER TABLE candidate_documents ADD COLUMN mime TEXT NOT NULL DEFAULT ''",
+                )?;
+            }
             // Recaps written before notes_fts existed become searchable, once.
             let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             if version < 1 {
@@ -139,6 +162,40 @@ mod tests {
             Default::default(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn document_columns_are_added_to_an_old_database() {
+        let dir = std::env::temp_dir().join(format!("nm-doc-old-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("h.db");
+        let db = Database::open(&path).unwrap();
+        let candidate = repos::candidates::create(db.connection(), "Ada").unwrap();
+        repos::candidates::add_document(
+            db.connection(),
+            &candidate.id,
+            "cv",
+            "cv.pdf",
+            "old text",
+            None,
+            "",
+        )
+        .unwrap();
+        db.connection()
+            .execute_batch(
+                "ALTER TABLE candidate_documents DROP COLUMN original;
+                 ALTER TABLE candidate_documents DROP COLUMN mime",
+            )
+            .unwrap();
+        drop(db);
+
+        let db = Database::open(&path).unwrap();
+        let documents = repos::candidates::documents(db.connection(), &candidate.id).unwrap();
+        assert_eq!(documents[0].text, "old text");
+        assert_eq!(documents[0].original, None);
+        assert_eq!(documents[0].mime, "");
+        drop(db);
+        Database::open(&path).unwrap();
     }
 
     #[test]

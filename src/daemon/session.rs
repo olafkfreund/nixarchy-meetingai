@@ -3364,7 +3364,7 @@ impl Daemon {
         candidates::get(c, &a.id)
             .map_err(|e| e.to_string())?
             .ok_or("No such candidate.")?;
-        let doc = candidates::add_document(c, &a.id, &a.kind, &item.name, &item.text)
+        let doc = candidates::add_document(c, &a.id, &a.kind, &item.name, &item.text, None, "")
             .map_err(|e| e.to_string())?;
         Ok(
             json!({"id": doc.id, "kind": doc.kind, "name": doc.name, "chars": item.text.chars().count()}),
