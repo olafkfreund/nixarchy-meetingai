@@ -143,3 +143,9 @@ the examples and scripts are standalone. Redeploy p620 from main.
   test-clean: mic = one speaker plus another speaker's speech delayed and
   attenuated as speaker bleed, system = that other speaker, references
   from the LibriSpeech transcripts. Same three variants and decision rule.
+- Step 5c-e done by the lead, 2026-10-30: `tools/accuracy/libri_mix.py`
+  builds the 10 calls; `examples/echo_gate_file.rs` adds the echo gate as
+  a fourth variant, which settles #14's pending `echo_gate` decision on
+  the same set plus the 28 Oct real-room tap (stays off). Report:
+  `tools/accuracy/reports/2026-10-voice-filters.md`. Decision: no filter,
+  so no follow-up issue.

@@ -47,3 +47,9 @@ Use a throwaway Python 3.13 venv in the scratchpad. These hashes pin the Linux x
     ~/meetingai-eval/alkove-venv/bin/python -I tools/accuracy/alkove_filter.py IN.wav SAMPLE.wav OUT.wav
 
 `IN.wav` is stereo 16 kHz 16-bit PCM (mic left, system right); `SAMPLE.wav` is mono owner-only audio in the same format. The output is stereo with the system channel unchanged and prints `{"rtf": ...}`. Output must not already exist.
+
+## Without the owner: LibriSpeech calls
+
+    python3 -I tools/accuracy/libri_mix.py WAVDIR ENROLLDIR OUTDIR
+
+Builds stereo test calls with speaker bleed and double talk from LibriSpeech test-clean, with references and an owner sample each (see the script). `cargo run --release --example echo_gate_file IN.wav OUT.wav` runs a call through the daemon's echo gate. The October results are in `reports/2026-10-voice-filters.md`.
