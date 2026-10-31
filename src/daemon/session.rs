@@ -2178,17 +2178,24 @@ impl Daemon {
         let meeting = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
-            let candidate = g.candidate.take();
-            let consent = std::mem::take(&mut g.consent);
-            let local_only = self.local_only.load(Ordering::Relaxed);
             if new {
                 // A call starts a fresh meeting; only manual Play resumes the previous one.
+                // An interview set up but not yet recorded keeps its candidate; a finished one doesn't.
+                let keep = g.resume_meeting.is_none().then(|| {
+                    (
+                        g.candidate.take(),
+                        std::mem::take(&mut g.consent),
+                        self.local_only.load(Ordering::Relaxed),
+                    )
+                });
                 self.reset_session(g);
                 self.emit("session.reset", json!({}));
+                if let Some((candidate, consent, local_only)) = keep {
+                    g.candidate = candidate;
+                    g.consent = consent;
+                    self.local_only.store(local_only, Ordering::Relaxed);
+                }
             }
-            g.candidate = candidate;
-            g.consent = consent;
-            self.local_only.store(local_only, Ordering::Relaxed);
             let outcome = if self.capture && session.is_none() {
                 Err(failure.unwrap_or_else(|| "Could not start audio capture.".into()))
             } else if let Some(id) = g.resume_meeting.clone() {
@@ -2323,8 +2330,9 @@ impl Daemon {
                         }
                         Err(error) => {
                             self.error(format!("Could not change system audio: {error}"));
+                            // The session is gone; the closing path still drains the transcriber.
                             stop.store(true, Ordering::Relaxed);
-                            break;
+                            continue;
                         }
                     }
                 }
@@ -4326,7 +4334,8 @@ impl Daemon {
                     | "transcript.get"
             ) || (cmd == "settings.set"
                 && !crate::mcp::MCP_SETTINGS.contains(&args["key"].as_str().unwrap_or_default()))
-                || (cmd == "chat.send" && args.get("attachments").is_some()))
+                || (cmd == "chat.send"
+                    && (args.get("attachments").is_some() || args.get("screenshot").is_some())))
         {
             return Err("not allowed for agents".into());
         }
@@ -7398,6 +7407,29 @@ mod command_tests {
         }
         assert!(d.local_only.load(Ordering::Relaxed));
         d.handle("record.stop", json!({}), None).await.unwrap();
+        for _ in 0..100 {
+            let idle = {
+                let g = d.inner.lock();
+                g.recording.is_none() && g.finishing_meeting.is_none()
+            };
+            if idle {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        // The next call after a finished interview is an ordinary meeting, not more of the interview.
+        d.handle("record.start", json!({"new": true}), None)
+            .await
+            .unwrap();
+        {
+            let g = d.inner.lock();
+            let meeting = g.meeting_id.clone().unwrap();
+            let c = g.db.connection();
+            assert!(candidates::for_meeting(c, &meeting).unwrap().is_none());
+            assert!(!g.consent && g.candidate.is_none());
+        }
+        assert!(!d.local_only.load(Ordering::Relaxed));
+        d.handle("record.stop", json!({}), None).await.unwrap();
     }
 
     #[tokio::test]
@@ -7434,6 +7466,7 @@ mod command_tests {
                 "chat.send",
                 json!({"text": "hi", "attachments": ["/etc/hostname"]}),
             ),
+            ("chat.send", json!({"text": "hi", "screenshot": true})),
             ("quit", json!({})),
         ] {
             let err = mcp(cmd, args.clone()).await.unwrap_err();

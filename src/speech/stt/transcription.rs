@@ -1160,6 +1160,18 @@ fn lost_speech_notice(start: f64, end: f64) -> LiveEvent {
     LiveEvent::Notice(format!("lost speech for {start:.1}–{end:.1} s"))
 }
 
+/// The open system chunk's end, but only when no closed system chunk is still being transcribed:
+/// a mic line that overlaps one must wait for its text before the echo check can judge it.
+fn open_only_system_end(
+    in_flight: &std::collections::VecDeque<f64>,
+    waiting: &std::collections::VecDeque<BatchChunk>,
+    chunks: &BatchChunks,
+) -> Option<f64> {
+    (in_flight.is_empty() && !waiting.iter().any(|c| c.0 == 1))
+        .then(|| chunks.open_system_end())
+        .flatten()
+}
+
 fn earliest_system(
     in_flight: &std::collections::VecDeque<f64>,
     waiting: &std::collections::VecDeque<BatchChunk>,
@@ -1291,7 +1303,7 @@ async fn batch_task(
                     }
                     queue_chunks(&mut pending, &mut waiting, &mut system_requests, &config, &filter, &hints.glossary, &tx).await;
                     let earliest = earliest_system(&system_requests, &waiting, &chunks);
-                    emit_lines(&tx, filter.tick(chunks.now(), earliest, chunks.open_system_end())).await;
+                    emit_lines(&tx, filter.tick(chunks.now(), earliest, open_only_system_end(&system_requests, &waiting, &chunks))).await;
                 }
             }
             _ = stop.changed() => {},
@@ -1301,7 +1313,7 @@ async fn batch_task(
                 for channel in (0u8..).zip(chunks.take_opened()).filter_map(|(c, opened)| opened.then_some(c)) { let _ = tx.send(LiveEvent::SpeechStarted { channel }).await; }
                 queue_chunks(&mut pending, &mut waiting, &mut system_requests, &config, &filter, &hints.glossary, &tx).await;
                 let earliest = earliest_system(&system_requests, &waiting, &chunks);
-                emit_lines(&tx, filter.tick(chunks.now(), earliest, chunks.open_system_end())).await;
+                emit_lines(&tx, filter.tick(chunks.now(), earliest, open_only_system_end(&system_requests, &waiting, &chunks))).await;
             } }
         }
     }
@@ -1343,7 +1355,11 @@ async fn batch_task(
             let earliest = earliest_system(&system_requests, &waiting, &chunks);
             emit_lines(
                 &tx,
-                filter.tick(chunks.now(), earliest, chunks.open_system_end()),
+                filter.tick(
+                    chunks.now(),
+                    earliest,
+                    open_only_system_end(&system_requests, &waiting, &chunks),
+                ),
             )
             .await;
         }
@@ -1833,6 +1849,28 @@ mod tests {
             rest[0].1,
             ready[0].2
         );
+    }
+
+    /// A held mic line may skip ahead of the open system chunk only while no closed system
+    /// chunk is still waiting for its text: that text is what the echo check compares against.
+    #[test]
+    fn open_system_end_is_withheld_while_system_text_is_in_flight() {
+        let pcm: Vec<i16> = (0..16_000)
+            .flat_map(|i| [0, (6_000.0 * (i as f32 * 0.1).sin().signum()) as i16])
+            .collect();
+        let mut chunks = BatchChunks::default();
+        assert!(chunks.push(&pcm).is_empty());
+        let none = std::collections::VecDeque::new();
+        assert!(open_only_system_end(&none, &none_waiting(), &chunks).is_some());
+        let in_flight = std::collections::VecDeque::from([0.0]);
+        assert_eq!(
+            open_only_system_end(&in_flight, &none_waiting(), &chunks),
+            None
+        );
+    }
+
+    fn none_waiting() -> std::collections::VecDeque<BatchChunk> {
+        std::collections::VecDeque::new()
     }
 
     /// Ten utterances arriving faster than a slow engine answers all come out, in order:
