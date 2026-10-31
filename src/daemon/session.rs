@@ -55,7 +55,7 @@ use crate::{
     speech::{
         listen::{ListenSession, SessionConfig, SessionEvent},
         stt::filter::tokens,
-        transcription::{self, LiveEvent, LiveTranscriber, LiveTurns, SttHints},
+        transcription::{self, LiveEvent, LiveTranscriber, LiveTurns, SttError, SttHints},
         voice_check::{self, Embedder, MicRing, SherpaEmbedder, Verdict},
     },
 };
@@ -336,6 +336,9 @@ pub struct Daemon {
     tx: broadcast::Sender<Value>,
     pub shutdown: Notify,
     chunking: AtomicBool,
+    /// Tests: the capture open fails the way a panicked blocking task does.
+    #[cfg(test)]
+    fail_open: AtomicBool,
     /// The session's candidate is local-only: only ollama, parakeet-local and a loopback openai-compatible-stt may be used.
     local_only: AtomicBool,
     /// Settings fixed by `programs.nixarchy-meetingai.settings.enforce`; `settings.set` refuses them.
@@ -837,6 +840,8 @@ impl Daemon {
             tx,
             shutdown: Notify::new(),
             chunking: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_open: AtomicBool::new(false),
             local_only: AtomicBool::new(false),
             locked: Mutex::new(Vec::new()),
             startup_notice: Mutex::new(startup_notice),
@@ -1946,8 +1951,16 @@ impl Daemon {
         if self.chunking.swap(true, Ordering::AcqRel) {
             return;
         }
+        struct Chunking(Arc<Daemon>);
+        impl Drop for Chunking {
+            fn drop(&mut self) {
+                self.0.chunking.store(false, Ordering::Release);
+            }
+        }
+        let chunking = Chunking(self.clone());
         let me = self.clone();
         tokio::spawn(async move {
+            let _chunking = chunking;
             let (config, language) = {
                 let g = me.inner.lock();
                 (
@@ -1959,41 +1972,41 @@ impl Daemon {
                 let _serial = me.notes.lock().await;
                 // After the notes lock, so a line that arrived while waiting for it is checked too.
                 me.settle_checks().await;
-                if let Ok((made, continued)) =
-                    recap::maybe_chunk_items(&me.db_path, &meeting, &config, &language).await
-                {
-                    if made {
-                        me.emit("notes.updated", json!({"meeting": meeting}));
-                        if continued_mode_is_team(&me, &meeting) {
-                            me.emit("items.updated", json!({"meeting": meeting}));
-                        }
-                    }
-                    let pick = {
-                        let mut g = me.inner.lock();
-                        let next = continued
-                            .iter()
-                            .find(|c| !g.shown_earlier.contains(&c.item.id));
-                        match next {
-                            Some(c) if earlier_due(&mut g.last_earlier, Instant::now()) => {
-                                g.shown_earlier.insert(c.item.id.clone());
-                                Some(c.clone())
+                match recap::maybe_chunk_items(&me.db_path, &meeting, &config, &language).await {
+                    Err(error) => tracing::warn!(%error, "could not write a notes chunk"),
+                    Ok((made, continued)) => {
+                        if made {
+                            me.emit("notes.updated", json!({"meeting": meeting}));
+                            if continued_mode_is_team(&me, &meeting) {
+                                me.emit("items.updated", json!({"meeting": meeting}));
                             }
-                            _ => None,
                         }
-                    };
-                    if let Some(c) = pick {
-                        let i = &c.item;
-                        me.emit(
-                            "earlier_item",
-                            json!({"item": {"id": i.id, "kind": i.kind, "text": i.text,
+                        let pick = {
+                            let mut g = me.inner.lock();
+                            let next = continued
+                                .iter()
+                                .find(|c| !g.shown_earlier.contains(&c.item.id));
+                            match next {
+                                Some(c) if earlier_due(&mut g.last_earlier, Instant::now()) => {
+                                    g.shown_earlier.insert(c.item.id.clone());
+                                    Some(c.clone())
+                                }
+                                _ => None,
+                            }
+                        };
+                        if let Some(c) = pick {
+                            let i = &c.item;
+                            me.emit(
+                                "earlier_item",
+                                json!({"item": {"id": i.id, "kind": i.kind, "text": i.text,
                                 "created_at": i.created_at, "status": i.status},
                                 "quote": c.quote, "line": c.line, "meeting": meeting,
                                 "new_item": c.new_item}),
-                        );
+                            );
+                        }
                     }
                 }
             }
-            me.chunking.store(false, Ordering::Release);
         });
     }
 
@@ -2087,16 +2100,28 @@ impl Daemon {
                 g.settings.echo_gate,
             )
         };
+        struct RecordingSlot<'a> {
+            daemon: &'a Daemon,
+            armed: bool,
+        }
+        impl Drop for RecordingSlot<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    self.daemon.inner.lock().recording = None;
+                }
+            }
+        }
+        let mut slot = RecordingSlot {
+            daemon: self,
+            armed: true,
+        };
         // Load Parakeet before capture makes chunks, so a slow first load cannot back them up.
         if speech.as_ref().is_some_and(|c| c.id == "parakeet-local") {
             let loaded = tokio::task::spawn_blocking(crate::speech::stt::parakeet::preload)
                 .await
                 .map_err(|e| e.to_string())
                 .and_then(|r| r);
-            if let Err(error) = loaded {
-                self.inner.lock().recording = None;
-                return Err(error);
-            }
+            loaded?;
         }
         let opened = if self.capture {
             let config = SessionConfig {
@@ -2113,6 +2138,10 @@ impl Daemon {
             .await
             .map_err(|e| e.to_string())?
         } else {
+            #[cfg(test)]
+            if self.fail_open.load(Ordering::Relaxed) {
+                return Err("task panicked".into());
+            }
             (None, Vec::new())
         };
         let (session, events) = opened;
@@ -2127,11 +2156,17 @@ impl Daemon {
         let meeting = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
+            let candidate = g.candidate.take();
+            let consent = std::mem::take(&mut g.consent);
+            let local_only = self.local_only.load(Ordering::Relaxed);
             if new {
                 // A call starts a fresh meeting; only manual Play resumes the previous one.
                 self.reset_session(g);
                 self.emit("session.reset", json!({}));
             }
+            g.candidate = candidate;
+            g.consent = consent;
+            self.local_only.store(local_only, Ordering::Relaxed);
             let outcome = if self.capture && session.is_none() {
                 Err(failure.unwrap_or_else(|| "Could not start audio capture.".into()))
             } else if let Some(id) = g.resume_meeting.clone() {
@@ -2185,13 +2220,14 @@ impl Daemon {
                     id
                 }
                 Err(error) => {
-                    g.recording = None;
+                    drop(guard);
                     return Err(error);
                 }
             }
         };
         let me = self.clone();
         tokio::spawn(async move { me.recording_task(session, speech, stop, meeting).await });
+        slot.armed = false;
         Ok(json!({}))
     }
 
@@ -2247,13 +2283,30 @@ impl Daemon {
                 if let Some(mut s) = session.take() {
                     events = s.stop();
                 }
-            } else if let Some(s) = session.as_mut() {
+            } else if session.is_some() {
                 let want = self.inner.lock().system;
                 if want != system_on {
                     system_on = want;
-                    events = s.set_system_audio(want);
+                    let s = session.take().unwrap();
+                    match tokio::task::spawn_blocking(move || {
+                        let mut s = s;
+                        let events = s.set_system_audio(want);
+                        (s, events)
+                    })
+                    .await
+                    {
+                        Ok((s, changed)) => {
+                            session = Some(s);
+                            events = changed;
+                        }
+                        Err(error) => {
+                            self.error(format!("Could not change system audio: {error}"));
+                            stop.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
                 }
-                events.extend(s.pump());
+                events.extend(session.as_mut().unwrap().pump());
             }
             for event in events {
                 match event {
@@ -2267,8 +2320,13 @@ impl Daemon {
                         if let Some(l) = &live
                             && let Err(error) = l.push(&samples).await
                         {
-                            self.error(error.to_string());
-                            done = true;
+                            // A closed stream says why through its own events, drained below.
+                            if !matches!(&error, SttError::Socket(message) if message == "Speech stream ended; start recording again")
+                            {
+                                self.error(error.to_string());
+                                done = true;
+                            }
+                            let _ = session.take().map(|mut s| s.stop());
                             break;
                         }
                     }
@@ -2299,6 +2357,7 @@ impl Daemon {
                             if !closing {
                                 self.error("The speech stream ended unexpectedly. Recording stopped; start again to reconnect.");
                             }
+                            let _ = session.take().map(|mut s| s.stop());
                             done = true;
                             break;
                         }
@@ -2406,7 +2465,7 @@ impl Daemon {
             }
             self.emit_state(g);
         }
-        self.finish_meeting_artifacts(meeting).await;
+        self.finish_meeting_artifacts(meeting, true).await;
         let mut g = self.inner.lock();
         g.finishing_meeting = None;
         self.emit_state(&g); // the shell shows "Finishing" until it hears this
@@ -2556,7 +2615,7 @@ impl Daemon {
     }
 
     /// Name the meeting, then summarise what is left and consolidate every chunk.
-    async fn finish_meeting_artifacts(self: &Arc<Self>, meeting: &str) {
+    async fn finish_meeting_artifacts(self: &Arc<Self>, meeting: &str, export: bool) {
         self.settle_checks().await;
         let _serial = self.notes.lock().await;
         let (config, language, body, local, interview, said, named) = {
@@ -2592,7 +2651,7 @@ impl Daemon {
                     !g.settings.export_folder.trim().is_empty(),
                 )
             };
-            if enabled {
+            if export && enabled {
                 if !has_folder {
                     self.emit("export.folder_needed", json!({"meeting": meeting}));
                 } else if let Err(error) = self.export_meeting(meeting).await {
@@ -3033,10 +3092,8 @@ impl Daemon {
             self.restore_chat(g, id)?;
             return Ok(json!({"kind": "chat"}));
         }
-        let record = meetings::list(g.db.connection(), 500)
+        let record = meetings::get(g.db.connection(), id)
             .map_err(|e| e.to_string())?
-            .into_iter()
-            .find(|m| m.id == id)
             .ok_or("This session no longer exists.")?;
         self.reset_session(g);
         self.emit("session.reset", json!({}));
@@ -4222,6 +4279,31 @@ impl Daemon {
         {
             return Err("not allowed for agents".into());
         }
+        // This narrows MCP permissions; other local processes can omit `origin`.
+        if origin == Some("mcp")
+            && (!matches!(
+                cmd,
+                "chat.send"
+                    | "items.list"
+                    | "notes.get"
+                    | "notes.regenerate"
+                    | "now.get"
+                    | "record.start"
+                    | "record.stop"
+                    | "series.list"
+                    | "session.list"
+                    | "session.new"
+                    | "session.restore"
+                    | "settings.get"
+                    | "settings.set"
+                    | "state.get"
+                    | "transcript.get"
+            ) || (cmd == "settings.set"
+                && !crate::mcp::MCP_SETTINGS.contains(&args["key"].as_str().unwrap_or_default()))
+                || (cmd == "chat.send" && args.get("attachments").is_some()))
+        {
+            return Err("not allowed for agents".into());
+        }
         tracing::info!(origin, cmd);
         // Agents cannot give the candidate's consent, and cannot read a local-only interview.
         let mut args = args;
@@ -4292,6 +4374,8 @@ impl Daemon {
             "state.get" if self.local_now(&g) => {
                 value["calendar_title"] = Value::Null;
                 value["meeting"] = Value::Null;
+                value["candidate"] = Value::Null;
+                value["consent"] = Value::Null;
             }
             "items.list" => {
                 if let Some(list) = value.as_array_mut() {
@@ -4521,8 +4605,14 @@ impl Daemon {
             "notes.get" => self.notes_get(&parse::<protocol::MeetingArg>(args)?.meeting),
             "notes.regenerate" => {
                 let meeting = parse::<protocol::MeetingArg>(args)?.meeting;
+                {
+                    let g = self.inner.lock();
+                    if g.recording.is_some() && g.meeting_id.as_deref() == Some(&meeting) {
+                        return Err("That meeting is still recording.".into());
+                    }
+                }
                 let me = self.clone();
-                tokio::spawn(async move { me.finish_meeting_artifacts(&meeting).await });
+                tokio::spawn(async move { me.finish_meeting_artifacts(&meeting, false).await });
                 Ok(json!({}))
             }
             "meetings.export" => {
@@ -5031,12 +5121,18 @@ mod command_tests {
                 .iter()
                 .any(|p| p["preset"] == "openai-speech")
         );
+        assert!(
+            d.handle("presets.list", json!({}), Some("agent"))
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            d.handle("presets.list", json!({}), Some("mcp"))
+                .await
+                .unwrap_err(),
+            "not allowed for agents"
+        );
         for origin in ["agent", "mcp"] {
-            assert!(
-                d.handle("presets.list", json!({}), Some(origin))
-                    .await
-                    .is_ok()
-            );
             for cmd in [
                 "providers.add",
                 "providers.update",
@@ -5570,7 +5666,7 @@ mod command_tests {
         };
         d.inner.lock().settings.chat_provider = "none".into();
         let mut events = d.subscribe();
-        d.finish_meeting_artifacts(&meeting).await;
+        d.finish_meeting_artifacts(&meeting, true).await;
         let mut folder_needed = false;
         while let Ok(event) = events.try_recv() {
             folder_needed |= event["event"] == "export.folder_needed";
@@ -5584,7 +5680,7 @@ mod command_tests {
 
         let root = d.db_path.parent().unwrap().join("exports");
         d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
-        d.finish_meeting_artifacts(&meeting).await;
+        d.finish_meeting_artifacts(&meeting, true).await;
         assert!(
             exports::get(d.inner.lock().db.connection(), &meeting)
                 .unwrap()
@@ -5604,7 +5700,7 @@ mod command_tests {
             .unwrap()
         };
         d.inner.lock().settings.export_meetings = false;
-        d.finish_meeting_artifacts(&other).await;
+        d.finish_meeting_artifacts(&other, true).await;
         assert!(
             exports::get(d.inner.lock().db.connection(), &other)
                 .unwrap()
@@ -6502,7 +6598,7 @@ mod command_tests {
             }
             m
         };
-        d.finish_meeting_artifacts(&m).await;
+        d.finish_meeting_artifacts(&m, true).await;
         let mut updated = 0;
         while let Ok(e) = events.try_recv() {
             updated += usize::from(e["event"] == "items.updated");
@@ -7002,6 +7098,7 @@ mod command_tests {
         }
         let st = agent("state.get", json!({})).await.unwrap();
         assert!(st["meeting"].is_null() && st["calendar_title"].is_null());
+        assert!(st["candidate"].is_null() && st["consent"].is_null());
         d.local_only.store(false, Ordering::Relaxed);
         // Series replies never carry an interview, even one that is in a series.
         let series = {
@@ -7231,5 +7328,196 @@ mod command_tests {
         d.inject_live(mic("why Rust", 4.0));
         assert_eq!(status(&short), "planned");
         call("record.stop", json!({})).await.unwrap();
+    }
+
+    /// A session with a local-only candidate and a loopback speech provider; returns its id.
+    async fn local_interview(d: &Arc<Daemon>) -> String {
+        let call = |cmd: &'static str, args: Value| {
+            let d = d.clone();
+            async move { d.handle(cmd, args, None).await.unwrap() }
+        };
+        let id = call("candidate.create", json!({"name": "Ada"})).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        call("session.new", json!({"candidate": id})).await;
+        call("candidate.local_only", json!({"id": id, "on": true})).await;
+        for (key, value) in [
+            ("speech_base_url", "http://127.0.0.1:8000"),
+            ("speech_model", "m"),
+            ("speech_provider", "openai-compatible-stt"),
+        ] {
+            call("settings.set", json!({"key": key, "value": value})).await;
+        }
+        id
+    }
+
+    #[tokio::test]
+    async fn a_new_recording_keeps_the_chosen_candidate_consent_and_local_only() {
+        let d = daemon();
+        let id = local_interview(&d).await;
+        d.handle("record.start", json!({"consent": true, "new": true}), None)
+            .await
+            .unwrap();
+        {
+            let g = d.inner.lock();
+            let meeting = g.meeting_id.clone().unwrap();
+            let c = g.db.connection();
+            let linked = candidates::for_meeting(c, &meeting).unwrap().map(|c| c.id);
+            assert_eq!(linked.as_deref(), Some(id.as_str()));
+            assert!(d.local_for(c, Some(&meeting)));
+            assert!(g.consent && g.candidate.as_deref() == Some(id.as_str()));
+        }
+        assert!(d.local_only.load(Ordering::Relaxed));
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mcp_may_send_only_its_own_commands() {
+        let d = daemon();
+        let meeting = {
+            let g = d.inner.lock();
+            meetings::start(
+                g.db.connection(),
+                "Review",
+                "",
+                "en",
+                None,
+                Default::default(),
+            )
+            .unwrap()
+        };
+        let mcp = |cmd: &'static str, args: Value| {
+            let d = d.clone();
+            async move { d.handle(cmd, args, Some("mcp")).await }
+        };
+        for (cmd, args) in [
+            ("settings.set", json!({"key": "api_key", "value": "x"})),
+            (
+                "settings.set",
+                json!({"key": "mcp_allow_record", "value": true}),
+            ),
+            ("attachment.preview", json!({"path": "/etc/hostname"})),
+            ("record.tap", json!({})),
+            ("candidate.local_only", json!({"id": "x", "on": false})),
+            ("session.delete", json!({"id": "x"})),
+            ("presets.list", json!({})),
+            (
+                "chat.send",
+                json!({"text": "hi", "attachments": ["/etc/hostname"]}),
+            ),
+            ("quit", json!({})),
+        ] {
+            let err = mcp(cmd, args.clone()).await.unwrap_err();
+            assert_eq!(err, "not allowed for agents", "{cmd} {args}");
+        }
+        assert!(!d.inner.lock().settings.mcp_allow_record);
+        for (cmd, args) in [
+            ("state.get", json!({})),
+            ("settings.get", json!({})),
+            ("settings.set", json!({"key": "text_scale", "value": 1.2})),
+            ("session.list", json!({})),
+            ("series.list", json!({})),
+            ("now.get", json!({})),
+            ("transcript.get", json!({})),
+            ("items.list", json!({"meeting": meeting})),
+            ("session.new", json!({})),
+        ] {
+            let result = mcp(cmd, args.clone()).await;
+            assert!(result.is_ok(), "{cmd} {args}: {result:?}");
+        }
+        for cmd in [
+            "chat.send",
+            "notes.get",
+            "notes.regenerate",
+            "session.restore",
+        ] {
+            let result = mcp(cmd, json!({})).await;
+            assert_ne!(result, Err("not allowed for agents".into()), "{cmd}");
+        }
+    }
+
+    #[tokio::test]
+    async fn regenerating_notes_never_exports_and_waits_for_the_recording() {
+        let d = daemon();
+        let meeting = {
+            let g = d.inner.lock();
+            meetings::start(
+                g.db.connection(),
+                "Review",
+                "",
+                "en",
+                None,
+                Default::default(),
+            )
+            .unwrap()
+        };
+        let root = d.db_path.parent().unwrap().join("exports");
+        {
+            let mut g = d.inner.lock();
+            g.settings.chat_provider = "none".into();
+            g.settings.export_meetings = true;
+            g.settings.export_folder = root.to_string_lossy().into_owned();
+        }
+        let mut events = d.subscribe();
+        d.handle("notes.regenerate", json!({"meeting": meeting}), None)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while events.recv().await.unwrap()["event"] != "items.updated" {}
+        })
+        .await
+        .unwrap();
+        // The regenerate task holds the notes lock until it returns.
+        drop(d.notes.lock().await);
+        assert!(
+            exports::get(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.exists() || std::fs::read_dir(&root).unwrap().count() == 0);
+
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let live = d.inner.lock().meeting_id.clone().unwrap();
+        let err = d
+            .handle("notes.regenerate", json!({"meeting": live}), None)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "That meeting is still recording.");
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_frees_the_recording_slot() {
+        let d = daemon();
+        d.fail_open.store(true, Ordering::Relaxed);
+        let err = d.handle("record.start", json!({}), None).await.unwrap_err();
+        assert_eq!(err, "task panicked");
+        assert!(d.inner.lock().recording.is_none());
+        d.fail_open.store(false, Ordering::Relaxed);
+        d.handle("record.start", json!({}), None).await.unwrap();
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_finds_a_meeting_older_than_the_list() {
+        let d = daemon();
+        let first = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            // The first one made is the oldest: the list caps at the newest 500.
+            let first = meetings::start(c, "Oldest", "", "en", None, Default::default()).unwrap();
+            for i in 0..500 {
+                meetings::start(c, &format!("M{i}"), "", "en", None, Default::default()).unwrap();
+            }
+            first
+        };
+        d.handle("session.restore", json!({"id": first}), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            d.inner.lock().resume_meeting.as_deref(),
+            Some(first.as_str())
+        );
     }
 }
