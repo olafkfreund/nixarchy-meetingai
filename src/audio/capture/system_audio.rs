@@ -23,6 +23,8 @@ pub enum SystemAudioError {
     Spawn(String),
     #[error("server audio capture requires Linux")]
     Unsupported,
+    #[error("the speaker recording stopped")]
+    Stopped,
 }
 
 /// A running `parec` process and its buffered samples.
@@ -188,6 +190,22 @@ impl SystemAudio {
             Some("audio recorder has stopped".to_owned())
         } else {
             None
+        }
+    }
+}
+
+#[cfg(test)]
+impl SystemAudio {
+    /// A recorder whose process has already exited, for tests of the callers.
+    pub(crate) fn stopped_for_test() -> Self {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let _ = child.wait();
+        Self {
+            source: "fake output".to_owned(),
+            samples: Arc::new(Mutex::new(SampleQueue::new(16))),
+            child: Mutex::new(child),
+            reader: None,
+            exited: AtomicBool::new(true),
         }
     }
 }
