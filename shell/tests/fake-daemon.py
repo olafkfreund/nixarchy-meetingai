@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--call] [--providers] [--locked] [--export-ask] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--reask] [--call] [--providers] [--locked] [--export-ask] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -47,6 +47,7 @@ dropped = [False]
 first_run = "--first-run" in sys.argv   # no provider, speech not ready: the Setup card
 err = "--error" in sys.argv          # a typed question starts, waits, then fails (Writing bar, then Retry)
 stale = "--stale" in sys.argv        # turn 2 starts, then the late tail of turn 1 arrives: the client must drop it
+reask = "--reask" in sys.argv        # connect while turn 1 streams (now.get says writing), then ask: turn 1's late delta must not take the new question
 drop = "--drop" in sys.argv          # the first connection is cut mid-answer; the client reconnects and asks transcript.get / now.get
 providers = "--providers" in sys.argv
 call = "--call" in sys.argv
@@ -411,6 +412,15 @@ class Handler(socketserver.StreamRequestHandler):
         self.send({"event": "answer.error", "turn": 1, "message": "late failure", **PROVIDER})
         self.send({"event": "answer.done", "turn": 1, **PROVIDER})
 
+    def reask_tail(self, question):
+        """--reask: the late tail of turn 1 arrives before the new question's answer.started."""
+        time.sleep(0.2)
+        self.send({"event": "answer.delta", "turn": 1, "text": "OLDTAIL", **PROVIDER})
+        time.sleep(0.2)
+        self.send({"event": "answer.started", "turn": 2, "question": question, "automatic": False, **PROVIDER})
+        self.send({"event": "answer.delta", "turn": 2, "text": "NEW", **PROVIDER})
+        self.send({"event": "answer.done", "turn": 2, **PROVIDER})
+
     def stream(self):
         time.sleep(0.3)
         if not slow:
@@ -598,6 +608,8 @@ class Handler(socketserver.StreamRequestHandler):
                 data = {"meeting": "m1", "lines": [l for l in SPOKEN if l["line"] > req.get("args", {}).get("after_line", 0)]}
             elif voice_mode and cmd == "transcript.get":
                 data = {"meeting": "m1", "lines": [{"line": 1, "who": "room", "speaker": "", "text": "Earlier room remark", "t0": 1.0, "t1": 2.5}] if req.get("args", {}).get("after_line", 0) == 0 else []}
+            elif reask and cmd == "now.get":
+                data = {"status": "writing", "question": "old?", "answer": "OLD1", "provider": PROVIDER["provider"], "model": PROVIDER["model"], "suggestions": []}
             elif drop and cmd == "now.get":
                 data = {"status": "writing" if ANSWER["streaming"] else "ready" if ANSWER["body"] else "idle", "question": ANSWER["question"], "answer": ANSWER["body"], "provider": PROVIDER["provider"], "model": PROVIDER["model"], "suggestions": ANSWER["suggestions"]}
             if cmd == "voice.status":
@@ -671,9 +683,9 @@ class Handler(socketserver.StreamRequestHandler):
                 self.send({"event": "session.reset"})
                 self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})
             if cmd == "chat.send":
-                threading.Thread(target=self.typed, args=(req["args"].get("text", ""),), daemon=True).start()
+                threading.Thread(target=self.reask_tail if reask else self.typed, args=(req["args"].get("text", ""),), daemon=True).start()
             if cmd == "state.get":
-                threading.Thread(target=self.stream_stale if stale else self.stream_voice if voice_mode else self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
+                threading.Thread(target=self.stream_stale if stale else self.stream_resume if reask else self.stream_voice if voice_mode else self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

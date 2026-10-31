@@ -270,39 +270,36 @@ fn names(folder: &Path, id: &str) -> Option<bool> {
     Some(lines.next() == Some("---") && lines.take_while(|l| *l != "---").any(|l| l == want))
 }
 
-/// Build `files` in a temporary sibling, keep the old directory until the new one is in place.
-fn swap(dest: &Path, tmp: &Path, old: &Path, files: &[(String, &[u8])]) -> io::Result<()> {
-    mkdir(tmp)?;
-    for (n, d) in files {
-        put(tmp, Path::new(n), d)?;
-    }
-    match fs::symlink_metadata(dest) {
-        Ok(m) if m.is_dir() => fs::rename(dest, old)?,
-        Ok(_) => fs::remove_file(dest)?,
-        Err(_) => {}
-    }
-    fs::rename(tmp, dest)
+fn sha256(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
-/// Replace `folder/name` with a directory holding `files`; with no files it is removed (the app owns it).
-/// A failure leaves the previous directory in place.
-fn swap_dir(folder: &Path, name: &str, files: &[(String, &[u8])]) -> io::Result<()> {
+/// Write `files` into `folder/name`, keeping any other files already there; remove the directory
+/// only when `files` is empty and nothing else is in it.
+fn write_dir(folder: &Path, name: &str, files: &[(String, &[u8])]) -> io::Result<()> {
     let dest = folder.join(name);
     if files.is_empty() {
-        return rm(&dest);
+        let _ = fs::remove_dir(&dest);
+        return Ok(());
     }
-    let tmp = folder.join(format!(".{name}.tmp"));
-    let old = folder.join(format!(".{name}.old"));
-    let r = swap(&dest, &tmp, &old, files);
-    if r.is_ok() {
-        let _ = rm(&old);
-    } else {
-        let _ = rm(&tmp);
-        if fs::symlink_metadata(&dest).is_err() {
-            let _ = fs::rename(&old, &dest);
+    if fs::symlink_metadata(&dest).is_ok_and(|m| !m.is_dir()) {
+        fs::remove_file(&dest)?;
+    }
+    mkdir(&dest)?;
+    for (n, d) in files {
+        let tmp = format!(".{n}.tmp");
+        rm(&dest.join(&tmp))?;
+        put(&dest, Path::new(&tmp), d)?;
+        if let Err(err) = fs::rename(dest.join(&tmp), dest.join(n)) {
+            let _ = rm(&dest.join(&tmp));
+            return Err(err);
         }
     }
-    r
+    Ok(())
 }
 
 /// Choose, rename or create the meeting folder under `root`. Returns it; writes no contents.
@@ -342,8 +339,9 @@ pub fn place(root: &Path, previous: Option<&Path>, e: &Export) -> io::Result<Pat
     Ok(dest)
 }
 
-/// Write the meeting's files into `folder`: screenshots and documents first, `notes.md` last.
-pub fn fill(folder: &Path, e: &Export) -> io::Result<()> {
+/// Write the meeting's files into `folder`, keeping an edited `notes.md` beside `notes (updated).md`.
+/// Returns the sha256 of the notes file written.
+pub fn fill_tracked(folder: &Path, e: &Export, stored: Option<&str>) -> io::Result<String> {
     for n in [
         ".notes.md.tmp",
         ".screenshots.tmp",
@@ -363,15 +361,29 @@ pub fn fill(folder: &Path, e: &Export) -> io::Result<()> {
         .into_iter()
         .zip(e.docs.iter().map(|d| d.data.as_slice()))
         .collect();
-    swap_dir(folder, "screenshots", &shots)?;
-    swap_dir(folder, "documents", &docs)?;
+    write_dir(folder, "screenshots", &shots)?;
+    write_dir(folder, "documents", &docs)?;
+    let notes = folder.join("notes.md");
+    let target = match fs::symlink_metadata(&notes) {
+        Err(_) => "notes.md",
+        Ok(_) if stored.is_some_and(|s| fs::read(&notes).ok().is_some_and(|b| sha256(&b) == s)) => {
+            "notes.md"
+        }
+        Ok(_) => "notes (updated).md",
+    };
+    let rendered = render(e);
     let tmp = ".notes.md.tmp";
-    put(folder, Path::new(tmp), render(e).as_bytes())?;
-    if let Err(err) = fs::rename(folder.join(tmp), folder.join("notes.md")) {
+    put(folder, Path::new(tmp), rendered.as_bytes())?;
+    if let Err(err) = fs::rename(folder.join(tmp), folder.join(target)) {
         let _ = rm(&folder.join(tmp));
         return Err(err);
     }
-    Ok(())
+    Ok(sha256(rendered.as_bytes()))
+}
+
+/// Write the meeting's files into `folder`: screenshots and documents first, `notes.md` last.
+pub fn fill(folder: &Path, e: &Export) -> io::Result<()> {
+    fill_tracked(folder, e, None).map(drop)
 }
 
 #[cfg(test)]
@@ -395,8 +407,16 @@ mod tests {
 
     fn write(root: &Path, previous: Option<&Path>, e: &Export) -> io::Result<PathBuf> {
         let f = place(root, previous, e)?;
-        fill(&f, e)?;
+        fill_tracked(&f, e, None)?;
         Ok(f)
+    }
+
+    fn sha(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     fn fixture(title: &str) -> Export {
@@ -553,10 +573,10 @@ mod tests {
     }
 
     #[test]
-    fn failed_swap_keeps_previous_and_symlinks_are_not_followed() {
+    fn failed_write_keeps_previous_and_symlinks_are_not_followed() {
         let t = Tmp::new();
         let f = write(&t.0, None, &fixture("Safe")).unwrap();
-        // a file in the way of the new screenshots tmp folder makes the swap fail
+        // a non-empty directory in the way of shot-02.png makes the write fail
         let mut bad = fixture("Safe");
         bad.shots.push(Shot {
             taken_at: 1.0,
@@ -564,28 +584,43 @@ mod tests {
             mime: "image/png".into(),
             data: vec![9],
         });
-        let (files, tmp, old) = (
-            [
-                ("shot-01.png".to_string(), &b"x"[..]),
-                ("shot-01.png".to_string(), &b"y"[..]),
-            ],
-            f.join(".screenshots.tmp"),
-            f.join(".screenshots.old"),
+        fs::create_dir_all(f.join("screenshots/shot-02.png/x")).unwrap();
+        assert!(fill_tracked(&f, &bad, None).is_err());
+        assert!(f.join("screenshots/shot-01.png").is_file());
+        assert_eq!(
+            fs::read_dir(f.join("screenshots"))
+                .unwrap()
+                .filter(|e| e
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp"))
+                .count(),
+            0
         );
-        assert!(swap_dir(&f, "screenshots", &files).is_err());
-        assert!(f.join("screenshots/shot-01.png").is_file() && !tmp.exists() && !old.exists());
+        fs::remove_dir_all(f.join("screenshots/shot-02.png")).unwrap();
         // a symlink at the destination is unlinked, its target untouched
         let target = t.0.join("target");
         fs::create_dir(&target).unwrap();
         fs::write(target.join("keep"), "k").unwrap();
         fs::remove_dir_all(f.join("screenshots")).unwrap();
         std::os::unix::fs::symlink(&target, f.join("screenshots")).unwrap();
-        fill(&f, &bad).unwrap();
+        fill_tracked(&f, &bad, None).unwrap();
         assert!(target.join("keep").is_file() && f.join("screenshots/shot-02.png").is_file());
-        // a planted symlink at the tmp name is cleared, not followed
-        std::os::unix::fs::symlink(&target, f.join(".notes.md.tmp")).unwrap();
-        fill(&f, &bad).unwrap();
         assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
+        // a planted symlink at a file name is replaced, not followed
+        fs::remove_file(f.join("screenshots/shot-01.png")).unwrap();
+        std::os::unix::fs::symlink(target.join("keep"), f.join("screenshots/shot-01.png")).unwrap();
+        std::os::unix::fs::symlink(&target, f.join(".notes.md.tmp")).unwrap();
+        fill_tracked(&f, &bad, None).unwrap();
+        assert_eq!(fs::read_to_string(target.join("keep")).unwrap(), "k");
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
+        assert!(
+            !fs::symlink_metadata(f.join("screenshots/shot-01.png"))
+                .unwrap()
+                .is_symlink()
+        );
     }
 
     #[test]
@@ -632,8 +667,72 @@ mod tests {
         let mut bare = fixture("Sync");
         bare.shots.clear();
         bare.docs.clear();
+        // our earlier files are never deleted, so their folders stay; an empty one goes
+        fs::remove_file(first.join("documents/cv.pdf")).unwrap();
         let again = write(&t.0, Some(&first), &bare).unwrap();
         assert_eq!(again, first);
-        assert!(!again.join("screenshots").exists() && !again.join("documents").exists());
+        assert!(again.join("screenshots/shot-01.png").is_file());
+        assert!(!again.join("documents").exists());
+    }
+
+    #[test]
+    fn edited_notes_survive_beside_updated_notes() {
+        let t = Tmp::new();
+        let f = place(&t.0, None, &fixture("Sync")).unwrap();
+        let first = fill_tracked(&f, &fixture("Sync"), None).unwrap();
+        assert_eq!(first, sha(&fs::read(f.join("notes.md")).unwrap()));
+        // unchanged since our write: replaced in place
+        let mut later = fixture("Sync");
+        later.summary = "Second pass.".into();
+        let second = fill_tracked(&f, &later, Some(&first)).unwrap();
+        assert!(
+            fs::read_to_string(f.join("notes.md"))
+                .unwrap()
+                .contains("Second pass.")
+        );
+        assert!(!f.join("notes (updated).md").exists());
+        assert_eq!(second, sha(&fs::read(f.join("notes.md")).unwrap()));
+        // edited by the user: left alone, the new notes go beside it
+        fs::write(f.join("notes.md"), "my edit").unwrap();
+        later.summary = "Third pass.".into();
+        let third = fill_tracked(&f, &later, Some(&second)).unwrap();
+        assert_eq!(fs::read_to_string(f.join("notes.md")).unwrap(), "my edit");
+        let updated = fs::read(f.join("notes (updated).md")).unwrap();
+        assert!(String::from_utf8_lossy(&updated).contains("Third pass."));
+        assert_eq!(third, sha(&updated));
+        // no stored hash (an export from before hashes were kept): never overwritten
+        let g = place(&t.0, None, &fixture("Legacy")).unwrap();
+        fs::write(g.join("notes.md"), "old export").unwrap();
+        fill_tracked(&g, &fixture("Legacy"), None).unwrap();
+        assert_eq!(
+            fs::read_to_string(g.join("notes.md")).unwrap(),
+            "old export"
+        );
+        assert!(g.join("notes (updated).md").is_file());
+    }
+
+    #[test]
+    fn user_files_in_export_folders_survive() {
+        let t = Tmp::new();
+        let f = write(&t.0, None, &fixture("Sync")).unwrap();
+        fs::write(f.join("screenshots/mine.png"), "mine").unwrap();
+        fs::write(f.join("documents/extra.txt"), "extra").unwrap();
+        let mut bare = fixture("Sync");
+        bare.shots.clear();
+        bare.docs.clear();
+        write(&t.0, Some(&f), &bare).unwrap();
+        write(&t.0, Some(&f), &fixture("Sync")).unwrap();
+        assert_eq!(
+            fs::read_to_string(f.join("screenshots/mine.png")).unwrap(),
+            "mine"
+        );
+        assert_eq!(
+            fs::read_to_string(f.join("documents/extra.txt")).unwrap(),
+            "extra"
+        );
+        assert_eq!(
+            fs::read(f.join("screenshots/shot-01.png")).unwrap(),
+            [1, 2, 3]
+        );
     }
 }

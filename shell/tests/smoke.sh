@@ -103,6 +103,28 @@ if d["now"] != "NEW" or d["error"] != "":
 print("stale: replies of earlier turns are dropped")
 PY
 
+# --reask: connected mid-stream (now.turn unknown), the user asks; the late delta of the old turn
+# arrives before answer.started and must neither take NOW nor land in the transcript.
+ln -sf "$here/tests/harness-reask.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-reask"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/reask.log" --reask &
+fake=$!
+sleep 0.5
+timeout 7 quickshell -p "$work/cfg" > "$work/reask.out" 2> "$work/reask.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/reask.err" "$work/reask.out"; then echo "FAIL (reask): QML errors above" >&2; exit 1; fi
+python3 - "$work/reask.out" <<'PY'
+import json, sys
+line = next((l for l in open(sys.argv[1], errors="replace") if "REASK {" in l), None)
+if line is None:
+    sys.exit("FAIL (reask): no dump")
+d = json.loads(line[line.index("REASK ") + 6:])
+if d["now"] != "NEW" or any("OLDTAIL" in r for r in d["rows"]):
+    sys.exit(f"FAIL (reask): the old turn's late delta took the new question: {d}")
+print("reask: a new question after a reconnect ignores the old turn's deltas")
+PY
+
 # --locked: settings fixed by Nix are never sent (live_provider is free and still is; a locked provider keeps its model), and the Settings page loads.
 ln -sf "$here/tests/harness-locked.qml" "$work/cfg/shell.qml"
 export XDG_RUNTIME_DIR="$work/run-locked"
