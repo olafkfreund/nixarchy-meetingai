@@ -67,10 +67,17 @@ impl CustomProvider {
         }
         if self.streaming {
             if speech {
-                let url = reqwest::Url::parse(&self.stream_url)
+                let mut url = reqwest::Url::parse(&self.stream_url)
                     .map_err(|_| "Enter a WebSocket stream URL.".to_owned())?;
                 if !matches!(url.scheme(), "ws" | "wss") {
                     return Err("Use a ws or wss stream URL.".into());
+                }
+                if url.scheme() == "ws" {
+                    url.set_scheme("http")
+                        .map_err(|_| "Enter a WebSocket stream URL.".to_owned())?;
+                    if !super::providers::endpoint_allowed(url.as_str()) {
+                        return Err("Use wss for non-local stream URLs.".into());
+                    }
                 }
             } else {
                 let native = if self.request_format == "anthropic" {
@@ -222,5 +229,28 @@ mod tests {
         assert_eq!(p.header("k1").unwrap().1, "k1");
         p.auth = "none".into();
         assert_eq!(p.header("k1"), None);
+    }
+
+    #[test]
+    fn plain_ws_streams_are_loopback_only() {
+        let mut p = CustomProvider {
+            request_format: "multipart-wav".into(),
+            response_path: "/text".into(),
+            streaming: true,
+            ..CustomProvider::default()
+        };
+        for ok in [
+            "wss://speech.example/stream",
+            "ws://127.0.0.1:9000/stream",
+            "ws://localhost/stream",
+            "ws://[::1]:9000/stream",
+        ] {
+            p.stream_url = ok.into();
+            assert!(p.validate(true).is_ok(), "{ok}");
+        }
+        for bad in ["ws://remote.example/stream", "ws://192.168.1.5/stream"] {
+            p.stream_url = bad.into();
+            assert!(p.validate(true).is_err(), "{bad}");
+        }
     }
 }

@@ -87,16 +87,38 @@ async fn client(stream: UnixStream, daemon: Arc<Daemon>) {
                 continue;
             }
         };
-        // In order on this connection; events still stream through `forward`.
+        // Slow requests run concurrently; other commands stay in order on this connection.
         let provider = (request.cmd == "models.list")
             .then(|| request.args.get("provider").cloned())
             .flatten();
-        let result = daemon
-            .handle(&request.cmd, request.args, request.origin.as_deref())
-            .await;
-        let _ = out
-            .send(protocol::reply_for(&request.id, result, provider))
-            .await;
+        if matches!(
+            request.cmd.as_str(),
+            "chat.send"
+                | "voice.enroll"
+                | "questions.generate"
+                | "providers.test"
+                | "dictate.stop"
+                | "models.list"
+                | "notes.regenerate"
+        ) {
+            let daemon = daemon.clone();
+            let out = out.clone();
+            tokio::spawn(async move {
+                let result = daemon
+                    .handle(&request.cmd, request.args, request.origin.as_deref())
+                    .await;
+                let _ = out
+                    .send(protocol::reply_for(&request.id, result, provider))
+                    .await;
+            });
+        } else {
+            let result = daemon
+                .handle(&request.cmd, request.args, request.origin.as_deref())
+                .await;
+            let _ = out
+                .send(protocol::reply_for(&request.id, result, provider))
+                .await;
+        }
     }
     forward.abort();
     writer.abort();

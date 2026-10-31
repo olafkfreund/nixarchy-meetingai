@@ -154,6 +154,27 @@ pub fn delete(c: &Connection, meeting_id: &str) -> Result<()> {
 pub fn list(c: &Connection, limit: usize) -> Result<Vec<MeetingRecord>> {
     search(c, "", limit)
 }
+pub fn get(c: &Connection, id: &str) -> Result<Option<MeetingRecord>> {
+    Ok(c.query_row(
+        "SELECT m.id,m.title,m.context,m.language,m.started_at,m.ended_at,m.duration_seconds,
+           (SELECT count(*) FROM meeting_lines l WHERE l.meeting_id=m.id)
+         FROM meetings m WHERE m.id=?1",
+        [id],
+        |r| {
+            Ok(MeetingRecord {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                context: r.get(2)?,
+                language: r.get(3)?,
+                started_at: r.get(4)?,
+                ended_at: r.get(5)?,
+                duration_seconds: r.get(6)?,
+                line_count: r.get(7)?,
+            })
+        },
+    )
+    .optional()?)
+}
 pub fn search(c: &Connection, query: &str, limit: usize) -> Result<Vec<MeetingRecord>> {
     let mut s=c.prepare(
         "SELECT m.id,m.title,m.context,m.language,m.started_at,m.ended_at,m.duration_seconds,

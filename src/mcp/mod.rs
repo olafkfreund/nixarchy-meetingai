@@ -33,7 +33,7 @@ const MAX_QUESTION: usize = 8_000;
 const MAX_LIMIT: usize = 500;
 const ASK_TIMEOUT: Duration = Duration::from_secs(120);
 /// Settings an agent may change. `api_key` and `mcp_allow_record` are deliberately absent.
-const SETTINGS_ALLOWLIST: [&str; 7] = [
+pub const MCP_SETTINGS: [&str; 7] = [
     "meeting_mode",
     "response_pace",
     "chat_provider",
@@ -601,11 +601,11 @@ impl Server {
         annotations(read_only_hint = false)
     )]
     async fn settings_set(&self, Parameters(a): Parameters<SettingArgs>) -> CallToolResult {
-        if !SETTINGS_ALLOWLIST.contains(&a.key.as_str()) {
+        if !MCP_SETTINGS.contains(&a.key.as_str()) {
             return fail(format!(
                 "Agents may not change '{}'. Allowed: {}.",
                 a.key,
-                SETTINGS_ALLOWLIST.join(", ")
+                MCP_SETTINGS.join(", ")
             ));
         }
         done(

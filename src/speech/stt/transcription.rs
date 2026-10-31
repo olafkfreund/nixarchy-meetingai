@@ -28,6 +28,9 @@ pub struct TranscriptLine {
     pub end: f64,
 }
 
+/// The push error once the speech worker is gone; its own `Failed` event carries the reason.
+pub const STREAM_ENDED: &str = "Speech stream ended; start recording again";
+
 /// An error returned while preparing or using speech recognition.
 #[derive(Debug, thiserror::Error)]
 pub enum SttError {
@@ -70,6 +73,7 @@ pub enum LiveEvent {
     Transcript(TranscriptLine),
     SpeechStarted { channel: u8 },
     UtteranceEnd { channel: u8, last_word_end: f64 },
+    Notice(String),
     Failed(String),
 }
 
@@ -482,6 +486,28 @@ const LONGEST: usize = SAMPLE_RATE as usize * 15;
 /// Shortest utterance (0.1 s) worth recognising.
 const SHORTEST: usize = SAMPLE_RATE as usize / 10;
 
+/// Middle of the quietest 100 ms window in the last 2 s of `samples`, or `samples.len()`
+/// when no earlier window is strictly quieter than the last one.
+fn quiet_cut(samples: &[f32]) -> usize {
+    let rate = SAMPLE_RATE as usize;
+    let window = rate / 10;
+    let end = samples.len();
+    if end < window {
+        return end;
+    }
+    let energy = |at: usize| -> f32 { samples[at..at + window].iter().map(|s| s * s).sum() };
+    let mut best = (energy(end - window), end);
+    let mut at = end.saturating_sub(rate * 2);
+    while at + window <= end {
+        let e = energy(at);
+        if e < best.0 {
+            best = (e, at + window / 2);
+        }
+        at += window;
+    }
+    best.1
+}
+
 #[derive(Default)]
 struct OpenChunk {
     start: f64,
@@ -490,6 +516,18 @@ struct OpenChunk {
     quiet: usize,
 }
 impl OpenChunk {
+    fn from_samples(start: f64, samples: Vec<f32>) -> Self {
+        let mut chunk = Self {
+            start,
+            samples: Vec::with_capacity(samples.len()),
+            sound: 0,
+            quiet: 0,
+        };
+        for sample in samples {
+            chunk.add(sample, sample.abs() > SOUND_LEVEL);
+        }
+        chunk
+    }
     /// Keeps one more sample; true when the utterance has to end now.
     fn add(&mut self, value: f32, sounding: bool) -> bool {
         self.samples.push(value);
@@ -548,7 +586,21 @@ impl BatchChunks {
                     }
                 };
                 if chunk.add(value, sounding) {
-                    done.extend(chunk.close(channel as u8, (frame + 1) as f64 / rate));
+                    let cut = if chunk.quiet >= QUIET_CLOSE {
+                        chunk.samples.len()
+                    } else {
+                        quiet_cut(&chunk.samples)
+                    };
+                    if cut < chunk.samples.len() {
+                        let tail = chunk.samples.split_off(cut);
+                        let cut_time = (frame + 1 - tail.len()) as f64 / rate;
+                        let next = OpenChunk::from_samples(cut_time, tail);
+                        chunk.sound -= next.sound;
+                        done.extend(chunk.close(channel as u8, cut_time));
+                        self.lanes[channel] = ChannelState::Speaking(next);
+                    } else {
+                        done.extend(chunk.close(channel as u8, (frame + 1) as f64 / rate));
+                    }
                 } else {
                     self.lanes[channel] = ChannelState::Speaking(chunk);
                 }
@@ -578,6 +630,9 @@ impl BatchChunks {
             ChannelState::Speaking(open) => Some(open.start),
             ChannelState::Idle => None,
         }
+    }
+    fn open_system_end(&self) -> Option<f64> {
+        matches!(self.lanes[1], ChannelState::Speaking(_)).then(|| self.now())
     }
     /// Which channels opened an utterance since the last call.
     fn take_opened(&mut self) -> [bool; 2] {
@@ -913,9 +968,7 @@ impl LiveTranscriber {
             Err(SendTimeoutError::Timeout(_)) => Err(SttError::Socket(
                 "Speech audio queue fell behind; start recording again".into(),
             )),
-            Err(SendTimeoutError::Closed(_)) => Err(SttError::Socket(
-                "Speech stream ended; start recording again".into(),
-            )),
+            Err(SendTimeoutError::Closed(_)) => Err(SttError::Socket(STREAM_ENDED.into())),
         }
     }
     pub async fn next_event(&mut self) -> Option<LiveEvent> {
@@ -1098,35 +1151,131 @@ type Pending = futures_util::stream::FuturesOrdered<
 >;
 /// Batch requests allowed to be outstanding at once.
 const MAX_IN_FLIGHT: usize = 4;
-fn queue_chunks(
+/// Waiting audio (seconds) kept before the oldest chunk is dropped.
+const MAX_WAITING_SECONDS: f64 = 120.0;
+/// Continuous chunk errors remain non-fatal only below this span.
+const MAX_ERROR_STREAK: Duration = Duration::from_secs(60);
+
+fn lost_speech_notice(start: f64, end: f64) -> LiveEvent {
+    LiveEvent::Notice(format!("lost speech for {start:.1}–{end:.1} s"))
+}
+
+/// The open system chunk's end, but only when no closed system chunk is still being transcribed:
+/// a mic line that overlaps one must wait for its text before the echo check can judge it.
+fn open_only_system_end(
+    in_flight: &std::collections::VecDeque<f64>,
+    waiting: &std::collections::VecDeque<BatchChunk>,
+    chunks: &BatchChunks,
+) -> Option<f64> {
+    (in_flight.is_empty() && !waiting.iter().any(|c| c.0 == 1))
+        .then(|| chunks.open_system_end())
+        .flatten()
+}
+
+fn earliest_system(
+    in_flight: &std::collections::VecDeque<f64>,
+    waiting: &std::collections::VecDeque<BatchChunk>,
+    chunks: &BatchChunks,
+) -> Option<f64> {
+    [
+        in_flight.front().copied(),
+        waiting.iter().find(|c| c.0 == 1).map(|c| c.1),
+        chunks.pending_system(),
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(f64::min)
+}
+
+async fn queue_chunks(
     pending: &mut Pending,
-    chunks: Vec<BatchChunk>,
+    waiting: &mut std::collections::VecDeque<BatchChunk>,
+    system_requests: &mut std::collections::VecDeque<f64>,
     config: &ProviderConfig,
     filter: &LineFilter,
     glossary: &str,
-) -> Result<(), String> {
-    if pending.len() + chunks.len() > MAX_IN_FLIGHT {
-        return Err("Speech requests fell behind; start recording again".into());
-    }
-    for (channel, start, end, samples) in chunks {
+    tx: &mpsc::Sender<LiveEvent>,
+) {
+    while pending.len() < MAX_IN_FLIGHT
+        && let Some((channel, start, end, samples)) = waiting.pop_front()
+    {
+        if channel == 1 {
+            system_requests.push_back(start);
+        }
         let config = config.clone();
         let prompt = filter.prompt(channel, glossary);
         pending.push_back(Box::pin(async move {
-            (
-                channel,
-                start,
-                end,
-                transcribe_chunk(&config, &samples, &prompt).await,
-            )
+            let first = transcribe_chunk(&config, &samples, &prompt).await;
+            let result = match first {
+                Err(SttError::NotConfigured | SttError::MissingKey) => first,
+                Err(_) => transcribe_chunk(&config, &samples, &prompt).await,
+                Ok(_) => first,
+            };
+            (channel, start, end, result)
         }));
     }
-    Ok(())
+    let mut queued: f64 = waiting.iter().map(|(_, s, e, _)| e - s).sum();
+    while queued > MAX_WAITING_SECONDS
+        && let Some((_, start, end, _)) = waiting.pop_front()
+    {
+        queued -= end - start;
+        let _ = tx.send(lost_speech_notice(start, end)).await;
+    }
 }
+
 async fn emit_lines(tx: &mpsc::Sender<LiveEvent>, lines: Vec<TranscriptLine>) {
     for line in lines {
         let _ = tx.send(LiveEvent::Transcript(line)).await;
     }
 }
+
+async fn handle_chunk_result(
+    (channel, start, end, result): (u8, f64, f64, Result<String, SttError>),
+    system_requests: &mut std::collections::VecDeque<f64>,
+    failing_since: &mut Option<(f64, Instant)>,
+    filter: &mut LineFilter,
+    tx: &mpsc::Sender<LiveEvent>,
+    error: &mut Option<String>,
+) -> bool {
+    if channel == 1 {
+        system_requests.pop_front();
+    }
+    match result {
+        Ok(text) => {
+            *failing_since = None;
+            if !text.is_empty() {
+                let line = TranscriptLine {
+                    channel,
+                    speaker: None,
+                    text,
+                    is_final: true,
+                    speech_final: true,
+                    start,
+                    end,
+                };
+                emit_lines(tx, filter.accept(&line)).await;
+            }
+            true
+        }
+        Err(e @ (SttError::NotConfigured | SttError::MissingKey)) => {
+            *error = Some(format!("{e} (lost audio {start:.1}s..{end:.1}s)"));
+            false
+        }
+        Err(e) => {
+            let (first_start, first_at) = *failing_since.get_or_insert((start, Instant::now()));
+            if end - first_start >= MAX_ERROR_STREAK.as_secs_f64()
+                || first_at.elapsed() >= MAX_ERROR_STREAK
+            {
+                *error = Some(format!("{e} (lost audio {start:.1}s..{end:.1}s)"));
+                false
+            } else {
+                let _ = tx.send(lost_speech_notice(start, end)).await;
+                true
+            }
+        }
+    }
+}
+
 async fn batch_task(
     config: ProviderConfig,
     hints: SttHints,
@@ -1137,7 +1286,9 @@ async fn batch_task(
     let mut chunks = BatchChunks::default();
     let mut filter = LineFilter::default();
     let mut pending = Pending::new();
+    let mut waiting: std::collections::VecDeque<BatchChunk> = std::collections::VecDeque::new();
     let mut system_requests: std::collections::VecDeque<f64> = std::collections::VecDeque::new();
+    let mut failing_since: Option<(f64, Instant)> = None;
     let mut error = None;
     loop {
         if (*stop.borrow() || input.is_closed()) && input.is_empty() {
@@ -1146,84 +1297,69 @@ async fn batch_task(
         tokio::select! {
             biased;
             result = pending.next(), if !pending.is_empty() => {
-                if let Some((channel, start, end, result)) = result {
-                    if channel == 1 { system_requests.pop_front(); }
-                    match result {
-                        Ok(text) if !text.is_empty() => {
-                            let line = TranscriptLine { channel, speaker: None, text, is_final: true, speech_final: true, start, end };
-                            emit_lines(&tx, filter.accept(&line)).await;
-                        }
-                        Err(e) => { error = Some(format!("{e} (lost audio {start:.1}s..{end:.1}s)")); break; }
-                        _ => {}
+                if let Some(done) = result {
+                    if !handle_chunk_result(done, &mut system_requests, &mut failing_since, &mut filter, &tx, &mut error).await {
+                        break;
                     }
-                    let earliest = [system_requests.front().copied(), chunks.pending_system()].into_iter().flatten().reduce(f64::min);
-                    emit_lines(&tx, filter.tick(chunks.now(), earliest)).await;
+                    queue_chunks(&mut pending, &mut waiting, &mut system_requests, &config, &filter, &hints.glossary, &tx).await;
+                    let earliest = earliest_system(&system_requests, &waiting, &chunks);
+                    emit_lines(&tx, filter.tick(chunks.now(), earliest, open_only_system_end(&system_requests, &waiting, &chunks))).await;
                 }
             }
             _ = stop.changed() => {},
             block = input.recv() => { let Some(block) = block else { break; }; {
                 let pcm: Vec<i16> = block.as_chunks::<2>().0.iter().map(|pair| i16::from_le_bytes(*pair)).collect();
-                let ready = chunks.push(&pcm);
+                waiting.extend(chunks.push(&pcm));
                 for channel in (0u8..).zip(chunks.take_opened()).filter_map(|(c, opened)| opened.then_some(c)) { let _ = tx.send(LiveEvent::SpeechStarted { channel }).await; }
-                for chunk in &ready { if chunk.0 == 1 { system_requests.push_back(chunk.1); } }
-                if let Err(e) = queue_chunks(&mut pending, ready, &config, &filter, &hints.glossary) { error = Some(e); break; }
-                let earliest = [system_requests.front().copied(), chunks.pending_system()].into_iter().flatten().reduce(f64::min);
-                emit_lines(&tx, filter.tick(chunks.now(), earliest)).await;
+                queue_chunks(&mut pending, &mut waiting, &mut system_requests, &config, &filter, &hints.glossary, &tx).await;
+                let earliest = earliest_system(&system_requests, &waiting, &chunks);
+                emit_lines(&tx, filter.tick(chunks.now(), earliest, open_only_system_end(&system_requests, &waiting, &chunks))).await;
             } }
         }
     }
-    // At stop every in-flight result is still handled: the final chunks wait for a free slot
-    // instead of counting as "fell behind".
-    let mut tail = if error.is_none() {
-        chunks.finish()
-    } else {
-        Vec::new()
-    };
-    tail.reverse();
-    // Waiting system chunks count for line ordering before they are sent.
-    system_requests.extend(tail.iter().rev().filter(|c| c.0 == 1).map(|c| c.1));
     if error.is_none() {
-        loop {
-            while pending.len() < MAX_IN_FLIGHT
-                && let Some(chunk) = tail.pop()
+        waiting.extend(chunks.finish());
+        queue_chunks(
+            &mut pending,
+            &mut waiting,
+            &mut system_requests,
+            &config,
+            &filter,
+            &hints.glossary,
+            &tx,
+        )
+        .await;
+        while let Some(done) = pending.next().await {
+            if !handle_chunk_result(
+                done,
+                &mut system_requests,
+                &mut failing_since,
+                &mut filter,
+                &tx,
+                &mut error,
+            )
+            .await
             {
-                if let Err(e) =
-                    queue_chunks(&mut pending, vec![chunk], &config, &filter, &hints.glossary)
-                {
-                    error = Some(e);
-                }
-            }
-            if error.is_some() {
                 break;
             }
-            let Some((channel, start, end, result)) = pending.next().await else {
-                break;
-            };
-            if channel == 1 {
-                system_requests.pop_front();
-            }
-            match result {
-                Ok(text) if !text.is_empty() => {
-                    let line = TranscriptLine {
-                        channel,
-                        speaker: None,
-                        text,
-                        is_final: true,
-                        speech_final: true,
-                        start,
-                        end,
-                    };
-                    emit_lines(&tx, filter.accept(&line)).await;
-                }
-                Err(e) => {
-                    error = Some(format!("{e} (lost audio {start:.1}s..{end:.1}s)"));
-                    break;
-                }
-                _ => {}
-            }
+            queue_chunks(
+                &mut pending,
+                &mut waiting,
+                &mut system_requests,
+                &config,
+                &filter,
+                &hints.glossary,
+                &tx,
+            )
+            .await;
+            let earliest = earliest_system(&system_requests, &waiting, &chunks);
             emit_lines(
                 &tx,
-                filter.tick(chunks.now(), system_requests.front().copied()),
+                filter.tick(
+                    chunks.now(),
+                    earliest,
+                    open_only_system_end(&system_requests, &waiting, &chunks),
+                ),
             )
             .await;
         }
@@ -1653,6 +1789,121 @@ mod tests {
             1,
             "{lines:?}"
         );
+    }
+
+    /// One utterance the engine keeps failing on becomes a "lost speech" notice; the
+    /// recording goes on and the other utterances still give lines.
+    #[tokio::test]
+    async fn a_failing_chunk_becomes_a_notice_and_the_rest_still_come_out() {
+        let _one_at_a_time = DECODER_TESTS.lock().await;
+        crate::speech::stt::parakeet::set_decoder(Box::new(|_, samples| {
+            let peak = samples.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+            assert!(!(0.25..0.35).contains(&peak), "fake engine failure");
+            format!("line level {peak:.1}")
+        }));
+        let config = ProviderConfig::new("parakeet-local", "", "");
+        let mut live = LiveTranscriber::connect_batch(config, SttHints::default());
+        let mut audio = Vec::new();
+        for level in [0.1_f32, 0.3, 0.2] {
+            audio.extend((0..6_400).flat_map(|_| [level, 0.0]));
+            audio.extend((0..12_800).flat_map(|_| [0.0_f32, 0.0]));
+        }
+        live.push(&audio).await.unwrap();
+        live.finish();
+        let (mut lines, mut notices, mut failed) = (Vec::new(), Vec::new(), None);
+        while let Some(event) = live.next_event().await {
+            match event {
+                LiveEvent::Transcript(line) => lines.push(line.text),
+                LiveEvent::Notice(message) => notices.push(message),
+                LiveEvent::Failed(message) => failed = Some(message),
+                _ => {}
+            }
+        }
+        assert_eq!(failed, None);
+        assert_eq!(lines, ["line level 0.1", "line level 0.2"]);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("lost speech for 1.2"), "{notices:?}");
+    }
+
+    /// An utterance that runs into the 15 s limit is cut at the pause just before it,
+    /// not through the word at exactly 15 s.
+    #[test]
+    fn long_speech_is_cut_at_the_pause_before_the_limit() {
+        let mut tone: Vec<f32> = (0..16_000 * 20)
+            .map(|i| 0.2 * (i as f32 * 0.1).sin().signum())
+            .collect();
+        tone[14 * 16_000..14 * 16_000 + 2_400].fill(0.0);
+        let pcm: Vec<i16> = tone
+            .iter()
+            .flat_map(|v| [(v * f32::from(i16::MAX)) as i16, 0])
+            .collect();
+        let mut chunks = BatchChunks::default();
+        let ready = chunks.push(&pcm);
+        assert_eq!(ready.len(), 1);
+        assert!((ready[0].2 - 14.05).abs() < 0.06, "cut at {}", ready[0].2);
+        let rest = chunks.finish();
+        assert_eq!(rest.len(), 1);
+        assert!(
+            (rest[0].1 - ready[0].2).abs() < 0.001,
+            "{} vs {}",
+            rest[0].1,
+            ready[0].2
+        );
+    }
+
+    /// A held mic line may skip ahead of the open system chunk only while no closed system
+    /// chunk is still waiting for its text: that text is what the echo check compares against.
+    #[test]
+    fn open_system_end_is_withheld_while_system_text_is_in_flight() {
+        let pcm: Vec<i16> = (0..16_000)
+            .flat_map(|i| [0, (6_000.0 * (i as f32 * 0.1).sin().signum()) as i16])
+            .collect();
+        let mut chunks = BatchChunks::default();
+        assert!(chunks.push(&pcm).is_empty());
+        let none = std::collections::VecDeque::new();
+        assert!(open_only_system_end(&none, &none_waiting(), &chunks).is_some());
+        let in_flight = std::collections::VecDeque::from([0.0]);
+        assert_eq!(
+            open_only_system_end(&in_flight, &none_waiting(), &chunks),
+            None
+        );
+    }
+
+    fn none_waiting() -> std::collections::VecDeque<BatchChunk> {
+        std::collections::VecDeque::new()
+    }
+
+    /// Ten utterances arriving faster than a slow engine answers all come out, in order:
+    /// they wait for a request slot instead of ending the recording.
+    #[tokio::test]
+    async fn a_slow_engine_with_ten_waiting_chunks_keeps_every_line_in_order() {
+        let _one_at_a_time = DECODER_TESTS.lock().await;
+        let mut said = 0;
+        crate::speech::stt::parakeet::set_decoder(Box::new(move |_, _| {
+            std::thread::sleep(Duration::from_millis(50));
+            said += 1;
+            format!("remark number {said}")
+        }));
+        let config = ProviderConfig::new("parakeet-local", "", "");
+        let mut live = LiveTranscriber::connect_batch(config, SttHints::default());
+        let mut audio = Vec::new();
+        for _ in 0..10 {
+            audio.extend((0..6_400).flat_map(|_| [0.2_f32, 0.0]));
+            audio.extend((0..12_800).flat_map(|_| [0.0_f32, 0.0]));
+        }
+        live.push(&audio).await.unwrap();
+        live.finish();
+        let (mut lines, mut failed) = (Vec::new(), None);
+        while let Some(event) = live.next_event().await {
+            match event {
+                LiveEvent::Transcript(line) => lines.push(line.text),
+                LiveEvent::Failed(message) => failed = Some(message),
+                _ => {}
+            }
+        }
+        assert_eq!(failed, None);
+        let expected: Vec<String> = (1..=10).map(|n| format!("remark number {n}")).collect();
+        assert_eq!(lines, expected);
     }
 
     /// The four-second finish deadline also covers draining queued audio into a sink

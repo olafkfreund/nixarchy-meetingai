@@ -758,3 +758,68 @@ async fn local_only_data_never_reaches_a_cloud_model_even_without_the_session_fl
     assert_eq!(CLOUD_HITS.load(SeqCst), 1);
     assert_eq!(client.call("quit", json!({})).await["ok"], true);
 }
+
+/// Accepts every connection and holds it for three seconds without answering.
+async fn slow_provider() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                drop(socket);
+            });
+        }
+    });
+    url
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_request_does_not_hold_up_the_next_one_on_the_socket() {
+    let root = std::env::temp_dir().join(format!("nixarchy-slow-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let vault_dir = root.join("data");
+    {
+        let vault = Vault::open(&vault_dir).unwrap();
+        let mut credential = credentials::Credential::chat("ollama", SECRET);
+        credential.model = "mock".into();
+        credential.base_url = slow_provider().await;
+        credentials::save(&vault, &credential).unwrap();
+    }
+    let daemon = Daemon::new(Options {
+        db_path: vault_dir.join("test.db"),
+        vault_dir,
+        capture: false,
+    })
+    .unwrap();
+    let socket = cli::socket_path_in(&root.join("run"));
+    {
+        let (socket, daemon) = (socket.clone(), daemon.clone());
+        tokio::spawn(async move { server::serve(&socket, daemon).await });
+    }
+    for _ in 0..100 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut client = Client::connect(&socket).await;
+    assert_eq!(client.call("record.start", json!({})).await["ok"], true);
+    // Both requests go out before either reply is read.
+    let requests = format!(
+        "{}\n{}\n",
+        json!({"id": "slow", "cmd": "models.list", "args": {"provider": "ollama"}}),
+        json!({"id": "stop", "cmd": "record.stop", "args": {}}),
+    );
+    client.writer.write_all(requests.as_bytes()).await.unwrap();
+    let mut order = Vec::new();
+    while order.len() < 2 {
+        let value = client.line().await.expect("socket closed");
+        if let Some(id) = value["id"].as_str() {
+            order.push(id.to_owned());
+        }
+    }
+    assert_eq!(order, ["stop", "slow"]);
+    assert_eq!(client.call("quit", json!({})).await["ok"], true);
+}

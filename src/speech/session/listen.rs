@@ -23,6 +23,9 @@ const MAX_CHANNEL_SAMPLES: usize = (SAMPLE_RATE as usize) * 2;
 /// Silence duration after which a capture channel is treated as quiet.
 const QUIET_AFTER: Duration = Duration::from_millis(250);
 
+/// Minimum interval between non-fatal audio gap notices.
+const GAP_NOTICE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Notice emitted when the user picked a microphone that bypasses echo cancellation.
 const ECHO_CANCEL_NOTICE: &str = "Echo cancelling is off for the chosen microphone. Pick \"Meeting AI echo-cancelled mic\" in Settings → Audio to turn it on.";
 
@@ -93,6 +96,26 @@ impl StereoAssembler {
             self.sys_queue.extend(sys_samples.iter().copied());
         }
         true
+    }
+
+    fn drop_overflow_frame(&mut self, mic_samples: &[f32], sys_samples: &[f32]) -> bool {
+        let mut dropped = false;
+        if self.mic_queue.len() + mic_samples.len() > MAX_CHANNEL_SAMPLES
+            && !self.mic_queue.is_empty()
+        {
+            let n = FRAME.min(self.mic_queue.len());
+            self.mic_queue.drain(..n);
+            dropped = true;
+        }
+        if self.sys_enabled
+            && self.sys_queue.len() + sys_samples.len() > MAX_CHANNEL_SAMPLES
+            && !self.sys_queue.is_empty()
+        {
+            let n = FRAME.min(self.sys_queue.len());
+            self.sys_queue.drain(..n);
+            dropped = true;
+        }
+        dropped
     }
 
     fn pull_live(&mut self, mic_quiet: bool, sys_quiet: bool) -> Option<Vec<f32>> {
@@ -180,6 +203,10 @@ fn format_interrupted_failure() -> String {
         .to_owned()
 }
 
+fn format_gap_notice(gap_frames: u64) -> String {
+    format!("Audio capture adjusted for clock drift ({gap_frames} frames).")
+}
+
 fn format_mic_stopped(reason: Option<&str>) -> String {
     match reason {
         Some(detail) if !detail.is_empty() => {
@@ -202,6 +229,8 @@ pub struct ListenSession {
     emitted_samples: usize,
     last_mic_delivery: Instant,
     last_sys_delivery: Instant,
+    last_gap_notice: Option<Instant>,
+    gap_frames: u64,
 }
 
 impl ListenSession {
@@ -267,6 +296,8 @@ impl ListenSession {
             emitted_samples: 0,
             last_mic_delivery: now,
             last_sys_delivery: now,
+            last_gap_notice: None,
+            gap_frames: 0,
         };
         (session, events)
     }
@@ -330,22 +361,12 @@ impl ListenSession {
             return Vec::new();
         }
 
-        let now = Instant::now();
-        let current_elapsed = now.duration_since(self.started_at);
-        let due_samples =
-            (current_elapsed.as_micros() * u128::from(SAMPLE_RATE) / 1_000_000) as usize;
-
-        let lagged = due_samples.saturating_sub(self.emitted_samples) > MAX_CHANNEL_SAMPLES;
-        let mic_dropped = self.mic.as_ref().is_some_and(|m| m.dropped() > 0);
-        let sys_failed = self
-            .sys
-            .as_ref()
-            .is_some_and(|s| s.dropped() > 0 || !s.is_running());
-
-        if lagged || mic_dropped || sys_failed {
+        if self.mic.as_ref().is_some_and(|m| m.dropped() > 0) {
             self.abort_captures();
             return vec![SessionEvent::Failed(format_interrupted_failure())];
         }
+
+        let mut events = self.drop_failed_system();
 
         let mic_samples = self
             .mic
@@ -358,9 +379,60 @@ impl ListenSession {
             .map(|s| s.take(MAX_CHANNEL_SAMPLES))
             .unwrap_or_default();
 
-        if !self.assembler.ingest(&mic_samples, &sys_samples) {
+        events.extend(self.feed(Instant::now(), &mic_samples, &sys_samples));
+
+        if self.mic.as_ref().is_some_and(|m| !m.is_running()) {
+            let reason = self.mic.as_ref().and_then(Microphone::failure);
             self.abort_captures();
-            return vec![SessionEvent::Failed(format_interrupted_failure())];
+            events.push(SessionEvent::Failed(format_mic_stopped(reason.as_deref())));
+        }
+
+        events
+    }
+
+    fn drop_failed_system(&mut self) -> Vec<SessionEvent> {
+        if !self
+            .sys
+            .as_ref()
+            .is_some_and(|s| s.dropped() > 0 || !s.is_running())
+        {
+            return Vec::new();
+        }
+        let mut events = self.set_system_audio(false);
+        events.push(SessionEvent::Notice(format_mic_only_notice(
+            &SystemAudioError::Stopped,
+        )));
+        events
+    }
+
+    fn feed(
+        &mut self,
+        now: Instant,
+        mic_samples: &[f32],
+        sys_samples: &[f32],
+    ) -> Vec<SessionEvent> {
+        let current_elapsed = now.duration_since(self.started_at);
+        let due_samples =
+            (current_elapsed.as_micros() * u128::from(SAMPLE_RATE) / 1_000_000) as usize;
+
+        let mut events = Vec::new();
+        while due_samples.saturating_sub(self.emitted_samples) > MAX_CHANNEL_SAMPLES {
+            self.emitted_samples += FRAME;
+            self.record_gap(now, &mut events);
+            if let Some(ready) = Self::queue_audio(
+                &mut self.echo_gate,
+                &mut self.pending_audio,
+                vec![0.0; FRAME * 2],
+            ) {
+                events.push(SessionEvent::Audio(ready));
+            }
+        }
+
+        while !self.assembler.ingest(mic_samples, sys_samples) {
+            if !self.assembler.drop_overflow_frame(mic_samples, sys_samples) {
+                break;
+            }
+            self.record_gap(now, &mut events);
         }
 
         if !mic_samples.is_empty() {
@@ -373,7 +445,6 @@ impl ListenSession {
         let mic_quiet = now.duration_since(self.last_mic_delivery) >= QUIET_AFTER;
         let sys_quiet = now.duration_since(self.last_sys_delivery) >= QUIET_AFTER;
 
-        let mut events = Vec::new();
         while self.emitted_samples + FRAME <= due_samples {
             let Some(frame) = self.assembler.pull_live(mic_quiet, sys_quiet) else {
                 break;
@@ -386,19 +457,21 @@ impl ListenSession {
             }
         }
 
-        let peak_rms = rms(&mic_samples).max(rms(&sys_samples));
+        let peak_rms = rms(mic_samples).max(rms(sys_samples));
         events.push(SessionEvent::Level(peak_rms));
         self.elapsed = current_elapsed;
-
-        if self.mic.as_ref().is_some_and(|m| !m.is_running()) {
-            let reason = self.mic.as_ref().and_then(Microphone::failure);
-            if let Some(mic_handle) = self.mic.take() {
-                mic_handle.stop();
-            }
-            events.push(SessionEvent::Failed(format_mic_stopped(reason.as_deref())));
-        }
-
         events
+    }
+
+    fn record_gap(&mut self, now: Instant, events: &mut Vec<SessionEvent>) {
+        self.gap_frames += 1;
+        if self
+            .last_gap_notice
+            .is_none_or(|last| now.saturating_duration_since(last) >= GAP_NOTICE_INTERVAL)
+        {
+            self.last_gap_notice = Some(now);
+            events.push(SessionEvent::Notice(format_gap_notice(self.gap_frames)));
+        }
     }
 
     /// Flush remaining buffered audio, stop capture handles, and emit `Stopped`.
@@ -509,7 +582,72 @@ mod tests {
             emitted_samples: 0,
             last_mic_delivery: now,
             last_sys_delivery: now,
+            last_gap_notice: None,
+            gap_frames: 0,
         }
+    }
+
+    #[test]
+    fn a_stopped_system_source_gives_a_notice_and_mic_frames_keep_coming() {
+        let mut session = idle_session(false);
+        session.sys = Some(SystemAudio::stopped_for_test());
+        session.assembler.configure_system(true);
+        let events = session.drop_failed_system();
+        assert!(
+            events.iter().any(|e| matches!(e, SessionEvent::Notice(_))),
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|e| matches!(e, SessionEvent::Failed(_))));
+        assert!(session.sys.is_none());
+        assert!(session.drop_failed_system().is_empty());
+        let later = session.started_at + Duration::from_millis(100);
+        let events = session.feed(later, &vec![0.1; 2 * FRAME], &[]);
+        let frames = events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::Audio(_)))
+            .count();
+        assert_eq!(frames, 2, "{events:?}");
+        assert!(!events.iter().any(|e| matches!(e, SessionEvent::Failed(_))));
+    }
+
+    /// Runs `minutes` of 50 ms pumps where the microphone delivers `per_tick` samples.
+    fn run_feed(per_tick: usize, minutes: u64) -> Vec<SessionEvent> {
+        let mut session = idle_session(false);
+        let ticks = minutes * 60 * 20;
+        let mut events = Vec::new();
+        let mut owed = 0.0_f64;
+        for tick in 1..=ticks {
+            owed += per_tick as f64 / 100.0;
+            let count = owed as usize;
+            owed -= count as f64;
+            let now = session.started_at + Duration::from_millis(50 * tick);
+            events.extend(session.feed(now, &vec![0.1; count], &[]));
+        }
+        events
+    }
+
+    #[test]
+    fn a_feed_one_percent_fast_never_aborts() {
+        // 808 samples per 50 ms instead of 800.
+        let events = run_feed(80_800, 5);
+        assert!(!events.iter().any(|e| matches!(e, SessionEvent::Failed(_))));
+        let notices = events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::Notice(_)))
+            .count();
+        assert!((1..=5).contains(&notices), "{notices} notices");
+    }
+
+    #[test]
+    fn a_feed_one_percent_slow_never_aborts() {
+        // 792 samples per 50 ms instead of 800.
+        let events = run_feed(79_200, 5);
+        assert!(!events.iter().any(|e| matches!(e, SessionEvent::Failed(_))));
+        let notices = events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::Notice(_)))
+            .count();
+        assert!(notices <= 5, "{notices} notices");
     }
 
     #[test]

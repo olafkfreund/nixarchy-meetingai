@@ -26,6 +26,7 @@ const ECHO_WINDOW: f64 = 8.0;
 const ECHO_CONTAINMENT: f64 = 0.6;
 const HOLD_WINDOW: f64 = 3.0;
 const HOLD_CAP: f64 = 15.0;
+const MARGIN: f64 = 1.0;
 /// Minimum content words and consecutive phrase length required for echo drops.
 const ECHO_MIN_TOKENS: usize = 3;
 const PROMPT_PART: usize = 200;
@@ -124,6 +125,8 @@ pub struct LineFilter {
     clock: f64,
     /// Earliest start time of any open or in-flight system chunk.
     pending_sys_start: Option<f64>,
+    /// Current end time of an open system chunk, if any.
+    open_sys_end: Option<f64>,
     /// Recent accepted text on the system channel, the prompt context.
     recent_system: String,
 }
@@ -163,16 +166,24 @@ impl LineFilter {
     }
 
     /// Release held mic lines whose hold window has expired at audio clock `now`
-    /// and that have no overlapping open-or-in-flight system chunk (`pending_sys_start`).
-    pub fn tick(&mut self, now: f64, pending_sys_start: Option<f64>) -> Vec<TranscriptLine> {
+    /// and that have no overlapping open-or-in-flight system chunk (`pending_sys_start`),
+    /// or where the open system chunk has passed the line by [`MARGIN`].
+    pub fn tick(
+        &mut self,
+        now: f64,
+        pending_sys_start: Option<f64>,
+        open_sys_end: Option<f64>,
+    ) -> Vec<TranscriptLine> {
         self.clock = self.clock.max(now);
         self.pending_sys_start = pending_sys_start;
+        self.open_sys_end = open_sys_end;
         self.release_ready(self.clock, false)
     }
 
     /// Judge and release all held mic lines at end of stream.
     pub fn flush(&mut self) -> Vec<TranscriptLine> {
         self.pending_sys_start = None;
+        self.open_sys_end = None;
         self.release_ready(f64::INFINITY, true)
     }
 
@@ -213,9 +224,9 @@ impl LineFilter {
             let ready = {
                 let (line, _, arrived_at) = &self.held[i];
                 let waited = now - *arrived_at;
-                all || waited >= HOLD_CAP
-                    || (waited >= HOLD_WINDOW
-                        && self.pending_sys_start.is_none_or(|s| s > line.end))
+                let sys_clear = self.pending_sys_start.is_none_or(|s| s > line.end)
+                    || self.open_sys_end.is_some_and(|e| e > line.end + MARGIN);
+                all || waited >= HOLD_CAP || (waited >= HOLD_WINDOW && sys_clear)
             };
             if ready {
                 let (line, words, _) = self.held.remove(i);
@@ -489,7 +500,7 @@ mod tests {
             f.accept(&line(0, "we should ship the release on friday", 0.2, 2.0))
                 .is_empty()
         );
-        assert!(f.tick(5.0, None).is_empty());
+        assert!(f.tick(5.0, None, None).is_empty());
         // Owner says the same sentence later (within the 60 s loop window, outside the 8 s echo window).
         assert!(
             f.accept(&line(0, "we should ship the release on friday", 11.0, 13.0))
@@ -530,7 +541,7 @@ mod tests {
         let out = f.accept(&line(1, "we should ship the release on friday", 9.8, 13.5));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].channel, 1);
-        assert!(f.tick(16.0, None).is_empty());
+        assert!(f.tick(16.0, None, None).is_empty());
         assert!(f.flush().is_empty());
     }
 
@@ -563,20 +574,20 @@ mod tests {
     fn tick_holds_for_three_seconds_after_arrival_and_waits_for_overlapping_system_chunk() {
         let mut f = LineFilter::default();
         // Audio clock is already at 14.5 s when the 10.0..12.0 mic chunk finishes transcribing.
-        assert!(f.tick(14.5, Some(10.0)).is_empty());
+        assert!(f.tick(14.5, Some(10.0), None).is_empty());
         assert!(
             f.accept(&line(0, "I will follow up with the notes", 10.0, 12.0))
                 .is_empty()
         );
         // 3 s after line.end (15.0) is only 0.5 s after arrival -> still held even without pending system.
-        assert!(f.tick(15.0, None).is_empty());
-        assert!(f.tick(17.49, None).is_empty());
+        assert!(f.tick(15.0, None, None).is_empty());
+        assert!(f.tick(17.49, None, None).is_empty());
         // At 17.5 s (3 s after arrival), if an overlapping system chunk (start 11.0 <= 12.0) is still
         // open or in flight, the line remains held.
-        assert!(f.tick(17.5, Some(11.0)).is_empty());
-        assert!(f.tick(20.0, Some(11.0)).is_empty());
+        assert!(f.tick(17.5, Some(11.0), None).is_empty());
+        assert!(f.tick(20.0, Some(11.0), None).is_empty());
         // A system chunk that started after the mic line ended (12.5 > 12.0) does not block release.
-        let released = f.tick(20.0, Some(12.5));
+        let released = f.tick(20.0, Some(12.5), None);
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].text, "I will follow up with the notes");
         assert!(f.flush().is_empty());
@@ -585,13 +596,13 @@ mod tests {
     #[test]
     fn tick_enforces_fifteen_second_hard_cap_when_system_chunk_stays_open() {
         let mut f = LineFilter::default();
-        assert!(f.tick(14.0, Some(10.0)).is_empty());
+        assert!(f.tick(14.0, Some(10.0), None).is_empty());
         assert!(
             f.accept(&line(0, "I will follow up with the notes", 10.0, 12.0))
                 .is_empty()
         );
-        assert!(f.tick(28.99, Some(10.0)).is_empty());
-        let released = f.tick(29.0, Some(10.0));
+        assert!(f.tick(28.99, Some(10.0), None).is_empty());
+        let released = f.tick(29.0, Some(10.0), None);
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].text, "I will follow up with the notes");
     }
@@ -621,5 +632,23 @@ mod tests {
         assert!(p.split(' ').skip(1).all(|w| w == "word"));
         // Multibyte text never splits a character.
         let _ = whisper_prompt("", &"é".repeat(500));
+    }
+
+    #[test]
+    fn a_mic_line_during_continuous_system_speech_is_released_before_the_hold_cap() {
+        let mut f = LineFilter::default();
+        // The system channel has been speaking since 0 s and its chunk is still open.
+        assert!(
+            f.accept(&line(0, "our budget review moves to next week", 2.0, 3.0))
+                .is_empty()
+        );
+        let released = (0..150).find_map(|step| {
+            let now = 3.0 + f64::from(step) * 0.1;
+            let out = f.tick(now, Some(0.0), Some(now));
+            (!out.is_empty()).then_some((now, out))
+        });
+        let (at, out) = released.expect("held until the hold cap");
+        assert_eq!(out.len(), 1);
+        assert!(at <= 8.0, "released at {at}");
     }
 }

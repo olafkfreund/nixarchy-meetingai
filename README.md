@@ -1292,6 +1292,9 @@ The same commands work from a shell: `nixarchy-meetingai ctl state.get`.
   interviews never do.
 - Delete a meeting from Settings, Restore; delete an interview's data with
   "Delete candidate…".
+- A database from before encryption is converted once. The old unencrypted
+  file is replaced, not wiped, so its contents can stay recoverable from
+  free disk space. Use full-disk encryption if that matters to you.
 
 ## Troubleshooting
 

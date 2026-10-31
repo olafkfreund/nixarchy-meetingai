@@ -263,7 +263,7 @@ async fn db<T: Send + 'static>(
 ) -> Result<T, String> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
-        let db = Database::open(path).map_err(|e| e.to_string())?;
+        let db = Database::open_existing(path).map_err(|e| e.to_string())?;
         work(&db).map_err(|e| e.to_string())
     })
     .await
@@ -568,45 +568,54 @@ pub async fn generate(
     language: &str,
 ) -> Result<(), String> {
     let owned = id.to_owned();
-    let (settings, mode, interview, said) = db(path, move |db| {
-        meetings::begin_recap(db.connection(), &owned)?;
-        let mode = meetings::mode(db.connection(), &owned);
-        let interview = mode == MeetingMode::Interviewer
-            || candidates::for_meeting(db.connection(), &owned)?.is_some();
-        let said = candidates::said(db.connection(), &owned);
-        Ok((
-            Settings::load(db).unwrap_or_default(),
-            mode,
-            interview,
-            said,
-        ))
+    db(path, move |db| {
+        meetings::begin_recap(db.connection(), &owned)
     })
     .await?;
-    let prompt = match mode {
-        MeetingMode::General => &settings.recap_prompt_general,
-        MeetingMode::Interview => &settings.recap_prompt_interview,
-        MeetingMode::TeamMeeting => &settings.recap_prompt_team,
-        MeetingMode::Interviewer => &settings.recap_prompt_interviewer,
-    };
-    let result = match config {
-        None => Err("Choose a configured AI provider in Settings to generate the recap.".into()),
-        Some(config) if interview => {
-            let owned = id.to_owned();
-            let bank = db(path, move |db| question_bank(db.connection(), &owned)).await?;
-            // The recap is evidence only: retry once, then withhold, if it passes judgement.
-            guard::with_retry(&said, |extra| {
-                let prompt = format!("{prompt}\n\n{bank}\n\n{extra}");
-                let config = &config;
-                async move { notes(path, id, config, &prompt, language, false).await }
-            })
-            .await
+    let result = async {
+        let owned = id.to_owned();
+        let (settings, mode, interview, said) = db(path, move |db| {
+            let mode = meetings::mode(db.connection(), &owned);
+            let interview = mode == MeetingMode::Interviewer
+                || candidates::for_meeting(db.connection(), &owned)?.is_some();
+            let said = candidates::said(db.connection(), &owned);
+            Ok((
+                Settings::load(db).unwrap_or_default(),
+                mode,
+                interview,
+                said,
+            ))
+        })
+        .await?;
+        let prompt = match mode {
+            MeetingMode::General => &settings.recap_prompt_general,
+            MeetingMode::Interview => &settings.recap_prompt_interview,
+            MeetingMode::TeamMeeting => &settings.recap_prompt_team,
+            MeetingMode::Interviewer => &settings.recap_prompt_interviewer,
+        };
+        match config {
+            None => {
+                Err("Choose a configured AI provider in Settings to generate the recap.".into())
+            }
+            Some(config) if interview => {
+                let owned = id.to_owned();
+                let bank = db(path, move |db| question_bank(db.connection(), &owned)).await?;
+                // The recap is evidence only: retry once, then withhold, if it passes judgement.
+                guard::with_retry(&said, |extra| {
+                    let prompt = format!("{prompt}\n\n{bank}\n\n{extra}");
+                    let config = &config;
+                    async move { notes(path, id, config, &prompt, language, false).await }
+                })
+                .await
+            }
+            Some(config) => {
+                let team = mode == MeetingMode::TeamMeeting;
+                notes(path, id, &config, prompt, language, team).await
+            }
         }
-        Some(config) => {
-            let team = mode == MeetingMode::TeamMeeting;
-            notes(path, id, &config, prompt, language, team).await
-        }
-    };
-    db(path, {
+    }
+    .await;
+    if let Err(error) = db(path, {
         let (id, result) = (id.to_owned(), result.clone());
         move |db| {
             meetings::finish_recap(
@@ -616,7 +625,10 @@ pub async fn generate(
             )
         }
     })
-    .await?;
+    .await
+    {
+        tracing::warn!(%error, "failed to record recap completion");
+    }
     if let Ok(text) = &result {
         let (id, text) = (id.to_owned(), text.clone());
         db(path, move |db| {
@@ -691,6 +703,31 @@ async fn notes(
 mod tests {
     use super::*;
     use crate::db::Database;
+
+    #[tokio::test]
+    async fn a_failed_question_bank_marks_the_recap_failed() {
+        let dir = std::env::temp_dir().join(format!("nm-recap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("h.db");
+        let id = {
+            let db = Database::open(&path).unwrap();
+            let c = db.connection();
+            let id = meetings::start(c, "t", "", "en", None, MeetingMode::Interviewer).unwrap();
+            let candidate = candidates::create(c, "Ada").unwrap();
+            candidates::link_meeting(c, &candidate.id, &id).unwrap();
+            candidates::add_question(c, &candidate.id, "Why?", "manual", None).unwrap();
+            // Break the question bank query.
+            c.execute_batch("ALTER TABLE interview_questions RENAME COLUMN text TO gone")
+                .unwrap();
+            id
+        };
+        let config = ProviderConfig::new("none", "", "");
+        assert!(generate(&path, &id, Some(config), "en").await.is_err());
+        let db = Database::open(&path).unwrap();
+        let recap = meetings::recap(db.connection(), &id).unwrap().unwrap();
+        assert_eq!(recap.status, "failed");
+        assert!(!recap.error.is_empty());
+    }
 
     #[test]
     fn parses_valid_invalid_and_missing_json() {

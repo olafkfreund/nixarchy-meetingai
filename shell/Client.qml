@@ -29,6 +29,7 @@ Item {
     property var lastAsk: null           // the last typed question, for Retry
     property int minTurn: -1             // the highest turn that has started: replies of earlier turns are dropped
     property int staleTurn: -1           // the turn that was streaming when a new question was asked: its late events are dropped
+    property bool awaitingStart: false   // a typed question is waiting for its answer.started: late deltas are dropped
     property string providerNotice: ""   // the daemon's one-time provider notice (e.g. the removed Gemini key); Providers shows it, Service notifies
     property bool libraryOpen: false     // set by the overlay: request failures then go to the Library, not the transcript
     signal libraryError(string message)
@@ -188,6 +189,7 @@ Item {
         root.lastAsk = { text: text, attachments: attachments || [], screenshot: screenshot === true, noContext: noContext === true };
         root.archiveNow();
         root.staleTurn = root.now.turn;
+        root.awaitingStart = true;
         root.answering = true;
         root.suggestions = [];
         // NOW shows the question and the waiting bar at once; answer.started fills in the rest
@@ -197,6 +199,7 @@ Item {
     function retry() { if (root.lastAsk) root.ask(root.lastAsk.text, root.lastAsk.attachments, root.lastAsk.screenshot, root.lastAsk.noContext); }
     // A failed answer stays in NOW, with Retry, instead of becoming a line in the transcript.
     function answerFailed(message) {
+        root.awaitingStart = false;
         root.answering = false;
         root.now = Object.assign({}, root.now, { error: message !== "" ? message : "The answer failed." });
     }
@@ -206,6 +209,7 @@ Item {
         lines.clear();
         root.staleTurn = -1;
         root.minTurn = -1;
+        root.awaitingStart = false;
         root.answering = false; root.suggestions = []; root.itemEditing = false; root.pendingItems = null; root.items = []; root.earlierItem = null; root.consentPrompt = "";
         root.micLevel = 0; root.systemLevel = 0;
         root.now = ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "", error: "" });
@@ -285,6 +289,7 @@ Item {
             }
             break;
         case "answer.started":
+            root.awaitingStart = false;
             root.minTurn = Math.max(root.minTurn, ev.turn);
             root.archiveNow();
             if (ev.automatic !== true && String(ev.question || "") !== "") root.addRow("asked", "", String(ev.question), false);
@@ -293,6 +298,7 @@ Item {
             root.now = { turn: ev.turn, question: String(ev.question || ""), automatic: ev.automatic === true, asker: ev.automatic === true ? (root.lastSpeaker || "Them") : "You", provider: String(ev.provider || ""), model: String(ev.model || ""), body: "" };
             break;
         case "answer.delta":
+            if (root.awaitingStart && (root.now.turn === -1 || root.now.turn === -2)) break;
             root.answering = true;
             if (root.now.turn === -2) root.now = Object.assign({}, root.now, { turn: ev.turn });
             if (root.now.turn !== ev.turn) { root.archiveNow(); root.now = { turn: ev.turn, question: "", automatic: true, asker: root.lastSpeaker || "Them", provider: "", model: "", body: "" }; }

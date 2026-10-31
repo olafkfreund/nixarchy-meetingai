@@ -353,16 +353,18 @@ async fn run_speech(
 }
 
 #[tokio::test]
-async fn openai_compatible_speech_gives_up_with_the_lost_range() {
+async fn openai_compatible_speech_reports_the_lost_range_and_carries_on() {
     use nixarchy_meetingai::speech::transcription::LiveEvent;
     let (config, server) = speech_mock(vec![None]).await;
     let events = run_speech(&config).await;
-    let failure = events.iter().find_map(|e| match e {
-        LiveEvent::Failed(m) => Some(m.clone()),
-        _ => None,
-    });
     assert!(
-        failure.is_some_and(|m| m.contains("lost audio") && m.contains("s..")),
+        !events.iter().any(|e| matches!(e, LiveEvent::Failed(_))),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, LiveEvent::Notice(m) if m.contains("lost speech for"))),
         "{events:?}"
     );
     server.abort();

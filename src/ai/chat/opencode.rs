@@ -141,8 +141,16 @@ async fn start(program: &str, auth: Option<String>) -> Result<Server, ChatError>
     })
     .await
     .ok()
-    .flatten()
-    .ok_or_else(|| ChatError::Cli("`opencode serve` did not report a port".into()))?;
+    .flatten();
+    let Some(base) = base else {
+        if let Some(pid) = child.id() {
+            kill_group(pid);
+        }
+        let _ = child.wait().await;
+        return Err(ChatError::Cli(
+            "`opencode serve` did not report a port".into(),
+        ));
+    };
     // Keep reading so the server never blocks on a full pipe.
     tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
     Ok(Server {
@@ -802,5 +810,47 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(answer, "ok");
+    }
+
+    #[tokio::test]
+    async fn a_server_without_a_port_is_killed_with_its_group() {
+        let dir = std::env::temp_dir().join(format!("oc-noport-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("opencode");
+        let pid_file = dir.join("pid");
+        // The grandchild outlives the server unless the whole group is killed.
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep 60 >/dev/null &\necho $! > {}\nexec >/dev/null\nsleep 60\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = match start(script.to_str().unwrap(), None).await {
+            Ok(_) => panic!("a server without a port started"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("did not report a port"),
+            "{error}"
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: signal 0 only probes for existence. A killed orphan lingers until init reaps it.
+        let alive = || unsafe { libc::kill(pid, 0) } == 0;
+        for _ in 0..200 {
+            if !alive() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!alive(), "grandchild survived");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

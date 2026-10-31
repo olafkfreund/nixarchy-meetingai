@@ -38,6 +38,13 @@ impl Database {
         Self::prepare(encryption::open(path.as_ref())?)
     }
 
+    /// Unlock a database `open` already prepared: per-connection pragmas only, no schema work.
+    pub fn open_existing(path: impl AsRef<Path>) -> Result<Self> {
+        let connection = encryption::open(path.as_ref())?;
+        connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;")?;
+        Ok(Self { connection })
+    }
+
     pub fn in_memory() -> Result<Self> {
         Self::prepare(Connection::open_in_memory()?)
     }
@@ -110,6 +117,16 @@ impl Database {
                 connection.execute_batch(
                     "ALTER TABLE candidate_documents ADD COLUMN mime TEXT NOT NULL DEFAULT ''",
                 )?;
+            }
+            let has_notes_sha256: bool = connection.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meeting_exports')
+                 WHERE name = 'notes_sha256'",
+                [],
+                |r| r.get(0),
+            )?;
+            if !has_notes_sha256 {
+                connection
+                    .execute_batch("ALTER TABLE meeting_exports ADD COLUMN notes_sha256 TEXT")?;
             }
             // Recaps written before notes_fts existed become searchable, once.
             let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -250,6 +267,46 @@ mod tests {
         let id = meetings::start(c, "t", "", "en", None, Default::default()).unwrap();
         meetings::index_notes(c, &id, "ship the zebra release").unwrap();
         assert_eq!(meetings::search(c, "zebra", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn old_history_gets_the_notes_hash_column() {
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/old-history");
+        let dir = std::env::temp_dir().join(format!("nm-hash-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        for name in ["history.db", "history.db.key"] {
+            std::fs::copy(Path::new(fixture).join(name), dir.join(name)).unwrap();
+        }
+        let db = Database::open(dir.join("history.db")).unwrap();
+        let c = db.connection();
+        let id = meetings::start(c, "t", "", "en", None, Default::default()).unwrap();
+        assert_eq!(exports::notes_hash(c, &id).unwrap(), None);
+        exports::set(c, &id, "/out").unwrap();
+        assert_eq!(exports::notes_hash(c, &id).unwrap(), None);
+        exports::set_notes_hash(c, &id, "abc").unwrap();
+        assert_eq!(exports::notes_hash(c, &id).unwrap().as_deref(), Some("abc"));
+        exports::set(c, &id, "/moved").unwrap();
+        assert_eq!(exports::get(c, &id).unwrap().as_deref(), Some("/moved"));
+        assert_eq!(exports::notes_hash(c, &id).unwrap().as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn open_existing_reads_a_prepared_database() {
+        let dir = std::env::temp_dir().join(format!("nm-existing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("h.db");
+        let id = {
+            let db = Database::open(&path).unwrap();
+            meetings::start(db.connection(), "Kept", "", "en", None, Default::default()).unwrap()
+        };
+        let db = Database::open_existing(&path).unwrap();
+        let title: String = db
+            .connection()
+            .query_row("SELECT title FROM meetings WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "Kept");
     }
 
     #[test]

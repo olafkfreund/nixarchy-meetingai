@@ -23,6 +23,25 @@ pub fn set(connection: &Connection, meeting_id: &str, dir: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn notes_hash(connection: &Connection, meeting_id: &str) -> Result<Option<String>> {
+    Ok(connection
+        .query_row(
+            "SELECT notes_sha256 FROM meeting_exports WHERE meeting_id = ?1",
+            [meeting_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+pub fn set_notes_hash(connection: &Connection, meeting_id: &str, hash: &str) -> Result<()> {
+    connection.execute(
+        "UPDATE meeting_exports SET notes_sha256 = ?2 WHERE meeting_id = ?1",
+        params![meeting_id, hash],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
