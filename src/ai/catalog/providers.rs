@@ -169,7 +169,7 @@ impl ProviderConfig {
 
     pub fn endpoint(&self) -> Option<String> {
         if self.custom.is_some() && self.id.starts_with("custom-") {
-            return (!self.base_url.is_empty()).then(|| self.base_url.clone());
+            return endpoint_allowed(&self.base_url).then(|| self.base_url.clone());
         }
         let provider = ChatProvider::by_id(&self.id)?;
         if provider.wire == ChatWire::Cli {
@@ -218,7 +218,7 @@ impl ProviderConfig {
 
     fn speech_usable_in(&self, parakeet_dir: Option<std::path::PathBuf>) -> bool {
         if let Some(custom) = &self.custom {
-            let is_custom = self.id.starts_with("custom-") && !self.base_url.is_empty();
+            let is_custom = self.id.starts_with("custom-") && endpoint_allowed(&self.base_url);
             return is_custom && self.custom_key_ok(custom) && custom.validate(true).is_ok();
         }
         let Some(provider) = SttProvider::by_id(&self.id) else {
@@ -387,5 +387,31 @@ mod tests {
             config.endpoint().as_deref(),
             Some("http://127.0.0.1:11434/v1/chat/completions")
         );
+    }
+
+    #[test]
+    fn a_stored_custom_url_must_pass_the_endpoint_rule() {
+        let mut chat = ProviderConfig::new("custom-x", "", "m");
+        chat.custom = Some(super::super::custom::CustomProvider {
+            auth: "none".into(),
+            ..Default::default()
+        });
+        chat.base_url = "http://evil.example/v1/chat/completions".into();
+        assert!(chat.endpoint().is_none());
+        assert!(!chat.is_usable());
+        chat.base_url = "http://127.0.0.1:8080/v1/chat/completions".into();
+        assert!(chat.endpoint().is_some() && chat.is_usable());
+
+        let mut speech = ProviderConfig::new("custom-s", "", "m");
+        speech.custom = Some(super::super::custom::CustomProvider {
+            auth: "none".into(),
+            request_format: "multipart-wav".into(),
+            response_path: "/text".into(),
+            ..Default::default()
+        });
+        speech.base_url = "http://evil.example/v1/listen".into();
+        assert!(!speech.speech_usable_in(None));
+        speech.base_url = "https://speech.example/v1/listen".into();
+        assert!(speech.speech_usable_in(None));
     }
 }

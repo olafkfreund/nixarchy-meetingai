@@ -140,12 +140,14 @@ pub fn claude_args(model: &str, system_file: &Path) -> Vec<String> {
     args
 }
 
-/// Antigravity argv. agy takes the prompt only as an argument and has no system-prompt flag.
-pub fn agy_args(model: &str, prompt: &str) -> Vec<String> {
+/// Antigravity argv. The prompt is sent on stdin, never in argv.
+pub fn agy_args(model: &str) -> Vec<String> {
     let mut args: Vec<String> = [
         "--mode",
         "plan",
         "--output-format",
+        "stream-json",
+        "--input-format",
         "stream-json",
         "--print-timeout",
         "120s",
@@ -155,7 +157,6 @@ pub fn agy_args(model: &str, prompt: &str) -> Vec<String> {
     if model != CLI_DEFAULT_MODEL && !model.is_empty() {
         args.extend(["--model".into(), model.to_owned()]);
     }
-    args.extend(["-p".into(), prompt.to_owned()]);
     args
 }
 
@@ -340,6 +341,10 @@ fn claude_message(text: &str, images: &[String]) -> String {
     )
 }
 
+fn agy_message(text: &str) -> String {
+    format!("{}\n", json!({"event":"user","message":{"content":text}}))
+}
+
 pub(super) fn kill_group(pid: u32) {
     // SAFETY: killpg only signals the process group (= session) we created with setsid.
     unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
@@ -470,14 +475,14 @@ pub async fn stream<F: Future<Output = ()>>(
         }
         Kind::Agy => {
             let prompt = format!("{system}\n\n{text}");
-            // One argv string is capped near 128 KiB; a Cli error lets the chain try the next provider.
+            // Keep a bounded prompt; a Cli error lets the chain try the next provider.
             if prompt.len() > 100_000 {
                 return Err(ChatError::Cli(
                     "the conversation is too long for the Antigravity CLI".into(),
                 ));
             }
             agy_home(&dir.0)?;
-            ("agy", agy_args(&config.model, &prompt), String::new())
+            ("agy", agy_args(&config.model), agy_message(&prompt))
         }
     };
     run(program, kind, args, payload, &dir.0, cancel, on_text).await
@@ -534,19 +539,37 @@ pub(super) async fn run<F: Future<Output = ()>>(
     let plan_dropped = Arc::new(tokio::sync::Notify::new());
     let flag = plan_dropped.clone();
     let stderr_task = tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        let mut lines = BufReader::new((&mut stderr).take(1 << 20)).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if kind == Kind::Agy
-                && (line.contains("is unavailable") || line.contains("has no effect"))
-            {
-                flag.notify_one();
+        let mut tail = Vec::new();
+        let mut keep_tail = |chunk: &[u8]| {
+            tail.extend_from_slice(chunk);
+            let excess = tail.len().saturating_sub(STDERR_TAIL);
+            tail.drain(..excess);
+        };
+        {
+            let mut lines = BufReader::new((&mut stderr).take(1 << 20));
+            let mut line = Vec::new();
+            while let Ok(n) = lines.read_until(b'\n', &mut line).await {
+                if n == 0 {
+                    break;
+                }
+                let text = String::from_utf8_lossy(&line);
+                if kind == Kind::Agy
+                    && (text.contains("is unavailable") || text.contains("has no effect"))
+                {
+                    flag.notify_one();
+                }
+                keep_tail(&line);
+                line.clear();
             }
-            bytes.extend_from_slice(line.as_bytes());
-            bytes.push(b'\n');
         }
-        let start = bytes.len().saturating_sub(STDERR_TAIL);
-        String::from_utf8_lossy(&bytes[start..]).trim().to_owned()
+        let mut chunk = [0; 8192];
+        while let Ok(n) = stderr.read(&mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            keep_tail(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&tail).trim().to_owned()
     });
     let mut lines = BufReader::new(child.stdout.take().expect("stdout piped")).lines();
     let mut answer = String::new();
@@ -1012,5 +1035,51 @@ mod tests {
             // SAFETY: signal 0 only probes for existence.
             assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "{name} survived");
         }
+    }
+
+    #[test]
+    fn agy_argv_never_carries_the_prompt() {
+        let prompt = "profile secret: the candidate CV text";
+        let args = agy_args("gemini-x");
+        assert!(args.iter().all(|a| !a.contains(prompt)), "{args:?}");
+        assert!(!args.contains(&"-p".to_owned()));
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--input-format", "stream-json"])
+        );
+        assert!(args.windows(2).any(|w| w == ["--mode", "plan"]));
+        assert!(args.iter().all(|a| !a.contains("dangerously")));
+        let message = agy_message(prompt);
+        assert!(message.ends_with('\n') && message.trim_end().lines().count() == 1);
+        let value: Value = serde_json::from_str(message.trim_end()).unwrap();
+        assert_eq!(value["event"], "user");
+        assert_eq!(value["message"]["content"], prompt);
+    }
+
+    #[tokio::test]
+    async fn stderr_past_one_mib_keeps_draining_and_keeps_its_tail() {
+        let dir = std::env::temp_dir();
+        let (_tx, rx) = watch::channel(false);
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run(
+                "sh",
+                Kind::Codex,
+                vec![
+                    "-c".into(),
+                    "yes noise | head -c 3000000 >&2; echo tailmark >&2; exit 3".into(),
+                ],
+                String::new(),
+                &dir,
+                Arc::new(rx),
+                |_| std::future::ready(()),
+            ),
+        )
+        .await
+        .expect("child blocked on a full stderr pipe")
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("tailmark"), "{message}");
+        assert!(message.len() < STDERR_TAIL + 200, "{}", message.len());
     }
 }
