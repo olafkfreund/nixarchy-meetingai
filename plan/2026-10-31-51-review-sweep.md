@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 51
 spec: spec/2026-10-31-51-review-sweep.md
 coders:
