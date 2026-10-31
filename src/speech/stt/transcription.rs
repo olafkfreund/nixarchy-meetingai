@@ -28,6 +28,9 @@ pub struct TranscriptLine {
     pub end: f64,
 }
 
+/// The push error once the speech worker is gone; its own `Failed` event carries the reason.
+pub const STREAM_ENDED: &str = "Speech stream ended; start recording again";
+
 /// An error returned while preparing or using speech recognition.
 #[derive(Debug, thiserror::Error)]
 pub enum SttError {
@@ -965,9 +968,7 @@ impl LiveTranscriber {
             Err(SendTimeoutError::Timeout(_)) => Err(SttError::Socket(
                 "Speech audio queue fell behind; start recording again".into(),
             )),
-            Err(SendTimeoutError::Closed(_)) => Err(SttError::Socket(
-                "Speech stream ended; start recording again".into(),
-            )),
+            Err(SendTimeoutError::Closed(_)) => Err(SttError::Socket(STREAM_ENDED.into())),
         }
     }
     pub async fn next_event(&mut self) -> Option<LiveEvent> {

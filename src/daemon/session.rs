@@ -1884,6 +1884,10 @@ impl Daemon {
                 Self::completed_turn(g, channel, completed);
                 false
             }
+            LiveEvent::Notice(message) => {
+                self.error(message);
+                false
+            }
             LiveEvent::Failed(message) => {
                 self.error(message);
                 if let Some(r) = &g.recording {
@@ -2321,7 +2325,7 @@ impl Daemon {
                             && let Err(error) = l.push(&samples).await
                         {
                             // A closed stream says why through its own events, drained below.
-                            if !matches!(&error, SttError::Socket(message) if message == "Speech stream ended; start recording again")
+                            if !matches!(&error, SttError::Socket(message) if message == transcription::STREAM_ENDED)
                             {
                                 self.error(error.to_string());
                                 done = true;
@@ -2606,7 +2610,10 @@ impl Daemon {
                 .map_err(|e| e.to_string())?;
             // Remember the folder before filling it, so a failed fill never orphans it.
             exports::set(c, &id, &folder.to_string_lossy()).map_err(|e| e.to_string())?;
-            export::fill(&folder, &export).map_err(|e| e.to_string())?;
+            let stored = exports::notes_hash(c, &id).map_err(|e| e.to_string())?;
+            let hash = export::fill_tracked(&folder, &export, stored.as_deref())
+                .map_err(|e| e.to_string())?;
+            exports::set_notes_hash(c, &id, &hash).map_err(|e| e.to_string())?;
             Ok::<_, String>(folder)
         })
         .await

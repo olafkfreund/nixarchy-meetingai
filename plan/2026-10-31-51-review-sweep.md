@@ -264,3 +264,36 @@ Traps that apply to every step:
   nixos lock bump, then a switch from committed main.
 - The `notes_sha256` column is nullable and ignored by older builds, so a
   rollback leaves the database usable.
+
+## Deviations (recorded during step 10)
+
+- One commit per team instead of per step. Each team handed back one
+  combined diff, and steps 1–3 and 7–8 share files. Each commit message
+  names its steps.
+- A2: `presets.list` isn't in the MCP allowlist, so the existing test that
+  expected it to work for `mcp` now expects a refusal. A `chat.send` from
+  MCP is refused if it has an `attachments` key at all.
+  `SETTINGS_ALLOWLIST` became `pub const MCP_SETTINGS` in
+  `src/mcp/mod.rs`.
+- A5: tested through a `#[cfg(test)]` failing-open flag. A7, A9/C8 and C5
+  have no tests: they need a panicking task or a live capture session.
+- A4: the test uses a slow `models.list`, because `chat.send` replies as
+  soon as the turn starts. Spawned slow requests aren't aborted when the
+  connection closes; their replies are dropped.
+- C1: a new `LiveEvent::Notice`, which the daemon shows as an error row
+  without stopping. `tests/network_resilience.rs` now checks the notice
+  instead of the old fatal stop, under a new test name. The "Speech stream
+  ended" text is a shared `STREAM_ENDED` constant, so the daemon no longer
+  matches a copy of the string.
+- C2, C6: tested through `ListenSession::drop_failed_system` and `feed`
+  helpers, because `Microphone` has no fake.
+- C3: **not done**. The probe printed 0 bytes, so the pinned monitor
+  stays.
+- C10: `tick` takes the open system chunk's end, with a margin of 1.0 s.
+- B1: agy 1.4.11 takes `{"event":"user","message":{"content":…}}` on
+  stdin. The fallback wasn't needed.
+- B2: `export::fill_tracked` returns the notes hash and the daemon saves
+  it. The `fill` wrapper is removed. Out-of-date generated files are no
+  longer deleted either. The column is added only in `Database::prepare`.
+- B7: `open_existing` also sets the connection pragmas `synchronous`,
+  `secure_delete` and `temp_store`.

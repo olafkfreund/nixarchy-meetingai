@@ -382,10 +382,6 @@ pub fn fill_tracked(folder: &Path, e: &Export, stored: Option<&str>) -> io::Resu
 }
 
 /// Write the meeting's files into `folder`: screenshots and documents first, `notes.md` last.
-pub fn fill(folder: &Path, e: &Export) -> io::Result<()> {
-    fill_tracked(folder, e, None).map(drop)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
