@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -336,6 +336,8 @@ pub struct Daemon {
     tx: broadcast::Sender<Value>,
     pub shutdown: Notify,
     chunking: AtomicBool,
+    /// Bumped by Cancel and a session reset: a `chat.send` still preparing (screenshot delay) drops out.
+    send_epoch: AtomicU64,
     /// Tests: the capture open fails the way a panicked blocking task does.
     #[cfg(test)]
     fail_open: AtomicBool,
@@ -840,6 +842,7 @@ impl Daemon {
             tx,
             shutdown: Notify::new(),
             chunking: AtomicBool::new(false),
+            send_epoch: AtomicU64::new(0),
             #[cfg(test)]
             fail_open: AtomicBool::new(false),
             local_only: AtomicBool::new(false),
@@ -1299,6 +1302,8 @@ impl Daemon {
     }
 
     async fn chat_send(self: &Arc<Self>, args: protocol::ChatSend) -> Result<Value, String> {
+        let epoch = self.send_epoch.load(Ordering::Relaxed);
+        let cancelled = || Ok(json!({"turn": null, "cancelled": true}));
         let mut question = args.text.trim().to_owned();
         if question.chars().nth(256_000).is_some() {
             return Err(SendError::TooLarge.message());
@@ -1340,7 +1345,11 @@ impl Daemon {
         };
         if want_capture {
             tokio::time::sleep(Duration::from_secs(u64::from(delay))).await;
-            match grab_screen(false).await {
+            let grabbed = grab_screen(false).await;
+            if self.send_epoch.load(Ordering::Relaxed) != epoch {
+                return cancelled();
+            }
+            match grabbed {
                 Ok(image) => self.inner.lock().pending_capture = Some(image),
                 // A failed capture must not hold up the question.
                 Err(error) => self.error(error),
@@ -1348,6 +1357,9 @@ impl Daemon {
         }
         let image = {
             let mut g = self.inner.lock();
+            if self.send_epoch.load(Ordering::Relaxed) != epoch {
+                return cancelled();
+            }
             let image = g.pending_capture.take();
             if image.is_some() {
                 self.emit_state(&g);
@@ -1381,8 +1393,10 @@ impl Daemon {
             }
             image
         };
-        let turn = self.begin_send(question, image, false, args.no_context)?;
-        Ok(json!({"turn": turn}))
+        match self.begin_send(question, image, false, args.no_context, Some(epoch))? {
+            Some(turn) => Ok(json!({"turn": turn})),
+            None => cancelled(),
+        }
     }
 
     /// Start one chat turn. Returns its turn number.
@@ -1392,9 +1406,13 @@ impl Daemon {
         image: Option<CapturedImage>,
         automatic: bool,
         no_context: bool,
-    ) -> Result<u64, String> {
+        epoch: Option<u64>,
+    ) -> Result<Option<u64>, String> {
         let mut guard = self.inner.lock();
         let g = &mut *guard;
+        if epoch.is_some_and(|e| e != self.send_epoch.load(Ordering::Relaxed)) {
+            return Ok(None);
+        }
         if automatic && g.recording.is_none() {
             return Err("Not recording.".into());
         }
@@ -1512,7 +1530,7 @@ impl Daemon {
             };
             me.finish_turn(turn, result, automatic);
         }));
-        Ok(turn)
+        Ok(Some(turn))
     }
 
     /// Stream one answer, moving down the chain past every provider that cannot even start. `quiet` holds the text back.
@@ -1801,7 +1819,7 @@ impl Daemon {
             g.pending_question.take()
         };
         if let Some(question) = question
-            && let Err(error) = self.begin_send(question, None, true, false)
+            && let Err(error) = self.begin_send(question, None, true, false, None)
         {
             self.error(error);
         }
@@ -3026,6 +3044,7 @@ impl Daemon {
     // ----- sessions -----------------------------------------------------
 
     fn reset_session(&self, g: &mut Inner) {
+        self.send_epoch.fetch_add(1, Ordering::Relaxed);
         self.interrupt(g);
         g.chat.reset();
         g.conversation.clear();
@@ -4541,7 +4560,9 @@ impl Daemon {
             }
             "chat.send" => self.chat_send(parse(args)?).await,
             "chat.cancel" => {
-                self.interrupt(&mut self.inner.lock());
+                let mut g = self.inner.lock();
+                self.send_epoch.fetch_add(1, Ordering::Relaxed);
+                self.interrupt(&mut g);
                 Ok(json!({}))
             }
             "voice.enroll" => self.voice_enroll().await,
@@ -7504,6 +7525,18 @@ mod command_tests {
         d.fail_open.store(false, Ordering::Relaxed);
         d.handle("record.start", json!({}), None).await.unwrap();
         d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_or_a_new_session_drops_a_send_still_preparing() {
+        let d = daemon();
+        for cmd in ["chat.cancel", "session.new"] {
+            let epoch = d.send_epoch.load(Ordering::Relaxed);
+            d.handle(cmd, json!({}), None).await.unwrap();
+            // The send that started before it must not start a turn afterwards.
+            let turn = d.begin_send("old question".into(), None, false, false, Some(epoch));
+            assert_eq!(turn, Ok(None), "{cmd}");
+        }
     }
 
     #[tokio::test]

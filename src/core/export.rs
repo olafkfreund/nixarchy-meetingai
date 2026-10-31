@@ -363,25 +363,30 @@ pub fn fill_tracked(folder: &Path, e: &Export, stored: Option<&str>) -> io::Resu
         .collect();
     write_dir(folder, "screenshots", &shots)?;
     write_dir(folder, "documents", &docs)?;
-    let notes = folder.join("notes.md");
-    let target = match fs::symlink_metadata(&notes) {
-        Err(_) => "notes.md",
-        Ok(_) if stored.is_some_and(|s| fs::read(&notes).ok().is_some_and(|b| sha256(&b) == s)) => {
-            "notes.md"
-        }
-        Ok(_) => "notes (updated).md",
+    // The first name that is free or still holds exactly what we last wrote; never one the user changed.
+    let ours = |name: &String| match fs::symlink_metadata(folder.join(name)) {
+        Err(_) => true,
+        Ok(_) => stored.is_some_and(|s| {
+            fs::read(folder.join(name))
+                .ok()
+                .is_some_and(|b| sha256(&b) == s)
+        }),
     };
+    let target = std::iter::once("notes.md".to_owned())
+        .chain(std::iter::once("notes (updated).md".to_owned()))
+        .chain((2..).map(|n| format!("notes (updated {n}).md")))
+        .find(ours)
+        .expect("an unbounded list of names");
     let rendered = render(e);
     let tmp = ".notes.md.tmp";
     put(folder, Path::new(tmp), rendered.as_bytes())?;
-    if let Err(err) = fs::rename(folder.join(tmp), folder.join(target)) {
+    if let Err(err) = fs::rename(folder.join(tmp), folder.join(&target)) {
         let _ = rm(&folder.join(tmp));
         return Err(err);
     }
     Ok(sha256(rendered.as_bytes()))
 }
 
-/// Write the meeting's files into `folder`: screenshots and documents first, `notes.md` last.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,6 +701,19 @@ mod tests {
         let updated = fs::read(f.join("notes (updated).md")).unwrap();
         assert!(String::from_utf8_lossy(&updated).contains("Third pass."));
         assert_eq!(third, sha(&updated));
+        // the updated file edited too: kept, and the next notes take a new name
+        fs::write(f.join("notes (updated).md"), "my second edit").unwrap();
+        later.summary = "Fourth pass.".into();
+        fill_tracked(&f, &later, Some(&third)).unwrap();
+        assert_eq!(
+            fs::read_to_string(f.join("notes (updated).md")).unwrap(),
+            "my second edit"
+        );
+        assert!(
+            fs::read_to_string(f.join("notes (updated 2).md"))
+                .unwrap()
+                .contains("Fourth pass.")
+        );
         // no stored hash (an export from before hashes were kept): never overwritten
         let g = place(&t.0, None, &fixture("Legacy")).unwrap();
         fs::write(g.join("notes.md"), "old export").unwrap();
