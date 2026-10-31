@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 51
 author: olafkfreund
 ---
@@ -104,21 +104,13 @@ and plan can refer to them.
 - Deploy only from committed main, after an agent-bus announcement, and not
   while recording.
 
-## Open questions
+## Decisions (approved 2026-10-31, owner's proposals)
 
-1. **A2:** which commands should MCP be allowed? My proposal is exactly
-   what its tools use today, with `settings.set` limited to the MCP
-   settings allowlist.
-2. **A3:** should `notes.regenerate` on a local-only meeting be refused, or
-   allowed with the local model (as it does today)? My proposal is to allow
-   it, but never export from it.
-3. **B1:** if agy has no way to read the prompt from stdin or a file,
-   should agy be refused meeting content, or be run with a warning in the
-   provider status? My proposal is to refuse profile and CV documents and
-   show the warning.
-4. **B6:** zero-filling the old file isn't a reliable erase on SSD or
-   copy-on-write storage, as Codex noted. Should we document the remaining
-   risk instead of adding code? My proposal is to document it only.
-5. **Scope:** fix all 28 in one PR, or split them into a privacy PR (groups
-   1 and 3) and a reliability PR (groups 2, 4 and 5)? My proposal is one
-   branch and one PR, since you asked for one sweep.
+1. A2: MCP gets a server-side allowlist of exactly the commands its tools use
+   today; `settings.set` from MCP is limited to the MCP settings allowlist.
+2. A3: `notes.regenerate` on a local-only meeting stays allowed with the local
+   model, but regenerating never exports.
+3. B1: if agy cannot take the prompt from stdin or a file, agy gets no profile
+   or CV documents and its provider status shows a warning.
+4. B6: document the residual risk only; no zero-fill code.
+5. Scope: all findings in one branch and one PR.
