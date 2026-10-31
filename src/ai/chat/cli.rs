@@ -859,8 +859,20 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let (tx, rx) = watch::channel(false);
+        let pid_file = dir.join("pid");
+        let read_pid = || {
+            std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+        };
+        // Cancel only once the grandchild exists; a fixed delay raced the script under load.
         let cancel = async {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            for _ in 0..500 {
+                if read_pid().is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
             tx.send(true).unwrap();
         };
         let started = std::time::Instant::now();
@@ -876,14 +888,16 @@ mod tests {
         let (_, answer) = tokio::join!(cancel, run);
         assert_eq!(answer.unwrap(), "");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
-        let pid: i32 = std::fs::read_to_string(dir.join("pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        // SAFETY: signal 0 only probes for existence.
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "grandchild survived");
+        let pid = read_pid().expect("script wrote the grandchild pid");
+        // SAFETY: signal 0 only probes for existence. A killed orphan lingers until init reaps it.
+        let alive = || unsafe { libc::kill(pid, 0) } == 0;
+        for _ in 0..200 {
+            if !alive() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!alive(), "grandchild survived");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
