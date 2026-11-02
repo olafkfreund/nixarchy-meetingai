@@ -115,3 +115,16 @@ reviewers:   # a second read on the thread/lock/Drop ordering, on top of the Opu
 
 Revert the merge commit and bump the nixos lock back. There's no schema or
 settings change.
+
+## Deviations
+
+- Step 2 (Codex): when the default sink is known, it is used directly
+  (`monitor_id(sink)`), even if `pactl list sources` fails or doesn't list
+  it, so the injected probe works without an audio server. A default sink
+  without a monitor now fails the start instead of falling back to the first
+  monitor in the list.
+- Step 2 (lead): the new tests retry "Text file busy" (ETXTBSY) like the
+  existing reap test. In the full suite, `ai::chat::cli::tests::cancel_kills_the_whole_group`
+  then failed once: `run` returned before cancel, because its fake script hit
+  ETXTBSY, which the extra script-writing tests made likelier. That test now
+  retries ETXTBSY up to 5 times (`src/ai/chat/cli.rs`).

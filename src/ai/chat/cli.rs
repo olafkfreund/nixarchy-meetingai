@@ -881,36 +881,45 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nsleep 60 &\necho $! > pid\nwait\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let (tx, rx) = watch::channel(false);
         let pid_file = dir.join("pid");
         let read_pid = || {
             std::fs::read_to_string(&pid_file)
                 .ok()
                 .and_then(|s| s.trim().parse::<i32>().ok())
         };
-        // Cancel only once the grandchild exists; a fixed delay raced the script under load.
-        let cancel = async {
-            for _ in 0..500 {
-                if read_pid().is_some() {
+        // Another test forking while a script is open for writing gives ETXTBSY; retry only that.
+        for attempt in 0.. {
+            let (tx, rx) = watch::channel(false);
+            // Cancel only once the grandchild exists; a fixed delay raced the script under load.
+            let cancel = async {
+                for _ in 0..500 {
+                    if read_pid().is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                let _ = tx.send(true);
+            };
+            let started = std::time::Instant::now();
+            let run = run(
+                script.to_str().unwrap(),
+                Kind::Claude,
+                vec![],
+                String::new(),
+                &dir,
+                Arc::new(rx),
+                |_| std::future::ready(()),
+            );
+            let (_, answer) = tokio::join!(cancel, run);
+            match answer {
+                Err(e) if attempt < 5 && e.to_string().contains("Text file busy") => continue,
+                answer => {
+                    assert_eq!(answer.unwrap(), "");
+                    assert!(started.elapsed() < std::time::Duration::from_secs(5));
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            tx.send(true).unwrap();
-        };
-        let started = std::time::Instant::now();
-        let run = run(
-            script.to_str().unwrap(),
-            Kind::Claude,
-            vec![],
-            String::new(),
-            &dir,
-            Arc::new(rx),
-            |_| std::future::ready(()),
-        );
-        let (_, answer) = tokio::join!(cancel, run);
-        assert_eq!(answer.unwrap(), "");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        }
         let pid = read_pid().expect("script wrote the grandchild pid");
         // SAFETY: signal 0 only probes for existence. A killed orphan lingers until init reaps it.
         let alive = || unsafe { libc::kill(pid, 0) } == 0;
