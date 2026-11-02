@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 55
 spec: spec/2026-11-02-55-follow-default-output.md
 coders:   # Rust threads and process handling, and Codex did the #51 capture steps cleanly
