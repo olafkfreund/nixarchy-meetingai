@@ -338,6 +338,21 @@ impl SystemAudio {
             moved: Arc::new(Mutex::new(None)),
         }
     }
+
+    pub(crate) fn moved_for_test(name: &str) -> Self {
+        let mut audio = Self::stopped_for_test();
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        audio.recorder = Arc::new(Mutex::new(Recorder {
+            child,
+            reader: None,
+        }));
+        audio.exited.store(false, Ordering::Relaxed);
+        *audio.moved.lock().expect("lock moved") = Some(name.to_owned());
+        audio
+    }
 }
 
 impl Drop for SystemAudio {

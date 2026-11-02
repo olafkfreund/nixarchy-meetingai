@@ -128,3 +128,8 @@ settings change.
   then failed once: `run` returned before cancel, because its fake script hit
   ETXTBSY, which the extra script-writing tests made likelier. That test now
   retries ETXTBSY up to 5 times (`src/ai/chat/cli.rs`).
+- Step 3 (Codex): `pump()` returns early without a microphone, so the test
+  also needs `#[cfg(test)] Microphone::running_for_test()` in
+  `src/audio/capture/microphone.rs`. It wraps a fake recorder (`sleep 60`)
+  and opens no audio device. After the lead's ETXTBSY fixes, 10 consecutive
+  full test runs were clean.

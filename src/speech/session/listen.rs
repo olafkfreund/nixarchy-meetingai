@@ -366,7 +366,16 @@ impl ListenSession {
             return vec![SessionEvent::Failed(format_interrupted_failure())];
         }
 
-        let mut events = self.drop_failed_system();
+        let mut events = Vec::new();
+        if let Some(name) = self.sys.as_ref().and_then(SystemAudio::take_moved) {
+            events.push(SessionEvent::Notice(format!(
+                "System audio now records {name}"
+            )));
+            if let Some(gate) = &mut self.echo_gate {
+                gate.reset();
+            }
+        }
+        events.extend(self.drop_failed_system());
 
         let mic_samples = self
             .mic
@@ -608,6 +617,28 @@ mod tests {
             .count();
         assert_eq!(frames, 2, "{events:?}");
         assert!(!events.iter().any(|e| matches!(e, SessionEvent::Failed(_))));
+    }
+
+    #[test]
+    fn moved_system_source_gives_one_notice() {
+        let mut session = idle_session(true);
+        session.mic = Some(Microphone::running_for_test());
+        session.sys = Some(SystemAudio::moved_for_test("new output"));
+        session.assembler.configure_system(true);
+
+        let notices = |events: Vec<SessionEvent>| {
+            events
+                .into_iter()
+                .filter(|event| matches!(event, SessionEvent::Notice(_)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            notices(session.pump()),
+            vec![SessionEvent::Notice(
+                "System audio now records new output".to_owned()
+            )]
+        );
+        assert!(notices(session.pump()).is_empty());
     }
 
     /// Runs `minutes` of 50 ms pumps where the microphone delivers `per_tick` samples.

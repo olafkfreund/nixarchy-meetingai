@@ -275,6 +275,17 @@ impl Drop for Microphone {
     }
 }
 
+#[cfg(test)]
+impl Microphone {
+    pub(crate) fn running_for_test() -> Self {
+        Self {
+            capture: Capture::Pulse(SystemAudio::moved_for_test("")),
+            name: "fake microphone".to_owned(),
+            bypassed: false,
+        }
+    }
+}
+
 /// The input device whose description name is exactly `wanted`, if any.
 fn input_named(host: &cpal::Host, wanted: &str) -> Result<Option<cpal::Device>, AudioError> {
     let devices = host
