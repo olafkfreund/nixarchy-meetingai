@@ -2325,13 +2325,7 @@ impl Daemon {
                 if want != system_on {
                     system_on = want;
                     let s = session.take().unwrap();
-                    match tokio::task::spawn_blocking(move || {
-                        let mut s = s;
-                        let events = s.set_system_audio(want);
-                        (s, events)
-                    })
-                    .await
-                    {
+                    match off_thread(s, move |s| s.set_system_audio(want)).await {
                         Ok((s, changed)) => {
                             session = Some(s);
                             events = changed;
@@ -4671,6 +4665,19 @@ impl Daemon {
             other => Err(format!("unknown command '{other}'")),
         }
     }
+}
+
+async fn off_thread<T: Send + 'static, R: Send + 'static>(
+    value: T,
+    f: impl FnOnce(&mut T) -> R + Send + 'static,
+) -> Result<(T, R), String> {
+    tokio::task::spawn_blocking(move || {
+        let mut v = value;
+        let r = f(&mut v);
+        (v, r)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -7625,5 +7632,18 @@ mod command_tests {
         d.chunk_panic.store(false, Ordering::Relaxed);
         d.spawn_chunk("m".into());
         assert!(d.chunking.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn off_thread_turns_a_panic_into_an_error() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let err = off_thread(1, |_| -> () { panic!("boom") })
+                .await
+                .unwrap_err();
+            assert!(err.contains("panic"), "{err}");
+            assert_eq!(off_thread(2, |v| *v * 3).await, Ok((2, 6)));
+        })
+        .await
+        .unwrap();
     }
 }
