@@ -29,3 +29,6 @@ result-*
 # Accuracy evaluation audio is personal: never commit it (tools/accuracy/README.md).
 tools/accuracy/*.wav
 tools/accuracy/data/
+
+# Python bytecode
+__pycache__/
