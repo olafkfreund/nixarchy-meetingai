@@ -79,6 +79,14 @@ impl StereoAssembler {
         }
     }
 
+    /// After a system recorder swap, pad the system channel with silence up to the
+    /// microphone's backlog, so new system audio pairs with current microphone audio.
+    fn align_system(&mut self) {
+        if self.sys_enabled && self.sys_queue.len() < self.mic_queue.len() {
+            self.sys_queue.resize(self.mic_queue.len(), 0.0);
+        }
+    }
+
     fn configure_system(&mut self, enabled: bool) {
         self.sys_enabled = enabled;
         self.sys_queue.clear();
@@ -367,6 +375,9 @@ impl ListenSession {
         }
 
         let mut events = Vec::new();
+        if self.sys.as_ref().is_some_and(SystemAudio::take_swapped) {
+            self.assembler.align_system();
+        }
         if let Some(name) = self.sys.as_ref().and_then(SystemAudio::take_moved) {
             events.push(SessionEvent::Notice(format!(
                 "System audio now records {name}"
@@ -625,6 +636,8 @@ mod tests {
         session.mic = Some(Microphone::running_for_test());
         session.sys = Some(SystemAudio::moved_for_test("new output"));
         session.assembler.configure_system(true);
+        // Microphone audio buffered while the system recorder was being replaced.
+        session.assembler.mic_queue.extend([0.1; 1200]);
 
         let notices = |events: Vec<SessionEvent>| {
             events
@@ -639,6 +652,11 @@ mod tests {
             )]
         );
         assert!(notices(session.pump()).is_empty());
+        // The swap padded the system channel up to the microphone's backlog.
+        assert_eq!(
+            session.assembler.sys_queue.len(),
+            session.assembler.mic_queue.len()
+        );
     }
 
     /// Runs `minutes` of 50 ms pumps where the microphone delivers `per_tick` samples.

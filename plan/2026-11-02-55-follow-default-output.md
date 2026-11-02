@@ -158,3 +158,14 @@ settings change.
 - Codex re-review P2: the notice label is looked up before the handover, so a
   slow `pactl list sources` can't delay the notice and the echo-gate reset
   after the new recorder starts feeding.
+- Copilot review on PR #58:
+  - A block is queued only if the recorder was live when its read
+    *started*, so a block read while muted can't land after the handover.
+  - Every swap sets `swapped`. `pump` then pads the system channel with
+    silence up to the microphone's backlog (`StereoAssembler::align_system`).
+    Before, a gap under the 250 ms quiet threshold left new system audio
+    paired with older microphone audio, and the offset could accumulate.
+  - A new test, `a_switch_never_interleaves_old_and_new_audio`, uses a fake
+    parec that streams 1.0 on A and 2.0 on B. The `listen.rs` notice test
+    now also asserts the realignment. Each test fails 3/3 with its fix
+    removed. After this, 8 clean full runs.

@@ -57,6 +57,8 @@ pub struct SystemAudio {
     exited: AtomicBool,
     follow: Option<Follow>,
     moved: Arc<Mutex<Option<String>>>,
+    /// Set on every recorder swap, so the session can realign the system channel.
+    swapped: Arc<AtomicBool>,
 }
 
 fn spawn_recorder(
@@ -100,12 +102,14 @@ fn spawn_recorder(
         let mut carry = Vec::new();
         let mut decoded = Vec::with_capacity(frame.len() / 4);
         loop {
+            // Checked before the read: a block read while muted overlaps the old recorder's audio.
+            let was_live = feeding.load(Ordering::Acquire);
             match input.read(&mut frame) {
                 Ok(0) | Err(_) => break,
                 Ok(count) => {
                     decoded.clear();
                     decode_samples(&mut carry, &frame[..count], &mut decoded);
-                    if !feeding.load(Ordering::Acquire) {
+                    if !was_live {
                         continue;
                     }
                     if let Ok(mut queue) = queue.lock() {
@@ -200,6 +204,7 @@ impl SystemAudio {
         let recorder = Arc::clone(&audio.recorder);
         let samples = Arc::clone(&audio.samples);
         let moved = Arc::clone(&audio.moved);
+        let swapped = Arc::clone(&audio.swapped);
         let thread_stop = Arc::clone(&stop);
         let program = program.to_owned();
         let thread = thread::spawn(move || {
@@ -251,6 +256,7 @@ impl SystemAudio {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(label);
                             current_sink = target;
                         }
+                        swapped.store(true, Ordering::Release);
                         live.store(true, Ordering::Release);
                     }
                     Err(_) if !alive => break,
@@ -286,6 +292,7 @@ impl SystemAudio {
             exited: AtomicBool::new(false),
             follow: None,
             moved: Arc::new(Mutex::new(None)),
+            swapped: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -320,6 +327,11 @@ impl SystemAudio {
             self.exited.store(true, Ordering::Relaxed);
         }
         alive
+    }
+
+    /// Whether the recorder was replaced since the last call.
+    pub fn take_swapped(&self) -> bool {
+        self.swapped.swap(false, Ordering::AcqRel)
     }
 
     /// Take the latest output name reported by the watcher.
@@ -367,6 +379,7 @@ impl SystemAudio {
             exited: AtomicBool::new(true),
             follow: None,
             moved: Arc::new(Mutex::new(None)),
+            swapped: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -383,6 +396,7 @@ impl SystemAudio {
         }));
         audio.exited.store(false, Ordering::Relaxed);
         *audio.moved.lock().expect("lock moved") = Some(name.to_owned());
+        audio.swapped.store(true, Ordering::Relaxed);
         audio
     }
 }
@@ -548,6 +562,43 @@ mod tests {
         let _ = std::fs::remove_file(script);
         let _ = std::fs::remove_file(args);
         let _ = std::fs::remove_file(gone);
+    }
+
+    #[test]
+    fn a_switch_never_interleaves_old_and_new_audio() {
+        // Each recorder streams one value: 1.0 on A.monitor, 2.0 on B.monitor (float32le).
+        let (script, args) = fake_parec_with(
+            "pcm",
+            r#"case "$*" in *B.monitor*) s='\000\000\000\100';; *) s='\000\000\200\077';; esac
+p=$s$s$s$s$s$s$s$s; p=$p$p$p$p$p$p$p$p
+while :; do printf "$p" || exit; sleep 0.004; done"#,
+        );
+        let sink = Arc::new(Mutex::new(Some("A".to_owned())));
+        let audio = following(&script, &sink);
+        let mut heard = Vec::new();
+        wait_until(|| {
+            heard.extend(audio.take(usize::MAX));
+            heard.contains(&1.0)
+        });
+        *sink.lock().unwrap() = Some("B".to_owned());
+        wait_until(|| {
+            heard.extend(audio.take(usize::MAX));
+            heard.contains(&2.0)
+        });
+        // Let the new recorder run on, so a late block from either one would show.
+        let settle = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < settle {
+            heard.extend(audio.take(usize::MAX));
+            thread::sleep(Duration::from_millis(10));
+        }
+        let first_new = heard.iter().position(|&v| v == 2.0).unwrap();
+        assert!(
+            heard[first_new..].iter().all(|&v| v == 2.0),
+            "old audio after new audio began"
+        );
+        drop(audio);
+        let _ = std::fs::remove_file(script);
+        let _ = std::fs::remove_file(args);
     }
 
     #[test]
