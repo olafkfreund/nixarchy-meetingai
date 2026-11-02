@@ -26,6 +26,19 @@ Item {
     property var found: []        // settings.search results: { key, label, value }
     property string promptMode: "general"
     property string notes: ""
+    readonly property real notesDefault: Style.space(160) * theme.ts
+    property real notesHeight: notesDefault
+    // Unix ms for sorting and showing: a chat's last activity, a meeting's start (SQLite UTC text). 0 if unknown.
+    function when(s) {
+        if (s.kind === "chat") return Number(s.updated_at) || 0;
+        return s.started_at ? (Date.parse(String(s.started_at).replace(" ", "T") + "Z") || 0) : 0;
+    }
+    // The notes pane keeps three lines at least and leaves the list two rows.
+    function setNotesHeight(h) {
+        var max = restoreList.parent.height - restoreList.y - 2 * (root.theme.ctl + Style.spacing.xs)
+            - notesGrip.height - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - 2 * Style.spacing.md;
+        root.notesHeight = Math.max(Style.space(48) * root.theme.ts, Math.min(h, max));
+    }
     property var notesMeeting: null
     property string exportStatus: ""
     property var exportAfterPick: null
@@ -208,7 +221,7 @@ Item {
     property string error: ""   // the last failed request made from here, shown under the search field
     onProvModeChanged: { root.formEpoch++; if (root.provMode !== "form") { provKey.text = ""; root.testMessage = ""; root.testingProvider = false; } }
     onTabChanged: { root.error = ""; root.provMode = ""; root.load(); }
-    onVisibleChanged: if (!visible) root.provMode = ""   // closing the overlay drops a typed key
+    onVisibleChanged: { if (!visible) root.provMode = ""; else root.notesHeight = root.notesDefault; }   // closing drops a typed key; opening resets the notes height
     onPromptModeChanged: root.loadPrompt()
     onPromptKindChanged: root.loadPrompt()
     Component.onCompleted: root.load()
@@ -261,10 +274,11 @@ Item {
 
         // Restore: chats and meetings with their notes.
         ListView {
+            id: restoreList
             visible: root.tab === "restore"
-            width: parent.width; height: parent.height - y - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - (notesBox.visible ? notesBox.height + Style.spacing.md : 0)
+            width: parent.width; height: parent.height - y - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - (notesGrip.visible ? notesGrip.height + Style.spacing.md : 0) - (notesBox.visible ? notesBox.height + Style.spacing.md : 0)
             clip: true
-            model: root.sessions.filter(function(s) { return root.match(s.title); })
+            model: root.sessions.filter(function(s) { return root.match(s.title); }).sort(function(a, b) { return root.when(b) - root.when(a); })
             delegate: RowLayout {
                 id: rrow
                 required property var modelData
@@ -281,8 +295,17 @@ Item {
                     color: Commons.Color.popups.text
                     font.pixelSize: root.theme.body
                 }
+                UiText {
+                    objectName: "sessionWhen"
+                    Layout.alignment: Qt.AlignVCenter
+                    textFormat: Text.PlainText
+                    text: { var t = root.when(rrow.modelData); return t ? Qt.formatDateTime(new Date(t), Qt.locale().dateTimeFormat(Locale.ShortFormat)) : ""; }
+                    color: Commons.Color.popups.text
+                    opacity: root.theme.dim
+                    font.pixelSize: root.theme.caption
+                }
                 IconButton { objectName: "restore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Restore"; onClicked: root.client.send("session.restore", { id: rrow.modelData.id }) }
-                IconButton { ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
+                IconButton { objectName: "openNotes"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
                     text: "Notes"
                     visible: rrow.modelData.kind === "meeting"
                     onClicked: {
@@ -312,11 +335,27 @@ Item {
             color: Commons.Color.popups.text
             font.pixelSize: root.theme.caption
         }
+        Item {   // drag up or down to resize the notes pane
+            id: notesGrip
+            objectName: "notesGrip"
+            visible: notesBox.visible
+            width: parent.width; height: 6
+            Rectangle { anchors.centerIn: parent; width: Style.space(40); height: 2; radius: 1; color: Commons.Color.foreground; opacity: root.theme.dim }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.SizeVerCursor
+                property real pressY: 0
+                property real startH: 0
+                onPressed: function(m) { pressY = mapToItem(null, m.x, m.y).y; startH = root.notesHeight; }
+                onPositionChanged: function(m) { if (pressed) root.setNotesHeight(startH - (mapToItem(null, m.x, m.y).y - pressY)); }
+            }
+        }
         ScrollView {   // long notes scroll
             id: notesBox
+            objectName: "notesBox"
             visible: root.tab === "restore" && root.notes !== ""
             width: parent.width
-            height: visible ? Math.round(Style.space(160) * root.theme.ts) : 0
+            height: visible ? Math.round(root.notesHeight) : 0
             contentWidth: availableWidth
             clip: true
             UiText {

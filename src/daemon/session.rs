@@ -3269,7 +3269,7 @@ impl Daemon {
         let mut list: Vec<Value> = conversations::list(c, 40)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .map(|r| json!({"id": r.id, "kind": "chat", "title": r.title}))
+            .map(|r| json!({"id": r.id, "kind": "chat", "title": r.title, "updated_at": r.updated_at}))
             .collect();
         list.extend(
             meetings::list(c, 40)
@@ -7048,6 +7048,7 @@ mod command_tests {
             let cand = candidates::create(c, "Ada").unwrap();
             candidates::link_meeting(c, &cand.id, &hid).unwrap();
             candidates::set_local_only(c, &cand.id, true).unwrap();
+            conversations::create(c, "Chat", 5).unwrap();
             (a, b, hid)
         };
         let find = |q: &str, limit: Value| {
@@ -7073,6 +7074,12 @@ mod command_tests {
         );
         assert_eq!(find("  ", Value::Null).await.unwrap_err(), "query is empty");
         let list = d.handle("session.list", json!({}), None).await.unwrap();
+        assert!(
+            list.as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["kind"] == "chat" && v["updated_at"] == 5)
+        );
         assert!(
             list.as_array()
                 .unwrap()

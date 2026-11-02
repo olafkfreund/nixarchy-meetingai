@@ -104,3 +104,10 @@ spec: spec/2026-11-02-53-restore-dates-resize.md
 
 Revert the merge commit in nixarchy-meetingai and bump the nixos flake lock
 back. No data or schema changes.
+
+## Deviations
+
+- Step 3: the grip is drawn as a short centred 2 px bar (`Style.space(40)` wide)
+  rather than a full-width 1 px line, so it reads as a handle.
+- Step 1: the test creates its own chat (`conversations::create(c, "Chat", 5)`)
+  and asserts `updated_at == 5`.

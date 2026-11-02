@@ -507,6 +507,13 @@ ShellRoot {
         for (var i = 0; i < kids.length; i++) { var f = find(kids[i], name, (depth || 0) + 1); if (f) return f; }
         return null;
     }
+    function findAll(it, name, acc, depth) {
+        if (!it || !it.visible || (depth || 0) > 60) return acc;
+        if (it.objectName === name) acc.push(it);
+        var kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) findAll(kids[i], name, acc, (depth || 0) + 1);
+        return acc;
+    }
     Overlay {
         id: overlay
         Component.onCompleted: overlay.open("{}")
@@ -542,9 +549,27 @@ ShellRoot {
                 var eb = root.find(card, "exportNow");
                 root.out.hasExportNow = !!eb;
                 if (eb) eb.clicked();
+                var whens = root.findAll(card, "sessionWhen", []).map(function(w) { return { y: w.mapToItem(null, 0, 0).y, text: String(w.text) }; }).sort(function(a, b) { return a.y - b.y; });
+                root.out.whens = whens.map(function(w) { return w.text; });
+                root.out.chatWhen = Qt.formatDateTime(new Date(1793400000000), Qt.locale().dateTimeFormat(Locale.ShortFormat));
+                var on = root.find(card, "openNotes");
+                if (on) on.clicked();
             } else if (root.phase === 15) {
                 var st = root.find(card, "exportStatus");
                 root.out.exportStatusOk = st ? String(st.text) : "";
+                var nb = root.find(card, "notesBox");
+                var grip = root.find(card, "notesGrip");
+                var lib = grip ? grip.parent.parent : null;
+                root.out.hasGrip = !!grip;
+                if (nb && lib) {
+                    var h0 = nb.height;
+                    lib.setNotesHeight(h0 + 40);
+                    root.out.grew = nb.height > h0;
+                    lib.setNotesHeight(1e6);
+                    root.out.maxOk = nb.height > h0 && nb.height < card.height;
+                    lib.setNotesHeight(0);
+                    root.out.minOk = nb.height > 0 && nb.height < h0;
+                }
                 overlay.exportFolderHook("/tmp/fail");
             } else if (root.phase === 17) {
                 var eb2 = root.find(card, "exportNow");
@@ -584,6 +609,11 @@ if d.get("settingsFolder") != "/tmp/meetings" or not d.get("hasChangeBtn") or d.
     bad.append(f"export_folder row check failed: {d}")
 if not d.get("hasExportNow") or d.get("exportStatusOk") != "Exported to /tmp/vault/2026-10-30 Fake standup":
     bad.append(f"Export now success check failed: {d}")
+w = d.get("whens") or []
+if len(w) != 2 or not all(w) or w[0] != d.get("chatWhen"):
+    bad.append(f"Restore rows must show times, newest (the chat) first: {d}")
+if not (d.get("hasGrip") and d.get("grew") and d.get("maxOk") and d.get("minOk")):
+    bad.append(f"notes pane resize check failed: {d}")
 if "Could not export the meeting" not in d.get("exportStatusErr", ""):
     bad.append(f"Export now error check failed: {d}")
 for need in ("settings.set export_folder", "settings.set export_meetings", "meetings.export"):

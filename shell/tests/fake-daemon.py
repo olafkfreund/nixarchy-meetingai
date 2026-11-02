@@ -102,7 +102,8 @@ DATA = {
         {"id": "ollama-cloud", "name": "Ollama Cloud", "state": "no_key", "login": "set OLLAMA_API_KEY in the service environment, or add the key here", "cli": None},
         {"id": "ollama", "name": "Ollama (local)", "state": "ready", "login": "ollama serve", "cli": None},
     ],
-    "session.list": [{"id": 1, "kind": "meeting", "title": "Fake standup"}],
+    "session.list": [{"id": 1, "kind": "meeting", "title": "Fake standup", "started_at": "2026-10-30 09:00:00"},
+                     {"id": 2, "kind": "chat", "title": "Fake chat", "updated_at": 1793400000000}],
     "settings.search": [
         {"key": "overlay_w", "label": "Overlay width", "value": -1},
         {"key": "auto_record_on_call", "label": "Take notes automatically when a call starts", "value": auto},
