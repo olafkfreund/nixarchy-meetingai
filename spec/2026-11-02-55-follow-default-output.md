@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 55
 intent: intent/2026-11-02-55-follow-default-output.md
 ---
