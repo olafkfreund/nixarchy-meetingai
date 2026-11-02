@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 53
 intent: intent/2026-11-02-53-restore-dates-resize.md
 ---
