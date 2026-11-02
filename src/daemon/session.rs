@@ -341,6 +341,8 @@ pub struct Daemon {
     /// Tests: the capture open fails the way a panicked blocking task does.
     #[cfg(test)]
     fail_open: AtomicBool,
+    #[cfg(test)]
+    chunk_panic: AtomicBool,
     /// The session's candidate is local-only: only ollama, parakeet-local and a loopback openai-compatible-stt may be used.
     local_only: AtomicBool,
     /// Settings fixed by `programs.nixarchy-meetingai.settings.enforce`; `settings.set` refuses them.
@@ -845,6 +847,8 @@ impl Daemon {
             send_epoch: AtomicU64::new(0),
             #[cfg(test)]
             fail_open: AtomicBool::new(false),
+            #[cfg(test)]
+            chunk_panic: AtomicBool::new(false),
             local_only: AtomicBool::new(false),
             locked: Mutex::new(Vec::new()),
             startup_notice: Mutex::new(startup_notice),
@@ -1983,6 +1987,10 @@ impl Daemon {
         let me = self.clone();
         tokio::spawn(async move {
             let _chunking = chunking;
+            #[cfg(test)]
+            if me.chunk_panic.load(Ordering::Relaxed) {
+                panic!("test: chunk task panicked");
+            }
             let (config, language) = {
                 let g = me.inner.lock();
                 (
@@ -2317,13 +2325,7 @@ impl Daemon {
                 if want != system_on {
                     system_on = want;
                     let s = session.take().unwrap();
-                    match tokio::task::spawn_blocking(move || {
-                        let mut s = s;
-                        let events = s.set_system_audio(want);
-                        (s, events)
-                    })
-                    .await
-                    {
+                    match off_thread(s, move |s| s.set_system_audio(want)).await {
                         Ok((s, changed)) => {
                             session = Some(s);
                             events = changed;
@@ -4663,6 +4665,19 @@ impl Daemon {
             other => Err(format!("unknown command '{other}'")),
         }
     }
+}
+
+async fn off_thread<T: Send + 'static, R: Send + 'static>(
+    value: T,
+    f: impl FnOnce(&mut T) -> R + Send + 'static,
+) -> Result<(T, R), String> {
+    tokio::task::spawn_blocking(move || {
+        let mut v = value;
+        let r = f(&mut v);
+        (v, r)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -7599,5 +7614,36 @@ mod command_tests {
             d.inner.lock().resume_meeting.as_deref(),
             Some(first.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_notes_chunk_frees_the_chunking_flag() {
+        let d = daemon();
+        d.chunk_panic.store(true, Ordering::Relaxed);
+        d.spawn_chunk("m".into());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while d.chunking.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "chunking stayed true after panic"
+            );
+            tokio::task::yield_now().await;
+        }
+        d.chunk_panic.store(false, Ordering::Relaxed);
+        d.spawn_chunk("m".into());
+        assert!(d.chunking.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn off_thread_turns_a_panic_into_an_error() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let err = off_thread(1, |_| -> () { panic!("boom") })
+                .await
+                .unwrap_err();
+            assert!(err.contains("panic"), "{err}");
+            assert_eq!(off_thread(2, |v| *v * 3).await, Ok((2, 6)));
+        })
+        .await
+        .unwrap();
     }
 }
