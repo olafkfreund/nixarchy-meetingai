@@ -495,6 +495,7 @@ grep -a 'EXPORT_NOTNOW {"cardShown":true,"title":"Save meeting notes to a folder
 cat > "$work/harness-export-flow.qml" <<'QML'
 import QtQuick
 import Quickshell
+import qs.Commons
 
 ShellRoot {
     id: root
@@ -566,9 +567,11 @@ ShellRoot {
                     lib.setNotesHeight(h0 + 40);
                     root.out.grew = nb.height > h0;
                     lib.setNotesHeight(1e6);
-                    root.out.maxOk = nb.height > h0 && nb.height < card.height;
+                    var rl = root.find(card, "restoreList");
+                    var rows = 2 * (lib.theme.ctl + Style.spacing.xs);
+                    root.out.maxOk = nb.height > h0 && !!rl && rl.height >= rows - 1 && rl.height <= rows + 1;
                     lib.setNotesHeight(0);
-                    root.out.minOk = nb.height > 0 && nb.height < h0;
+                    root.out.minOk = Math.abs(nb.height - Math.round(lib.notesMin)) <= 1;
                 }
                 overlay.exportFolderHook("/tmp/fail");
             } else if (root.phase === 17) {

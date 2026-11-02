@@ -33,11 +33,12 @@ Item {
         if (s.kind === "chat") return Number(s.updated_at) || 0;
         return s.started_at ? (Date.parse(String(s.started_at).replace(" ", "T") + "Z") || 0) : 0;
     }
-    // The notes pane keeps three lines at least and leaves the list two rows.
+    readonly property real notesMin: Style.space(48) * theme.ts
+    // The notes pane keeps three lines at least and leaves the list two rows; on a card too short for both, the list wins.
     function setNotesHeight(h) {
         var max = restoreList.parent.height - restoreList.y - 2 * (root.theme.ctl + Style.spacing.xs)
             - notesGrip.height - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - 2 * Style.spacing.md;
-        root.notesHeight = Math.max(Style.space(48) * root.theme.ts, Math.min(h, max));
+        root.notesHeight = Math.max(0, Math.min(Math.max(h, root.notesMin), max));
     }
     property var notesMeeting: null
     property string exportStatus: ""
@@ -275,6 +276,7 @@ Item {
         // Restore: chats and meetings with their notes.
         ListView {
             id: restoreList
+            objectName: "restoreList"
             visible: root.tab === "restore"
             width: parent.width; height: parent.height - y - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - (notesGrip.visible ? notesGrip.height + Style.spacing.md : 0) - (notesBox.visible ? notesBox.height + Style.spacing.md : 0)
             clip: true

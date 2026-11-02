@@ -111,3 +111,8 @@ back. No data or schema changes.
   rather than a full-width 1 px line, so it reads as a handle.
 - Step 1: the test creates its own chat (`conversations::create(c, "Chat", 5)`)
   and asserts `updated_at == 5`.
+- Review fix: when the card is too short for both the notes minimum and two
+  list rows, the list wins (`max(0, min(max(h, notesMin), max))`). The default
+  height on open is still not clamped, matching the old fixed 160.
+- Review fix: the test asserts the exact minimum and that the list keeps two
+  rows at maximum; `__pycache__/` is ignored.
