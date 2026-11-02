@@ -27,13 +27,104 @@ pub enum SystemAudioError {
     Stopped,
 }
 
+struct Recorder {
+    child: Child,
+    reader: Option<JoinHandle<()>>,
+}
+
+impl Recorder {
+    fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
 /// A running `parec` process and its buffered samples.
 pub struct SystemAudio {
     source: String,
     samples: Arc<Mutex<SampleQueue>>,
-    child: Mutex<Child>,
-    reader: Option<JoinHandle<()>>,
+    recorder: Mutex<Recorder>,
     exited: AtomicBool,
+}
+
+fn spawn_recorder(
+    program: &str,
+    device: &str,
+    queue: Arc<Mutex<SampleQueue>>,
+) -> Result<Recorder, SystemAudioError> {
+    let mut child = Command::new(program)
+        .args([
+            "--latency-msec=50",
+            "--format=float32le",
+            "--rate=16000",
+            "--channels=1",
+            "--device",
+            device,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                SystemAudioError::NoServer
+            } else {
+                SystemAudioError::Spawn(format!("{program} could not start: {error}"))
+            }
+        })?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(SystemAudioError::Spawn(format!(
+            "{program} did not provide an output pipe"
+        )));
+    };
+    // Ends at EOF, which killing the child (see Drop) or its own exit produces.
+    let reader = thread::spawn(move || {
+        let mut input = BufReader::with_capacity(16 * 1024, stdout);
+        let mut frame = [0_u8; 2048];
+        let mut carry = Vec::new();
+        let mut decoded = Vec::with_capacity(frame.len() / 4);
+        loop {
+            match input.read(&mut frame) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => {
+                    decoded.clear();
+                    decode_samples(&mut carry, &frame[..count], &mut decoded);
+                    if let Ok(mut queue) = queue.lock() {
+                        queue.push(&decoded);
+                    }
+                }
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let verdict = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break Err(SystemAudioError::NoServer),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => break Ok(()),
+            Err(error) => {
+                break Err(SystemAudioError::Spawn(format!(
+                    "could not inspect {program}: {error}"
+                )));
+            }
+        }
+    };
+    if let Err(error) = verdict {
+        Recorder {
+            child,
+            reader: Some(reader),
+        }
+        .stop();
+        return Err(error);
+    }
+    Ok(Recorder {
+        child,
+        reader: Some(reader),
+    })
 }
 
 impl SystemAudio {
@@ -68,79 +159,14 @@ impl SystemAudio {
 
     /// Run `program` (normally `parec`) on `device` and wait briefly to see that it stays up.
     fn launch(program: &str, device: &str, shown: &str) -> Result<Self, SystemAudioError> {
-        let mut child = Command::new(program)
-            .args([
-                "--latency-msec=50",
-                "--format=float32le",
-                "--rate=16000",
-                "--channels=1",
-                "--device",
-                device,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    SystemAudioError::NoServer
-                } else {
-                    SystemAudioError::Spawn(format!("{program} could not start: {error}"))
-                }
-            })?;
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(SystemAudioError::Spawn(format!(
-                "{program} did not provide an output pipe"
-            )));
-        };
         let samples = Arc::new(Mutex::new(SampleQueue::new(
             crate::audio::SAMPLE_RATE as usize * 2,
         )));
-        let queue = Arc::clone(&samples);
-        // Ends at EOF, which killing the child (see Drop) or its own exit produces.
-        let reader = thread::spawn(move || {
-            let mut input = BufReader::with_capacity(16 * 1024, stdout);
-            let mut frame = [0_u8; 2048];
-            let mut carry = Vec::new();
-            let mut decoded = Vec::with_capacity(frame.len() / 4);
-            loop {
-                match input.read(&mut frame) {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) => {
-                        decoded.clear();
-                        decode_samples(&mut carry, &frame[..count], &mut decoded);
-                        if let Ok(mut queue) = queue.lock() {
-                            queue.push(&decoded);
-                        }
-                    }
-                }
-            }
-        });
-        let deadline = Instant::now() + Duration::from_millis(200);
-        let verdict = loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break Err(SystemAudioError::NoServer),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
-                Ok(None) => break Ok(()),
-                Err(error) => {
-                    break Err(SystemAudioError::Spawn(format!(
-                        "could not inspect {program}: {error}"
-                    )));
-                }
-            }
-        };
-        if let Err(error) = verdict {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(error);
-        }
+        let recorder = spawn_recorder(program, device, Arc::clone(&samples))?;
         Ok(Self {
             source: shown.to_owned(),
             samples,
-            child: Mutex::new(child),
-            reader: Some(reader),
+            recorder: Mutex::new(recorder),
             exited: AtomicBool::new(false),
         })
     }
@@ -160,10 +186,12 @@ impl SystemAudio {
         if self.exited.load(Ordering::Relaxed) {
             return false;
         }
-        let alive = self
-            .child
-            .lock()
-            .is_ok_and(|mut child| child.try_wait().is_ok_and(|status| status.is_none()));
+        let alive = self.recorder.lock().is_ok_and(|mut recorder| {
+            recorder
+                .child
+                .try_wait()
+                .is_ok_and(|status| status.is_none())
+        });
         if !alive {
             self.exited.store(true, Ordering::Relaxed);
         }
@@ -203,8 +231,10 @@ impl SystemAudio {
         Self {
             source: "fake output".to_owned(),
             samples: Arc::new(Mutex::new(SampleQueue::new(16))),
-            child: Mutex::new(child),
-            reader: None,
+            recorder: Mutex::new(Recorder {
+                child,
+                reader: None,
+            }),
             exited: AtomicBool::new(true),
         }
     }
@@ -212,15 +242,11 @@ impl SystemAudio {
 
 impl Drop for SystemAudio {
     fn drop(&mut self) {
-        let mut child = self
-            .child
+        let mut recorder = self
+            .recorder
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = child.kill();
-        let _ = child.wait();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
+        recorder.stop();
     }
 }
 
@@ -336,7 +362,7 @@ mod tests {
         };
         let _ = std::fs::remove_file(&script);
         let live = launched.unwrap();
-        let pid = live.child.lock().unwrap().id();
+        let pid = live.recorder.lock().unwrap().child.id();
         drop(live);
         assert!(
             !std::path::Path::new(&format!("/proc/{pid}")).exists(),
