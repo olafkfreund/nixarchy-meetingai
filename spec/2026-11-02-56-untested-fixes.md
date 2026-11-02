@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 56
 intent: intent/2026-11-02-56-untested-fixes.md
 ---
