@@ -124,12 +124,14 @@ async fn start(program: &str, auth: Option<String>) -> Result<Server, ChatError>
             Ok(())
         });
     }
-    let mut child = command.spawn().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => ChatError::Cli(
-            "`opencode` was not found in PATH; install it and run `opencode auth login`".into(),
-        ),
-        _ => ChatError::Cli(format!("could not start `opencode`: {e}")),
-    })?;
+    let mut child = super::cli::spawn(&mut command)
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => ChatError::Cli(
+                "`opencode` was not found in PATH; install it and run `opencode auth login`".into(),
+            ),
+            _ => ChatError::Cli(format!("could not start `opencode`: {e}")),
+        })?;
     let mut lines = BufReader::new(child.stdout.take().expect("stdout piped")).lines();
     let base = tokio::time::timeout(Duration::from_secs(30), async {
         while let Ok(Some(line)) = lines.next_line().await {

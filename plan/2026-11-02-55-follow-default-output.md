@@ -126,8 +126,11 @@ settings change.
 - Step 2 (lead): the new tests retry "Text file busy" (ETXTBSY) like the
   existing reap test. In the full suite, `ai::chat::cli::tests::cancel_kills_the_whole_group`
   then failed once: `run` returned before cancel, because its fake script hit
-  ETXTBSY, which the extra script-writing tests made likelier. That test now
-  retries ETXTBSY up to 5 times (`src/ai/chat/cli.rs`).
+  ETXTBSY, which the extra script-writing tests made likelier. The same error
+  then showed in `child_touching_the_terminal_cannot_stall` and in opencode's
+  group-kill test. Root fix: `cli::spawn` retries ETXTBSY up to 5 times, 20 ms
+  apart, and both process spawns in `cli.rs` and the one in `opencode.rs` use
+  it. The per-test retry was dropped.
 - Step 3 (Codex): `pump()` returns early without a microphone, so the test
   also needs `#[cfg(test)] Microphone::running_for_test()` in
   `src/audio/capture/microphone.rs`. It wraps a fake recorder (`sleep 60`)
@@ -152,3 +155,6 @@ settings change.
   - Not done (low): the misleading `NoServer` error when a default sink has
     no monitor; `source()` keeps the first name; the `listen.rs` test doesn't
     check the echo-gate reset; the reap test checks only the last child.
+- Codex re-review P2: the notice label is looked up before the handover, so a
+  slow `pactl list sources` can't delay the notice and the echo-gate reset
+  after the new recorder starts feeding.

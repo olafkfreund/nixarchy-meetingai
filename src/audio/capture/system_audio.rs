@@ -234,6 +234,8 @@ impl SystemAudio {
                 // Spawning includes a 200 ms wait, so it must stay outside the lock.
                 match spawn_recorder(&program, &monitor_id(&target), Arc::clone(&samples), false) {
                     Ok(new) => {
+                        // Before the handover, so a slow lookup cannot delay the notice (and its echo-gate reset).
+                        let label = (target != current_sink).then(|| describe(&target));
                         let live = Arc::clone(&new.live);
                         let old = {
                             let mut recorder = recorder
@@ -243,14 +245,13 @@ impl SystemAudio {
                         };
                         let mut old = old;
                         old.stop();
-                        live.store(true, Ordering::Release);
-                        if target != current_sink {
+                        if let Some(label) = label {
                             *moved
                                 .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(describe(&target));
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(label);
                             current_sink = target;
                         }
+                        live.store(true, Ordering::Release);
                     }
                     Err(_) if !alive => break,
                     Err(_) => {}

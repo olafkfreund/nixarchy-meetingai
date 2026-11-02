@@ -218,8 +218,8 @@ async fn list_output(
             Ok(())
         });
     }
-    let child = command
-        .spawn()
+    let child = spawn(&mut command)
+        .await
         .map_err(|e| format!("could not run `{shown}`: {e}"))?;
     let pid = child.id();
     match tokio::time::timeout(limit, child.wait_with_output()).await {
@@ -237,6 +237,19 @@ async fn list_output(
             Ok(output.stdout)
         }
     }
+}
+
+/// Spawn, retrying ETXTBSY: a script just written can stay "busy" while another thread forks.
+pub(crate) async fn spawn(command: &mut Command) -> std::io::Result<tokio::process::Child> {
+    for _ in 0..5 {
+        match command.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            other => return other,
+        }
+    }
+    command.spawn()
 }
 
 /// Provider credentials the CLIs must never inherit: they would bypass the subscription login.
@@ -516,12 +529,13 @@ pub(super) async fn run<F: Future<Output = ()>>(
             Ok(())
         });
     }
-    let mut child = command
+    command
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = spawn(&mut command)
+        .await
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => ChatError::Cli(format!(
                 "`{program}` was not found in PATH; install it and sign in with your subscription"
@@ -881,45 +895,36 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nsleep 60 &\necho $! > pid\nwait\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (tx, rx) = watch::channel(false);
         let pid_file = dir.join("pid");
         let read_pid = || {
             std::fs::read_to_string(&pid_file)
                 .ok()
                 .and_then(|s| s.trim().parse::<i32>().ok())
         };
-        // Another test forking while a script is open for writing gives ETXTBSY; retry only that.
-        for attempt in 0.. {
-            let (tx, rx) = watch::channel(false);
-            // Cancel only once the grandchild exists; a fixed delay raced the script under load.
-            let cancel = async {
-                for _ in 0..500 {
-                    if read_pid().is_some() {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-                let _ = tx.send(true);
-            };
-            let started = std::time::Instant::now();
-            let run = run(
-                script.to_str().unwrap(),
-                Kind::Claude,
-                vec![],
-                String::new(),
-                &dir,
-                Arc::new(rx),
-                |_| std::future::ready(()),
-            );
-            let (_, answer) = tokio::join!(cancel, run);
-            match answer {
-                Err(e) if attempt < 5 && e.to_string().contains("Text file busy") => continue,
-                answer => {
-                    assert_eq!(answer.unwrap(), "");
-                    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // Cancel only once the grandchild exists; a fixed delay raced the script under load.
+        let cancel = async {
+            for _ in 0..500 {
+                if read_pid().is_some() {
                     break;
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-        }
+            tx.send(true).unwrap();
+        };
+        let started = std::time::Instant::now();
+        let run = run(
+            script.to_str().unwrap(),
+            Kind::Claude,
+            vec![],
+            String::new(),
+            &dir,
+            Arc::new(rx),
+            |_| std::future::ready(()),
+        );
+        let (_, answer) = tokio::join!(cancel, run);
+        assert_eq!(answer.unwrap(), "");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         let pid = read_pid().expect("script wrote the grandchild pid");
         // SAFETY: signal 0 only probes for existence. A killed orphan lingers until init reaps it.
         let alive = || unsafe { libc::kill(pid, 0) } == 0;
