@@ -79,3 +79,12 @@ coders:   # small test-only steps; agy runs in parallel with Codex on #55
 
 Revert the merge commit. Tests and test hooks only, apart from the
 behaviour-neutral `off_thread` extraction.
+
+## Deviations
+
+- Step 3 (agy): `off_thread` sits after `impl Daemon` (`session.rs` ~4670), not
+  next to the recording loop. Only its placement differs.
+- Step 4 results (lead): full check passed. Mutation checks: A7 (guard
+  body removed), A9/C8 (`Closed` mapped to "closed") and C5 (`off_thread`
+  panicking on the JoinError) each made their test fail, and were restored.
+  The Opus review found no defects.
