@@ -572,6 +572,14 @@ ShellRoot {
                     root.out.maxOk = nb.height > h0 && !!rl && rl.height >= rows - 1 && rl.height <= rows + 1;
                     lib.setNotesHeight(0);
                     root.out.minOk = Math.abs(nb.height - Math.round(lib.notesMin)) <= 1;
+                    // the handle's drag math: moving up 30 px grows the pane by 30 px
+                    var drag = root.find(card, "notesDrag");
+                    var hd = nb.height;
+                    if (drag) { drag.begin(500); drag.moveTo(470); }
+                    root.out.dragOk = !!drag && Math.abs(nb.height - (hd + 30)) <= 1;
+                    // a stored height past the room (default on a short card, resize, late status) is clamped by the binding
+                    lib.notesHeight = 1e6;
+                    root.out.boundOk = rl.height >= rows - 1;
                 }
                 overlay.exportFolderHook("/tmp/fail");
             } else if (root.phase === 17) {
@@ -615,7 +623,7 @@ if not d.get("hasExportNow") or d.get("exportStatusOk") != "Exported to /tmp/vau
 w = d.get("whens") or []
 if len(w) != 2 or not all(w) or w[0] != d.get("chatWhen"):
     bad.append(f"Restore rows must show times, newest (the chat) first: {d}")
-if not (d.get("hasGrip") and d.get("grew") and d.get("maxOk") and d.get("minOk")):
+if not all(d.get(k) for k in ("hasGrip", "grew", "maxOk", "minOk", "dragOk", "boundOk")):
     bad.append(f"notes pane resize check failed: {d}")
 if "Could not export the meeting" not in d.get("exportStatusErr", ""):
     bad.append(f"Export now error check failed: {d}")

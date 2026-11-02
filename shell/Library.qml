@@ -35,11 +35,10 @@ Item {
     }
     readonly property real notesMin: Style.space(48) * theme.ts
     // The notes pane keeps three lines at least and leaves the list two rows; on a card too short for both, the list wins.
-    function setNotesHeight(h) {
-        var max = restoreList.parent.height - restoreList.y - 2 * (root.theme.ctl + Style.spacing.xs)
-            - notesGrip.height - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - 2 * Style.spacing.md;
-        root.notesHeight = Math.max(0, Math.min(Math.max(h, root.notesMin), max));
-    }
+    // A binding, so the default on open, a window resize and a late export status line are clamped too. Never reads notesBox.height.
+    readonly property real notesMax: restoreList.parent.height - restoreList.y - 2 * (root.theme.ctl + Style.spacing.xs)
+        - notesGrip.height - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - 2 * Style.spacing.md
+    function setNotesHeight(h) { root.notesHeight = Math.max(0, Math.min(Math.max(h, root.notesMin), root.notesMax)); }
     property var notesMeeting: null
     property string exportStatus: ""
     property var exportAfterPick: null
@@ -345,11 +344,15 @@ Item {
             Rectangle { anchors.centerIn: parent; width: Style.space(40); height: 2; radius: 1; color: Commons.Color.foreground; opacity: root.theme.dim }
             MouseArea {
                 anchors.fill: parent
+                objectName: "notesDrag"
                 cursorShape: Qt.SizeVerCursor
                 property real pressY: 0
                 property real startH: 0
-                onPressed: function(m) { pressY = mapToItem(null, m.x, m.y).y; startH = root.notesHeight; }
-                onPositionChanged: function(m) { if (pressed) root.setNotesHeight(startH - (mapToItem(null, m.x, m.y).y - pressY)); }
+                // window y, so the grip moving with the pane does not feed back into the drag
+                function begin(y) { pressY = y; startH = notesBox.height; }
+                function moveTo(y) { root.setNotesHeight(startH - (y - pressY)); }
+                onPressed: function(m) { begin(mapToItem(null, m.x, m.y).y); }
+                onPositionChanged: function(m) { if (pressed) moveTo(mapToItem(null, m.x, m.y).y); }
             }
         }
         ScrollView {   // long notes scroll
@@ -357,7 +360,7 @@ Item {
             objectName: "notesBox"
             visible: root.tab === "restore" && root.notes !== ""
             width: parent.width
-            height: visible ? Math.round(root.notesHeight) : 0
+            height: visible ? Math.round(Math.max(0, Math.min(root.notesHeight, root.notesMax))) : 0
             contentWidth: availableWidth
             clip: true
             UiText {

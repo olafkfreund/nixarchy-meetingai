@@ -116,3 +116,9 @@ back. No data or schema changes.
   height on open is still not clamped, matching the old fixed 160.
 - Review fix: the test asserts the exact minimum and that the list keeps two
   rows at maximum; `__pycache__/` is ignored.
+- Follow-up: the maximum is now a binding (`notesMax`) and `notesBox.height`
+  clamps `notesHeight` to it. The default height on open, a window resize and a
+  late export status line can no longer squeeze the list under two rows. The
+  drag math lives in the grip's `begin(y)`/`moveTo(y)`, which the handlers
+  call, and the test drives them. Emitting MouseArea `pressed` from JS isn't
+  possible, because the property shadows the signal.
