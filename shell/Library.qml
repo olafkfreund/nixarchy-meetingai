@@ -341,7 +341,17 @@ Item {
             objectName: "notesGrip"
             visible: notesBox.visible
             width: parent.width; height: 6
-            Rectangle { anchors.centerIn: parent; width: Style.space(40); height: 2; radius: 1; color: Commons.Color.foreground; opacity: root.theme.dim }
+            activeFocusOnTab: true
+            Accessible.role: Accessible.Slider
+            Accessible.name: "Notes pane height"
+            Accessible.description: "Up makes the notes pane taller, Down makes it shorter"
+            // keyboard and assistive tech: one step is a line of body text
+            function step(dir) { root.setNotesHeight(notesBox.height + dir * root.theme.body * 1.5); }
+            Keys.onUpPressed: step(1)
+            Keys.onDownPressed: step(-1)
+            Accessible.onIncreaseAction: step(1)
+            Accessible.onDecreaseAction: step(-1)
+            Rectangle { anchors.centerIn: parent; width: Style.space(40); height: notesGrip.activeFocus ? 4 : 2; radius: height / 2; color: notesGrip.activeFocus ? Commons.Color.accent : Commons.Color.foreground; opacity: notesGrip.activeFocus ? 1 : root.theme.dim }
             MouseArea {
                 anchors.fill: parent
                 objectName: "notesDrag"

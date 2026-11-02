@@ -122,3 +122,7 @@ back. No data or schema changes.
   drag math lives in the grip's `begin(y)`/`moveTo(y)`, which the handlers
   call, and the test drives them. Emitting MouseArea `pressed` from JS isn't
   possible, because the property shadows the signal.
+- Copilot review: the grip is a Tab stop with an accent focus mark, announced
+  as a slider ("Notes pane height"). Up/Down and the accessible
+  increase/decrease actions step it by about one line through
+  `setNotesHeight`. The test drives `step(±1)`.

@@ -577,6 +577,12 @@ ShellRoot {
                     var hd = nb.height;
                     if (drag) { drag.begin(500); drag.moveTo(470); }
                     root.out.dragOk = !!drag && Math.abs(nb.height - (hd + 30)) <= 1;
+                    // keyboard: Up grows the pane, Down shrinks it back
+                    var hk = nb.height;
+                    grip.step(1);
+                    var up = nb.height;
+                    grip.step(-1);
+                    root.out.keyOk = grip.activeFocusOnTab && up > hk && Math.abs(nb.height - hk) <= 1;
                     // a stored height past the room (default on a short card, resize, late status) is clamped by the binding
                     lib.notesHeight = 1e6;
                     root.out.boundOk = rl.height >= rows - 1;
@@ -623,7 +629,7 @@ if not d.get("hasExportNow") or d.get("exportStatusOk") != "Exported to /tmp/vau
 w = d.get("whens") or []
 if len(w) != 2 or not all(w) or w[0] != d.get("chatWhen"):
     bad.append(f"Restore rows must show times, newest (the chat) first: {d}")
-if not all(d.get(k) for k in ("hasGrip", "grew", "maxOk", "minOk", "dragOk", "boundOk")):
+if not all(d.get(k) for k in ("hasGrip", "grew", "maxOk", "minOk", "dragOk", "keyOk", "boundOk")):
     bad.append(f"notes pane resize check failed: {d}")
 if "Could not export the meeting" not in d.get("exportStatusErr", ""):
     bad.append(f"Export now error check failed: {d}")
