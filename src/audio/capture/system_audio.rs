@@ -30,6 +30,8 @@ pub enum SystemAudioError {
 struct Recorder {
     child: Child,
     reader: Option<JoinHandle<()>>,
+    /// Only the recorder in use feeds the queue; a replacement stays muted until the old one is gone.
+    live: Arc<AtomicBool>,
 }
 
 impl Recorder {
@@ -61,6 +63,7 @@ fn spawn_recorder(
     program: &str,
     device: &str,
     queue: Arc<Mutex<SampleQueue>>,
+    live: bool,
 ) -> Result<Recorder, SystemAudioError> {
     let mut child = Command::new(program)
         .args([
@@ -88,6 +91,8 @@ fn spawn_recorder(
             "{program} did not provide an output pipe"
         )));
     };
+    let live = Arc::new(AtomicBool::new(live));
+    let feeding = Arc::clone(&live);
     // Ends at EOF, which killing the child (see Drop) or its own exit produces.
     let reader = thread::spawn(move || {
         let mut input = BufReader::with_capacity(16 * 1024, stdout);
@@ -100,6 +105,9 @@ fn spawn_recorder(
                 Ok(count) => {
                     decoded.clear();
                     decode_samples(&mut carry, &frame[..count], &mut decoded);
+                    if !feeding.load(Ordering::Acquire) {
+                        continue;
+                    }
                     if let Ok(mut queue) = queue.lock() {
                         queue.push(&decoded);
                     }
@@ -124,6 +132,7 @@ fn spawn_recorder(
         Recorder {
             child,
             reader: Some(reader),
+            live,
         }
         .stop();
         return Err(error);
@@ -131,7 +140,21 @@ fn spawn_recorder(
     Ok(Recorder {
         child,
         reader: Some(reader),
+        live,
     })
+}
+
+/// The server's readable name for a sink's monitor, or the sink id when it can't be listed.
+fn describe(sink: &str) -> String {
+    let device = monitor_id(sink);
+    super::devices::pactl(&["--format=json", "list", "sources"])
+        .ok()
+        .and_then(|text| {
+            monitor_sources(&text)
+                .into_iter()
+                .find(|(id, _)| *id == device)
+        })
+        .map_or_else(|| sink.to_owned(), |(_, name)| name)
 }
 
 impl SystemAudio {
@@ -169,7 +192,8 @@ impl SystemAudio {
             (device, name, sink)
         } else {
             let (device, name) = monitors.first().ok_or(SystemAudioError::NoMonitor)?;
-            (device.clone(), name.clone(), device.clone())
+            let sink = device.strip_suffix(".monitor").unwrap_or(device).to_owned();
+            (device.clone(), name.clone(), sink)
         };
         let mut audio = Self::launch(program, &device, &name)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -181,10 +205,13 @@ impl SystemAudio {
         let thread = thread::spawn(move || {
             let mut current_sink = current_sink;
             let mut next_probe = Instant::now() + Duration::from_secs(2);
-            while !thread_stop.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_millis(250));
-                if thread_stop.load(Ordering::Relaxed) {
-                    break;
+            'watch: while !thread_stop.load(Ordering::Relaxed) {
+                // 250 ms between checks, in slices, so Drop waits at most about 50 ms for a quiet watcher.
+                for _ in 0..5 {
+                    thread::sleep(Duration::from_millis(50));
+                    if thread_stop.load(Ordering::Relaxed) {
+                        break 'watch;
+                    }
                 }
                 let alive = recorder.lock().is_ok_and(|mut recorder| {
                     recorder
@@ -192,7 +219,8 @@ impl SystemAudio {
                         .try_wait()
                         .is_ok_and(|status| status.is_none())
                 });
-                let due = Instant::now() >= next_probe;
+                // A dead recorder usually means its sink vanished: ask for the new default at once.
+                let due = !alive || Instant::now() >= next_probe;
                 let selected = if due {
                     next_probe = Instant::now() + Duration::from_secs(2);
                     probe().filter(|sink| !sink.trim().is_empty())
@@ -204,24 +232,25 @@ impl SystemAudio {
                     continue;
                 }
                 // Spawning includes a 200 ms wait, so it must stay outside the lock.
-                match spawn_recorder(&program, &monitor_id(&target), Arc::clone(&samples)) {
+                match spawn_recorder(&program, &monitor_id(&target), Arc::clone(&samples), false) {
                     Ok(new) => {
+                        let live = Arc::clone(&new.live);
                         let old = {
                             let mut recorder = recorder
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             std::mem::replace(&mut *recorder, new)
                         };
-                        let changed = target != current_sink;
-                        if changed {
-                            current_sink = target;
+                        let mut old = old;
+                        old.stop();
+                        live.store(true, Ordering::Release);
+                        if target != current_sink {
                             *moved
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(current_sink.clone());
+                                Some(describe(&target));
+                            current_sink = target;
                         }
-                        let mut old = old;
-                        old.stop();
                     }
                     Err(_) if !alive => break,
                     Err(_) => {}
@@ -248,7 +277,7 @@ impl SystemAudio {
         let samples = Arc::new(Mutex::new(SampleQueue::new(
             crate::audio::SAMPLE_RATE as usize * 2,
         )));
-        let recorder = spawn_recorder(program, device, Arc::clone(&samples))?;
+        let recorder = spawn_recorder(program, device, Arc::clone(&samples), true)?;
         Ok(Self {
             source: shown.to_owned(),
             samples,
@@ -332,6 +361,7 @@ impl SystemAudio {
             recorder: Arc::new(Mutex::new(Recorder {
                 child,
                 reader: None,
+                live: Arc::new(AtomicBool::new(true)),
             })),
             exited: AtomicBool::new(true),
             follow: None,
@@ -348,6 +378,7 @@ impl SystemAudio {
         audio.recorder = Arc::new(Mutex::new(Recorder {
             child,
             reader: None,
+            live: Arc::new(AtomicBool::new(true)),
         }));
         audio.exited.store(false, Ordering::Relaxed);
         *audio.moved.lock().expect("lock moved") = Some(name.to_owned());
@@ -407,6 +438,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn fake_parec(name: &str) -> (PathBuf, PathBuf) {
+        fake_parec_with(name, "")
+    }
+
+    /// `extra` is shell run before the recorder settles, e.g. to refuse a device.
+    fn fake_parec_with(name: &str, extra: &str) -> (PathBuf, PathBuf) {
         let stem = format!(
             "fake-parec-{name}-{}-{}",
             std::process::id(),
@@ -420,7 +456,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec sleep 30\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n{extra}\nexec sleep 30\n",
                 args.display()
             ),
         )
@@ -489,10 +525,20 @@ mod tests {
 
     #[test]
     fn dead_child_restarts_on_new_default() {
-        let (script, args) = fake_parec("dead-switch");
+        // Once `gone` exists, sink A has vanished: parec on A.monitor exits at once.
+        let gone = std::env::temp_dir().join(format!("fake-parec-gone-{}", std::process::id()));
+        let _ = std::fs::remove_file(&gone);
+        let (script, args) = fake_parec_with(
+            "dead-switch",
+            &format!(
+                "case \"$*\" in *A.monitor*) [ -e '{}' ] && exit 1;; esac",
+                gone.display()
+            ),
+        );
         let sink = Arc::new(Mutex::new(Some("A".to_owned())));
         let audio = following(&script, &sink);
         *sink.lock().unwrap() = Some("C".to_owned());
+        std::fs::write(&gone, "").unwrap();
         audio.recorder.lock().unwrap().child.kill().unwrap();
         wait_until(|| recorded_device(&args).as_deref() == Some("C.monitor"));
         wait_until(|| audio.take_moved().as_deref() == Some("C"));
@@ -500,6 +546,7 @@ mod tests {
         drop(audio);
         let _ = std::fs::remove_file(script);
         let _ = std::fs::remove_file(args);
+        let _ = std::fs::remove_file(gone);
     }
 
     #[test]

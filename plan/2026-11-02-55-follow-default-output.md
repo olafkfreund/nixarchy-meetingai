@@ -133,3 +133,22 @@ settings change.
   `src/audio/capture/microphone.rs`. It wraps a fake recorder (`sleep 60`)
   and opens no audio device. After the lead's ETXTBSY fixes, 10 consecutive
   full test runs were clean.
+- Review fixes (Codex P1/P2, Opus 1–4, 6):
+  - A dead recorder probes for the default at once (`due = !alive || …`).
+    Before this, it reopened the vanished sink and the watcher gave up.
+    Test 2's fake parec now refuses `A.monitor` once A is "gone"; without the
+    fix, it fails 3/3.
+  - Each `Recorder` has a `live` flag, and only the recorder in use feeds the
+    queue. A replacement stays muted until the old one is stopped, so the
+    ~200 ms start-up overlap is dropped, not appended twice. That matches the
+    spec's "simply missing".
+  - The watcher sleeps in 50 ms slices, so `Drop` waits ≤ ~50 ms for an idle
+    watcher. Worst case is still an in-flight `pactl` (2 s timeout) or
+    relaunch (200 ms).
+  - The fallback first pick stores a sink name, not a monitor id, so there's
+    no spurious switch later.
+  - The notice uses the monitor's readable name from `pactl list sources`,
+    falling back to the sink id.
+  - Not done (low): the misleading `NoServer` error when a default sink has
+    no monitor; `source()` keeps the first name; the `listen.rs` test doesn't
+    check the echo-gate reset; the reap test checks only the last child.
