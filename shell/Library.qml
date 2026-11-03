@@ -26,6 +26,9 @@ Item {
     property var found: []        // settings.search results: { key, label, value }
     property string promptMode: "general"
     property string notes: ""
+    property bool notesStale: false   // notes.get: names changed after the notes were written
+    property var lineHits: []         // transcript.search rows for the query
+    signal closeRequested()
     readonly property real notesDefault: Style.space(160) * theme.ts
     property real notesHeight: notesDefault
     // Unix ms for sorting and showing: a chat's last activity, a meeting's start (SQLite UTC text). 0 if unknown.
@@ -113,6 +116,23 @@ Item {
         root.client.setSetting("export_folder", path);
         root.search();
         if (m !== null) root.exportMeeting(m);
+    }
+
+    function esc(t) { return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+    // StyledText: everything is escaped first, only the match gets a tag
+    function marked(text, q) {
+        var t = String(text), i = t.toLowerCase().indexOf(q.toLowerCase());
+        return i < 0 ? root.esc(t) : root.esc(t.slice(0, i)) + "<b>" + root.esc(t.slice(i, i + q.length)) + "</b>" + root.esc(t.slice(i + q.length));
+    }
+    function searchLines() {
+        var q = root.query.trim();
+        if (q.length < 2) { root.lineHits = []; return; }
+        root.client.send("transcript.search", { query: q }, function(r) { if (r.ok && root.query.trim() === q) root.lineHits = r.data || []; });
+    }
+    function openHit(h) {
+        var go = function() { root.closeRequested(); root.client.openLine(String(h.id)); };
+        if (String(h.meeting) === root.client.currentMeeting) go();
+        else if (!root.client.recording) root.client.send("session.restore", { id: h.meeting }, function(r) { if (r.ok) go(); else root.error = String(r.error || "request failed"); });
     }
 
     function match(s) { return root.query === "" || String(s).toLowerCase().indexOf(root.query.toLowerCase()) >= 0; }
@@ -226,6 +246,8 @@ Item {
     onPromptKindChanged: root.loadPrompt()
     Component.onCompleted: root.load()
 
+    Timer { id: linesTimer; interval: 300; onTriggered: root.searchLines() }
+
     Connections {
         target: root.client
         function onLibraryError(message) { root.error = message; }
@@ -260,7 +282,7 @@ Item {
             ts: root.theme.ts
             width: parent.width
             placeholderText: "Search settings, chats, profiles"
-            onTextChanged: { root.query = text; root.search(); }
+            onTextChanged: { root.query = text; root.search(); linesTimer.restart(); }
         }
         UiText {   // a failed request from the shown tab
             visible: root.error !== ""
@@ -277,7 +299,7 @@ Item {
             id: restoreList
             objectName: "restoreList"
             visible: root.tab === "restore"
-            width: parent.width; height: parent.height - y - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - (notesGrip.visible ? notesGrip.height + Style.spacing.md : 0) - (notesBox.visible ? notesBox.height + Style.spacing.md : 0)
+            width: parent.width; height: Math.max(0, parent.height - y - (linesBox.visible ? linesBox.height + Style.spacing.md : 0) - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - (notesGrip.visible ? notesGrip.height + Style.spacing.md : 0) - (notesBox.visible ? notesBox.height + Style.spacing.md : 0))
             clip: true
             model: root.sessions.filter(function(s) { return root.match(s.title); }).sort(function(a, b) { return root.when(b) - root.when(a); })
             delegate: RowLayout {
@@ -311,7 +333,7 @@ Item {
                     visible: rrow.modelData.kind === "meeting"
                     onClicked: {
                         root.notesMeeting = rrow.modelData.id;
-                        root.client.send("notes.get", { meeting: rrow.modelData.id }, function(r) { root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; });
+                        root.client.send("notes.get", { meeting: rrow.modelData.id }, function(r) { root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; root.notesStale = r.ok && !!r.data && r.data.stale === true; });
                     }
                 }
                 IconButton {
@@ -323,6 +345,61 @@ Item {
                     onClicked: root.exportMeeting(rrow.modelData.id)
                 }
                 IconButton { objectName: "deleteSession"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: root.confirmRequested("Delete \"" + rrow.modelData.title + "\"? " + (rrow.modelData.kind === "meeting" ? "The transcript, notes and items of this meeting are removed." : "This chat is removed."), "Delete", function() { root.client.send("session.delete", { id: rrow.modelData.id }); root.load(); }) }
+            }
+        }
+        Item {   // transcript lines that match the search
+            id: linesBox
+            objectName: "linesBox"
+            visible: root.tab === "restore" && root.lineHits.length > 0
+            width: parent.width
+            height: visible ? Math.min(linesHead.height + linesList.contentHeight + Style.spacing.xs, Math.max(root.theme.ctl * 3, parent.height * 0.4)) : 0
+            UiText { id: linesHead; textFormat: Text.PlainText; text: "Lines"; color: Commons.Color.popups.text; opacity: root.theme.dim; font.pixelSize: root.theme.caption; font.bold: true }
+            ListView {
+                id: linesList
+                objectName: "lineHits"
+                anchors { top: linesHead.bottom; topMargin: Style.spacing.xs; left: parent.left; right: parent.right; bottom: parent.bottom }
+                clip: true
+                spacing: Style.spacing.xs
+                model: root.lineHits
+                delegate: Item {
+                    id: hit
+                    objectName: "lineHit" + index
+                    required property var modelData
+                    required property int index
+                    readonly property bool canOpen: String(modelData.meeting) === root.client.currentMeeting || !root.client.recording
+                    width: ListView.view.width
+                    height: hcol.implicitHeight
+                    opacity: canOpen ? 1 : 0.6
+                    Accessible.role: Accessible.Button
+                    Accessible.name: String(modelData.text)
+                    Accessible.onPressAction: { if (hit.canOpen) root.openHit(hit.modelData); }
+                    Column {
+                        id: hcol
+                        width: parent.width
+                        UiText {
+                            width: parent.width
+                            textFormat: Text.StyledText
+                            wrapMode: Text.Wrap
+                            maximumLineCount: 2
+                            elide: Text.ElideRight
+                            mayCut: true
+                            text: root.esc(root.client.fmtTime(hit.modelData.t0)) + " \u00b7 " + root.esc(hit.modelData.speaker || (hit.modelData.who === "mic" ? "You" : hit.modelData.who === "room" ? "Room" : "Them")) + ": " + root.marked(hit.modelData.text, root.query.trim())
+                            color: Commons.Color.popups.text
+                            font.pixelSize: root.theme.body
+                        }
+                        UiText {
+                            width: parent.width
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            mayCut: true
+                            text: String(hit.modelData.title || "") + (hit.canOpen ? "" : "  \u00b7  Stop recording to open")
+                            color: Commons.Color.popups.text
+                            opacity: root.theme.dim
+                            font.pixelSize: root.theme.caption
+                        }
+                    }
+                    MouseArea { anchors.fill: parent; enabled: hit.canOpen; cursorShape: Qt.PointingHandCursor; onClicked: root.openHit(hit.modelData) }
+                }
             }
         }
         UiText {
@@ -373,13 +450,29 @@ Item {
             height: visible ? Math.round(Math.max(0, Math.min(root.notesHeight, root.notesMax))) : 0
             contentWidth: availableWidth
             clip: true
-            UiText {
+            Column {
                 width: notesBox.availableWidth
-                textFormat: Text.MarkdownText
-                wrapMode: Text.Wrap
-                text: root.notes
-                color: Commons.Color.popups.text
-                font.pixelSize: root.theme.body
+                spacing: Style.spacing.xs
+                UiText {
+                    objectName: "notesStale"
+                    visible: root.notesStale
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    text: "Names changed after these notes were written"
+                    color: Commons.Color.popups.text
+                    opacity: root.theme.dim
+                    font.italic: true
+                    font.pixelSize: root.theme.caption
+                }
+                UiText {
+                    width: parent.width
+                    textFormat: Text.MarkdownText
+                    wrapMode: Text.Wrap
+                    text: root.notes
+                    color: Commons.Color.popups.text
+                    font.pixelSize: root.theme.body
+                }
             }
         }
 
