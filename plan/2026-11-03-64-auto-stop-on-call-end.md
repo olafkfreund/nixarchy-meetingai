@@ -258,3 +258,33 @@ Traps:
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+
+- **Step 1 (coder):** three of the eight new cases (`manualnew`, `gone`,
+  `gonepending`) also pass on the old `Service.qml`. They guard against
+  regressions; they do not prove the new behaviour. The step 1 commit
+  message says that all eight fail, which is wrong. The coder's report
+  had it right.
+- **Step 2 (Codex):** its sandbox could not run the suite, so Claude ran
+  it (call-state ok, lint ok). `target: calls` became `root.calls`, which
+  is cosmetic.
+- **Step 3 review fixes (Codex, Opus, agy):**
+  - **A call with no `callSince`** (`ownerSince` 1) owned every recording,
+    so older notes could be stopped. `forCall()` now needs
+    `ownerSince > 1`. New case `nosince`.
+  - **`keptFor` outlived its recording**, so a later recording or call
+    lost both its stop and its offer. It is now cleared when recording
+    stops. Entering a call that is not a takeover now resets `handledFor`
+    and sets a new `ownerSince`; `keptFor` is kept only for the same call.
+    This replaces the plan's "keep `ownerSince` while kept" rule. New case
+    `keepnext`.
+  - **A stop or keep now names the recording**
+    (`state.meeting@state.since`, `recId()`), not only the meeting, so a
+    restart into the same meeting is a different recording.
+  - **The fake daemon** now casts `state` after setting the interviewer
+    consent flag, so the cast carries it.
+  - **The notify stub** answers only the first notification of a run.
+  - **Accepted (safe direction):** a meeting-mode restart (new `pid`)
+    during the grace period turns the pending stop into a "Stop notes"
+    offer. A `call` → `maybe` → `call` flap shows a "Notes stop" notice
+    that then cancels silently. The takeover `MARK` check is redundant
+    with the timer's `call` guard, but harmless.

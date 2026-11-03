@@ -586,9 +586,10 @@ class Handler(socketserver.StreamRequestHandler):
                 continue
             if cmd == "record.start":
                 state.update(recording=True, since=int(time.time() * 1000), meeting="m-%d" % next(MEETINGS))
-                cast({"event": "state", **state})
                 if iv:
                     state["consent"] = True
+                cast({"event": "state", **state})   # after consent, so the cast carries it
+                if iv:
                     threading.Thread(target=self.stream_iv_call, daemon=True).start()
             elif cmd == "record.stop":
                 state["recording"] = False

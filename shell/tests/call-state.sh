@@ -14,7 +14,7 @@ rm -f "$work/cfg/shell.qml"
 for f in "$here"/*.qml; do ln -s "$f" "$work/cfg/$(basename "$f")"; done
 ln -s "$here/tests/harness-call.qml" "$work/cfg/shell.qml"
 mkdir "$work/bin"
-printf '#!/bin/sh\necho "$@" >> "%s/notify.log"\n[ -z "$NOTIFY_ANSWER" ] || { sleep "${NOTIFY_DELAY:-0}"; echo "$NOTIFY_ANSWER"; }\n' "$work" > "$work/bin/notify-send"
+printf '#!/bin/sh\necho "$@" >> "%s/notify.log"\n[ -z "$NOTIFY_ANSWER" ] || [ -e "%s/answered" ] || { touch "%s/answered"; sleep "${NOTIFY_DELAY:-0}"; echo "$NOTIFY_ANSWER"; }\n' "$work" "$work" "$work" > "$work/bin/notify-send"
 chmod +x "$work/bin/notify-send"
 . "$(dirname "$0")/headless.sh"
 export PATH="$work/bin:$PATH"
@@ -29,7 +29,7 @@ run() {
     local label=$1 flags=$2 steps=$3
     export XDG_RUNTIME_DIR="$work/run-$label"
     mkdir -m 700 "$XDG_RUNTIME_DIR"
-    : > "$work/$label.log"; : > "$work/notify.log"
+    : > "$work/$label.log"; : > "$work/notify.log"; rm -f "$work/answered"   # the stub answers the first notification only
     python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/$label.log" $flags &
     local fake=$!
     sleep 0.5
@@ -140,6 +140,19 @@ gonepending() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st may
 run gonepending "--live --live-since=2000" gonepending
 no_record gonepending
 [ "$(grep -c -- '-A stop=Stop notes' "$work/gonepending.notify")" = 1 ] || fail gonepending "expected exactly one Stop notes offer"
+
+# Keep holds for that recording only: stopped and restarted before a new call, the new notes stop when that call ends
+keepnext() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go)
+    wr "$(st none $$ "" "$cs")"; sleep 0.3; user record.stop; user record.start; sleep 0.3
+    cs2=$(date +%s%3N); wr "$(st call $$ "" "$cs2")"; sleep 0.5; wr "$(st none $$ "" "$cs2")"; sleep 3 ;; esac; }
+NOTIFY_ANSWER=keep run keepnext "--live --live-since=2000" keepnext
+stops keepnext 2   # the user's, then the automatic one
+
+# a call with no callSince owns nothing: older notes get the offer, never a stop
+nosince() { case $1 in base) wr "$(st call $$ "" 0)" ;; go) wr "$(st none $$ "" 0)"; sleep 3 ;; esac; }
+run nosince "--live --live-since=2000" nosince
+no_record nosince
+grep -q -- '-A stop=Stop notes' "$work/nosince.notify" || fail nosince "no Stop notes offer for a call without callSince"
 
 # an old Stop notes button answered after the user started a new meeting must not stop that one
 cs=$(date +%s%3N)

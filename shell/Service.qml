@@ -25,15 +25,19 @@ Item {
     property int stopGraceMs: 30000  // the tests set 2000
     readonly property int slackMs: 5000   // notes started in a short "maybe" just before the call still count
 
+    // ownerSince 1 is a call with no callSince: it owns nothing, so older notes are never stopped
     function forCall() {
-        return root.ownerSince > 0 && client.recording && Number(client.state.since) >= root.ownerSince - root.slackMs;
+        return root.ownerSince > 1 && client.recording && Number(client.state.since) >= root.ownerSince - root.slackMs;
     }
+
+    // One recording: a restart into the same meeting is a different recording
+    function recId() { return String(client.state.meeting) + "@" + Number(client.state.since); }
 
     Timer {
         id: stopTimer
         interval: root.stopGraceMs
         onTriggered: {
-            if (root.pendingStop && client.recording && String(client.state.meeting) === root.pendingStop.meeting && root.calls.call !== "call" && !root.calls.writerGone)
+            if (root.pendingStop && client.recording && root.recId() === root.pendingStop.meeting && root.calls.call !== "call" && !root.calls.writerGone)
                 client.send("record.stop", {});
             root.pendingStop = null;
         }
@@ -81,7 +85,7 @@ Item {
         if (what === "start") {
             if (calls.call === "call" && (calls.since || 1) === key) root.startNotes(true, calls.title);
         } else if (what === "stop") {
-            if (!(calls.call === "call" && (calls.since || 1) !== key) && client.recording && String(client.state.meeting) === meeting)
+            if (!(calls.call === "call" && (calls.since || 1) !== key) && client.recording && root.recId() === meeting)
                 client.send("record.stop", {});
         } else if (what === "keep" && root.pendingStop && root.pendingStop.meeting === meeting) {
             stopTimer.stop();
@@ -129,6 +133,7 @@ Item {
             if (!client.recording) {
                 stopTimer.stop();
                 root.pendingStop = null;
+                root.keptFor = 0;   // Keep was for that recording, not the next
             }
         }
     }
@@ -144,10 +149,14 @@ Item {
                     stopTimer.stop();
                     root.pendingStop = null;
                     root.handledFor = 0;
-                } else if (!(root.keptFor === root.ownerSince && root.ownerSince > 0 && client.recording)) root.ownerSince = root.calls.since || 1;
+                } else {   // a new call, or the same one again: its end is handled afresh, Keep only holds for the same call
+                    root.ownerSince = root.calls.since || 1;
+                    if (root.keptFor !== root.ownerSince) root.keptFor = 0;
+                    root.handledFor = 0;
+                }
             } else if (was === "call" && root.handledFor !== root.ownerSince && !root.calls.writerGone && root.forCall() && root.keptFor !== root.ownerSince) {
                 root.handledFor = root.ownerSince;
-                root.pendingStop = { meeting: String(client.state.meeting) };
+                root.pendingStop = { meeting: root.recId() };
                 stopTimer.restart();
                 root.offer("The call ended. Notes stop in " + root.stopGraceMs / 1000 + " s.", "keep", "Keep recording", root.ownerSince, root.pendingStop.meeting, root.stopGraceMs);
             }
@@ -160,7 +169,7 @@ Item {
                 // "call" may end through "maybe": offer when this call had reached "call"
                 if (root.calledKey !== 0 && client.recording && !root.pendingStop && root.keptFor !== root.ownerSince && root.handledFor !== root.ownerSince) {
                     root.handledFor = root.ownerSince;
-                    root.offer("The call ended. Notes are still recording.", "stop", "Stop notes", root.calledKey, String(client.state.meeting));
+                    root.offer("The call ended. Notes are still recording.", "stop", "Stop notes", root.calledKey, root.recId());
                 }
                 root.calledKey = 0;
                 root.waiting = false;
@@ -172,7 +181,7 @@ Item {
                 root.pendingStop = null;
                 if (client.recording) {
                     root.handledFor = root.ownerSince;
-                    root.offer("The call ended. Notes are still recording.", "stop", "Stop notes", root.ownerSince, String(client.state.meeting));
+                    root.offer("The call ended. Notes are still recording.", "stop", "Stop notes", root.ownerSince, root.recId());
                 }
             }
         }
