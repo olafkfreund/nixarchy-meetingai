@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--reask] [--call] [--providers] [--locked] [--export-ask] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--live-since=MS_AGO] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--reask] [--call] [--providers] [--locked] [--export-ask] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -58,7 +58,11 @@ export_ask = "--export-ask" in sys.argv   # emit export.folder_needed after conn
 live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-state = {"recording": live, "since": int(time.time() * 1000) - 754_000 if live else 0, "mic": True, "system": True}
+live_ago = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--live-since=")), 754_000)   # --live-since=<ms-ago>: where the recording started
+state = {"recording": live, "since": int(time.time() * 1000) - live_ago if live else 0, "mic": True, "system": True}
+if live:
+    state["meeting"] = "m-live"
+MEETINGS = itertools.count(1)   # record.start names the new meeting m-<n>
 if first_run:
     state.update(ready={"chat": False, "speech": False}, hints={"chat": "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama.", "speech": "Speech-to-text is not ready. Check the Parakeet model, or add a Deepgram key in Providers."})
 MODELS = {   # models.list per provider; a string is the daemon's error
@@ -581,14 +585,14 @@ class Handler(socketserver.StreamRequestHandler):
                 self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed."})
                 continue
             if cmd == "record.start":
-                state.update(recording=True, since=int(time.time() * 1000))
-                if call:
-                    cast({"event": "state", **state})
+                state.update(recording=True, since=int(time.time() * 1000), meeting="m-%d" % next(MEETINGS))
+                cast({"event": "state", **state})
                 if iv:
                     state["consent"] = True
                     threading.Thread(target=self.stream_iv_call, daemon=True).start()
             elif cmd == "record.stop":
                 state["recording"] = False
+                cast({"event": "state", **state})
             elif cmd in ("screenshot.capture", "capture.clear", "chat.send"):   # a screenshot waits for the next question
                 state["capture"] = cmd == "screenshot.capture"
                 self.send({"event": "state", **state})
