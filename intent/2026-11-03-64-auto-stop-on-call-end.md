@@ -30,8 +30,11 @@ notes keep recording until the user stops them by hand.
    - The grace period starts when the call leaves `call`, whether to
      `maybe` or `none`. A `maybe` that lasts the whole grace period counts
      as an end.
-   - The same applies when the detector's writer has gone, which reads as
-     `none`.
+   - A detector whose writer has gone (`writerGone`, which also reads as
+     `none`) is **unknown, not ended**. The detector may only be
+     restarting: a new `pid` briefly reads as `none` until `/proc` confirms
+     it (`CallState.qml:68-72`). That case gets today's "Stop notes" offer,
+     with no automatic stop.
 2. **A way to keep recording.** During the grace period a notification
    says "The call ended. Notes stop in 30 s." with a **Keep recording**
    button. Choosing it leaves the recording running, with no further
@@ -39,8 +42,9 @@ notes keep recording until the user stops them by hand.
 3. **No stop if the call returns.** If any call is back at `call` before
    the grace period ends, the pending stop is cancelled. That covers a
    short `maybe` while the app reconnects, or a second call starting
-   straight away. A reconnect longer than the grace period does stop the
-   notes.
+   straight away. The returning call **takes over** the notes, even with a
+   new `callSince`, so they still stop when that call ends. A reconnect
+   longer than the grace period does stop the notes.
 4. **Other recordings are left alone.** Notes that were not taken for
    this call keep running, for example a room recording started before
    the call. They get today's "Stop notes" offer.
@@ -61,6 +65,8 @@ notes keep recording until the user stops them by hand.
   old stop must therefore name the recording it was made for, the daemon's
   `state.meeting`. It is dropped if a different meeting is recording by
   then, or if none is. This also applies to today's "Stop notes" button.
+  A pending stop is also cancelled as soon as recording stops, for example
+  when the user stops by hand during the grace period.
 - **Ownership must survive a shell restart.** The shell may restart in the
   middle of a call, so it cannot rely on remembering who started the notes.
   The rule must work from state the daemon and the detector already keep
@@ -85,6 +91,20 @@ say otherwise.
 3. **Which notes count as "for this call"?** Recommended: notes whose
    recording started at or after the call started. That compares the
    daemon's `state.since` with the detector's `callSince`, allowing a few
-   seconds of slack. It covers notes started automatically, from "Take
+   seconds of slack, so notes started during a short `maybe` just before
+   the call also count. It covers notes started automatically, from "Take
    notes", or by hand, and it still works after a shell restart. Notes that
    were already running when the call started are not stopped.
+
+## Review record (draft intent)
+
+| Finding | From | Verdict |
+|---|---|---|
+| `act()` checks the call, not the recording, so an old or pending stop can end a newer recording (`Service.qml:58-63`) | Codex, agy | confirmed → constraint: a stop names `state.meeting` |
+| "For this call" cannot be an in-memory flag: a shell restart mid-call loses it, and the start order is racy | Codex, agy | confirmed → open question 3 uses `state.since` and `callSince` (both epoch ms, checked) |
+| End handling ran only on `none`, so a lasting `maybe` never ended; the grace period must start when the call leaves `call` | Codex, agy | confirmed → outcome 1 |
+| A reconnect with a new `callSince` left the notes owned by no call | agy | confirmed → outcome 3: the returning call takes over |
+| A detector restart briefly reads as `none` and would show a false "Notes stop in 30 s" | agy | confirmed (`CallState.qml:68-72`) → outcome 1: a gone writer is unknown, offer only |
+| A manual stop plus a new recording within the grace period could be stopped | agy | confirmed → constraint: cancel on stop, and the meeting check |
+| A timer cannot promise no audio loss for any reconnect | Codex | agreed → outcome 3 says a reconnect longer than the grace period stops |
+
