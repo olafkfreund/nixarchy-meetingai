@@ -26,11 +26,11 @@ rows add `"duration_seconds": r.duration_seconds` and
 
 | Property | Meaning |
 |---|---|
-| `selectedId` (string) | The selected session id. |
+| `selectedId` (string) | The selected session id, always `String(s.id)`: the fake daemon's ids are numbers, so every compare uses `String()`. |
 | `notesPhase` (string) | `""`, `loading`, `ready`, `empty` or `error`. |
 | `menuFor` (string) | The row whose "⋯" line is open. |
 | `linesDoneFor` (string) | The trimmed query whose `transcript.search` reply has arrived. |
-| `rowH` (readonly) | `theme.ctl + theme.caption * 1.4 + Style.spacing.xs`, the height of a two-line meeting row. |
+| `rowH` (readonly) | `theme.ctl + theme.caption + Style.spacing.xs`, the height of a two-line meeting row (the approved formula). |
 
 **`select(s)`:**
 1. Set `selectedId = s.id` and `menuFor = ""`, and clear `notes` and
@@ -80,8 +80,9 @@ containing a `Column`.
 
 **Layout:**
 - `notesMax` (`:43`) reserves `2 * root.rowH`.
-- The `restoreList` height (`:306`) also subtracts `noResults` when it is
-  visible.
+- `noResults` sits *above* `restoreList` in the `Column`. `restoreList.y`
+  therefore already includes it, and the height binding (`:306`) does not
+  subtract it again.
 
 **The notes pane** (`notesBox`, `:449`). It is visible when
 `tab === "restore" && notesPhase !== ""`.
@@ -122,55 +123,74 @@ Files: `shell/tests/fake-daemon.py`, `shell/tests/smoke.sh`, a new
 `shell/tests/harness-library.qml`.
 
 1. **`fake-daemon.py`:**
-   - The `"session.list"` meeting row (~121) gains `"duration_seconds":
-     2520, "line_count": 412`. Add a second meeting row with
-     `duration_seconds: 20, line_count: 3`, for the "< 1 min" case.
-   - `notes.get` answers `{"text": "# Meeting recap\n## Summary\nfake",
-     "stale": false}` for meeting 1, and `{"text": ""}` for the
-     second meeting, to give the empty state.
-   - New flag `--slow-notes`: `notes.get` answers after 0.8 s. Follow
-     `--slow-settings` (`:54`), which uses a `threading.Timer`.
-   - Keep the existing modes' data, including the `grounded` and
-     `notes.get` branches #63 added.
+   - The default `"session.list"` meeting row (~121) gains
+     `"duration_seconds": 2520, "line_count": 412`. It keeps exactly one
+     meeting and one chat, because `smoke.sh:663` asserts two dates.
+   - **The default `transcript.search` answer is `[]`**, not `{}`. Outside
+     `--grounded` it fell through to `DATA.get(cmd, {})`.
+   - **New flag `--library`**, used only by the library harness:
+     - `session.list` adds a second meeting, `{"id": 3, "kind":
+       "meeting", "title": "Quick sync", "started_at": "2026-10-29
+       08:00:00", "duration_seconds": 20, "line_count": 3}`;
+     - `notes.get` for meeting 1 answers `{"text": "# Meeting
+       recap\n## Summary\nfake", "stale": false}`, and for meeting 3
+       `{"text": "", "stale": false}`;
+     - **`notes.get` replies after 0.8 s.** The reply data is chosen
+       first, by the same branches as every mode (grounded included),
+       then sent through `threading.Timer(0.8, self.send, …)` and
+       `continue`. The delay never skips a mode's data;
+     - a `notes.bump` command casts `{"event": "notes.updated",
+       "meeting": 1}` and switches meeting 1's text to `"# Meeting
+       recap\nupdated"`, for the reload check.
 2. **`smoke.sh` export flow** (~581-625):
-   - In phase 13 and in phase 17, click the first `rowMore` before
-     `find(card, "exportNow")`.
+   - In phase 13 and in phase 17, before `find(card, "exportNow")`, click
+     the `rowMore` **inside the meeting row**: the `openNotes` item's own
+     descendant, not the first `rowMore`. The list is sorted by time and
+     the fake chat is newer, so the first "⋯" is the chat's.
    - Phase 15's size check uses `lib.rowH` in place of
      `lib.theme.ctl + Style.spacing.xs`.
    - After phase 13's `openNotes.clicked()`, record `notesTitle` text and
      `selectedBar` visibility, and assert them in its Python check.
 3. **A new `harness-library.qml` and its `smoke.sh` block**, modelled on
-   the `harness-grounded` block (~129). Run it with `--slow-notes`, so the
-   loading state is visible. Phases, 500 ms apart; extend the timeout as
-   needed:
+   the `harness-grounded` block (~129). It runs the fake with `--library`.
+   Phases are 500 ms apart, and a wait of N ms spans `ceil(N/500)`
+   phases. Give quickshell `timeout 20`. Find each row by its title (the
+   `openNotes` or `openChat` item whose accessible name contains it),
+   never by position.
    1. Open the Library on the Restore tab, then switch to settings and
       back to restore, so the list loads.
-   2. Click the first meeting row (`openNotes`). Assert
-      `notesStateText` reads "Loading notes…", then after 1 s that
-      `notesTitle` holds "Fake standup", that the recap has no `#`, and
-      that `selectedBar` is visible.
-   3. Click a chat row (`openChat`). The pane is hidden.
-   4. Late reply: click meeting 1, then the chat at once, and wait 1.2 s.
-      The pane stays hidden.
-   5. Click `rowMore` on the chat row: `deleteSession` is present and
-      `exportNow` is absent. Record line 1's `sessionWhen` x position
-      before and after; they must be equal.
-   6. Line 2 of meeting 1 reads `42 min · 412 lines`; the second meeting
-      reads `< 1 min · 3 lines`.
-   7. Select the second meeting: `notesStateText` reads "No notes yet for
-      this meeting."
-   8. `capHeadings` fixture, called directly. The input has four parts:
-      `# Title`, `  ## Sub`, a ```` ``` ```` fence holding `# kept`, and a
-      `~~~` fence holding `# kept2`, followed by `# A **b**`.
+   2. **Geometry first:** `Geo.dump` of the card with no search active.
+   3. Click "Fake standup". `notesStateText` reads "Loading notes…".
+   4. Two phases later (1 s): `notesTitle` holds "Fake standup", the
+      recap has no `#`, and `selectedBar` is visible.
+   5. Send `notes.bump` through the client (`client.send`). Two phases
+      later the recap shows "updated", so the selected meeting reloaded.
+   6. Click the chat row. The pane is hidden.
+   7. **Late reply:** click "Fake standup", then the chat row in the same
+      phase. Three phases later (1.5 s, longer than the 0.8 s reply) the
+      pane is still hidden.
+   8. Click `rowMore` in the chat row: `deleteSession` is present and
+      `exportNow` is absent. Record the chat row's `sessionWhen` x
+      position before and after; they must be equal.
+   9. **Metadata:** "Fake standup" line 2 reads `42 min · 412 lines`, and
+      "Quick sync" reads `< 1 min · 3 lines`.
+   10. Click "Quick sync". In the same phase `notesStateText` reads
+       "Loading notes…"; two phases later it reads "No notes yet for this
+       meeting."
+   11. **`capHeadings` fixture**, called directly on the Library. The
+       input has four parts: `# Title`, `  ## Sub`, a ```` ``` ```` fence
+       holding `# kept`, and a `~~~` fence holding `# kept2`, followed by
+       `# A **b**`.
 
-      Assert:
-      - the heading lines read `**Title**`, `**Sub**` and `**A b**`, each
-        with a blank line before and after;
-      - both fenced lines are unchanged.
-   9. Type a search such as "zzzz" with no hits. After 1 s `noResults`
-      is visible, and right after typing (before 300 ms) it is not.
-   10. Geometry: `Geo.dump`, as in the grounded harness, and run
-       `check-geometry.py`.
+       Assert:
+       - the heading lines read `**Title**`, `**Sub**` and `**A b**`,
+         each with a blank line before and after;
+       - both fenced lines are unchanged.
+   12. **No results:** type "zzzz" in `search`. In the same phase
+       `noResults` is not visible, because the transcript search hasn't
+       answered. Two phases later it is visible.
+   13. Print `LIBRARY {json}` and quit. The `smoke.sh` Python check
+       asserts every key, then runs `check-geometry.py` on the dump.
 4. **Check:** `TMPDIR=/tmp devenv shell -- bash shell/tests/smoke.sh`
    **fails** at the new library block or at the export flow (no
    `rowMore`, no `notesTitle`). Record which.
@@ -237,6 +257,21 @@ Traps:
 5. **Manual:** open the Library and click a meeting. It is highlighted,
    its name is above the notes, the headings are normal size, the date
    does not move when "⋯" opens, and keyboard Tab then Enter selects.
+
+## Review record (draft plan)
+
+| Finding | From | Verdict |
+|---|---|---|
+| "The first `rowMore`" is the chat's (sorted by time, the chat is newer), so the export test would fail | Codex, agy | confirmed (`Library.qml:308`, `fake-daemon.py:121`) → use the meeting row's own `rowMore` |
+| `rowH` drifted from the approved formula | Codex | confirmed → the spec's `ctl + caption + spacing` |
+| The empty-notes and late-reply checks ignored the 0.8 s delay and the 500 ms phases | Codex, agy | confirmed → explicit phase waits |
+| The spec's `notesUpdated` reload check was missing | Codex, agy | confirmed → `notes.bump` plus phase 5 |
+| `--slow-notes` must delay after choosing the mode's data | Codex | confirmed → a Timer after the data is chosen |
+| Numeric fake ids vs a string `selectedId` | agy | confirmed → `String()` on every compare |
+| Outside grounded, `transcript.search` returns `{}`, so `noResults` never shows | agy | confirmed → the default is `[]` |
+| A second default meeting breaks `smoke.sh:663` (two dates) | agy (could not verify), Claude | verified → extra data only behind `--library` |
+| Subtracting `noResults` from the list height double-counts, because it is above the list | agy | confirmed → dropped |
+| Geometry ran while "zzzz" was active | agy | confirmed → geometry first |
 
 ## Tests
 
