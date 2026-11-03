@@ -3512,7 +3512,7 @@ impl Daemon {
                 .map_err(|e| e.to_string())?
                 .into_iter()
                 .map(|r| {
-                    json!({"id": r.id, "kind": "meeting", "title": r.title, "started_at": r.started_at})
+                    json!({"id": r.id, "kind": "meeting", "title": r.title, "started_at": r.started_at, "duration_seconds": r.duration_seconds, "line_count": r.line_count})
                 }),
         );
         if for_agent {
@@ -7590,6 +7590,29 @@ mod command_tests {
         assert!(hound::WavReader::open(&path).is_ok());
         std::fs::remove_file(&path).unwrap();
         d.inner.lock().recording = None;
+    }
+
+    #[tokio::test]
+    async fn session_list_meeting_rows_carry_line_count_and_duration() {
+        let d = daemon();
+        let meeting = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let m = meetings::start(c, "Sync", "", "en", None, Default::default()).unwrap();
+            meetings::add_line(c, &m, "mic", None, "one", 0.0, 1.0).unwrap();
+            meetings::add_line(c, &m, "mic", None, "two", 1.0, 2.0).unwrap();
+            meetings::finish(c, &m, 95).unwrap();
+            m
+        };
+        let list = d.handle("session.list", json!({}), None).await.unwrap();
+        let row = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == json!(meeting))
+            .unwrap();
+        assert_eq!(row["line_count"], json!(2));
+        assert_eq!(row["duration_seconds"], json!(95));
     }
 
     #[tokio::test]
