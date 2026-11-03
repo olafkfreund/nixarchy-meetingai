@@ -289,3 +289,12 @@ Traps:
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+- Step 3 (Codex): its sandbox could not run `smoke.sh` (no Nix daemon or
+  D-Bus), so Claude ran it. The geometry check found line 2 (`42 min ·
+  412 lines`) clipped by an explicit `height: theme.caption`; a
+  `UiText` line is taller than its pixel size. Claude removed the
+  explicit height. `implicitHeight` makes a binding loop, and the
+  `Column` already gives a hidden line no space. `rowH` keeps the
+  approved formula, so the notes reservation is about 3 px short of a
+  real two-line row. That is harmless, and the size check uses `rowH`
+  itself.

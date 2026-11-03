@@ -27,7 +27,11 @@ Item {
     property string promptMode: "general"
     property string notes: ""
     property bool notesStale: false   // notes.get: names changed after the notes were written
+    property string selectedId: ""
+    property string notesPhase: ""
+    property string menuFor: ""
     property var lineHits: []         // transcript.search rows for the query
+    property string linesDoneFor: ""
     signal closeRequested()
     readonly property real notesDefault: Style.space(160) * theme.ts
     property real notesHeight: notesDefault
@@ -37,9 +41,10 @@ Item {
         return s.started_at ? (Date.parse(String(s.started_at).replace(" ", "T") + "Z") || 0) : 0;
     }
     readonly property real notesMin: Style.space(48) * theme.ts
+    readonly property real rowH: theme.ctl + theme.caption + Style.spacing.xs
     // The notes pane keeps three lines at least and leaves the list two rows; on a card too short for both, the list wins.
     // A binding, so the default on open, a window resize and a late export status line are clamped too. Never reads notesBox.height.
-    readonly property real notesMax: restoreList.parent.height - restoreList.y - 2 * (root.theme.ctl + Style.spacing.xs)
+    readonly property real notesMax: restoreList.parent.height - restoreList.y - 2 * root.rowH
         - notesGrip.height - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - 2 * Style.spacing.md
     function setNotesHeight(h) { root.notesHeight = Math.max(0, Math.min(Math.max(h, root.notesMin), root.notesMax)); }
     property var notesMeeting: null
@@ -124,10 +129,40 @@ Item {
         var t = String(text), i = t.toLowerCase().indexOf(q.toLowerCase());
         return i < 0 ? root.esc(t) : root.esc(t.slice(0, i)) + "<b>" + root.esc(t.slice(i, i + q.length)) + "</b>" + root.esc(t.slice(i + q.length));
     }
+    function select(s) {
+        var id = String(s.id);
+        root.selectedId = id;
+        root.menuFor = "";
+        root.notes = "";
+        root.notesStale = false;
+        if (s.kind !== "meeting") { root.notesPhase = ""; return; }
+        root.notesPhase = "loading";
+        root.client.send("notes.get", { meeting: s.id }, function(r) {
+            if (root.selectedId !== id) return;
+            root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : String(r.error || "request failed");
+            root.notesStale = r.ok && !!r.data && r.data.stale === true;
+            root.notesPhase = !r.ok ? "error" : (root.notes === "" ? "empty" : "ready");
+        });
+    }
+    function capHeadings(md) {
+        var lines = String(md).split("\n"), out = [], fenced = false;
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i], heading = fenced ? null : line.match(/^ {0,3}#{1,6}[ \t]+(.*?)[ \t]*#*[ \t]*$/);
+            if (/^ {0,3}(```|~~~)/.test(line)) { fenced = !fenced; out.push(line); }
+            else if (heading) out.push("", "**" + heading[1].replace(/\*\*/g, "") + "**", "");
+            else out.push(line);
+        }
+        return out.join("\n");
+    }
     function searchLines() {
         var q = root.query.trim();
-        if (q.length < 2) { root.lineHits = []; return; }
-        root.client.send("transcript.search", { query: q }, function(r) { if (r.ok && root.query.trim() === q) root.lineHits = r.data || []; });
+        if (q.length < 2) { root.lineHits = []; root.linesDoneFor = ""; return; }
+        root.linesDoneFor = "";
+        root.client.send("transcript.search", { query: q }, function(r) {
+            if (root.query.trim() !== q) return;
+            root.lineHits = r.ok ? (r.data || []) : [];
+            root.linesDoneFor = q;
+        });
     }
     function openHit(h) {
         if (String(h.meeting) === root.client.currentMeeting) { root.closeRequested(); root.client.openLine(String(h.id)); return; }
@@ -255,7 +290,13 @@ Item {
     Connections {
         target: root.client
         function onLibraryError(message) { root.error = message; }
-        function onNotesUpdated() { root.load(); }
+        function onNotesUpdated(meeting) {
+            root.load();
+            if (String(meeting) === root.selectedId) {
+                var rows = root.sessions.filter(function(s) { return s.kind === "meeting" && String(s.id) === root.selectedId; });
+                if (rows.length) root.select(rows[0]);
+            }
+        }
         function onExportDone(meeting, path) { if (root.notesMeeting !== null && String(root.notesMeeting) === String(meeting) && path !== "") root.exportStatus = "Exported to " + path; }
         function onProvidersChanged() { root.load(); }
     }
@@ -285,8 +326,18 @@ Item {
             objectName: "search"
             ts: root.theme.ts
             width: parent.width
-            placeholderText: "Search settings, chats, profiles"
-            onTextChanged: { root.query = text; root.search(); linesTimer.restart(); }
+            placeholderText: root.tab === "restore" ? "Search meetings, chats and transcripts" : "Search settings, chats, profiles"
+            onTextChanged: { root.query = text; root.search(); root.linesDoneFor = ""; linesTimer.restart(); }
+        }
+        UiText {
+            objectName: "noResults"
+            visible: root.tab === "restore" && root.query.trim().length >= 2 && restoreList.count === 0 && root.linesDoneFor === root.query.trim() && root.lineHits.length === 0
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "No results"
+            color: Commons.Color.popups.text
+            opacity: root.theme.dim
+            font.pixelSize: root.theme.caption
         }
         UiText {   // a failed request from the shown tab
             visible: root.error !== ""
@@ -306,49 +357,106 @@ Item {
             width: parent.width; height: Math.max(0, parent.height - y - (linesBox.visible ? linesBox.height + Style.spacing.md : 0) - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - (notesGrip.visible ? notesGrip.height + Style.spacing.md : 0) - (notesBox.visible ? notesBox.height + Style.spacing.md : 0))
             clip: true
             model: root.sessions.filter(function(s) { return root.match(s.title); }).sort(function(a, b) { return root.when(b) - root.when(a); })
-            delegate: RowLayout {
+            delegate: Item {
                 id: rrow
                 required property var modelData
+                readonly property string rowId: String(modelData.id)
+                readonly property string dateText: { var t = root.when(modelData); return t ? Qt.formatDateTime(new Date(t), Qt.locale().dateTimeFormat(Locale.ShortFormat)) : ""; }
+                readonly property string accName: Accessible.name
+                objectName: modelData.kind === "meeting" ? "openNotes" : "openChat"
                 width: ListView.view.width
-                height: root.theme.ctl + Style.spacing.xs
-                spacing: root.theme.gap
-                UiText {
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignVCenter
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    mayCut: true
-                    text: (rrow.modelData.kind === "meeting" ? "Meeting · " : "Chat · ") + rrow.modelData.title
-                    color: Commons.Color.popups.text
-                    font.pixelSize: root.theme.body
+                height: rowColumn.implicitHeight
+                activeFocusOnTab: true
+                Accessible.role: Accessible.Button
+                Accessible.name: (modelData.kind === "meeting" ? "Meeting: " : "Chat: ") + modelData.title + ", " + dateText
+                signal clicked()
+                onClicked: root.select(modelData)
+                Keys.onReturnPressed: clicked()
+                Keys.onEnterPressed: clicked()
+                Keys.onSpacePressed: clicked()
+                Accessible.onPressAction: clicked()
+                Rectangle {
+                    anchors.fill: parent
+                    radius: root.theme.radius
+                    color: root.selectedId === rrow.rowId ? Qt.alpha(Commons.Color.accent, 0.18) : "transparent"
+                    visible: root.selectedId === rrow.rowId || rrow.activeFocus
+                    border.width: rrow.activeFocus ? 2 : 0
+                    border.color: Commons.Color.accent
                 }
-                UiText {
-                    objectName: "sessionWhen"
-                    Layout.alignment: Qt.AlignVCenter
-                    textFormat: Text.PlainText
-                    text: { var t = root.when(rrow.modelData); return t ? Qt.formatDateTime(new Date(t), Qt.locale().dateTimeFormat(Locale.ShortFormat)) : ""; }
-                    color: Commons.Color.popups.text
-                    opacity: root.theme.dim
-                    font.pixelSize: root.theme.caption
+                Rectangle {
+                    objectName: "selectedBar"
+                    visible: root.selectedId === rrow.rowId
+                    x: 0; y: 0; width: 3; height: rrow.height
+                    color: Commons.Color.accent
                 }
-                IconButton { objectName: "restore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Restore"; onClicked: root.client.send("session.restore", { id: rrow.modelData.id }) }
-                IconButton { objectName: "openNotes"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter;
-                    text: "Notes"
-                    visible: rrow.modelData.kind === "meeting"
-                    onClicked: {
-                        root.notesMeeting = rrow.modelData.id;
-                        root.client.send("notes.get", { meeting: rrow.modelData.id }, function(r) { root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : r.error; root.notesStale = r.ok && !!r.data && r.data.stale === true; });
+                TextMetrics { id: kindMetrics; font.pixelSize: root.theme.caption; text: "Meeting" }
+                TextMetrics { id: dateMetrics; font.pixelSize: root.theme.caption; text: Qt.formatDateTime(new Date(2026, 11, 28, 23, 59), Qt.locale().dateTimeFormat(Locale.ShortFormat)) }
+                Column {
+                    id: rowColumn
+                    width: parent.width
+                    spacing: Style.spacing.xs
+                    RowLayout {
+                        id: rowFirst
+                        width: parent.width
+                        height: root.theme.ctl
+                        spacing: root.theme.gap
+                        UiText {
+                            Layout.preferredWidth: kindMetrics.width
+                            Layout.alignment: Qt.AlignVCenter
+                            textFormat: Text.PlainText
+                            text: rrow.modelData.kind === "meeting" ? "Meeting" : "Chat"
+                            color: Commons.Color.popups.text
+                            opacity: root.theme.dim
+                            font.pixelSize: root.theme.caption
+                        }
+                        UiText {
+                            id: rowTitle
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            mayCut: true
+                            text: rrow.modelData.title
+                            color: Commons.Color.popups.text
+                            font.pixelSize: root.theme.body
+                        }
+                        UiText {
+                            objectName: "sessionWhen"
+                            Layout.preferredWidth: dateMetrics.width
+                            Layout.minimumWidth: dateMetrics.width
+                            Layout.alignment: Qt.AlignVCenter
+                            textFormat: Text.PlainText
+                            text: rrow.dateText
+                            color: Commons.Color.popups.text
+                            opacity: root.theme.dim
+                            font.pixelSize: root.theme.caption
+                        }
+                        IconButton { objectName: "restore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Restore"; onClicked: root.client.send("session.restore", { id: rrow.modelData.id }) }
+                        IconButton { objectName: "rowMore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "⋯"; Accessible.name: "More actions"; onClicked: root.menuFor = root.menuFor === rrow.rowId ? "" : rrow.rowId }
+                    }
+                    UiText {
+                        visible: rrow.modelData.kind === "meeting" && (Number(rrow.modelData.duration_seconds) > 0 || Number(rrow.modelData.line_count) > 0)
+                        textFormat: Text.PlainText
+                        text: (Number(rrow.modelData.duration_seconds) > 0 ? (Number(rrow.modelData.duration_seconds) < 60 ? "< 1 min" : Math.floor(Number(rrow.modelData.duration_seconds) / 60) + " min") : "") + (Number(rrow.modelData.duration_seconds) > 0 && Number(rrow.modelData.line_count) > 0 ? " · " : "") + (Number(rrow.modelData.line_count) > 0 ? Number(rrow.modelData.line_count) + " lines" : "")
+                        color: Commons.Color.popups.text
+                        opacity: root.theme.dim
+                        font.pixelSize: root.theme.caption
+                    }
+                    Row {
+                        visible: root.menuFor === rrow.rowId
+                        width: parent.width
+                        height: visible ? root.theme.ctl : 0
+                        spacing: root.theme.gap
+                        layoutDirection: Qt.RightToLeft
+                        IconButton { objectName: "deleteSession"; ts: root.theme.ts; text: "Delete"; onClicked: root.confirmRequested("Delete \"" + rrow.modelData.title + "\"? " + (rrow.modelData.kind === "meeting" ? "The transcript, notes and items of this meeting are removed." : "This chat is removed."), "Delete", function() { root.client.send("session.delete", { id: rrow.modelData.id }); if (root.selectedId === rrow.rowId) { root.selectedId = ""; root.notes = ""; root.notesPhase = ""; } root.menuFor = ""; root.load(); }) }
+                        IconButton { objectName: "exportNow"; ts: root.theme.ts; text: "Export now"; visible: rrow.modelData.kind === "meeting"; onClicked: root.exportMeeting(rrow.modelData.id) }
                     }
                 }
-                IconButton {
-                    objectName: "exportNow"
-                    ts: root.theme.ts
-                    Layout.alignment: Qt.AlignVCenter
-                    text: "Export now"
-                    visible: rrow.modelData.kind === "meeting"
-                    onClicked: root.exportMeeting(rrow.modelData.id)
+                MouseArea {
+                    x: 0; y: 0; width: rowTitle.x + rowTitle.width; height: rowFirst.height
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: rrow.clicked()
                 }
-                IconButton { objectName: "deleteSession"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Delete"; onClicked: root.confirmRequested("Delete \"" + rrow.modelData.title + "\"? " + (rrow.modelData.kind === "meeting" ? "The transcript, notes and items of this meeting are removed." : "This chat is removed."), "Delete", function() { root.client.send("session.delete", { id: rrow.modelData.id }); root.load(); }) }
             }
         }
         Item {   // transcript lines that match the search
@@ -449,7 +557,7 @@ Item {
         ScrollView {   // long notes scroll
             id: notesBox
             objectName: "notesBox"
-            visible: root.tab === "restore" && root.notes !== ""
+            visible: root.tab === "restore" && root.notesPhase !== ""
             width: parent.width
             height: visible ? Math.round(Math.max(0, Math.min(root.notesHeight, root.notesMax))) : 0
             contentWidth: availableWidth
@@ -457,6 +565,26 @@ Item {
             Column {
                 width: notesBox.availableWidth
                 spacing: Style.spacing.xs
+                Column {
+                    objectName: "notesTitle"
+                    width: parent.width
+                    UiText {
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        text: { var s = root.sessions.find(function(row) { return row.kind === "meeting" && String(row.id) === root.selectedId; }); return s ? String(s.title) : ""; }
+                        color: Commons.Color.popups.text
+                        font.pixelSize: root.theme.body
+                        font.bold: true
+                    }
+                    UiText {
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        text: { var s = root.sessions.find(function(row) { return row.kind === "meeting" && String(row.id) === root.selectedId; }); var t = s ? root.when(s) : 0; return t ? Qt.formatDateTime(new Date(t), Qt.locale().dateTimeFormat(Locale.ShortFormat)) : ""; }
+                        color: Commons.Color.popups.text
+                        opacity: root.theme.dim
+                        font.pixelSize: root.theme.caption
+                    }
+                }
                 UiText {
                     objectName: "notesStale"
                     visible: root.notesStale
@@ -470,10 +598,22 @@ Item {
                     font.pixelSize: root.theme.caption
                 }
                 UiText {
+                    objectName: "notesStateText"
+                    visible: root.notesPhase !== "ready"
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    text: root.notesPhase === "loading" ? "Loading notes…" : (root.notesPhase === "empty" ? "No notes yet for this meeting." : "Notes failed: " + root.notes)
+                    color: Commons.Color.popups.text
+                    opacity: root.theme.dim
+                    font.pixelSize: root.theme.body
+                }
+                UiText {
+                    visible: root.notesPhase === "ready"
                     width: parent.width
                     textFormat: Text.MarkdownText
                     wrapMode: Text.Wrap
-                    text: root.notes
+                    text: root.capHeadings(root.notes)
                     color: Commons.Color.popups.text
                     font.pixelSize: root.theme.body
                 }
