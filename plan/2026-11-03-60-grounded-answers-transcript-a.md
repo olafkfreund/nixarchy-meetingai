@@ -643,3 +643,16 @@ fake-daemon unit paths run.
   `Source.t1` for a line is read from `meeting_lines.end_time`. No
   separate `no_context` test was added: `begin_send` builds an empty map
   for it directly.
+- Step 5 (Codex): Codex's sandbox could not finish the workspace tests
+  (socket restrictions); Claude ran them. `tests/mcp_flow.rs` counts the
+  MCP tools, so it now expects 15 (the new `transcript_search`). An agent
+  `transcript.search` with no `meeting` during a live local-only session
+  stays refused by the existing guard (stricter than the plan, never
+  looser). MCP `lines_text` prints the line `id` when a row has no rowid
+  (search hits).
+- Step 6 (coder): `Library.qml` has no Regenerate button, so the stale
+  caption sits alone above the notes text. `addRow` takes a trailing
+  options object instead of more positional arguments. Clearing a name
+  relabels rows in place ("Speaker N" / "Them") instead of `rebuild()`,
+  which would drop archived answers. A rename marks every archived answer
+  `renamedAfter`.

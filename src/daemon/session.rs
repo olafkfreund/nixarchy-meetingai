@@ -4560,12 +4560,11 @@ impl Daemon {
         Ok(json!({"meeting": meeting, "lines": lines}))
     }
 
-    /// Lines matching `query` across meetings, newest meeting first. `for_agent` is wired in a
-    /// later step.
+    /// Lines matching `query` across meetings, newest meeting first.
     fn transcript_search(
         &self,
         args: protocol::TranscriptSearch,
-        _for_agent: bool,
+        for_agent: bool,
     ) -> Result<Value, String> {
         let query = args.query.trim();
         if query.chars().count() < 2 {
@@ -4574,11 +4573,32 @@ impl Daemon {
         let limit = args.limit.unwrap_or(20).clamp(1, 50);
         let g = self.inner.lock();
         let c = g.db.connection();
-        let hits = meetings::search_lines(c, query, args.meeting.as_deref(), limit)
-            .map_err(|e| e.to_string())?;
+        let hidden = if for_agent {
+            candidates::local_only_ids(c).map_err(|e| e.to_string())?
+        } else {
+            Default::default()
+        };
+        if args.meeting.as_ref().is_some_and(|m| hidden.contains(m)) {
+            return Err("This interview is local-only".into());
+        }
+        let hits = meetings::search_lines(
+            c,
+            query,
+            args.meeting.as_deref(),
+            if for_agent {
+                (limit * 4).min(500)
+            } else {
+                limit
+            },
+        )
+        .map_err(|e| e.to_string())?;
         let mut names: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
         let mut rows = Vec::with_capacity(hits.len());
-        for h in hits {
+        for h in hits
+            .into_iter()
+            .filter(|h| !hidden.contains(&h.meeting))
+            .take(limit)
+        {
             if !names.contains_key(&h.meeting) {
                 let n = meetings::speaker_names(c, &h.meeting).map_err(|e| e.to_string())?;
                 names.insert(h.meeting.clone(), n);
@@ -4648,6 +4668,7 @@ impl Daemon {
                     | "series.list"
                     | "last_time.get"
                     | "transcript.get"
+                    | "transcript.search"
                     | "now.get"
                     | "state.get"
                     | "presets.list"
@@ -4674,6 +4695,7 @@ impl Daemon {
                     | "settings.set"
                     | "state.get"
                     | "transcript.get"
+                    | "transcript.search"
             ) || (cmd == "settings.set"
                 && !crate::mcp::MCP_SETTINGS.contains(&args["key"].as_str().unwrap_or_default()))
                 || (cmd == "chat.send"
@@ -4692,24 +4714,47 @@ impl Daemon {
         if cmd == "session.list" {
             return self.session_list(true);
         }
+        if cmd == "transcript.search" {
+            return self.transcript_search(parse(args)?, true);
+        }
         if matches!(
             cmd,
             "transcript.get" | "notes.get" | "now.get" | "chat.send" | "items.list"
         ) {
             let g = self.inner.lock();
-            let meeting = args["meeting"].as_str().map(str::to_owned).or_else(|| {
+            let around_meeting = if cmd == "transcript.get" {
+                args["around"]
+                    .as_str()
+                    .map(|id| {
+                        g.db.connection()
+                            .query_row(
+                                "SELECT meeting_id FROM meeting_lines WHERE id=?1",
+                                [id],
+                                |r| r.get::<_, String>(0),
+                            )
+                            .optional()
+                            .map_err(|e| e.to_string())?
+                            .ok_or_else(|| "That line no longer exists.".to_owned())
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
+            let requested_meeting =
+                around_meeting.or_else(|| args["meeting"].as_str().map(str::to_owned));
+            let use_current = requested_meeting.is_none();
+            let meeting = requested_meeting.or_else(|| {
                 g.meeting_id
                     .clone()
                     .or_else(|| g.finishing_meeting.clone())
                     .or_else(|| g.resume_meeting.clone())
             });
-            let local = meeting.is_some_and(|m| {
-                candidates::for_meeting(g.db.connection(), &m)
+            let local = meeting.as_ref().is_some_and(|m| {
+                candidates::for_meeting(g.db.connection(), m)
                     .ok()
                     .flatten()
                     .is_some_and(|c| c.local_only)
-            }) || ((cmd == "now.get" || args["meeting"].as_str().is_none())
-                && self.local_now(&g));
+            }) || ((cmd == "now.get" || use_current) && self.local_now(&g));
             if local {
                 return Err("This interview is local-only".into());
             }
@@ -8701,6 +8746,108 @@ mod command_tests {
             d.handle("transcript.search", json!({"query": " b "}), None)
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_transcript_search_and_around_hide_local_only_lines() {
+        let d = daemon();
+        let (ordinary, hidden, ordinary_line, hidden_line) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let ordinary = meetings::start(c, "Team", "", "en", None, Default::default()).unwrap();
+            let hidden =
+                meetings::start(c, "Interview", "", "en", None, Default::default()).unwrap();
+            c.execute(
+                "UPDATE meetings SET started_at='2020-01-01 00:00:00' WHERE id=?1",
+                [&ordinary],
+            )
+            .unwrap();
+            let ordinary_line =
+                meetings::add_line(c, &ordinary, "me", None, "budget ordinary", 0.0, 1.0).unwrap();
+            meetings::add_line(c, &ordinary, "me", None, "budget second", 1.0, 2.0).unwrap();
+            for i in 0..3 {
+                meetings::add_line(
+                    c,
+                    &hidden,
+                    "me",
+                    None,
+                    "budget private",
+                    i as f64,
+                    i as f64 + 1.0,
+                )
+                .unwrap();
+            }
+            let hidden_line: String = c
+                .query_row(
+                    "SELECT id FROM meeting_lines WHERE meeting_id=?1 LIMIT 1",
+                    [&hidden],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let cand = candidates::create(c, "Ada").unwrap();
+            candidates::link_meeting(c, &cand.id, &hidden).unwrap();
+            candidates::set_local_only(c, &cand.id, true).unwrap();
+            (ordinary, hidden, ordinary_line, hidden_line)
+        };
+        for origin in ["mcp", "agent"] {
+            let hits = d
+                .handle(
+                    "transcript.search",
+                    json!({"query": "budget", "limit": 2}),
+                    Some(origin),
+                )
+                .await
+                .unwrap();
+            assert_eq!(hits.as_array().unwrap().len(), 2);
+            assert_eq!(hits[0]["meeting"], ordinary);
+            assert_eq!(hits[1]["meeting"], ordinary);
+            let err = d
+                .handle(
+                    "transcript.search",
+                    json!({"query": "budget", "meeting": hidden}),
+                    Some(origin),
+                )
+                .await
+                .unwrap_err();
+            assert!(err.contains("local-only"), "{origin}: {err}");
+            let err = d
+                .handle(
+                    "transcript.get",
+                    json!({"around": hidden_line}),
+                    Some(origin),
+                )
+                .await
+                .unwrap_err();
+            assert!(err.contains("local-only"), "{origin}: {err}");
+            assert!(
+                d.handle(
+                    "transcript.get",
+                    json!({"around": "missing-line"}),
+                    Some(origin)
+                )
+                .await
+                .unwrap_err()
+                .contains("no longer exists")
+            );
+        }
+        d.local_only.store(true, Ordering::Relaxed);
+        for origin in ["mcp", "agent"] {
+            let got = d
+                .handle(
+                    "transcript.get",
+                    json!({"around": ordinary_line}),
+                    Some(origin),
+                )
+                .await
+                .unwrap();
+            assert_eq!(got["lines"][0]["id"], ordinary_line);
+        }
+        assert!(
+            d.handle("now.get", json!({}), Some("mcp"))
+                .await
+                .unwrap_err()
+                .contains("local-only")
         );
     }
 }

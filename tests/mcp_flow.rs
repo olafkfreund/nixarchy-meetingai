@@ -224,7 +224,7 @@ async fn mcp_flow() {
 
     let mut mcp = Mcp::start(&root.join("run")).await;
     let tools = mcp.rpc("tools/list", json!({})).await;
-    assert_eq!(tools["tools"].as_array().unwrap().len(), 14);
+    assert_eq!(tools["tools"].as_array().unwrap().len(), 15);
 
     let (is_error, _, data) = mcp.tool("meeting_status", json!({})).await;
     assert!(!is_error);
