@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 64
 intent: intent/2026-11-03-64-auto-stop-on-call-end.md
 ---
