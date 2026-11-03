@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--reask] [--call] [--providers] [--locked] [--export-ask] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--reask] [--call] [--providers] [--locked] [--export-ask] [--library] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -56,6 +56,8 @@ locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, me
 voice_mode = "--voice" in sys.argv     # transcript.get room row, transcript.relabel, direct room final, and voice.* commands
 grounded = "--grounded" in sys.argv   # citations, search, old-window jump, rename, and stale suggestion
 export_ask = "--export-ask" in sys.argv   # emit export.folder_needed after connect
+library = "--library" in sys.argv     # a second meeting, per-meeting notes answered after 0.8 s, and notes.bump
+LIB_NOTES = {"1": "# Meeting recap\n## Summary\nfake", "3": ""}
 live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
@@ -118,7 +120,7 @@ DATA = {
         {"id": "ollama-cloud", "name": "Ollama Cloud", "state": "no_key", "login": "set OLLAMA_API_KEY in the service environment, or add the key here", "cli": None},
         {"id": "ollama", "name": "Ollama (local)", "state": "ready", "login": "ollama serve", "cli": None},
     ],
-    "session.list": [{"id": 1, "kind": "meeting", "title": "Fake standup", "started_at": "2026-10-30 09:00:00"},
+    "session.list": [{"id": 1, "kind": "meeting", "title": "Fake standup", "started_at": "2026-10-30 09:00:00", "duration_seconds": 2520, "line_count": 412},
                      {"id": 2, "kind": "chat", "title": "Fake chat", "updated_at": 1793400000000}],
     "settings.search": [
         {"key": "overlay_w", "label": "Overlay width", "value": -1},
@@ -132,7 +134,10 @@ DATA = {
     "items.list": [],
     "now.get": {"status": "idle", "question": "", "answer": "", "turn": 0, "cite_max": 0, "cite_notes": 0, "sources": [], "suggestions": []},
     "notes.get": {"text": "## Summary\nfake", "stale": False},
+    "transcript.search": [],
 }
+if library:
+    DATA["session.list"].append({"id": 3, "kind": "meeting", "title": "Quick sync", "started_at": "2026-10-29 08:00:00", "duration_seconds": 20, "line_count": 3})
 if locked:
     settings["locked"] = ["chat_provider", "meeting_mode", "text_scale", "export_folder"]
 settings.update(overlay_x=-1, overlay_y=-1, overlay_w=-1, overlay_h=-1)
@@ -662,6 +667,8 @@ class Handler(socketserver.StreamRequestHandler):
                 data = dict(GROUND_NOW)
             elif grounded and cmd == "notes.get":
                 data = {"text": "## Summary\nfake", "stale": RENAMED[0]}
+            elif library and cmd == "notes.get":
+                data = {"text": LIB_NOTES.get(str(req.get("args", {}).get("meeting")), ""), "stale": False}
             elif drop and cmd == "transcript.get":
                 data = {"meeting": "m1", "lines": [l for l in SPOKEN if l["line"] > req.get("args", {}).get("after_line", 0)]}
             elif voice_mode and cmd == "transcript.get":
@@ -670,6 +677,14 @@ class Handler(socketserver.StreamRequestHandler):
                 data = {"status": "writing", "question": "old?", "answer": "OLD1", "turn": 1, "cite_max": 0, "cite_notes": 0, "sources": [], "provider": PROVIDER["provider"], "model": PROVIDER["model"], "suggestions": []}
             elif drop and cmd == "now.get":
                 data = {"status": "writing" if ANSWER["streaming"] else "ready" if ANSWER["body"] else "idle", "question": ANSWER["question"], "answer": ANSWER["body"], "turn": 1, "cite_max": 0, "cite_notes": 0, "sources": [], "provider": PROVIDER["provider"], "model": PROVIDER["model"], "suggestions": ANSWER["suggestions"]}
+            if library and cmd == "notes.get":   # the data is chosen above; only its arrival is late
+                threading.Timer(0.8, self.send, args=({"id": req["id"], "ok": True, "data": data},)).start()
+                continue
+            if library and cmd == "notes.bump":
+                LIB_NOTES["1"] = "# Meeting recap\nupdated"
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "notes.updated", "meeting": 1})
+                continue
             if cmd == "voice.status":
                 self.send({"id": req["id"], "ok": True, "data": voice_status()})
                 continue
