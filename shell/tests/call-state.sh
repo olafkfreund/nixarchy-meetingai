@@ -14,7 +14,7 @@ rm -f "$work/cfg/shell.qml"
 for f in "$here"/*.qml; do ln -s "$f" "$work/cfg/$(basename "$f")"; done
 ln -s "$here/tests/harness-call.qml" "$work/cfg/shell.qml"
 mkdir "$work/bin"
-printf '#!/bin/sh\necho "$@" >> "%s/notify.log"\n' "$work" > "$work/bin/notify-send"
+printf '#!/bin/sh\necho "$@" >> "%s/notify.log"\n[ -z "$NOTIFY_ANSWER" ] || [ -e "%s/answered" ] || { touch "%s/answered"; sleep "${NOTIFY_DELAY:-0}"; echo "$NOTIFY_ANSWER"; }\n' "$work" "$work" "$work" > "$work/bin/notify-send"
 chmod +x "$work/bin/notify-send"
 . "$(dirname "$0")/headless.sh"
 export PATH="$work/bin:$PATH"
@@ -29,7 +29,7 @@ run() {
     local label=$1 flags=$2 steps=$3
     export XDG_RUNTIME_DIR="$work/run-$label"
     mkdir -m 700 "$XDG_RUNTIME_DIR"
-    : > "$work/$label.log"; : > "$work/notify.log"
+    : > "$work/$label.log"; : > "$work/notify.log"; rm -f "$work/answered"   # the stub answers the first notification only
     python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/$label.log" $flags &
     local fake=$!
     sleep 0.5
@@ -46,6 +46,18 @@ run() {
 }
 fail() { echo "FAIL ($1): $2" >&2; exit 1; }
 no_record() { ! grep -q 'record\.\(start\|stop\)' "$work/$1.log" || fail "$1" "the daemon was asked to record"; }
+# user <cmd>: plays the user, a second client of the fake daemon; reads past the state broadcast to the reply (id 1)
+user() { python3 - "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$1" <<'EOF'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
+s.sendall((json.dumps({"id": 1, "cmd": sys.argv[2], "args": {}}) + "\n").encode())
+for line in s.makefile():
+    r = json.loads(line)
+    if r.get("id") == 1:
+        sys.exit(0 if r.get("ok") else 1)
+sys.exit(1)
+EOF
+}
 no_offer() { ! grep -q -- '-A ' "$work/$1.notify" || fail "$1" "an offer was shown"; }
 
 manual() { case $1 in base) wr "$(st none)" ;; go) wr "$(st none)"; sleep 1; printf '{"active":true,"reason":"manual","since":2,"updated":1,"pid":%s}' "$$" > "$XDG_RUNTIME_DIR/meeting-mode.json"; sleep 4 ;; esac; }
@@ -79,10 +91,74 @@ no_record hangup
 grep -q -- '-A stop=Stop notes' "$work/hangup.notify" || fail hangup "no Stop notes offer on call -> none"
 
 # the same call ending through "maybe" still offers "Stop notes"
-viamaybe() { case $1 in base) wr "$(st call "$$" "" 5000)" ;; go) wr "$(st maybe "$$" "" 5000)"; sleep 1.5; wr "$(st none)"; sleep 3 ;; esac; }
+viamaybe() { case $1 in base) wr "$(st call "$$" "" "$cs")" ;; go) wr "$(st maybe "$$" "" "$cs")"; sleep 1.5; wr "$(st none)"; sleep 3 ;; esac; }
+cs=$(date +%s%3N)
 run viamaybe "--live --auto" viamaybe
 no_record viamaybe
 grep -q -- '-A stop=Stop notes' "$work/viamaybe.notify" || fail viamaybe "no Stop notes offer on call -> maybe -> none"
+
+# the call ends while the notes it started run: they stop by themselves after the grace period (2 s here), unless kept
+# every write passes the same callSince (a missing one reads as a different call); the recording started 2 s before the daemon, after the call
+stops() { [ "$(grep -c 'record\.stop' "$work/$1.log")" = "$2" ] || fail "$1" "expected $2 record.stop"; }
+cs=$(( $(date +%s%3N) - 10000 ))
+autostop() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st none $$ "" "$cs")"; sleep 3 ;; esac; }
+run autostop "--live --live-since=2000" autostop
+stops autostop 1
+grep -q -- '-A keep=Keep recording' "$work/autostop.notify" || fail autostop "no Keep recording offer"
+grep -q -- '-t 2000' "$work/autostop.notify" || fail autostop "the offer does not expire with the grace period"
+
+maybeend() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st maybe $$ "" "$cs")"; sleep 3 ;; esac; }
+run maybeend "--live --live-since=2000" maybeend
+stops maybeend 1
+
+# a call that returns during the grace period takes the notes over: the first timer must not fire, the second end stops them
+cs=$(( $(date +%s%3N) - 60000 ))
+takeover() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go)
+    wr "$(st none $$ "" "$cs")"; sleep 0.5
+    t2=$(date +%s%3N); wr "$(st call $$ "" "$t2")"; sleep 2.5
+    wr "$(st none $$ "" "$t2")"; echo MARK >> "$work/takeover.log"; sleep 3 ;; esac; }
+run takeover "--live --live-since=30000" takeover
+stops takeover 1
+[ "$(grep -n 'record\.stop' "$work/takeover.log" | cut -d: -f1)" -gt "$(grep -n MARK "$work/takeover.log" | cut -d: -f1)" ] || fail takeover "the notes stopped before the second end"
+
+cs=$(( $(date +%s%3N) - 10000 ))
+NOTIFY_ANSWER=keep run keep "--live --live-since=2000" autostop
+no_record keep
+! grep -q -- '-A stop=' "$work/keep.notify" || fail keep "offered Stop notes after Keep recording"
+
+manualnew() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st none $$ "" "$cs")"; sleep 0.5; user record.stop; user record.start; sleep 3 ;; esac; }
+run manualnew "--live --live-since=2000" manualnew
+stops manualnew 1
+
+dead=$(sh -c 'echo $$')   # a pid that has exited
+gone() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st none "$dead" "" "$cs")"; sleep 3 ;; esac; }
+run gone "--live --live-since=2000" gone
+no_record gone
+grep -q -- '-A stop=Stop notes' "$work/gone.notify" || fail gone "no Stop notes offer when the writer went"
+
+gonepending() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st maybe $$ "" "$cs")"; sleep 0.5; wr "$(st maybe "$dead" "" "$cs")"; sleep 3 ;; esac; }
+run gonepending "--live --live-since=2000" gonepending
+no_record gonepending
+[ "$(grep -c -- '-A stop=Stop notes' "$work/gonepending.notify")" = 1 ] || fail gonepending "expected exactly one Stop notes offer"
+
+# Keep holds for that recording only: stopped and restarted before a new call, the new notes stop when that call ends
+keepnext() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go)
+    wr "$(st none $$ "" "$cs")"; sleep 0.3; user record.stop; user record.start; sleep 0.3
+    cs2=$(date +%s%3N); wr "$(st call $$ "" "$cs2")"; sleep 0.5; wr "$(st none $$ "" "$cs2")"; sleep 3 ;; esac; }
+NOTIFY_ANSWER=keep run keepnext "--live --live-since=2000" keepnext
+stops keepnext 2   # the user's, then the automatic one
+
+# a call with no callSince owns nothing: older notes get the offer, never a stop
+nosince() { case $1 in base) wr "$(st call $$ "" 0)" ;; go) wr "$(st none $$ "" 0)"; sleep 3 ;; esac; }
+run nosince "--live --live-since=2000" nosince
+no_record nosince
+grep -q -- '-A stop=Stop notes' "$work/nosince.notify" || fail nosince "no Stop notes offer for a call without callSince"
+
+# an old Stop notes button answered after the user started a new meeting must not stop that one
+cs=$(date +%s%3N)
+stalestop() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st none $$ "" "$cs")"; sleep 0.5; user record.stop; user record.start; sleep 3 ;; esac; }
+NOTIFY_ANSWER=stop NOTIFY_DELAY=1.5 run stalestop "--live --auto" stalestop
+stops stalestop 1
 
 # settings arrive after the call: auto-record decides once they are there, never an offer
 slowset() { case $1 in base) wr "$(st none)" ;; go) wr "$(st call)"; sleep 5 ;; esac; }
