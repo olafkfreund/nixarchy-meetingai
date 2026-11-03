@@ -87,7 +87,7 @@ notes pane no longer reads it.
   - `exportNow`, "Export now", meetings only;
   - `deleteSession`, "Delete", with the existing confirmation.
 
-  On confirm it also clears `selectedId`, `notes` and `notesState` when
+  On confirm it also clears `selectedId`, `notes` and `notesPhase` when
   the deleted row is the selected one.
 
 Line 3 opens *below* the row, so opening it never changes line 1's
