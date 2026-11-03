@@ -375,6 +375,7 @@ Item {
                     id: lib
                     settingsHeader: settingsControls
                     onConfirmRequested: function(message, label, yes) { root.ask(message, label, yes); }
+                    onCloseRequested: root.library = false
                     visible: root.library
                     client: backend
                     theme: metrics
