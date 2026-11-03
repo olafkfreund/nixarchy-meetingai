@@ -43,17 +43,21 @@ reviewers:
   - call `offer("The call ended. Notes stop in " + stopGraceMs/1000 +
     " s.", "keep", "Keep recording", ownerSince, pendingStop.meeting,
     stopGraceMs)`.
-- **Today's `none` offer branch** (`calledKey !== 0 && client.recording`)
-  additionally requires:
-  - `!pendingStop` and `keptFor !== ownerSince`;
-  - `handledFor !== ownerSince || calls.writerGone`.
-
-  It sets `handledFor = ownerSince` and passes
-  `String(client.state.meeting)`.
-- **`writerGone` while a stop is pending** (checked in `onCallChanged` and
-  in `onWriterGoneChanged`): stop the timer and set `pendingStop = null`.
-  If recording, show the "Stop notes" offer once (`handledFor =
-  ownerSince`).
+- **Exactly one place offers "Stop notes" per call end**, guarded by
+  `handledFor`:
+  - **Today's `none` branch** (`calledKey !== 0 && client.recording`)
+    additionally requires `!pendingStop`, `keptFor !== ownerSince` and
+    `handledFor !== ownerSince`. There is no `writerGone` bypass. It sets
+    `handledFor = ownerSince` and passes `String(client.state.meeting)`.
+    A writer that goes while the call is still at `call` reaches this
+    branch: "leaving `call`" skipped it, so `handledFor` was not set.
+  - **`Connections { target: calls; function onWriterGoneChanged() }`:**
+    when `writerGone` becomes true while `pendingStop` is set, stop the
+    timer and set `pendingStop = null`. If recording, offer "Stop notes"
+    with key `ownerSince`, and set `handledFor = ownerSince` (it already
+    is). `CallState` sets `writerGone` *before* it refreshes `call`
+    (`CallState.qml:68-72`, `:37`), so this runs first. The `none` branch
+    that follows then sees `handledFor === ownerSince` and stays quiet.
 - **The timer fires:** `record.stop` only when all of these hold, then set
   `pendingStop = null`:
   - `pendingStop` is set;
@@ -79,7 +83,7 @@ reviewers:
 - **Accepted limits:** a restart during the grace period, and a restart
   after a takeover, both fall back to the offer or to no action. No code
   is needed for them.
-- **Header comment:** `Service.qml:6-8` describes the new rule instead of
+- **Header comment:** `Service.qml:5-7` describes the new rule instead of
   "It never stops a recording on its own".
 
 ## Steps
@@ -100,16 +104,26 @@ Files: `shell/tests/fake-daemon.py`, `shell/tests/call-state.sh`,
      counter, and always casts `state`. Today it casts only `if call:`;
      keep that cast and add one when `not call`.
    - `record.stop` (~590) casts `state` after setting `recording = False`.
-2. **`harness-call.qml`:** `Service { stopGraceMs: 2000 }`.
+2. **`harness-call.qml` is not touched in this step.** Setting
+   `stopGraceMs` before `Service.qml` has that property would be a QML
+   error, failing every case. Step 2 adds it. With the default 30 s grace
+   period, the new cases fail as they should, because nothing stops within
+   their 3 s.
 3. **`call-state.sh`:**
-   - **The `notify-send` stub:** when `NOTIFY_ANSWER` is set, print it.
-     It keeps logging its arguments.
-   - **A `user <cmd>` helper:** a `python3 -c` one-liner that connects to
-     `$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock`, sends
-     `{"id":1,"cmd":"<cmd>","args":{}}`, and reads one line. It plays the
-     user as a second client.
-   - **The `st` helper's 4th argument (`callSince`):** pass it explicitly
-     in the new cases.
+   - **The `notify-send` stub:** it keeps logging its arguments. When
+     `NOTIFY_ANSWER` is set, it sleeps `${NOTIFY_DELAY:-0}` seconds, then
+     prints `NOTIFY_ANSWER`. The delay lets a case answer an old
+     notification after the state has moved on.
+   - **A `user <cmd>` helper:** a short `python3` script that connects to
+     `$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock` and sends
+     `{"id":1,"cmd":"<cmd>","args":{}}`. It then reads lines until it gets
+     the one with `"id": 1`, because the fake now broadcasts `state`
+     first, and fails unless `ok` is true. It plays the user as a second
+     client.
+   - **`callSince` in every write:** every `st` write in a new case passes
+     the same explicit 4th argument (`callSince`). A missing one makes
+     `st` write a new `callSince`, which `Service.qml:108` reads as a
+     different call. The only exception is takeover's returning call.
    - **`viamaybe` (~82):** use `callSince` = now instead of `5000`, on
      both writes (the same value).
    - **New cases**, following the existing `run`/`fail`/`no_record`
@@ -120,12 +134,18 @@ Files: `shell/tests/fake-daemon.py`, `shell/tests/call-state.sh`,
        - the notify log has `-A keep=Keep recording` and `-t 2000`.
      - `maybe-end`: same base; go → `st maybe $$ "" <same callSince>`, sleep 3.
        Assert one `record.stop`.
-     - `takeover`: `--live --live-since=30000`; base callSince `now-60000`; go → `none`, sleep 1, `st call $$ "" $(date +%s%3N)`, sleep 1, `none`, sleep 3.
+     - `takeover`: `--live --live-since=30000`; base `callSince` = `now-60000`.
+       Go:
+       1. `none` (the same `callSince`), then sleep 0.5;
+       2. `st call $$ "" $(date +%s%3N)`, the returning call with a new
+          `callSince`, kept as `T2`. Sleep 2.5. Without the takeover, the
+          first timer would fire in this window;
+       3. `st none $$ "" $T2`, then **immediately** `echo MARK >>
+          $work/takeover.log`, then sleep 3.
+
        Assert:
        - exactly one `record.stop`;
-       - it is logged after the second `none`: check that the log line
-         follows a marker the test appends to the log via
-         `echo MARK >> log` before the second `none`.
+       - its log line comes after `MARK`.
      - `keep`: as `autostop` with `NOTIFY_ANSWER=keep` exported for the
        run.
        Assert:
@@ -139,10 +159,18 @@ Files: `shell/tests/fake-daemon.py`, `shell/tests/call-state.sh`,
        - a `-A stop=Stop notes` offer.
 
        For the dead pid: `sh -c 'echo $$'` returns a pid that has exited.
-     - `gonepending`: as `autostop`; go → `st maybe`, sleep 0.5, `st maybe <dead-pid>`, sleep 3.
+     - `gonepending`: as `autostop`; go → `st maybe $$ "" <cs>`, sleep 0.5, `st maybe <dead-pid> "" <cs>`, sleep 3.
        Assert:
        - no `record.stop`;
-       - a `-A stop=Stop notes` offer.
+       - **exactly one** `-A stop=Stop notes` offer.
+     - `stalestop`: the existing `hangup` setup, where the recording
+       predates the call, so the end shows a "Stop notes" offer for
+       `m-live`. Run with `NOTIFY_ANSWER=stop` and `NOTIFY_DELAY=1.5`. Go:
+       `none`, sleep 0.5, `user record.stop`, `user record.start` (the new
+       meeting is `m-1`), sleep 3.
+
+       Assert exactly one `record.stop`: the user's. The old offer's
+       "stop" is rejected because `m-live` is no longer the meeting.
    - **Existing `hangup` and `viamaybe`:** keep their assertions.
 4. **Check:** `TMPDIR=/tmp devenv shell -- bash shell/tests/call-state.sh`.
    The new cases **must fail** against the current `Service.qml` (no
@@ -155,7 +183,8 @@ Traps:
 
 ### 2. Service.qml (codex)
 
-File: `shell/Service.qml` only.
+Files: `shell/Service.qml`, and `shell/tests/harness-call.qml`
+(`Service { stopGraceMs: 2000 }`).
 
 Implement "Decisions carried over" exactly:
 - properties, `forCall()`, `stopTimer`;
@@ -212,6 +241,19 @@ Traps:
 - **After merge:** `git revert -m 1 <merge>`, bump the nixos lock again,
   and switch.
 - No data or schema is touched, so a revert is complete.
+
+## Review record (draft plan)
+
+| Finding | From | Verdict |
+|---|---|---|
+| Step 1's `stopGraceMs` in the harness is a QML error before step 2, and fails every case | Codex, agy | confirmed → the harness moves to step 2 |
+| `writerGone` while a stop is pending gives two "Stop notes" offers (the `\|\| writerGone` bypass; `CallState` sets `writerGone` before `call`) | Codex, agy | confirmed (`CallState.qml:68-72`) → one offerer; the bypass removed |
+| The takeover `MARK` was written before the second end, so it proves nothing | Codex | confirmed → `MARK` right after the second end, with a 2.5 s window for the first timer |
+| The `user` helper's single read can catch the `state` broadcast instead of its reply | Codex, agy | confirmed → it reads until `id` 1 and checks `ok` |
+| No test of a stale button from an old notification | Codex | confirmed → `NOTIFY_DELAY` and the `stalestop` case |
+| `st` without `callSince` writes a new one, which clears `calledKey` (`Service.qml:108`) | agy | confirmed → an explicit `callSince` in every write |
+| The header comment is at lines 5-7 | Codex | confirmed → fixed |
+| Real `notify-send -t` expiry is not exercised by the stub | Codex | accepted: the argument is checked; the manual check covers expiry |
 
 ## Deviations
 
