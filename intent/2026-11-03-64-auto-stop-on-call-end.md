@@ -27,13 +27,20 @@ notes keep recording until the user stops them by hand.
 1. **Notes stop by themselves.** When a call that reached `call` ends and
    notes were being taken for it, they stop after a short grace period.
    The daemon then finishes the notes as it does for a manual stop.
+   - The grace period starts when the call leaves `call`, whether to
+     `maybe` or `none`. A `maybe` that lasts the whole grace period counts
+     as an end.
+   - The same applies when the detector's writer has gone, which reads as
+     `none`.
 2. **A way to keep recording.** During the grace period a notification
    says "The call ended. Notes stop in 30 s." with a **Keep recording**
    button. Choosing it leaves the recording running, with no further
    prompt for that call.
-3. **No stop if the call returns.** If the call comes back within the
-   grace period, for example a short `maybe` while the app reconnects,
-   nothing stops.
+3. **No stop if the call returns.** If any call is back at `call` before
+   the grace period ends, the pending stop is cancelled. That covers a
+   short `maybe` while the app reconnects, or a second call starting
+   straight away. A reconnect longer than the grace period does stop the
+   notes.
 4. **Other recordings are left alone.** Notes that were not taken for
    this call keep running, for example a room recording started before
    the call. They get today's "Stop notes" offer.
@@ -48,9 +55,16 @@ notes keep recording until the user stops them by hand.
 
 ## Constraints
 
-- **Never stop a recording the user did not tie to this call** (outcome
-  4). An old notification must not stop a newer call's notes; today's
-  `act()` key check already handles that.
+- **Never stop a recording that is not this call's** (outcome 4). Today's
+  `act()` checks the call, not the recording: with no call on it sends
+  `record.stop` whatever is recording (`Service.qml:58-63`). A pending or
+  old stop must therefore name the recording it was made for, the daemon's
+  `state.meeting`. It is dropped if a different meeting is recording by
+  then, or if none is. This also applies to today's "Stop notes" button.
+- **Ownership must survive a shell restart.** The shell may restart in the
+  middle of a call, so it cannot rely on remembering who started the notes.
+  The rule must work from state the daemon and the detector already keep
+  (see open question 3).
 - **Interviewer mode:** stopping is safe. Consent applies to starting,
   not stopping.
 - **No audio loss for a reconnect:** the grace period must cover a
@@ -68,7 +82,9 @@ say otherwise.
    little gain. Alternative: an `auto_stop_on_call_end` setting, on by
    default, next to `auto_record_on_call`.
 2. **Grace period.** Recommended: 30 s, a constant in `Service.qml`.
-3. **Which notes count as "for this call"?** Recommended: notes started
-   while this call was at `call`, whether started automatically, from the
-   "Take notes" offer, or by hand from the bar or overlay. Notes already
-   running when the call started are not stopped.
+3. **Which notes count as "for this call"?** Recommended: notes whose
+   recording started at or after the call started. That compares the
+   daemon's `state.since` with the detector's `callSince`, allowing a few
+   seconds of slack. It covers notes started automatically, from "Take
+   notes", or by hand, and it still works after a shell restart. Notes that
+   were already running when the call started are not stopped.
