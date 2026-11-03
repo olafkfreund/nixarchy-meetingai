@@ -18,7 +18,7 @@ Column {
     property bool done: true
     property bool show: true
     readonly property var list: { try { return JSON.parse(root.sources || "[]"); } catch (e) { return []; } }
-    readonly property bool uncited: root.done && root.list.length === 0 && root.citeMax + root.citeNotes > 0
+    readonly property bool uncited: root.done && root.sources !== "" && root.list.length === 0 && root.citeMax + root.citeNotes > 0   // "": answer.sources never came (cancelled)
 
     visible: root.show && (root.list.length > 0 || root.uncited)
     spacing: Style.space(4)

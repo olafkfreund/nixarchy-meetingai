@@ -204,8 +204,16 @@ fn cited_sources(answer: &str, offered: &[(String, Source)]) -> Vec<Source> {
     let bytes = answer.as_bytes();
     let mut found = Vec::new();
     let mut seen = HashSet::new();
+    let mut code = false;
     for i in 0..bytes.len() {
-        if bytes[i] != b'[' {
+        if bytes[i] == b'`' {
+            code = !code; // a fence's three backticks toggle an odd number of times
+        }
+        // `arr[1]` in code or after a word is an index, not a citation
+        if code
+            || bytes[i] != b'['
+            || i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_')
+        {
             continue;
         }
         let mut end = i + 1;
@@ -5177,6 +5185,7 @@ mod citation_tests {
                 },
             ));
         }
+        assert!(cited_sources("`arr[1]` and arr[2]\n```\nx[1]\n```", &g.cite).is_empty());
         let found = cited_sources("[N1] [3] [2] [N1] [1] [N99] [2] [123]", &g.cite);
         assert_eq!(
             found.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),

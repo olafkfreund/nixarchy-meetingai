@@ -348,7 +348,9 @@ Item {
             root.answering = true;
             root.now = { turn: ev.turn, question: String(ev.question || ""), automatic: ev.automatic === true, asker: ev.automatic === true ? (root.lastSpeaker || "Them") : "You", provider: String(ev.provider || ""), model: String(ev.model || ""), body: "", sources: "", citeMax: Number(ev.cite_max) || 0, citeNotes: Number(ev.cite_notes) || 0 };
             break;
-        case "answer.sources": if (ev.turn === root.now.turn) root.now = Object.assign({}, root.now, { sources: JSON.stringify(ev.sources || []) }); break;
+        case "answer.sources":   // -2: rebuilt mid-answer, and the stream may have ended with no delta to say which turn
+            if (ev.turn === root.now.turn || (root.now.turn === -2 && !root.awaitingStart)) root.now = Object.assign({}, root.now, { turn: ev.turn, sources: JSON.stringify(ev.sources || []) });
+            break;
         case "answer.delta":
             if (root.awaitingStart && (root.now.turn === -1 || root.now.turn === -2)) break;
             root.answering = true;
