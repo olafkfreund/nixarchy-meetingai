@@ -156,6 +156,58 @@ if cmds.count("transcript.get") < 3:
 print("grounded: citations, search/jump, rename, stale state and geometry ok")
 PY
 
+# Library: selection, notes pane states, late-reply guard, row menu, metadata, capHeadings and "no results".
+ln -sf "$here/tests/harness-library.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-library"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/library.log" --library &
+fake=$!
+sleep 0.5
+timeout 20 quickshell -p "$work/cfg" > "$work/library.out" 2> "$work/library.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/library.err" "$work/library.out" | grep -av 'GEO {'; then echo "FAIL (library): QML errors above" >&2; exit 1; fi
+python3 "$here/tests/check-geometry.py" "$work/library.out"
+python3 - "$work/library.out" <<'PY'
+import json, sys
+line = next((l for l in open(sys.argv[1], errors="replace") if "LIBRARY {" in l), None)
+if line is None:
+    sys.exit("FAIL (library): no harness dump")
+d = json.loads(line[line.index("LIBRARY ") + 8:])
+bad = []
+def want(key, val):
+    if d.get(key) != val:
+        bad.append(f"{key}: want {val!r}, got {d.get(key)!r}")
+for key in ("rows", "recapShown", "recapNoHash", "selectedBar", "beforeBump", "reloaded", "chatHidesPane", "lateReplyHidden", "chatDelete", "chatNoExport", "noResults"):
+    want(key, True)
+want("noResultsEarly", False)
+want("loading", "Loading notes\u2026")
+want("quickLoading", "Loading notes\u2026")
+want("quickEmpty", "No notes yet for this meeting.")
+want("standupMeta", "42 min \u00b7 412 lines")
+want("quickMeta", "< 1 min \u00b7 3 lines")
+if "Fake standup" not in d.get("title", ""):
+    bad.append(f"title: {d.get('title')!r}")
+if d.get("whenBefore", -1) < 0 or abs(d.get("whenBefore", -1) - d.get("whenAfter", -2)) > 0.5:
+    bad.append(f"the date moved when the menu opened: {d.get('whenBefore')} -> {d.get('whenAfter')}")
+caps = d.get("caps", "").split("\n")
+for text in ("Title", "Sub", "A b", "C#"):
+    h = "**" + text + "**"
+    if caps.count(h) != 1:
+        bad.append(f"capHeadings: want one {h!r}: {caps}")
+        continue
+    i = caps.index(h)
+    if i == 0 or caps[i - 1] != "" or i + 1 >= len(caps) or caps[i + 1] != "":
+        bad.append(f"capHeadings: {h!r} needs a blank line before and after: {caps}")
+for kept in ("```", "# kept", "~~~", "# kept2"):
+    if kept not in caps:
+        bad.append(f"capHeadings: fence line {kept!r} must stay unchanged: {caps}")
+if bad:
+    for b in bad:
+        print("FAIL (library):", b, file=sys.stderr)
+    sys.exit(1)
+print("library: selection, notes states, late reply, row menu, metadata, headings and no-results ok")
+PY
+
 # --locked: settings fixed by Nix are never sent (live_provider is free and still is; a locked provider keeps its model), and the Settings page loads.
 ln -sf "$here/tests/harness-locked.qml" "$work/cfg/shell.qml"
 export XDG_RUNTIME_DIR="$work/run-locked"
@@ -548,6 +600,17 @@ ShellRoot {
         for (var i = 0; i < kids.length; i++) findAll(kids[i], name, acc, (depth || 0) + 1);
         return acc;
     }
+    function texts(it, depth) {
+        if (!it || (depth || 0) > 60) return "";
+        var s = typeof it.text === "string" ? it.text : "", kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) s += " " + texts(kids[i], (depth || 0) + 1);
+        return s;
+    }
+    // the "⋯" of the meeting row itself: the list is newest first and the fake chat is newer, so the first rowMore is the chat's
+    function openMore(card) {
+        var m = root.find(root.find(card, "openNotes"), "rowMore");
+        if (m) m.clicked();
+    }
     Overlay {
         id: overlay
         Component.onCompleted: overlay.open("{}")
@@ -580,6 +643,7 @@ ShellRoot {
                 root.out.settingsFolderAfter = ff2 ? String(ff2.text) : "";
                 overlay.showLibrary("restore");
             } else if (root.phase === 13) {
+                root.openMore(card);
                 var eb = root.find(card, "exportNow");
                 root.out.hasExportNow = !!eb;
                 if (eb) eb.clicked();
@@ -588,6 +652,8 @@ ShellRoot {
                 root.out.chatWhen = Qt.formatDateTime(new Date(1793400000000), Qt.locale().dateTimeFormat(Locale.ShortFormat));
                 var on = root.find(card, "openNotes");
                 if (on) on.clicked();
+                root.out.notesTitle = root.texts(root.find(card, "notesTitle"));
+                root.out.selectedBar = !!root.find(card, "selectedBar");
             } else if (root.phase === 15) {
                 var st = root.find(card, "exportStatus");
                 root.out.exportStatusOk = st ? String(st.text) : "";
@@ -601,7 +667,7 @@ ShellRoot {
                     root.out.grew = nb.height > h0;
                     lib.setNotesHeight(1e6);
                     var rl = root.find(card, "restoreList");
-                    var rows = 2 * (lib.theme.ctl + Style.spacing.xs);
+                    var rows = 2 * lib.rowH;
                     root.out.maxOk = nb.height > h0 && !!rl && rl.height >= rows - 1 && rl.height <= rows + 1;
                     lib.setNotesHeight(0);
                     root.out.minOk = Math.abs(nb.height - Math.round(lib.notesMin)) <= 1;
@@ -622,6 +688,7 @@ ShellRoot {
                 }
                 overlay.exportFolderHook("/tmp/fail");
             } else if (root.phase === 17) {
+                root.openMore(card);
                 var eb2 = root.find(card, "exportNow");
                 if (eb2) eb2.clicked();
             } else if (root.phase === 19) {
@@ -662,6 +729,8 @@ if not d.get("hasExportNow") or d.get("exportStatusOk") != "Exported to /tmp/vau
 w = d.get("whens") or []
 if len(w) != 2 or not all(w) or w[0] != d.get("chatWhen"):
     bad.append(f"Restore rows must show times, newest (the chat) first: {d}")
+if "Fake standup" not in d.get("notesTitle", "") or d.get("selectedBar") is not True:
+    bad.append(f"selecting a meeting must show its name above the notes and mark the row: {d}")
 if not all(d.get(k) for k in ("hasGrip", "grew", "maxOk", "minOk", "dragOk", "keyOk", "boundOk")):
     bad.append(f"notes pane resize check failed: {d}")
 if "Could not export the meeting" not in d.get("exportStatusErr", ""):

@@ -16,6 +16,7 @@ TREE = os.path.join(os.path.dirname(os.environ["OMARCHY_SHELL_TREE"]), "themes")
 DEFAULT = [os.path.expanduser("~/.local/state/omarchy/current/theme/colors.toml"),
            f"{TREE}/flexoki-light/colors.toml", f"{TREE}/catppuccin-latte/colors.toml", f"{TREE}/white/colors.toml"]
 MEETING, YOU, CARD = 0.06, 0.14, 0.12   # Transcript.qml / NowCard.qml: bubbles and the NOW card (archived answers use 0.08)
+SELECTED = 0.18                         # Library.qml: the accent tint behind the selected session row
 CALLOUT = 0.10                          # ConsentBanner.qml / ItemsPanel.qml: the foreground tint of the consent and Earlier-task callouts
 DIM = 0.9                               # Theme.qml dim: opacity of secondary text (captions, hints, notes)
 FALLBACK_RED = "#e5484d"
@@ -61,10 +62,11 @@ def check(path):
         ("badge outline/number (mono)", fg, bg),
         ("level dot (mono, full level)", fg, bg),
         ("link (accent) on card", ac, over(ac, CARD, bg)),
+        ("text on selected row", fg, over(ac, SELECTED, bg)),
         ("recording dot on header/bar", record_red(c, bg, fg), bg),
     ]
     # secondary text: the text colour at DIM opacity, on every surface it sits on
-    for name, card in (("panel", bg), ("meeting bubble", over(fg, MEETING, bg)), ("you bubble", over(ac, YOU, bg)), ("NOW/answer card", over(ac, CARD, bg)), ("callout", over(fg, CALLOUT, bg))):
+    for name, card in (("panel", bg), ("meeting bubble", over(fg, MEETING, bg)), ("you bubble", over(ac, YOU, bg)), ("NOW/answer card", over(ac, CARD, bg)), ("callout", over(fg, CALLOUT, bg)), ("selected row", over(ac, SELECTED, bg))):
         rows.append((f"dimmed text on {name}", over(fg, DIM, card), card))
     print(f"{path}  ({c.get('mode', '?')})")
     ok = True
