@@ -110,6 +110,45 @@ pub fn add_line(
     c.execute("INSERT INTO meeting_lines(id,meeting_id,who,speaker,text,start_time,end_time) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,meeting_id,who,speaker,text,start_time,end_time])?;
     Ok(id)
 }
+/// One matching line with its meeting.
+pub struct LineHit {
+    pub meeting: String,
+    pub title: String,
+    pub started_at: String,
+    pub id: String,
+    pub who: String,
+    pub speaker: Option<i64>,
+    pub text: String,
+    pub start_time: f64,
+}
+pub fn search_lines(
+    c: &Connection,
+    query: &str,
+    meeting: Option<&str>,
+    limit: usize,
+) -> Result<Vec<LineHit>> {
+    let mut s = c.prepare(
+        "SELECT l.meeting_id,m.title,m.started_at,l.id,l.who,l.speaker,l.text,l.start_time
+         FROM meeting_lines l JOIN meetings m ON m.id=l.meeting_id
+         WHERE instr(lower(l.text),lower(?1))>0 AND (?2 IS NULL OR l.meeting_id=?2)
+         ORDER BY m.started_at DESC,l.start_time LIMIT ?3",
+    )?;
+    Ok(
+        s.query_map(params![query, meeting, limit.min(500) as i64], |r| {
+            Ok(LineHit {
+                meeting: r.get(0)?,
+                title: r.get(1)?,
+                started_at: r.get(2)?,
+                id: r.get(3)?,
+                who: r.get(4)?,
+                speaker: r.get(5)?,
+                text: r.get(6)?,
+                start_time: r.get(7)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?,
+    )
+}
 pub fn finish(c: &Connection, meeting_id: &str, duration_seconds: i64) -> Result<()> {
     c.execute(
         "UPDATE meetings SET ended_at=datetime('now'),duration_seconds=?2 WHERE id=?1",

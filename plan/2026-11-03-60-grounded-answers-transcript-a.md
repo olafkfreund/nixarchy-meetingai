@@ -622,3 +622,10 @@ fake-daemon unit paths run.
   stored `who` (`me`/`them`/`room`) instead of a channel number, so room
   lines get `"room"` and an empty speaker everywhere, as they already did
   in the live view.
+- Step 3 (coder): the first coder teammate never started (its tmux pane
+  was a plain shell outside this session), so a second coder ran the step.
+  `Entry.t0` carries `#[allow(dead_code)]` until step 4 reads it; remove
+  it there. `search_lines` clamps its limit to 500 internally, like
+  `meetings::search`, so step 5's `min(limit*4, 500)` over-fetch fits.
+  Search hits also carry `speaker_key`. The `around` window uses
+  `max(limit/2, 1)` per side, so `limit: 1` still returns the line.

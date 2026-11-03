@@ -165,6 +165,15 @@ pub struct TranscriptGet {
     pub meeting: Option<String>,
     pub after_line: Option<i64>,
     pub limit: Option<usize>,
+    pub around: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TranscriptSearch {
+    pub query: String,
+    pub meeting: Option<String>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]

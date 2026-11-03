@@ -183,6 +183,9 @@ struct Entry {
     speaker: Option<i64>,
     /// Stored row, to find the line again when it is relabelled.
     id: Option<String>,
+    /// Start time in the meeting, in seconds. Read by the citation window (plan step 4).
+    #[allow(dead_code)]
+    t0: f64,
 }
 
 /// Owner voice check: the speaker model and its embedder. Nothing here is locked on the audio
@@ -1978,13 +1981,14 @@ impl Daemon {
         let (label, name, key) = Self::who(&g.speaker_names, who, speaker);
         self.emit(
             "transcript.final",
-            json!({"who": label, "speaker": name, "speaker_key": key, "text": shown, "t0": start, "t1": end}),
+            json!({"who": label, "speaker": name, "speaker_key": key, "text": shown, "t0": start, "t1": end, "id": row}),
         );
         g.transcript.push(Entry {
             text: shown,
             who,
             speaker,
             id: row.clone(),
+            t0: start,
         });
         row
     }
@@ -3167,7 +3171,7 @@ impl Daemon {
             let (who, speaker, key) = Self::who(&g.speaker_names, &line.who, line.speaker);
             self.emit(
                 "transcript.final",
-                json!({"who": who, "speaker": speaker, "speaker_key": key, "text": line.text, "t0": line.start_time, "t1": line.end_time}),
+                json!({"who": who, "speaker": speaker, "speaker_key": key, "text": line.text, "t0": line.start_time, "t1": line.end_time, "id": line.id}),
             );
             g.transcript.push(Entry {
                 text: line.text.clone(),
@@ -3178,6 +3182,7 @@ impl Daemon {
                 },
                 speaker: line.speaker,
                 id: Some(line.id.clone()),
+                t0: line.start_time,
             });
         }
         // Keep the recap plus beginning and recent speech as bounded background.
@@ -4269,11 +4274,30 @@ impl Daemon {
         Ok(json!({"meeting": meeting, "key": key, "name": name}))
     }
 
-    /// Stored lines of a meeting (default: the current session), paged by rowid.
+    /// Stored lines of a meeting (default: the current session), paged by rowid, or the window
+    /// around one line (`around`, a line id).
     fn transcript_get(&self, args: protocol::TranscriptGet) -> Result<Value, String> {
         let g = self.inner.lock();
-        let meeting = args
-            .meeting
+        let c = g.db.connection();
+        let mut meeting = args.meeting;
+        let mut target = None;
+        if let Some(id) = &args.around {
+            let (m, rowid): (String, i64) = c
+                .query_row(
+                    "SELECT meeting_id, rowid FROM meeting_lines WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .ok_or("That line no longer exists.")?;
+            if meeting.as_ref().is_some_and(|given| *given != m) {
+                return Err("That line belongs to another meeting.".into());
+            }
+            meeting = Some(m);
+            target = Some(rowid);
+        }
+        let meeting = meeting
             .or_else(|| g.meeting_id.clone())
             .or_else(|| g.finishing_meeting.clone())
             .or_else(|| g.resume_meeting.clone());
@@ -4281,32 +4305,83 @@ impl Daemon {
             return Ok(json!({"meeting": null, "lines": []}));
         };
         let limit = args.limit.unwrap_or(200).clamp(1, 500);
-        let names =
-            meetings::speaker_names(g.db.connection(), &meeting).map_err(|e| e.to_string())?;
-        let mut statement =
-            g.db.connection()
-                .prepare(
-                    "SELECT rowid, who, speaker, text, start_time, end_time FROM meeting_lines
-                 WHERE meeting_id = ?1 AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3",
-                )
-                .map_err(|e| e.to_string())?;
-        let lines = statement
-            .query_map(
-                rusqlite::params![meeting, args.after_line.unwrap_or(0), limit as i64],
-                |r| {
-                    let who: String = r.get(1)?;
-                    let speaker: Option<i64> = r.get(2)?;
-                    let (who, name, key) = Self::who(&names, &who, speaker);
-                    Ok(
-                        json!({"line": r.get::<_, i64>(0)?, "who": who, "speaker": name,
-                              "speaker_key": key, "text": r.get::<_, String>(3)?,
-                              "t0": r.get::<_, f64>(4)?, "t1": r.get::<_, f64>(5)?}),
-                    )
-                },
+        let names = meetings::speaker_names(c, &meeting).map_err(|e| e.to_string())?;
+        let select = "SELECT rowid, who, speaker, text, start_time, end_time, id FROM meeting_lines
+                 WHERE meeting_id = ?1";
+        let read = |r: &rusqlite::Row| {
+            let who: String = r.get(1)?;
+            let speaker: Option<i64> = r.get(2)?;
+            let (who, name, key) = Self::who(&names, &who, speaker);
+            Ok(
+                json!({"line": r.get::<_, i64>(0)?, "id": r.get::<_, String>(6)?, "who": who,
+                      "speaker": name, "speaker_key": key, "text": r.get::<_, String>(3)?,
+                      "t0": r.get::<_, f64>(4)?, "t1": r.get::<_, f64>(5)?}),
             )
-            .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-            .map_err(|e| e.to_string())?;
+        };
+        let query = |sql: String, cursor: i64, n: usize| -> Result<Vec<Value>, String> {
+            c.prepare(&sql)
+                .and_then(|mut s| {
+                    s.query_map(rusqlite::params![meeting, cursor, n as i64], read)
+                        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+                })
+                .map_err(|e| e.to_string())
+        };
+        let lines = match target {
+            Some(rowid) => {
+                let half = (limit / 2).max(1);
+                let mut lines = query(
+                    format!("{select} AND rowid <= ?2 ORDER BY rowid DESC LIMIT ?3"),
+                    rowid,
+                    half,
+                )?;
+                lines.reverse();
+                lines.extend(query(
+                    format!("{select} AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3"),
+                    rowid,
+                    half,
+                )?);
+                lines
+            }
+            None => query(
+                format!("{select} AND rowid > ?2 ORDER BY rowid ASC LIMIT ?3"),
+                args.after_line.unwrap_or(0),
+                limit,
+            )?,
+        };
         Ok(json!({"meeting": meeting, "lines": lines}))
+    }
+
+    /// Lines matching `query` across meetings, newest meeting first. `for_agent` is wired in a
+    /// later step.
+    fn transcript_search(
+        &self,
+        args: protocol::TranscriptSearch,
+        _for_agent: bool,
+    ) -> Result<Value, String> {
+        let query = args.query.trim();
+        if query.chars().count() < 2 {
+            return Err("query needs at least 2 characters".into());
+        }
+        let limit = args.limit.unwrap_or(20).clamp(1, 50);
+        let g = self.inner.lock();
+        let c = g.db.connection();
+        let hits = meetings::search_lines(c, query, args.meeting.as_deref(), limit)
+            .map_err(|e| e.to_string())?;
+        let mut names: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        let mut rows = Vec::with_capacity(hits.len());
+        for h in hits {
+            if !names.contains_key(&h.meeting) {
+                let n = meetings::speaker_names(c, &h.meeting).map_err(|e| e.to_string())?;
+                names.insert(h.meeting.clone(), n);
+            }
+            let (who, speaker, key) = Self::who(&names[&h.meeting], &h.who, h.speaker);
+            rows.push(
+                json!({"meeting": h.meeting, "title": h.title, "started_at": h.started_at,
+                "id": h.id, "who": who, "speaker": speaker, "speaker_key": key,
+                "text": h.text, "t0": h.start_time}),
+            );
+        }
+        Ok(Value::Array(rows))
     }
 
     /// What the overlay shows now. `loading` while a loopback ollama has sent nothing yet, `writing` while an answer streams, `ready` when
@@ -4693,6 +4768,7 @@ impl Daemon {
                     .await
             }
             "transcript.get" => self.transcript_get(parse(args)?),
+            "transcript.search" => self.transcript_search(parse(args)?, false),
             "speakers.rename" => self.speakers_rename(parse(args)?),
             "now.get" => Ok(self.now_get()),
             "notes.get" => self.notes_get(&parse::<protocol::MeetingArg>(args)?.meeting),
@@ -6168,6 +6244,7 @@ mod command_tests {
                 who: "me",
                 speaker: None,
                 id: Some(row.clone()),
+                t0: 0.0,
             });
             drop(g);
             d.relabel_room(&meeting, &row, (0.0, 2.0));
@@ -8096,6 +8173,133 @@ mod command_tests {
                 .await
                 .unwrap()["stale"],
             false
+        );
+    }
+    #[tokio::test]
+    async fn lines_carry_ids_and_around_windows_them() {
+        let d = daemon();
+        let mut events = d.subscribe();
+        d.handle("record.start", json!({}), None).await.unwrap();
+        for (i, t) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+            d.inject_live(line(t, i as f64));
+        }
+        let mut finals = vec![];
+        while finals.len() < 5 {
+            let ev = events.recv().await.unwrap();
+            if ev["event"] == "transcript.final" {
+                finals.push(ev);
+            }
+        }
+        let all = d.handle("transcript.get", json!({}), None).await.unwrap();
+        let all = all["lines"].as_array().unwrap().clone();
+        for (f, r) in finals.iter().zip(&all) {
+            assert!(!r["id"].as_str().unwrap().is_empty());
+            assert_eq!(f["id"], r["id"]);
+        }
+        let around = |i: usize| {
+            let d = d.clone();
+            let id = all[i]["id"].clone();
+            async move {
+                let got = d
+                    .handle("transcript.get", json!({"around": id, "limit": 4}), None)
+                    .await
+                    .unwrap();
+                got["lines"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["text"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(around(0).await, ["a", "b", "c"]);
+        assert_eq!(around(2).await, ["b", "c", "d", "e"]);
+        assert_eq!(around(4).await, ["d", "e"]);
+        let id = all[2]["id"].clone();
+        let other = {
+            let g = d.inner.lock();
+            meetings::start(
+                g.db.connection(),
+                "Other",
+                "",
+                "en",
+                None,
+                Default::default(),
+            )
+            .unwrap()
+        };
+        assert!(
+            d.handle(
+                "transcript.get",
+                json!({"around": id, "meeting": other}),
+                None
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            d.handle("transcript.get", json!({"around": "nope"}), None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_search_orders_filters_and_names_speakers() {
+        let d = daemon();
+        let (old, new) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let old = meetings::start(c, "Old", "", "en", None, Default::default()).unwrap();
+            let new = meetings::start(c, "New", "", "en", None, Default::default()).unwrap();
+            c.execute(
+                "UPDATE meetings SET started_at='2020-01-01 00:00:00' WHERE id=?1",
+                [&old],
+            )
+            .unwrap();
+            meetings::add_line(c, &old, "them", Some(0), "Budget talk", 5.0, 6.0).unwrap();
+            meetings::add_line(c, &new, "them", Some(0), "late budget", 9.0, 10.0).unwrap();
+            meetings::add_line(c, &new, "me", None, "early BUDGET", 1.0, 2.0).unwrap();
+            meetings::add_line(c, &new, "me", None, "unrelated", 3.0, 4.0).unwrap();
+            meetings::name_speaker(c, &old, "0", "Ada").unwrap();
+            (old, new)
+        };
+        let found = d
+            .handle("transcript.search", json!({"query": " budget "}), None)
+            .await
+            .unwrap();
+        let rows = found.as_array().unwrap();
+        let texts: Vec<_> = rows.iter().map(|r| r["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, ["early BUDGET", "late budget", "Budget talk"]);
+        assert_eq!(rows[0]["meeting"], new);
+        assert_eq!(rows[0]["title"], "New");
+        assert_eq!(rows[0]["t0"], 1.0);
+        assert!(!rows[0]["id"].as_str().unwrap().is_empty());
+        assert_eq!(rows[1]["speaker"], "Speaker 1");
+        assert_eq!(rows[1]["speaker_key"], "0");
+        assert_eq!(rows[2]["speaker"], "Ada");
+        let one = d
+            .handle(
+                "transcript.search",
+                json!({"query": "budget", "meeting": old}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(one.as_array().unwrap().len(), 1);
+        let capped = d
+            .handle(
+                "transcript.search",
+                json!({"query": "budget", "limit": 2}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(capped.as_array().unwrap().len(), 2);
+        assert!(
+            d.handle("transcript.search", json!({"query": " b "}), None)
+                .await
+                .is_err()
         );
     }
 }
