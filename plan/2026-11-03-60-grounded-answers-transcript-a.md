@@ -656,3 +656,12 @@ fake-daemon unit paths run.
   relabels rows in place ("Speaker N" / "Them") instead of `rebuild()`,
   which would drop archived answers. A rename marks every archived answer
   `renamedAfter`.
+- Step 7 (Codex; reassigned from agy by the user): agy's run made no
+  usable progress in ~10 minutes (51 lines in `fake-daemon.py`, nothing
+  in `smoke.sh`), so the user moved the step to Codex. Codex added a
+  `--grounded` fake-daemon scenario and `harness-grounded.qml`; its
+  sandbox could not run `ci.sh`. Claude fixed the harness: `MouseArea`
+  `clicked()` needs an argument (`clicked(null)`), and the session list
+  only loads on a tab change, so the notes check switches tabs and clears
+  the search first (the grounded run gets 12 s). The voice check now
+  strips the new `· m:ss` suffix from bubble labels.
