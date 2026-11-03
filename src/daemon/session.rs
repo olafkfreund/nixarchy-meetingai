@@ -1694,16 +1694,25 @@ impl Daemon {
                 .into_iter()
                 .filter(|t| !guarded || guard::assessment(t, &said).is_none())
                 .collect();
-            for text in visible_follow_ups(&generated) {
-                {
-                    let mut g = me.inner.lock();
-                    if g.turn == turn {
-                        g.suggestions.push(text.clone());
-                    }
-                }
-                me.emit("suggestion", json!({"text": text}));
-            }
+            me.publish_follow_ups(turn, &generated);
         }));
+    }
+
+    fn publish_follow_ups(&self, turn: u64, generated: &[String]) {
+        for text in visible_follow_ups(generated) {
+            let current = {
+                let mut g = self.inner.lock();
+                if g.turn == turn {
+                    g.suggestions.push(text.clone());
+                    true
+                } else {
+                    false
+                }
+            };
+            if current {
+                self.emit("suggestion", json!({"text": text, "turn": turn}));
+            }
+        }
     }
 
     /// Name the current conversation once it has a real exchange in it.
@@ -4273,7 +4282,8 @@ impl Daemon {
             "idle"
         };
         json!({"status": status, "question": g.last_question, "answer": g.chat.answer(),
-               "provider": g.effective.0, "model": g.effective.1, "suggestions": g.suggestions})
+               "provider": g.effective.0, "model": g.effective.1, "suggestions": g.suggestions,
+               "turn": g.turn})
     }
 
     // ----- dispatch -----------------------------------------------------
@@ -5367,6 +5377,31 @@ mod command_tests {
         c.custom.as_mut().unwrap().streaming = false;
         credentials::save(&d.vault, &c).unwrap();
         id
+    }
+
+    #[tokio::test]
+    async fn old_follow_ups_do_not_broadcast_into_a_new_turn() {
+        let d = daemon();
+        d.inner.lock().turn = 1;
+        let mut events = d.subscribe();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let fake_provider = {
+            let d = d.clone();
+            tokio::spawn(async move {
+                release_rx.await.unwrap();
+                d.publish_follow_ups(1, &["Who owns the rollout?".into()]);
+            })
+        };
+        d.inner.lock().turn = 2;
+        release_tx.send(()).unwrap();
+        fake_provider.await.unwrap();
+        assert!(d.inner.lock().suggestions.is_empty());
+        assert!(events.try_recv().is_err(), "old suggestion was broadcast");
+        assert_eq!(d.now_get()["turn"], 2);
+        d.publish_follow_ups(2, &["When is the deadline?".into()]);
+        let event = events.try_recv().unwrap();
+        assert_eq!(event["turn"], 2);
+        assert_eq!(event["text"], "When is the deadline?");
     }
 
     #[tokio::test]

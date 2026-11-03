@@ -238,7 +238,7 @@ Item {
             root.answering = live;
             root.suggestions = (n.suggestions || []).slice(0, 3).map(String);
             if (n.answer === "" && n.question === "") return;
-            root.now = { turn: live ? -2 : -1, question: String(n.question || ""), automatic: false, asker: "You", provider: String(n.provider || ""), model: String(n.model || ""), body: String(n.answer || ""), error: "" };
+            root.now = { turn: live ? -2 : n.turn, question: String(n.question || ""), automatic: false, asker: "You", provider: String(n.provider || ""), model: String(n.model || ""), body: String(n.answer || ""), error: "" };
         });
     }
 
@@ -306,7 +306,7 @@ Item {
             break;
         case "answer.done": root.answering = false; if (ev.provider) root.now = Object.assign({}, root.now, { provider: String(ev.provider), model: String(ev.model || root.now.model) }); break;
         case "answer.error": if (ev.turn === undefined || ev.turn === root.now.turn || root.now.turn === -2) root.answerFailed(String(ev.message || ev.error || "")); break;
-        case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
+        case "suggestion": if (ev.turn === root.now.turn) root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
         case "notice": if (ev.kind === "providers") root.providerNotice = String(ev.text || ""); else root.addRow("notice", "", String(ev.text || ""), false); break;
         case "items.updated": if (ev.meeting === root.state.meeting) root.refreshItems(ev.meeting); break;
         case "earlier_item": if (ev.meeting === root.state.meeting) root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;

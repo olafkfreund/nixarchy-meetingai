@@ -135,6 +135,10 @@ async fn request(cmd: &str, args: Value) -> Result<Value, String> {
     .map_err(|_| "The daemon did not answer in time.".to_owned())?
 }
 
+fn matching_suggestion(event: &Value, turn: Option<u64>, finished: bool) -> bool {
+    finished && event["turn"].as_u64() == turn
+}
+
 /// Send `chat.send` and follow its turn until `answer.done` or `answer.error`.
 async fn ask_daemon(question: String) -> Result<Value, String> {
     let want_suggestions = request("settings.get", json!({})).await?["smart_follow_ups"] != false;
@@ -187,7 +191,7 @@ async fn ask_daemon(question: String) -> Result<Value, String> {
                         .unwrap_or("The answer failed.")
                         .to_owned());
                 }
-                Some("suggestion") if finished => {
+                Some("suggestion") if matching_suggestion(&e, turn, finished) => {
                     if suggestions.is_empty() {
                         deadline = deadline.min(Instant::now() + Duration::from_millis(500));
                     }
@@ -204,6 +208,19 @@ async fn ask_daemon(question: String) -> Result<Value, String> {
         json!({"answer": answer, "provider": provider, "model": model,
               "suggestions": suggestions, "partial": partial}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggestions_from_another_turn_are_ignored() {
+        assert!(!matching_suggestion(&json!({"turn": 1}), Some(2), true));
+        assert!(!matching_suggestion(&json!({}), Some(2), true));
+        assert!(matching_suggestion(&json!({"turn": 2}), Some(2), true));
+        assert!(!matching_suggestion(&json!({"turn": 2}), Some(2), false));
+    }
 }
 
 // ----- formatting ------------------------------------------------------------

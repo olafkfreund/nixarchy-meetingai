@@ -607,3 +607,9 @@ fake-daemon unit paths run.
 | Build `cite_window` once per turn; define `no_context` | agy | confirmed → step 4.2 |
 | Missing `now.get` field test | agy | confirmed → step 4 tests |
 | `transcript.search` also needs the `ctl --agent` allowlist | Claude | confirmed (session.rs ~4302) → step 5.1 |
+
+- Step 1 (Codex): the stale-suggestion daemon test calls a new
+  `publish_follow_ups(turn, &generated)` (extracted from `spawn_follow_ups`)
+  directly instead of driving a fake HTTP provider, because the Codex
+  sandbox cannot bind sockets. Same gate under test; verified failing
+  without the gate.
