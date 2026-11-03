@@ -613,3 +613,12 @@ fake-daemon unit paths run.
   directly instead of driving a fake HTTP provider, because the Codex
   sandbox cannot bind sockets. Same gate under test; verified failing
   without the gate.
+- Step 2 (agy): agy's run ended while its own checks were still running,
+  so it reported no results. Claude ran `cargo fmt` (agy's tests were
+  unformatted) and fixed a race in its rename test: the export could run
+  while a chunk task held the notes lock, so the test now waits for that
+  lock first. The new tests cannot compile against the old signatures,
+  which counts as failing before the change. `Self::who` now takes the
+  stored `who` (`me`/`them`/`room`) instead of a channel number, so room
+  lines get `"room"` and an empty speaker everywhere, as they already did
+  in the live view.

@@ -167,6 +167,14 @@ pub struct TranscriptGet {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SpeakersRename {
+    pub meeting: Option<String>,
+    pub key: String,
+    pub name: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PathArg {
     pub path: String,

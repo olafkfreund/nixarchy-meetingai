@@ -17,7 +17,7 @@ use crate::db::{
 use crate::speech::stt::filter::{similarity, tokens};
 use rusqlite::Connection;
 use serde::Deserialize;
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 /// New final characters that trigger a chunk, and the most one chunk covers.
 pub const CHUNK_CHARS: usize = 8000;
@@ -270,7 +270,12 @@ async fn db<T: Send + 'static>(
     .map_err(|e| e.to_string())?
 }
 
-fn slice_prompts(lines: &[LineRecord], language: &str, interview: bool) -> (String, String) {
+fn slice_prompts(
+    lines: &[LineRecord],
+    language: &str,
+    interview: bool,
+    names: &BTreeMap<String, String>,
+) -> (String, String) {
     let rule = if interview { NO_ASSESSMENT } else { "" };
     (
         format!(
@@ -282,7 +287,7 @@ fn slice_prompts(lines: &[LineRecord], language: &str, interview: bool) -> (Stri
         ),
         format!(
             "Summarise this slice:\n<transcript>\n{}</transcript>",
-            untag(&meetings::format_lines(lines))
+            untag(&meetings::format_lines(lines, names))
         ),
     )
 }
@@ -293,12 +298,18 @@ pub async fn summarise_slice(
     lines: &[LineRecord],
     language: &str,
     interview: bool,
+    names: &BTreeMap<String, String>,
 ) -> Result<String, String> {
-    let (system, user) = slice_prompts(lines, language, interview);
+    let (system, user) = slice_prompts(lines, language, interview, names);
     ask(config, system, user).await
 }
 
-fn team_prompts(lines: &[LineRecord], open: &str, language: &str) -> (String, String) {
+fn team_prompts(
+    lines: &[LineRecord],
+    open: &str,
+    language: &str,
+    names: &BTreeMap<String, String>,
+) -> (String, String) {
     let numbered: String = lines
         .iter()
         .enumerate()
@@ -306,7 +317,7 @@ fn team_prompts(lines: &[LineRecord], open: &str, language: &str) -> (String, St
             format!(
                 "[{}] {}",
                 i + 1,
-                untag(&meetings::format_lines(std::slice::from_ref(l)))
+                untag(&meetings::format_lines(std::slice::from_ref(l), names))
             )
         })
         .collect();
@@ -333,8 +344,9 @@ async fn summarise_team(
     lines: &[LineRecord],
     open: &str,
     language: &str,
+    names: &BTreeMap<String, String>,
 ) -> Result<String, String> {
-    let (system, user) = team_prompts(lines, open, language);
+    let (system, user) = team_prompts(lines, open, language, names);
     ask(config, system, user).await
 }
 
@@ -426,15 +438,17 @@ async fn chunk_pending(
     let (mut made, mut continued) = (0, Vec::new());
     loop {
         let owned = id.to_owned();
-        let (ids, lines) = unzip(
-            db(path, move |db| {
-                let last = meetings::chunks(db.connection(), &owned)?
-                    .last()
-                    .map_or(0, |c| c.last_line);
-                meetings::lines_after(db.connection(), &owned, last)
-            })
-            .await?,
-        );
+        let (rows, names) = db(path, move |db| {
+            let last = meetings::chunks(db.connection(), &owned)?
+                .last()
+                .map_or(0, |c| c.last_line);
+            Ok((
+                meetings::lines_after(db.connection(), &owned, last)?,
+                meetings::speaker_names(db.connection(), &owned)?,
+            ))
+        })
+        .await?;
+        let (ids, lines) = unzip(rows);
         if lines.is_empty() || (!force && !due(&lines)) {
             return Ok((made, continued));
         }
@@ -442,10 +456,10 @@ async fn chunk_pending(
         let slice = spoken(&lines[..n]);
         let (body, extracted) = if team {
             parse_team_chunk(
-                &summarise_team(config, &slice, &open_items_text(&open), language).await?,
+                &summarise_team(config, &slice, &open_items_text(&open), language, &names).await?,
             )
         } else {
-            let body = summarise_slice(config, &slice, language, interview).await?;
+            let body = summarise_slice(config, &slice, language, interview, &names).await?;
             let hit = interview && guard::assessment(&body, &said).is_some();
             (if hit { WITHHELD_CHUNK.into() } else { body }, Vec::new())
         };
@@ -454,6 +468,7 @@ async fn chunk_pending(
             t1: slice.iter().map(|l| l.end_time).fold(f64::MIN, f64::max),
             last_line: ids[n - 1],
             body,
+            created_at: String::new(),
         };
         // `source_line` counts the numbered slice; store the line's rowid.
         let spoken_text = slice
@@ -648,10 +663,14 @@ async fn notes(
     team: bool,
 ) -> Result<String, String> {
     let owned = id.to_owned();
-    let (saved, rest) = db(path, move |db| {
+    let (saved, rest, names) = db(path, move |db| {
         let saved = meetings::chunks(db.connection(), &owned)?;
         let last = saved.last().map_or(0, |c| c.last_line);
-        Ok((saved, meetings::lines_after(db.connection(), &owned, last)?))
+        Ok((
+            saved,
+            meetings::lines_after(db.connection(), &owned, last)?,
+            meetings::speaker_names(db.connection(), &owned)?,
+        ))
     })
     .await?;
     let rest = unzip(rest).1;
@@ -663,7 +682,7 @@ async fn notes(
     if !team && saved.is_empty() && slice_len(&rest) == rest.len() {
         return consolidate(
             config,
-            &[meetings::format_lines(&spoken(&rest))],
+            &[meetings::format_lines(&spoken(&rest), &names)],
             prompt,
             language,
         )
@@ -819,21 +838,21 @@ mod tests {
                 end_time: 6.0,
             },
         ];
-        let (slice_sys, slice_user) = slice_prompts(&lines, "Auto", false);
+        let (slice_sys, slice_user) = slice_prompts(&lines, "Auto", false, &BTreeMap::new());
         assert!(slice_sys.contains("Someone in the room"));
         assert!(slice_sys.contains("never treat 'Someone in the room' as the user"));
         assert!(slice_user.contains(
             "You: Let's check the schedule\nSomeone in the room: I will take the trash out\nSpeaker 2: Ship on Monday\n"
         ));
 
-        let (team_sys, team_user) = team_prompts(&lines, "", "Auto");
+        let (team_sys, team_user) = team_prompts(&lines, "", "Auto", &BTreeMap::new());
         assert!(team_sys.contains("Someone in the room"));
         assert!(team_user.contains("[1] You: Let's check the schedule\n"));
         assert!(team_user.contains("[2] Someone in the room: I will take the trash out\n"));
         assert!(team_user.contains("[3] Speaker 2: Ship on Monday\n"));
 
         let (recap_sys, recap_user) = consolidate_prompts(
-            &[meetings::format_lines(&lines)],
+            &[meetings::format_lines(&lines, &BTreeMap::new())],
             crate::core::settings::RECAP_PROMPT_GENERAL,
             "Auto",
         );
