@@ -298,3 +298,29 @@ Traps:
   approved formula, so the notes reservation is about 3 px short of a
   real two-line row. That is harmless, and the size check uses `rowH`
   itself.
+- Step 4 review fixes (Codex, Opus, agy):
+  - **`capHeadings`:** closing `#`s count only after whitespace, so
+    `# C#` keeps its `#` (new fixture). A fence closes only on its own
+    marker. An empty heading stays as written, because `****` would draw
+    a rule. This corrects the plan's regex.
+  - **Delete** copies the row's id before the dialog opens. A live
+    `notes.updated` reloads the list and can rebuild the row while the
+    dialog is open.
+  - **`notes.updated` for the selected meeting** refreshes the notes in
+    place (`fetchNotes`), with no "Loading…" flash and no menu close. This
+    replaces the plan's "re-run `select`".
+  - **Selecting a meeting sets `notesMeeting` again**, so an export
+    finishing for the meeting being read still shows its status line.
+  - **`rowH`** comes from the measured caption line (a `TextMetrics` in
+    the drawing font), not `theme.caption`, so two full meeting rows fit.
+    This replaces the approved formula, which was about 3 px short per
+    row. The kind and date metrics also use `Style.font.family`.
+  - **`contrast.py`** checks text and dim text on the selected-row accent
+    tint (0.18).
+  - **A failed transcript search** does not count as "No results".
+  - **The notes header title wraps.** Deleting the selected meeting also
+    clears `notesStale`.
+  - **Accepted:** setext headings are not capped, which is rare in
+    recaps. Clicking the date or line 2 does not select. "⋯" buttons share
+    one name, as Restore buttons already did. The harness timing has
+    about 200 ms of slack.

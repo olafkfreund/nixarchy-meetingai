@@ -106,7 +106,7 @@ ShellRoot {
                 root.out.quickLoading = root.stateText(card);
             } else if (root.phase === 20) {
                 root.out.quickEmpty = root.stateText(card);
-                root.out.caps = lib ? lib.capHeadings("# Title\n  ## Sub\n```\n# kept\n```\n~~~\n# kept2\n~~~\n# A **b**") : "";
+                root.out.caps = lib ? lib.capHeadings("# Title\n  ## Sub\n```\n# kept\n```\n~~~\n# kept2\n~~~\n# A **b**\n# C#") : "";
             } else if (root.phase === 21) {
                 input = root.find(card, "search");
                 if (input) input.text = "zzzz";

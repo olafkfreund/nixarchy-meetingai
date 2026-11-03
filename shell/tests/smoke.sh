@@ -190,7 +190,7 @@ if "Fake standup" not in d.get("title", ""):
 if d.get("whenBefore", -1) < 0 or abs(d.get("whenBefore", -1) - d.get("whenAfter", -2)) > 0.5:
     bad.append(f"the date moved when the menu opened: {d.get('whenBefore')} -> {d.get('whenAfter')}")
 caps = d.get("caps", "").split("\n")
-for text in ("Title", "Sub", "A b"):
+for text in ("Title", "Sub", "A b", "C#"):
     h = "**" + text + "**"
     if caps.count(h) != 1:
         bad.append(f"capHeadings: want one {h!r}: {caps}")

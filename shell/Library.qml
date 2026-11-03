@@ -41,7 +41,8 @@ Item {
         return s.started_at ? (Date.parse(String(s.started_at).replace(" ", "T") + "Z") || 0) : 0;
     }
     readonly property real notesMin: Style.space(48) * theme.ts
-    readonly property real rowH: theme.ctl + theme.caption + Style.spacing.xs
+    TextMetrics { id: captionLine; font.family: Style.font.family; font.pixelSize: root.theme.caption; text: "42 min · 412 lines" }
+    readonly property real rowH: theme.ctl + captionLine.height + Style.spacing.xs   // a two-line meeting row as drawn
     // The notes pane keeps three lines at least and leaves the list two rows; on a card too short for both, the list wins.
     // A binding, so the default on open, a window resize and a late export status line are clamped too. Never reads notesBox.height.
     readonly property real notesMax: restoreList.parent.height - restoreList.y - 2 * root.rowH
@@ -136,8 +137,14 @@ Item {
         root.notes = "";
         root.notesStale = false;
         if (s.kind !== "meeting") { root.notesPhase = ""; return; }
+        root.notesMeeting = s.id;   // an export.done for the meeting being read shows its status line
         root.notesPhase = "loading";
-        root.client.send("notes.get", { meeting: s.id }, function(r) {
+        root.fetchNotes(s.id);
+    }
+    // The reply lands only while that meeting is still selected; a live refresh keeps the old text until it does.
+    function fetchNotes(meeting) {
+        var id = String(meeting);
+        root.client.send("notes.get", { meeting: meeting }, function(r) {
             if (root.selectedId !== id) return;
             root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : String(r.error || "request failed");
             root.notesStale = r.ok && !!r.data && r.data.stale === true;
@@ -145,11 +152,12 @@ Item {
         });
     }
     function capHeadings(md) {
-        var lines = String(md).split("\n"), out = [], fenced = false;
+        var lines = String(md).split("\n"), out = [], fence = "";   // the open fence's marker: only the same marker closes it
         for (var i = 0; i < lines.length; i++) {
-            var line = lines[i], heading = fenced ? null : line.match(/^ {0,3}#{1,6}[ \t]+(.*?)[ \t]*#*[ \t]*$/);
-            if (/^ {0,3}(```|~~~)/.test(line)) { fenced = !fenced; out.push(line); }
-            else if (heading) out.push("", "**" + heading[1].replace(/\*\*/g, "") + "**", "");
+            var line = lines[i], heading = fence ? null : line.match(/^ {0,3}#{1,6}[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/);
+            var mark = line.match(/^ {0,3}(```|~~~)/);
+            if (mark && (!fence || mark[1] === fence)) { fence = fence ? "" : mark[1]; out.push(line); }
+            else if (heading && heading[1].replace(/\*\*/g, "").trim() !== "") out.push("", "**" + heading[1].replace(/\*\*/g, "") + "**", "");
             else out.push(line);
         }
         return out.join("\n");
@@ -161,7 +169,7 @@ Item {
         root.client.send("transcript.search", { query: q }, function(r) {
             if (root.query.trim() !== q) return;
             root.lineHits = r.ok ? (r.data || []) : [];
-            root.linesDoneFor = q;
+            if (r.ok) root.linesDoneFor = q;   // a failed search is not "No results"
         });
     }
     function openHit(h) {
@@ -292,10 +300,7 @@ Item {
         function onLibraryError(message) { root.error = message; }
         function onNotesUpdated(meeting) {
             root.load();
-            if (String(meeting) === root.selectedId) {
-                var rows = root.sessions.filter(function(s) { return s.kind === "meeting" && String(s.id) === root.selectedId; });
-                if (rows.length) root.select(rows[0]);
-            }
+            if (String(meeting) === root.selectedId) root.fetchNotes(meeting);   // in place: no "Loading", the menu stays
         }
         function onExportDone(meeting, path) { if (root.notesMeeting !== null && String(root.notesMeeting) === String(meeting) && path !== "") root.exportStatus = "Exported to " + path; }
         function onProvidersChanged() { root.load(); }
@@ -389,8 +394,8 @@ Item {
                     x: 0; y: 0; width: 3; height: rrow.height
                     color: Commons.Color.accent
                 }
-                TextMetrics { id: kindMetrics; font.pixelSize: root.theme.caption; text: "Meeting" }
-                TextMetrics { id: dateMetrics; font.pixelSize: root.theme.caption; text: Qt.formatDateTime(new Date(2026, 11, 28, 23, 59), Qt.locale().dateTimeFormat(Locale.ShortFormat)) }
+                TextMetrics { id: kindMetrics; font.family: Style.font.family; font.pixelSize: root.theme.caption; text: "Meeting" }
+                TextMetrics { id: dateMetrics; font.family: Style.font.family; font.pixelSize: root.theme.caption; text: Qt.formatDateTime(new Date(2026, 11, 28, 23, 59), Qt.locale().dateTimeFormat(Locale.ShortFormat)) }
                 Column {
                     id: rowColumn
                     width: parent.width
@@ -448,7 +453,8 @@ Item {
                         height: visible ? root.theme.ctl : 0
                         spacing: root.theme.gap
                         layoutDirection: Qt.RightToLeft
-                        IconButton { objectName: "deleteSession"; ts: root.theme.ts; text: "Delete"; onClicked: root.confirmRequested("Delete \"" + rrow.modelData.title + "\"? " + (rrow.modelData.kind === "meeting" ? "The transcript, notes and items of this meeting are removed." : "This chat is removed."), "Delete", function() { root.client.send("session.delete", { id: rrow.modelData.id }); if (root.selectedId === rrow.rowId) { root.selectedId = ""; root.notes = ""; root.notesPhase = ""; } root.menuFor = ""; root.load(); }) }
+                        IconButton { objectName: "deleteSession"; ts: root.theme.ts; text: "Delete"; onClicked: { var id = rrow.modelData.id, rid = rrow.rowId, kind = rrow.modelData.kind;   // the row may be rebuilt while the dialog is open
+                            root.confirmRequested("Delete \"" + rrow.modelData.title + "\"? " + (kind === "meeting" ? "The transcript, notes and items of this meeting are removed." : "This chat is removed."), "Delete", function() { root.client.send("session.delete", { id: id }); if (root.selectedId === rid) { root.selectedId = ""; root.notes = ""; root.notesStale = false; root.notesPhase = ""; } root.menuFor = ""; root.load(); }); } }
                         IconButton { objectName: "exportNow"; ts: root.theme.ts; text: "Export now"; visible: rrow.modelData.kind === "meeting"; onClicked: root.exportMeeting(rrow.modelData.id) }
                     }
                 }
@@ -572,6 +578,7 @@ Item {
                         width: parent.width
                         textFormat: Text.PlainText
                         text: { var s = root.sessions.find(function(row) { return row.kind === "meeting" && String(row.id) === root.selectedId; }); return s ? String(s.title) : ""; }
+                        wrapMode: Text.Wrap   // a long title grows the header instead of being cut
                         color: Commons.Color.popups.text
                         font.pixelSize: root.theme.body
                         font.bold: true
