@@ -24,13 +24,17 @@ cannot rely on it past the first few minutes of a call:
   (`session.rs` `spawn_follow_ups` stores only when `g.turn == turn` but
   emits regardless; `shell/Client.qml` appends without a turn check).
 - **The transcript is a feed, not a record.** Rows have start/end times, but
-  the view shows none. The daemon's `meetings.search` (titles, transcripts,
-  recaps) is not called by any part of the shell. A misheard name cannot be
-  fixed, a moment cannot be marked, and a line cannot be asked about.
+  the view shows none. The daemon's `meetings.search` is not called by any
+  part of the shell, and it returns whole meetings, not the matching lines
+  (`src/db/repos/meetings.rs` `search`). The shell drops the stored line id
+  when it loads a transcript (`shell/Client.qml` `addRow`), so nothing can
+  point at or jump to one specific line. A misheard name cannot be fixed, a
+  moment cannot be marked, and a line cannot be asked about.
 - **Remote speakers are all "Them".** Speaker names are stored and exported
   (`meetings::name_speaker`, `meeting_speakers`) but no command or UI sets
-  them. With the default Parakeet engine every remote line has no speaker at
-  all; only Deepgram separates speakers.
+  them, and `transcript.get` and the live prompt ignore stored names. With
+  the default Parakeet engine every remote line has no speaker at all; only
+  Deepgram separates speakers.
 - **Nothing ties a finished meeting together.** Recap, items and transcript
   exist but there is no single view that links them by time.
 
@@ -43,17 +47,22 @@ Observable by the user:
    earlier, because the meeting's rolling notes are part of its context.
 3. Every transcript row shows its time. A search field finds words in the
    current and past meetings and jumps to the line.
-4. The user can name "Speaker 2" (or "Them") once and the name shows in the
-   live view, answers, notes and exports.
-5. An answer that relies on the meeting shows which lines it used; clicking
-   one scrolls the transcript to it. An answer from general knowledge is
-   visibly different from one grounded in the meeting.
+4. The user can name a separated speaker ("Speaker 2") once and the name
+   shows in the live view, new answers, new notes and exports. Where the
+   engine gives no speaker (Parakeet today), the remote side can be named as
+   a whole ("Them" → "Acme team"), and the UI does not pretend it is one
+   person.
+5. An answer that relies on the meeting shows which transcript lines it
+   used, in a "Based on" list under the answer; clicking one scrolls the
+   transcript to that line, including in a past meeting. Citations point at
+   transcript lines, never at generated notes. An answer from general
+   knowledge is visibly different from one grounded in the meeting.
 6. From a transcript line the user can correct its text, bookmark it, or ask
    the copilot about it.
 7. After a meeting, one view shows the recap, items, bookmarks and transcript,
    each linked to the moment it came from.
-8. With local Parakeet, remote speech is split into separate speakers
-   without sending audio anywhere.
+8. (Separate issue, see open question 1.) With local Parakeet, remote
+   speech is split into separate speakers without sending audio anywhere.
 
 ## Affected users and systems
 
@@ -80,21 +89,29 @@ Observable by the user:
   answers past the providers' context or slow them noticeably.
 - **Corrections keep the original.** An edited line keeps what was heard, so
   notes and audits can tell the two apart.
-- **MCP parity:** what the user can read in the overlay, agents can read
-  through MCP (except local-only interviews).
+- **No silent rewrites.** Notes, recaps and earlier answers made before a
+  correction or a rename are shown as out of date, not quietly changed.
+- **Stable line identity.** Search results, citations, bookmarks and
+  corrections all refer to the stored line id, in live and past meetings.
+- **MCP: read parity only.** Agents may read search results, bookmarks and
+  citations through MCP (new commands added to the allowlist explicitly);
+  editing lines and naming speakers stay user-only. Local-only interviews
+  stay refused.
 - Follows the Omarchy theme and the existing shell components; every new
   daemon command is covered in `shell/tests/fake-daemon.py` and the smoke test.
 
 ## Open questions
 
-1. **Delivery in phases?** Recommendation: three PRs under this issue —
-   A = outcomes 1–5 (prompt, timestamps, search, naming, citations),
-   B = 6–7 (line actions, post-meeting view), C = 8 (speaker separation).
-   Each phase gets its own spec and plan; this intent covers all three.
-2. **Speaker separation (8):** acceptable to add a local diarization model
-   (more RAM and a larger closure, roughly 50–100 MB), or keep it
-   Deepgram-only and accept "Them" for Parakeet?
-3. **Corrections and notes:** should correcting a line regenerate the recap
-   automatically, or only mark it as out of date with a "Regenerate" button?
-4. **Citation format:** inline markers in the answer text (`[12:04]`) or a
-   separate "Based on" list under the answer?
+Each has a recommendation (Claude, agreed by Codex); approving the intent
+accepts them unless you say otherwise.
+
+1. **Delivery in phases.** Recommended: phase A = outcomes 1–5, phase B =
+   6–7, each its own spec, plan and PR under #60. Outcome 8 (local speaker
+   separation) moves to its own issue and intent, because its RAM, closure
+   and accuracy cost needs measuring before anyone commits to it.
+2. **Speaker separation.** Recommended: out of scope for #60; Parakeet stays
+   "Them", nameable as a group (outcome 4).
+3. **Corrections and notes.** Recommended: mark recap and notes out of date
+   and offer "Regenerate"; never regenerate automatically during a call.
+4. **Citation format.** Recommended: a separate "Based on" list tied to line
+   ids, not inline markers, so it survives folding and Markdown changes.
