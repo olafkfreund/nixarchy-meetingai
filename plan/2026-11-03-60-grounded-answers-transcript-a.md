@@ -629,3 +629,17 @@ fake-daemon unit paths run.
   `meetings::search`, so step 5's `min(limit*4, 500)` over-fetch fits.
   Search hits also carry `speaker_key`. The `around` window uses
   `max(limit/2, 1)` per side, so `limit: 1` still returns the line.
+- Step 4 (Codex, finished by Claude): Codex stopped mid-run with
+  "ERROR: Selected model is at capacity. Please try a different model."
+  after writing the implementation and tests. Claude fixed three borrow
+  errors and one wrong event key (`type` → `event`) in its tests, and a
+  clippy `collapsible_if`. Claude also made three changes:
+  - `no_context` skips `cite_window` instead of building and discarding it.
+  - Follow-up suggestions get the notes and an unlabelled transcript
+    (`plain_transcript`), so no `[k]` labels appear without the citation
+    instruction.
+  - A notes source looks up its first line with one indexed query per
+    chunk instead of loading every line of the meeting on each answer.
+  `Source.t1` for a line is read from `meeting_lines.end_time`. No
+  separate `no_context` test was added: `begin_send` builds an empty map
+  for it directly.
