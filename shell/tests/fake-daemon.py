@@ -54,6 +54,7 @@ call = "--call" in sys.argv
 slow = "--slow-settings" in sys.argv   # settings.get answers after 2.5 s and no settings event is pushed: the client must wait for them
 locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, meeting_mode, text_scale
 voice_mode = "--voice" in sys.argv     # transcript.get room row, transcript.relabel, direct room final, and voice.* commands
+grounded = "--grounded" in sys.argv   # citations, search, old-window jump, rename, and stale suggestion
 export_ask = "--export-ask" in sys.argv   # emit export.folder_needed after connect
 live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
@@ -84,6 +85,21 @@ settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider"
 
 if voice_mode:
     state["meeting"] = "m1"
+if grounded:
+    state["meeting"] = "m1"
+
+GROUND_ROWS = [
+    {"line": 1, "id": "old-1", "meeting": "m1", "who": "system", "speaker": "Speaker 2", "speaker_key": "1", "text": "Old migration detail", "t0": 61.0, "t1": 64.0},
+    {"line": 2, "id": "line-2", "meeting": "m1", "who": "system", "speaker": "Speaker 2", "speaker_key": "1", "text": "Current launch plan", "t0": 724.0, "t1": 728.0},
+    {"line": 3, "id": "line-3", "meeting": "m1", "who": "mic", "speaker": "", "speaker_key": "", "text": "Ship on Friday", "t0": 730.0, "t1": 733.0},
+    {"line": 1, "id": "other-1", "meeting": "m2", "who": "system", "speaker": "Dana", "speaker_key": "0", "text": "Other migration detail", "t0": 90.0, "t1": 94.0},
+]
+GROUND_SOURCES = [
+    {"kind": "line", "id": "line-2", "t0": 724.0, "t1": 728.0, "speaker": "Speaker 2", "snippet": "Current launch plan"},
+    {"kind": "notes", "id": "old-1", "t0": 600.0, "t1": 912.0, "speaker": "", "snippet": "Earlier migration notes"},
+]
+RENAMED = [False]
+GROUND_NOW = {"status": "idle", "question": "", "answer": "", "turn": 0, "cite_max": 0, "cite_notes": 0, "sources": [], "suggestions": []}
 
 
 def voice_status():
@@ -118,7 +134,8 @@ DATA = {
     "series.list": [],
     "candidates.list": [],
     "items.list": [],
-    "notes.get": {"text": "## Summary\nfake"},
+    "now.get": {"status": "idle", "question": "", "answer": "", "turn": 0, "cite_max": 0, "cite_notes": 0, "sources": [], "suggestions": []},
+    "notes.get": {"text": "## Summary\nfake", "stale": False},
 }
 if locked:
     settings["locked"] = ["chat_provider", "meeting_mode", "text_scale", "export_folder"]
@@ -410,19 +427,42 @@ class Handler(socketserver.StreamRequestHandler):
 
     def stream_stale(self):
         time.sleep(0.3)
-        self.send({"event": "answer.started", "turn": 1, "question": "old?", "automatic": False, **PROVIDER})
-        self.send({"event": "answer.started", "turn": 2, "question": "new?", "automatic": False, **PROVIDER})
+        self.send({"event": "answer.started", "turn": 1, "question": "old?", "automatic": False, "cite_max": 0, "cite_notes": 0, **PROVIDER})
+        self.send({"event": "answer.started", "turn": 2, "question": "new?", "automatic": False, "cite_max": 0, "cite_notes": 0, **PROVIDER})
         self.send({"event": "answer.delta", "turn": 2, "text": "NEW", **PROVIDER})
         self.send({"event": "answer.delta", "turn": 1, "text": "OLD", **PROVIDER})
         self.send({"event": "answer.error", "turn": 1, "message": "late failure", **PROVIDER})
         self.send({"event": "answer.done", "turn": 1, **PROVIDER})
+
+    def stream_grounded(self):
+        time.sleep(0.3)
+        self.send({"event": "settings", "settings": settings})
+        self.send({"event": "state", **state})
+        GROUND_NOW.update(status="writing", question="What is the plan?", answer="", turn=1, cite_max=1, cite_notes=1, sources=[], suggestions=[])
+        self.send({"event": "answer.started", "turn": 1, "question": "What is the plan?", "automatic": True, "cite_max": 1, "cite_notes": 1, **PROVIDER})
+        GROUND_NOW["answer"] = "Launch Friday [1] after the earlier notes [N1]."
+        self.send({"event": "answer.delta", "turn": 1, "text": "Launch Friday [1] after the earlier notes [N1].", **PROVIDER})
+        GROUND_NOW.update(status="ready", sources=GROUND_SOURCES, suggestions=["Current suggestion"])
+        self.send({"event": "answer.sources", "turn": 1, "sources": GROUND_SOURCES})
+        self.send({"event": "answer.done", "turn": 1, **PROVIDER})
+        self.send({"event": "suggestion", "turn": 1, "text": "Current suggestion"})
+        time.sleep(1.0)
+        GROUND_NOW.update(status="writing", question="Anything else?", answer="", turn=2, cite_max=1, cite_notes=1, sources=[], suggestions=[])
+        self.send({"event": "answer.started", "turn": 2, "question": "Anything else?", "automatic": True, "cite_max": 1, "cite_notes": 1, **PROVIDER})
+        GROUND_NOW["answer"] = "No new evidence."
+        self.send({"event": "answer.delta", "turn": 2, "text": "No new evidence.", **PROVIDER})
+        GROUND_NOW.update(status="ready", suggestions=["Current follow-up"])
+        self.send({"event": "answer.sources", "turn": 2, "sources": []})
+        self.send({"event": "answer.done", "turn": 2, **PROVIDER})
+        self.send({"event": "suggestion", "turn": 1, "text": "STALE SUGGESTION"})
+        self.send({"event": "suggestion", "turn": 2, "text": "Current follow-up"})
 
     def reask_tail(self, question):
         """--reask: the late tail of turn 1 arrives before the new question's answer.started."""
         time.sleep(0.2)
         self.send({"event": "answer.delta", "turn": 1, "text": "OLDTAIL", **PROVIDER})
         time.sleep(0.2)
-        self.send({"event": "answer.started", "turn": 2, "question": question, "automatic": False, **PROVIDER})
+        self.send({"event": "answer.started", "turn": 2, "question": question, "automatic": False, "cite_max": 0, "cite_notes": 0, **PROVIDER})
         self.send({"event": "answer.delta", "turn": 2, "text": "NEW", **PROVIDER})
         self.send({"event": "answer.done", "turn": 2, **PROVIDER})
 
@@ -432,35 +472,35 @@ class Handler(socketserver.StreamRequestHandler):
             self.send({"event": "settings", "settings": settings})
         self.send({"event": "session.reset"})
         self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})
-        self.send({"event": "transcript.final", "who": "system", "speaker": "Alex", "text": "What is the plan?", "t0": 0, "t1": 2})
-        self.send({"event": "transcript.partial", "who": "mic", "speaker": "", "text": "We should", "t0": 2, "t1": 3})
+        self.send({"event": "transcript.final", "id": "default-1", "who": "system", "speaker": "Alex", "speaker_key": "0", "text": "What is the plan?", "t0": 0, "t1": 2})
+        self.send({"event": "transcript.partial", "who": "mic", "speaker": "", "speaker_key": "", "text": "We should", "t0": 2, "t1": 3})
         for who, speaker, text, t0, t1 in [
             ("mic", "", "I think we can ship this on Friday if QA signs off, but the migration needs another look.", 3, 6),
             ("system", "Sam", "Agreed. Last time the migration took two days longer than planned, so let us pad it.", 6, 9),
             ("mic", "", "Fine, let us say next Tuesday.", 9, 11),
             ("mic", "", "Coffee is ready in the kitchen.", 11, 13),
         ]:
-            self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": t0, "t1": t1})
+            self.send({"event": "transcript.final", "id": "default-%d" % (t0 + 1), "who": who, "speaker": speaker, "speaker_key": "0" if who == "system" else "", "text": text, "t0": t0, "t1": t1})
         self.send({"event": "transcript.relabel", "meeting": state.get("meeting", ""), "t0": 11, "t1": 13, "who": "room"})
         self.send({"event": "notice", "text": "An agent started recording"})
         if providers and not NOTICED:   # the daemon tells its first client, once
             NOTICED.append(1)
             self.send({"event": "notice", "kind": "providers", "text": "Removed the stored Gemini API key; Gemini now runs through Antigravity (sign in with `agy`)."})
-        self.send({"event": "answer.started", "turn": 1, "question": "What is the plan?", "automatic": True, **PROVIDER})
+        self.send({"event": "answer.started", "turn": 1, "question": "What is the plan?", "automatic": True, "cite_max": 0, "cite_notes": 0, **PROVIDER})
         for word in ["Ship ", "it ", "**next Tuesday**.\n\n", "- QA sign-off first\n", "- Pad the migration by two days\n"]:
             self.send({"event": "answer.delta", "turn": 1, "text": word, **PROVIDER})
         self.send({"event": "answer.done", "turn": 1, **PROVIDER})
-        self.send({"event": "suggestion", "text": "Who owns it?"})
+        self.send({"event": "suggestion", "turn": 1, "text": "Who owns it?"})
         if export_ask:
             self.send({"event": "export.folder_needed", "meeting": "1"})
 
     def say(self, who, speaker, text, t0, pace=0.12):
         words = text.split()
         for n in range(1, len(words)):
-            self.send({"event": "transcript.partial", "who": who, "speaker": speaker, "text": " ".join(words[:n]), "t0": t0, "t1": t0 + n * 0.4})
+            self.send({"event": "transcript.partial", "who": who, "speaker": speaker, "speaker_key": "0" if who == "system" else "", "text": " ".join(words[:n]), "t0": t0, "t1": t0 + n * 0.4})
             time.sleep(pace)
-        self.send({"event": "transcript.final", "who": who, "speaker": speaker, "text": text, "t0": t0, "t1": t0 + len(words) * 0.4})
-        SPOKEN.append({"line": len(SPOKEN) + 1, "who": who, "speaker": speaker, "text": text, "t0": t0, "t1": t0 + len(words) * 0.4})
+        self.send({"event": "transcript.final", "id": "live-%d" % (len(SPOKEN) + 1), "who": who, "speaker": speaker, "speaker_key": "0" if who == "system" else "", "text": text, "t0": t0, "t1": t0 + len(words) * 0.4})
+        SPOKEN.append({"line": len(SPOKEN) + 1, "id": "live-%d" % (len(SPOKEN) + 1), "who": who, "speaker": speaker, "speaker_key": "0" if who == "system" else "", "text": text, "t0": t0, "t1": t0 + len(words) * 0.4})
 
     def levels(self):
         n = 0
@@ -486,7 +526,7 @@ class Handler(socketserver.StreamRequestHandler):
         time.sleep(0.6)  # Balanced pacing: answer after the question settles
         emit = cast if drop else self.send
         ANSWER.update(question="And how would you handle a consumer that falls behind for an hour?", body="", streaming=True)
-        emit({"event": "answer.started", "turn": 1, "question": ANSWER["question"], "automatic": True, **PROVIDER})
+        emit({"event": "answer.started", "turn": 1, "question": ANSWER["question"], "automatic": True, "cite_max": 0, "cite_notes": 0, **PROVIDER})
         answer = ["**Talking points**\n\n", "- Lag is visible: alert on ", "consumer lag, not CPU.\n", "- Scale out consumers ", "per partition; ", "the queue keeps ", "ordering per key.\n", "- If it is a poison message, ", "park it in a ", "dead-letter queue and move on.\n\n", "*Mention:* you did this at your last job ", "with Kafka lag alerts. See the ", "[Kafka docs](https://kafka.apache.org/documentation/)."]
         for n, chunk in enumerate(answer):
             ANSWER["body"] += chunk
@@ -499,7 +539,7 @@ class Handler(socketserver.StreamRequestHandler):
         emit({"event": "answer.done", "turn": 1, **PROVIDER})
         ANSWER["suggestions"] = ["Give a concrete lag number", "Ask how they monitor today", "Explain back-pressure"]
         for s in ANSWER["suggestions"]:
-            emit({"event": "suggestion", "text": s})
+            emit({"event": "suggestion", "turn": 1, "text": s})
         if drop:
             return
         self.say("mic", "", "Good question. First I would make the lag visible", 766, 0.3)
@@ -516,10 +556,10 @@ class Handler(socketserver.StreamRequestHandler):
         time.sleep(0.3)
         self.send({"event": "settings", "settings": settings})
         self.send({"event": "state", **state})
-        self.send({"event": "transcript.final", "who": "mic", "speaker": "", "text": "My own first line", "t0": 5.5, "t1": 8.0})
-        self.send({"event": "transcript.final", "who": "mic", "speaker": "", "text": "Someone else in the room", "t0": 5.5, "t1": 8.0})
+        self.send({"event": "transcript.final", "id": "voice-1", "who": "mic", "speaker": "", "speaker_key": "", "text": "My own first line", "t0": 5.5, "t1": 8.0})
+        self.send({"event": "transcript.final", "id": "voice-2", "who": "mic", "speaker": "", "speaker_key": "", "text": "Someone else in the room", "t0": 5.5, "t1": 8.0})
         self.send({"event": "transcript.relabel", "meeting": "m1", "t0": 5.5, "t1": 8.0, "who": "room"})
-        self.send({"event": "transcript.final", "who": "room", "speaker": "", "text": "Direct room line", "t0": 8.5, "t1": 10.0})
+        self.send({"event": "transcript.final", "id": "voice-3", "who": "room", "speaker": "", "speaker_key": "", "text": "Direct room line", "t0": 8.5, "t1": 10.0})
 
     def stream_iv_call(self):
         """After record.start: the candidate answers, then one automatic probe grounded in a quote."""
@@ -527,7 +567,7 @@ class Handler(socketserver.StreamRequestHandler):
         self.say("system", "Dana", "I led the Kafka migration, forty services over six months, and cut consumer lag from nine minutes to forty seconds.", 12, 0.02)
         self.say("mic", "", "What was your part in the cutover itself?", 20, 0.02)
         time.sleep(0.4)
-        self.send({"event": "answer.started", "turn": 1, "question": "", "automatic": True, **PROVIDER})
+        self.send({"event": "answer.started", "turn": 1, "question": "", "automatic": True, "cite_max": 0, "cite_notes": 0, **PROVIDER})
         for chunk in ["**Probes**\n\n", "- \u201ccut consumer lag from nine minutes to forty seconds\u201d: what did you change to get that?\n", "- \u201cforty services over six months\u201d: how did you order the rollout?\n"]:
             self.send({"event": "answer.delta", "turn": 1, "text": chunk, **PROVIDER})
             time.sleep(0.1)
@@ -545,21 +585,21 @@ class Handler(socketserver.StreamRequestHandler):
         self.say("system", "Priya", question, 740, 0.12)
         time.sleep(0.6)
         provider = {"provider": "claude-sub", "model": "haiku"}
-        self.send({"event": "answer.started", "turn": 1, "question": question, "automatic": True, **provider})
+        self.send({"event": "answer.started", "turn": 1, "question": question, "automatic": True, "cite_max": 0, "cite_notes": 0, **provider})
         answer = open(next(f for f in (os.path.join(FIXTURES, n) for n in ("k8s-live-answer.md", "k8s-answer.md")) if os.path.exists(f))).read()
         for i in range(0, len(answer), 24):   # about 8 s end to end, like a streaming model
             self.send({"event": "answer.delta", "turn": 1, "text": answer[i:i + 24], **provider})
             time.sleep(0.08)
         self.send({"event": "answer.done", "turn": 1, **provider})
         for text in json.load(open(os.path.join(FIXTURES, "k8s-suggestions.json"))):
-            self.send({"event": "suggestion", "text": text})
+            self.send({"event": "suggestion", "turn": 1, "text": text})
 
     def typed(self, question):
         """A typed question: started carries it, then deltas, done, and at most 3 follow-ups."""
         time.sleep(0.2)
         typed_provider = {"provider": "claude-sub", "model": "sonnet"}
         turn = next(TURNS)   # like the daemon: every question is a new turn
-        self.send({"event": "answer.started", "turn": turn, "question": question, "automatic": False, **typed_provider})
+        self.send({"event": "answer.started", "turn": turn, "question": question, "automatic": False, "cite_max": 0, "cite_notes": 0, **typed_provider})
         if err:
             time.sleep(4)
             return self.send({"event": "answer.error", "turn": turn, "message": "claude: the provider did not answer within 30 s", **typed_provider})
@@ -568,7 +608,7 @@ class Handler(socketserver.StreamRequestHandler):
             time.sleep(0.25)
         self.send({"event": "answer.done", "turn": turn, **typed_provider})
         for s in ["Who owns the alert?", "What is the retry policy?", "How do you replay?"]:
-            self.send({"event": "suggestion", "text": s})
+            self.send({"event": "suggestion", "turn": turn, "text": s})
 
     def handle(self):
         try:
@@ -610,14 +650,31 @@ class Handler(socketserver.StreamRequestHandler):
                 else:
                     self.send(reply)
                 continue
-            if drop and cmd == "transcript.get":
+            if grounded and cmd == "transcript.get":
+                args = req.get("args", {})
+                around = args.get("around")
+                rows = [r for r in GROUND_ROWS if r["meeting"] == "m1"]
+                if around:
+                    rows = rows if any(r["id"] == around for r in rows) else []
+                else:
+                    rows = [r for r in rows if r["line"] > (args.get("after_line") or 0) and r["line"] >= 2]
+                data = {"meeting": "m1", "lines": [{**r, "speaker": "Alex" if RENAMED[0] and r["speaker_key"] == "1" else r["speaker"]} for r in rows]}
+            elif grounded and cmd == "transcript.search":
+                args = req.get("args", {})
+                q = str(args.get("query", "")).strip().lower()
+                data = [{**r, "title": "Fake standup" if r["meeting"] == "m1" else "Other meeting", "started_at": "2026-10-30 09:00:00" if r["meeting"] == "m1" else "2026-10-29 09:00:00"} for r in GROUND_ROWS if len(q) >= 2 and q in r["text"].lower() and (not args.get("meeting") or args["meeting"] == r["meeting"])][:min(max(int(args.get("limit") or 20), 1), 50)]
+            elif grounded and cmd == "now.get":
+                data = dict(GROUND_NOW)
+            elif grounded and cmd == "notes.get":
+                data = {"text": "## Summary\nfake", "stale": RENAMED[0]}
+            elif drop and cmd == "transcript.get":
                 data = {"meeting": "m1", "lines": [l for l in SPOKEN if l["line"] > req.get("args", {}).get("after_line", 0)]}
             elif voice_mode and cmd == "transcript.get":
-                data = {"meeting": "m1", "lines": [{"line": 1, "who": "room", "speaker": "", "text": "Earlier room remark", "t0": 1.0, "t1": 2.5}] if req.get("args", {}).get("after_line", 0) == 0 else []}
+                data = {"meeting": "m1", "lines": [{"line": 1, "id": "room-1", "who": "room", "speaker": "", "speaker_key": "", "text": "Earlier room remark", "t0": 1.0, "t1": 2.5}] if req.get("args", {}).get("after_line", 0) == 0 else []}
             elif reask and cmd == "now.get":
-                data = {"status": "writing", "question": "old?", "answer": "OLD1", "provider": PROVIDER["provider"], "model": PROVIDER["model"], "suggestions": []}
+                data = {"status": "writing", "question": "old?", "answer": "OLD1", "turn": 1, "cite_max": 0, "cite_notes": 0, "sources": [], "provider": PROVIDER["provider"], "model": PROVIDER["model"], "suggestions": []}
             elif drop and cmd == "now.get":
-                data = {"status": "writing" if ANSWER["streaming"] else "ready" if ANSWER["body"] else "idle", "question": ANSWER["question"], "answer": ANSWER["body"], "provider": PROVIDER["provider"], "model": PROVIDER["model"], "suggestions": ANSWER["suggestions"]}
+                data = {"status": "writing" if ANSWER["streaming"] else "ready" if ANSWER["body"] else "idle", "question": ANSWER["question"], "answer": ANSWER["body"], "turn": 1, "cite_max": 0, "cite_notes": 0, "sources": [], "provider": PROVIDER["provider"], "model": PROVIDER["model"], "suggestions": ANSWER["suggestions"]}
             if cmd == "voice.status":
                 self.send({"id": req["id"], "ok": True, "data": voice_status()})
                 continue
@@ -678,6 +735,15 @@ class Handler(socketserver.StreamRequestHandler):
             if cmd == "settings.search":
                 q = (req.get("args", {}).get("query") or "").strip().lower()
                 data = [r for r in DATA["settings.search"] if not q or q in r["key"] or q in r["label"].lower()]
+            if grounded and cmd == "speakers.rename":
+                args = req.get("args", {})
+                if args.get("key") != "1":
+                    self.send({"id": req["id"], "ok": False, "error": "Unknown speaker"})
+                    continue
+                RENAMED[0] = True
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "speakers.renamed", "meeting": "m1", "key": "1", "name": args.get("name", "").strip()})
+                continue
             self.send({"id": req["id"], "ok": True, "data": data})
             if cmd == "settings.set":
                 settings[req["args"]["key"]] = req["args"]["value"]
@@ -685,13 +751,21 @@ class Handler(socketserver.StreamRequestHandler):
                     if r["key"] == req["args"]["key"]:
                         r["value"] = req["args"]["value"]
                 self.send({"event": "settings", "settings": settings})
+            elif cmd == "session.restore" and grounded:   # reply first, then reset, replayed lines, state: the real daemon's order
+                m = str(req["args"].get("id", ""))
+                state["meeting"] = m
+                self.send({"event": "session.reset"})
+                for r in GROUND_ROWS:
+                    if r["meeting"] == m:
+                        self.send({"event": "transcript.final", **{k: v for k, v in r.items() if k not in ("line", "meeting")}})
+                self.send({"event": "state", **state})
             elif cmd == "session.restore":
                 self.send({"event": "session.reset"})
                 self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})
             if cmd == "chat.send":
                 threading.Thread(target=self.reask_tail if reask else self.typed, args=(req["args"].get("text", ""),), daemon=True).start()
             if cmd == "state.get":
-                threading.Thread(target=self.stream_stale if stale else self.stream_resume if reask else self.stream_voice if voice_mode else self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
+                threading.Thread(target=self.stream_grounded if grounded else self.stream_stale if stale else self.stream_resume if reask else self.stream_voice if voice_mode else self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

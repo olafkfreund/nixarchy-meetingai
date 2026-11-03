@@ -49,6 +49,11 @@ Item {
     signal notesUpdated(var meeting)
     signal exportDone(var meeting, string path)
     signal providersChanged()
+    signal lineRequested(string id)   // Transcript scrolls to the row and flashes it
+    property bool viewingPast: false  // the rows are a window around a searched line: live lines are counted, not shown
+    property int pastNew: 0
+    // {meeting, id}: jump once the restore's state event names that meeting (its lines are replayed by then)
+    property var pendingJump: null
     readonly property string currentMeeting: String(state.meeting || "")
     // While an item's text is being edited a refresh waits, so typing is not lost.
     property bool itemEditing: false
@@ -207,6 +212,7 @@ Item {
     // Everything the daemon's current session owns; also what a lost connection leaves behind.
     function resetSession() {
         lines.clear();
+        root.viewingPast = false; root.pastNew = 0;
         root.staleTurn = -1;
         root.minTurn = -1;
         root.awaitingStart = false;
@@ -219,15 +225,13 @@ Item {
     // transcript and the current answer. now.turn is -2 (unknown) while an answer is still streaming:
     // the next delta says which turn it is. Pages of 500 lines; the cap keeps the newest.
     function rebuild() {
+        root.viewingPast = false; root.pastNew = 0;
         var page = function(after, first) {
             root.send("transcript.get", { after_line: after, limit: root.maxLines }, function(r) {
                 var rows = r.ok && r.data ? r.data.lines : undefined;
                 if (!Array.isArray(rows)) return;
                 if (first) lines.clear();
-                for (var i = 0; i < rows.length; i++) {
-                    if (rows[i].who === "system" && rows[i].speaker) root.lastSpeaker = String(rows[i].speaker);
-                    root.addRow(String(rows[i].who), String(rows[i].speaker || ""), String(rows[i].text), false, -1, rows[i].t0, rows[i].t1);
-                }
+                root.addServerRows(rows);
                 if (rows.length >= root.maxLines) page(rows[rows.length - 1].line, false);
             });
         };
@@ -238,28 +242,71 @@ Item {
             root.answering = live;
             root.suggestions = (n.suggestions || []).slice(0, 3).map(String);
             if (n.answer === "" && n.question === "") return;
-            root.now = { turn: live ? -2 : -1, question: String(n.question || ""), automatic: false, asker: "You", provider: String(n.provider || ""), model: String(n.model || ""), body: String(n.answer || ""), error: "" };
+            root.now = { turn: live ? -2 : n.turn, question: String(n.question || ""), automatic: false, asker: "You", provider: String(n.provider || ""), model: String(n.model || ""), body: String(n.answer || ""), error: "", sources: JSON.stringify(n.sources || []), citeMax: Number(n.cite_max) || 0, citeNotes: Number(n.cite_notes) || 0 };
         });
     }
 
+    // transcript.get rows, as stored
+    function addServerRows(rows) {
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i].who === "system" && rows[i].speaker) root.lastSpeaker = String(rows[i].speaker);
+            root.addRow(String(rows[i].who), String(rows[i].speaker || ""), String(rows[i].text), false, -1, rows[i].t0, rows[i].t1, { lineId: rows[i].id, speakerKey: rows[i].speaker_key });
+        }
+    }
+
+    // Jump to a line: in the loaded rows, or in a window of 200 rows around it.
+    function openLine(id) {
+        for (var i = 0; i < lines.count; i++) if (lines.get(i).lineId === id) { root.lineRequested(id); return; }
+        var m = root.currentMeeting;
+        root.send("transcript.get", { around: id, limit: 200 }, function(r) {
+            var rows = r.ok && r.data ? r.data.lines : undefined;
+            if (!Array.isArray(rows) || root.currentMeeting !== m) return;
+            lines.clear();
+            root.addServerRows(rows);
+            root.viewingPast = true;
+            root.pastNew = 0;
+            Qt.callLater(function() { root.lineRequested(id); });   // after the list has seen the new rows
+        });
+    }
+
+    function backToLatest() { root.viewingPast = false; root.pastNew = 0; root.rebuild(); }
+
+    function fmtTime(t) {
+        var s = Math.max(0, Math.floor(Number(t) || 0)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+        return (h > 0 ? h + ":" + (m < 10 ? "0" : "") : "") + m + ":" + (sec < 10 ? "0" : "") + sec;
+    }
+
+    // Removes the " [k]" / " [Nk]" markers the daemon offered (k within the counts), except in code.
+    function stripCites(text, max, notes) {
+        var t = String(text);
+        if (!(max > 0 || notes > 0)) return t;
+        return t.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/).map(function(p, i) {
+            return i % 2 ? p : p.replace(/ ?\[(N?)(\d{1,2})\](?!\()/g, function(m, n, k) { return Number(k) >= 1 && Number(k) <= (n ? notes : max) ? "" : m; });
+        }).join("");
+    }
+
     function archiveNow() {
-        if (root.now.body !== "") root.addRow("answer", "", root.now.body, false, root.now.turn);
+        if (root.now.body !== "") root.addRow("answer", "", root.now.body, false, root.now.turn, undefined, undefined, { sources: root.now.sources, citeMax: root.now.citeMax, citeNotes: root.now.citeNotes, renamedAfter: root.now.renamedAfter === true });
     }
 
     function pushLine(ev, partial) {
         if (!partial && ev.who === "system" && ev.speaker) root.lastSpeaker = String(ev.speaker);
+        if (root.viewingPast) { if (!partial) root.pastNew++; return; }
         for (var i = lines.count - 1; i >= 0 && i >= lines.count - 4; i--) {
             if (lines.get(i).partial && (lines.get(i).who === ev.who || (ev.who === "room" && lines.get(i).who === "mic"))) {
                 lines.remove(i);
                 break;
             }
         }
-        root.addRow(String(ev.who || ""), String(ev.speaker || ""), String(ev.text || ""), partial, -1, ev.t0, ev.t1);
+        root.addRow(String(ev.who || ""), String(ev.speaker || ""), String(ev.text || ""), partial, -1, ev.t0, ev.t1, { lineId: ev.id, speakerKey: ev.speaker_key });
     }
 
     // Answers and errors share the transcript model: one virtualized list.
-    function addRow(who, speaker, body, partial, turn, t0, t1) {
-        lines.append({ who: who, speaker: speaker, body: body, partial: partial, turn: turn === undefined ? -1 : turn, t0: t0 === undefined ? -1 : Number(t0), t1: t1 === undefined ? -1 : Number(t1) });
+    // x: optional lineId, speakerKey (remote rows), and sources (JSON string), citeMax, citeNotes (answers)
+    function addRow(who, speaker, body, partial, turn, t0, t1, x) {
+        x = x || {};
+        lines.append({ who: who, speaker: speaker, body: body, partial: partial, turn: turn === undefined ? -1 : turn, t0: t0 === undefined ? -1 : Number(t0), t1: t1 === undefined ? -1 : Number(t1),
+            lineId: String(x.lineId || ""), speakerKey: String(x.speakerKey || ""), sources: String(x.sources || ""), citeMax: Number(x.citeMax) || 0, citeNotes: Number(x.citeNotes) || 0, renamedAfter: x.renamedAfter === true, flash: false });
         while (lines.count > root.maxLines) lines.remove(0);
     }
 
@@ -274,7 +321,11 @@ Item {
             lines.clear();   // a reconnect replays the history: it replaces the transcript, it does not add to it
             for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(ev.rows[h].who === "question" ? "asked" : String(ev.rows[h].who), "", String(ev.rows[h].text), false);
             break;
-        case "state": root.state = Object.assign({}, root.state, ev); if (ev.recording === false) { root.micLevel = 0; root.systemLevel = 0; } break;
+        case "state":
+            root.state = Object.assign({}, root.state, ev);
+            if (ev.recording === false) { root.micLevel = 0; root.systemLevel = 0; }
+            if (root.pendingJump && root.currentMeeting === root.pendingJump.meeting) { var jump = root.pendingJump.id; root.pendingJump = null; root.openLine(jump); }
+            break;
         case "levels": root.micLevel = Number(ev.mic) || 0; root.systemLevel = Number(ev.system) || 0; break;
         case "transcript.partial": root.pushLine(ev, true); break;
         case "transcript.final": root.pushLine(ev, false); break;
@@ -295,7 +346,10 @@ Item {
             if (ev.automatic !== true && String(ev.question || "") !== "") root.addRow("asked", "", String(ev.question), false);
             root.suggestions = [];
             root.answering = true;
-            root.now = { turn: ev.turn, question: String(ev.question || ""), automatic: ev.automatic === true, asker: ev.automatic === true ? (root.lastSpeaker || "Them") : "You", provider: String(ev.provider || ""), model: String(ev.model || ""), body: "" };
+            root.now = { turn: ev.turn, question: String(ev.question || ""), automatic: ev.automatic === true, asker: ev.automatic === true ? (root.lastSpeaker || "Them") : "You", provider: String(ev.provider || ""), model: String(ev.model || ""), body: "", sources: "", citeMax: Number(ev.cite_max) || 0, citeNotes: Number(ev.cite_notes) || 0 };
+            break;
+        case "answer.sources":   // -2: rebuilt mid-answer, and the stream may have ended with no delta to say which turn
+            if (ev.turn === root.now.turn || (root.now.turn === -2 && !root.awaitingStart)) root.now = Object.assign({}, root.now, { turn: ev.turn, sources: JSON.stringify(ev.sources || []) });
             break;
         case "answer.delta":
             if (root.awaitingStart && (root.now.turn === -1 || root.now.turn === -2)) break;
@@ -306,7 +360,8 @@ Item {
             break;
         case "answer.done": root.answering = false; if (ev.provider) root.now = Object.assign({}, root.now, { provider: String(ev.provider), model: String(ev.model || root.now.model) }); break;
         case "answer.error": if (ev.turn === undefined || ev.turn === root.now.turn || root.now.turn === -2) root.answerFailed(String(ev.message || ev.error || "")); break;
-        case "suggestion": root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
+        case "suggestion": if (ev.turn === root.now.turn) root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
+        case "speakers.renamed": root.speakerRenamed(ev); break;
         case "notice": if (ev.kind === "providers") root.providerNotice = String(ev.text || ""); else root.addRow("notice", "", String(ev.text || ""), false); break;
         case "items.updated": if (ev.meeting === root.state.meeting) root.refreshItems(ev.meeting); break;
         case "earlier_item": if (ev.meeting === root.state.meeting) root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
@@ -319,6 +374,22 @@ Item {
         case "providers.changed": root.providersChanged(); break;
         case "error": root.addRow("error", "", String(ev.message || ""), false); break;
         }
+    }
+
+    function speakerRenamed(ev) {
+        if (String(ev.meeting || "") !== root.currentMeeting) return;
+        var key = String(ev.key), name = String(ev.name || ""), old = null;
+        if (name === "") name = key === "them" ? "" : "Speaker " + (Number(key) + 1);   // the daemon's own default label
+        for (var i = 0; i < lines.count; i++) {
+            var row = lines.get(i);
+            if (row.who === "answer") lines.setProperty(i, "renamedAfter", true);
+            if (row.who !== "system" || row.speakerKey !== key) continue;
+            if (old === null) old = row.speaker;
+            lines.setProperty(i, "speaker", name);
+        }
+        if (old !== null && root.lastSpeaker === old) root.lastSpeaker = name;
+        if (old !== null && root.now.asker === old) root.now = Object.assign({}, root.now, { asker: name });
+        if (root.now.body !== "") root.now = Object.assign({}, root.now, { renamedAfter: true });   // the answer in Now predates the rename too
     }
 
     function failed(msg) {

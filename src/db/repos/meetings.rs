@@ -11,16 +11,18 @@ pub struct Recap {
     pub content: String,
     pub status: String,
     pub error: String,
+    pub updated_at: String,
 }
 pub fn recap(c: &Connection, id: &str) -> Result<Option<Recap>> {
     Ok(c.query_row(
-        "SELECT content,status,error FROM meeting_recaps WHERE meeting_id=?1",
+        "SELECT content,status,error,updated_at FROM meeting_recaps WHERE meeting_id=?1",
         [id],
         |r| {
             Ok(Recap {
                 content: r.get(0)?,
                 status: r.get(1)?,
                 error: r.get(2)?,
+                updated_at: r.get(3)?,
             })
         },
     )
@@ -108,6 +110,45 @@ pub fn add_line(
     c.execute("INSERT INTO meeting_lines(id,meeting_id,who,speaker,text,start_time,end_time) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,meeting_id,who,speaker,text,start_time,end_time])?;
     Ok(id)
 }
+/// One matching line with its meeting.
+pub struct LineHit {
+    pub meeting: String,
+    pub title: String,
+    pub started_at: String,
+    pub id: String,
+    pub who: String,
+    pub speaker: Option<i64>,
+    pub text: String,
+    pub start_time: f64,
+}
+pub fn search_lines(
+    c: &Connection,
+    query: &str,
+    meeting: Option<&str>,
+    limit: usize,
+) -> Result<Vec<LineHit>> {
+    let mut s = c.prepare(
+        "SELECT l.meeting_id,m.title,m.started_at,l.id,l.who,l.speaker,l.text,l.start_time
+         FROM meeting_lines l JOIN meetings m ON m.id=l.meeting_id
+         WHERE instr(lower(l.text),lower(?1))>0 AND (?2 IS NULL OR l.meeting_id=?2)
+         ORDER BY m.started_at DESC,l.start_time LIMIT ?3",
+    )?;
+    Ok(
+        s.query_map(params![query, meeting, limit.min(500) as i64], |r| {
+            Ok(LineHit {
+                meeting: r.get(0)?,
+                title: r.get(1)?,
+                started_at: r.get(2)?,
+                id: r.get(3)?,
+                who: r.get(4)?,
+                speaker: r.get(5)?,
+                text: r.get(6)?,
+                start_time: r.get(7)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?,
+    )
+}
 pub fn finish(c: &Connection, meeting_id: &str, duration_seconds: i64) -> Result<()> {
     c.execute(
         "UPDATE meetings SET ended_at=datetime('now'),duration_seconds=?2 WHERE id=?1",
@@ -140,7 +181,8 @@ pub fn untitled(c: &Connection, limit: usize) -> Result<Vec<(String, String)>> {
         .query_map([limit as i64], |row| row.get::<_, String>(0))?
         .map(|found| {
             let id = found?;
-            Ok((id.clone(), transcript_excerpt(c, &id, 6000)?))
+            let names = speaker_names(c, &id)?;
+            Ok((id.clone(), transcript_excerpt(c, &id, 6000, &names)?))
         })
         .collect()
 }
@@ -239,12 +281,13 @@ pub fn recent_lines(c: &Connection, meeting_id: &str, limit: usize) -> Result<Ve
     .collect::<std::result::Result<_, _>>()?)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct NoteChunk {
     pub t0: f64,
     pub t1: f64,
     pub last_line: i64,
     pub body: String,
+    pub created_at: String,
 }
 pub fn add_chunk(c: &Connection, meeting_id: &str, chunk: &NoteChunk) -> Result<()> {
     c.execute(
@@ -255,7 +298,7 @@ pub fn add_chunk(c: &Connection, meeting_id: &str, chunk: &NoteChunk) -> Result<
 }
 pub fn chunks(c: &Connection, meeting_id: &str) -> Result<Vec<NoteChunk>> {
     let mut s = c.prepare(
-        "SELECT t0,t1,last_line,body FROM meeting_note_chunks WHERE meeting_id=?1 ORDER BY id",
+        "SELECT t0,t1,last_line,body,created_at FROM meeting_note_chunks WHERE meeting_id=?1 ORDER BY id",
     )?;
     Ok(s.query_map([meeting_id], |r| {
         Ok(NoteChunk {
@@ -263,6 +306,7 @@ pub fn chunks(c: &Connection, meeting_id: &str) -> Result<Vec<NoteChunk>> {
             t1: r.get(1)?,
             last_line: r.get(2)?,
             body: r.get(3)?,
+            created_at: r.get(4)?,
         })
     })?
     .collect::<std::result::Result<_, _>>()?)
@@ -288,21 +332,32 @@ pub fn lines_after(
     })?
     .collect::<std::result::Result<_, _>>()?)
 }
-pub fn label(who: &str, speaker: Option<i64>) -> String {
+pub fn label(names: &BTreeMap<String, String>, who: &str, speaker: Option<i64>) -> String {
     match who {
         "me" => "You".into(),
         "room" => "Someone in the room".into(),
-        _ => speaker.map_or("Them".into(), |n| format!("Speaker {}", n + 1)),
+        _ => match speaker {
+            Some(n) => names
+                .get(&n.to_string())
+                .cloned()
+                .unwrap_or_else(|| format!("Speaker {}", n + 1)),
+            None => names.get("them").cloned().unwrap_or_else(|| "Them".into()),
+        },
     }
 }
-pub fn format_lines(lines: &[LineRecord]) -> String {
+pub fn format_lines(lines: &[LineRecord], names: &BTreeMap<String, String>) -> String {
     lines
         .iter()
-        .map(|l| format!("{}: {}\n", label(&l.who, l.speaker), l.text))
+        .map(|l| format!("{}: {}\n", label(names, &l.who, l.speaker), l.text))
         .collect()
 }
 
-pub fn transcript_excerpt(c: &Connection, meeting_id: &str, max_chars: usize) -> Result<String> {
+pub fn transcript_excerpt(
+    c: &Connection,
+    meeting_id: &str,
+    max_chars: usize,
+    names: &BTreeMap<String, String>,
+) -> Result<String> {
     let mut statement = c.prepare(
         "SELECT who,speaker,text FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time,rowid",
     )?;
@@ -310,7 +365,7 @@ pub fn transcript_excerpt(c: &Connection, meeting_id: &str, max_chars: usize) ->
         .query_map([meeting_id], |r| {
             let (who, speaker, text): (String, Option<i64>, String) =
                 (r.get(0)?, r.get(1)?, r.get(2)?);
-            Ok(format!("{}: {text}\n", label(&who, speaker)))
+            Ok(format!("{}: {text}\n", label(names, &who, speaker)))
         })?
         .collect::<std::result::Result<Vec<String>, _>>()?;
     let total: usize = lines.iter().map(|l| l.chars().count()).sum();
@@ -329,11 +384,29 @@ pub fn transcript_excerpt(c: &Connection, meeting_id: &str, max_chars: usize) ->
     ))
 }
 pub fn name_speaker(c: &Connection, meeting_id: &str, key: &str, name: &str) -> Result<()> {
-    c.execute("INSERT INTO meeting_speakers(meeting_id,speaker_key,name) VALUES(?1,?2,?3) ON CONFLICT(meeting_id,speaker_key) DO UPDATE SET name=excluded.name",params![meeting_id,key,name])?;
+    // An empty name stays as a row, so `renamed_at` still sees the reset.
+    let name = name.trim();
+    c.execute(
+        "INSERT INTO meeting_speakers(meeting_id,speaker_key,name,updated_at)
+         VALUES(?1,?2,?3,strftime('%Y-%m-%d %H:%M:%f','now'))
+         ON CONFLICT(meeting_id,speaker_key) DO UPDATE SET
+           name=excluded.name,
+           updated_at=excluded.updated_at",
+        params![meeting_id, key, name],
+    )?;
     Ok(())
 }
+pub fn renamed_at(c: &Connection, meeting_id: &str) -> Result<Option<String>> {
+    Ok(c.query_row(
+        "SELECT MAX(updated_at) FROM meeting_speakers WHERE meeting_id=?1",
+        [meeting_id],
+        |r| r.get(0),
+    )?)
+}
 pub fn speaker_names(c: &Connection, meeting_id: &str) -> Result<BTreeMap<String, String>> {
-    let mut s = c.prepare("SELECT speaker_key,name FROM meeting_speakers WHERE meeting_id=?1")?;
+    let mut s = c.prepare(
+        "SELECT speaker_key,name FROM meeting_speakers WHERE meeting_id=?1 AND name<>''",
+    )?;
     Ok(s.query_map([meeting_id], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<std::result::Result<_, _>>()?)
 }
@@ -439,7 +512,7 @@ mod tests {
             let text = format!("line-{n} {}", "界".repeat(500));
             add_line(c, &id, "them", Some(0), &text, n as f64, n as f64 + 1.0).unwrap();
         }
-        let excerpt = transcript_excerpt(c, &id, 6000).unwrap();
+        let excerpt = transcript_excerpt(c, &id, 6000, &BTreeMap::new()).unwrap();
         assert!(excerpt.contains("line-0") && excerpt.contains("line-999"));
         assert!(excerpt.contains("Middle omitted"));
         assert!(!excerpt.contains("line-500"));
@@ -466,10 +539,13 @@ mod tests {
                 t1: 1.0,
                 last_line: 1,
                 body: "summary".into(),
+                created_at: String::new(),
             },
         )
         .unwrap();
-        assert_eq!(chunks(c, &id).unwrap().len(), 1);
+        let saved_chunks = chunks(c, &id).unwrap();
+        assert_eq!(saved_chunks.len(), 1);
+        assert!(!saved_chunks[0].created_at.is_empty());
         assert_eq!(lines_after(c, &id, 1).unwrap().len(), 999);
         delete(c, &id).unwrap();
         assert!(chunks(c, &id).unwrap().is_empty());
@@ -539,10 +615,17 @@ mod tests {
         let listed = list(c, 10).unwrap();
         assert_eq!(listed[0].title, "After");
         name_speaker(c, &id, "speaker-a", "Mira").unwrap();
+        let first_ts = renamed_at(c, &id).unwrap().unwrap();
         name_speaker(c, &id, "speaker-a", "Nora").unwrap();
+        let second_ts = renamed_at(c, &id).unwrap().unwrap();
+        assert!(second_ts >= first_ts);
         let names = speaker_names(c, &id).unwrap();
         assert_eq!(names.len(), 1);
         assert_eq!(names["speaker-a"], "Nora");
+        name_speaker(c, &id, "speaker-a", "  ").unwrap();
+        assert!(speaker_names(c, &id).unwrap().is_empty());
+        // Clearing a name is a rename too: notes written before it are stale.
+        assert!(renamed_at(c, &id).unwrap().unwrap() >= second_ts);
     }
 
     #[test]
@@ -571,22 +654,17 @@ mod tests {
         assert_eq!(recap(c, &id).unwrap().unwrap().status, "pending");
         finish_recap(c, &id, Ok("first pass")).unwrap();
         begin_recap(c, &id).unwrap();
+        let r = recap(c, &id).unwrap().unwrap();
+        assert!(!r.updated_at.is_empty());
         assert_eq!(
-            recap(c, &id).unwrap().unwrap(),
-            Recap {
-                content: "first pass".into(),
-                status: "pending".into(),
-                error: "".into()
-            }
+            (r.content.as_str(), r.status.as_str(), r.error.as_str()),
+            ("first pass", "pending", "")
         );
         finish_recap(c, &id, Err("timeout")).unwrap();
+        let r = recap(c, &id).unwrap().unwrap();
         assert_eq!(
-            recap(c, &id).unwrap().unwrap(),
-            Recap {
-                content: "".into(),
-                status: "failed".into(),
-                error: "timeout".into()
-            }
+            (r.content.as_str(), r.status.as_str(), r.error.as_str()),
+            ("", "failed", "timeout")
         );
         finish_recap(c, "absent", Ok("late")).unwrap();
         assert!(recap(c, "absent").unwrap().is_none());
@@ -631,8 +709,31 @@ mod tests {
             },
         ];
         assert_eq!(
-            format_lines(&utterances),
+            format_lines(&utterances, &BTreeMap::new()),
             "You: hello\nThem: welcome\nSpeaker 3: next\nSomeone in the room: passing by\n"
+        );
+        let mut names = BTreeMap::new();
+        names.insert("2".into(), "Ada".into());
+        names.insert("them".into(), "Panel".into());
+        assert_eq!(label(&names, "me", Some(2)), "You");
+        assert_eq!(label(&names, "room", Some(2)), "Someone in the room");
+        assert_eq!(label(&names, "them", Some(2)), "Ada");
+        assert_eq!(label(&names, "them", Some(0)), "Speaker 1");
+        assert_eq!(label(&names, "them", None), "Panel");
+        assert_eq!(label(&BTreeMap::new(), "them", None), "Them");
+        assert_eq!(
+            format_lines(&utterances, &names),
+            "You: hello\nPanel: welcome\nAda: next\nSomeone in the room: passing by\n"
+        );
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let id = start(c, "Named", "", "en", None, Default::default()).unwrap();
+        add_line(c, &id, "them", Some(2), "from ada", 0.0, 1.0).unwrap();
+        add_line(c, &id, "them", None, "from panel", 1.0, 2.0).unwrap();
+        add_line(c, &id, "them", Some(0), "from one", 2.0, 3.0).unwrap();
+        assert_eq!(
+            transcript_excerpt(c, &id, 6000, &names).unwrap(),
+            "Ada: from ada\nPanel: from panel\nSpeaker 1: from one\n"
         );
     }
 }

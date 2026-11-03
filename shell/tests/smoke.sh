@@ -125,6 +125,37 @@ if d["now"] != "NEW" or any("OLDTAIL" in r for r in d["rows"]):
 print("reask: a new question after a reconnect ignores the old turn's deltas")
 PY
 
+# Grounded answers, transcript search/jump, rename, stale notes and suggestions.
+ln -sf "$here/tests/harness-grounded.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-grounded"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/grounded.log" --grounded &
+fake=$!
+sleep 0.5
+timeout 15 quickshell -p "$work/cfg" > "$work/grounded.out" 2> "$work/grounded.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/grounded.err" "$work/grounded.out" | grep -av 'GEO {'; then echo "FAIL (grounded): QML errors above" >&2; exit 1; fi
+python3 "$here/tests/check-geometry.py" "$work/grounded.out"
+python3 - "$work/grounded.out" "$work/grounded.log" <<'PY'
+import json, sys
+line = next((l for l in open(sys.argv[1], errors="replace") if "GROUNDED {" in l), None)
+if line is None:
+    sys.exit("FAIL (grounded): no harness dump")
+d = json.loads(line[line.index("GROUNDED ") + 9:])
+for key in ("bubbleStamp", "markersHidden", "noCitations", "archivedChips", "staleSuggestionHidden", "renamed", "namesChanged", "nowNamesChanged", "linesBox", "lineHits", "past", "flashed", "oldInView", "backButton", "latest", "notesStale", "otherMeeting"):
+    if d.get(key) is not True:
+        sys.exit(f"FAIL (grounded): {key}: {d}")
+if d.get("lineChip") != "12:04 · Speaker 2" or d.get("notesChip") != "Notes · 10:00–15:12":
+    sys.exit(f"FAIL (grounded): Based on chips or timestamps: {d}")
+cmds = open(sys.argv[2]).read()
+for cmd in ("transcript.search", "speakers.rename", "notes.get"):
+    if cmd not in cmds:
+        sys.exit(f"FAIL (grounded): daemon never received {cmd}")
+if cmds.count("transcript.get") < 3:
+    sys.exit("FAIL (grounded): no around-window and latest fetch")
+print("grounded: citations, search/jump, rename, stale state and geometry ok")
+PY
+
 # --locked: settings fixed by Nix are never sent (live_provider is free and still is; a locked provider keeps its model), and the Settings page loads.
 ln -sf "$here/tests/harness-locked.qml" "$work/cfg/shell.qml"
 export XDG_RUNTIME_DIR="$work/run-locked"
@@ -151,7 +182,7 @@ kill "$fake" 2>/dev/null || true
 if grep -aE "$qml_bad" "$work/voice.err" "$work/voice.out" | grep -avE 'GEO \{|VOICE[1-5] '; then echo "FAIL (voice): QML errors above" >&2; exit 1; fi
 python3 "$here/tests/check-geometry.py" "$work/voice.out"
 python3 - "$work/voice.out" "$work/voice.log" <<'PY'
-import json, sys
+import json, re, sys
 out = open(sys.argv[1], errors="replace").read().splitlines()
 cmds = open(sys.argv[2], errors="replace").read().splitlines()
 v = {k: json.loads(next(l[l.index(k + " ") + len(k) + 1:] for l in out if (k + " {") in l)) for k in ("VOICE1", "VOICE2", "VOICE3", "VOICE4", "VOICE5")}
@@ -165,7 +196,9 @@ want_rows = [
 if v["VOICE1"]["rows"] != want_rows:
     sys.exit(f"FAIL (voice): unexpected transcript rows: {v['VOICE1']['rows']}")
 t_items = geos.get("transcript", [])
-t_labels = [i["label"] for i in t_items]
+t_labels = [re.sub(r" · \d+:\d\d$", "", i["label"]) for i in t_items]   # bubble labels end in their m:ss time
+for i, l in zip(t_items, t_labels):
+    i["label"] = l
 if t_labels.count("Room") != 3 or "You · Spoke" not in t_labels:
     sys.exit(f"FAIL (voice): Room / You · Spoke labels missing in transcript: {t_labels}")
 room_xs = [i["x"] for i in t_items if i["label"] == "Room"]

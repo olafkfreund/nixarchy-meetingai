@@ -454,6 +454,7 @@ mod tests {
                 t1: 1.0,
                 body: "notes".into(),
                 last_line: 1,
+                created_at: String::new(),
             },
         )
         .unwrap();
@@ -464,11 +465,7 @@ mod tests {
             params![m],
         )
         .unwrap();
-        c.execute(
-            "INSERT INTO meeting_speakers VALUES (?1, '1', 'Ada')",
-            params![m],
-        )
-        .unwrap();
+        meetings::name_speaker(c, &m, "1", "Ada").unwrap();
         set_local_only(c, &a.id, true).unwrap();
         c.execute("INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('conv', 't', 0, 0)", []).unwrap();
         c.execute(
