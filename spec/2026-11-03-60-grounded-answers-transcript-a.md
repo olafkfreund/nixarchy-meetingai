@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 60
 intent: intent/2026-11-03-60-grounded-answers-transcript.md
 phase: A (intent outcomes 1–5)
