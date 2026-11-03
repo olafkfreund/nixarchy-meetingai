@@ -646,9 +646,10 @@ fake-daemon unit paths run.
 - Step 5 (Codex): Codex's sandbox could not finish the workspace tests
   (socket restrictions); Claude ran them. `tests/mcp_flow.rs` counts the
   MCP tools, so it now expects 15 (the new `transcript_search`). An agent
-  `transcript.search` with no `meeting` during a live local-only session
-  stays refused by the existing guard (stricter than the plan, never
-  looser). MCP `lines_text` prints the line `id` when a row has no rowid
+  `transcript.search` is answered before the local-only guard: it is
+  filtered by `local_only_ids` (a live interview's meeting is linked to its
+  candidate at `record.start`), not refused; a test covers search while a
+  local-only interview is live. MCP `lines_text` prints the line `id` when a row has no rowid
   (search hits).
 - Step 6 (coder): `Library.qml` has no Regenerate button, so the stale
   caption sits alone above the notes text. `addRow` takes a trailing

@@ -1246,13 +1246,7 @@ impl Daemon {
                 kept.push((chunk, body));
             }
             kept.reverse();
-            for (index, (chunk, body)) in kept.iter().enumerate() {
-                let label = format!("N{}", index + 1);
-                notes.push_str(&format!(
-                    "[{label}] ({}–{}) {body}\n",
-                    Self::stamp(chunk.t0),
-                    Self::stamp(chunk.t1)
-                ));
+            for (chunk, body) in &kept {
                 let first: Option<String> =
                     g.db.connection()
                         .query_row(
@@ -1264,7 +1258,15 @@ impl Daemon {
                         .optional()
                         .ok()
                         .flatten();
-                if let Some(id) = first {
+                let span = format!("({}–{})", Self::stamp(chunk.t0), Self::stamp(chunk.t1));
+                // A chunk with no line to point at is shown unlabelled, so no label lacks a source.
+                let Some(id) = first else {
+                    notes.push_str(&format!("{span} {body}\n"));
+                    continue;
+                };
+                let label = format!("N{}", sources.len() + 1);
+                notes.push_str(&format!("[{label}] {span} {body}\n"));
+                {
                     sources.push((
                         label,
                         Source {
@@ -4450,7 +4452,7 @@ impl Daemon {
 
     fn speakers_rename(&self, args: protocol::SpeakersRename) -> Result<Value, String> {
         let key = args.key.trim();
-        if key != "them" && (key.is_empty() || !key.chars().all(|c| c.is_ascii_digit())) {
+        if key != "them" && key.parse::<u32>().map(|n| n.to_string()) != Ok(key.to_owned()) {
             return Err("Invalid speaker key.".into());
         }
         let name: String = args.name.trim().chars().take(60).collect();
@@ -8832,6 +8834,23 @@ mod command_tests {
             );
         }
         d.local_only.store(true, Ordering::Relaxed);
+        for origin in ["mcp", "agent"] {
+            let hits = d
+                .handle(
+                    "transcript.search",
+                    json!({"query": "budget"}),
+                    Some(origin),
+                )
+                .await
+                .unwrap();
+            assert!(
+                hits.as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|h| h["meeting"] == ordinary),
+                "{origin}: {hits}"
+            );
+        }
         for origin in ["mcp", "agent"] {
             let got = d
                 .handle(

@@ -248,11 +248,11 @@ fn line_text(l: &Value) -> String {
     let who = name.map_or_else(|| who.to_owned(), |n| format!("{who} ({n})"));
     format!(
         "[{}] {} {:.0}s: {}",
-        if l["line"].is_null() {
-            &l["id"]
-        } else {
-            &l["line"]
-        },
+        // search hits have no rowid: show the line id, unquoted
+        l["id"]
+            .as_str()
+            .filter(|_| l["line"].is_null())
+            .map_or_else(|| l["line"].to_string(), str::to_owned),
         who,
         l["t0"].as_f64().unwrap_or(0.0),
         l["text"].as_str().unwrap_or_default()

@@ -132,7 +132,7 @@ mkdir -m 700 "$XDG_RUNTIME_DIR"
 python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/grounded.log" --grounded &
 fake=$!
 sleep 0.5
-timeout 12 quickshell -p "$work/cfg" > "$work/grounded.out" 2> "$work/grounded.err" || true
+timeout 15 quickshell -p "$work/cfg" > "$work/grounded.out" 2> "$work/grounded.err" || true
 kill "$fake" 2>/dev/null || true
 if grep -aE "$qml_bad" "$work/grounded.err" "$work/grounded.out" | grep -av 'GEO {'; then echo "FAIL (grounded): QML errors above" >&2; exit 1; fi
 python3 "$here/tests/check-geometry.py" "$work/grounded.out"
@@ -142,7 +142,7 @@ line = next((l for l in open(sys.argv[1], errors="replace") if "GROUNDED {" in l
 if line is None:
     sys.exit("FAIL (grounded): no harness dump")
 d = json.loads(line[line.index("GROUNDED ") + 9:])
-for key in ("bubbleStamp", "markersHidden", "noCitations", "archivedChips", "staleSuggestionHidden", "renamed", "namesChanged", "linesBox", "lineHits", "past", "flashed", "oldInView", "backButton", "latest", "notesStale"):
+for key in ("bubbleStamp", "markersHidden", "noCitations", "archivedChips", "staleSuggestionHidden", "renamed", "namesChanged", "nowNamesChanged", "linesBox", "lineHits", "past", "flashed", "oldInView", "backButton", "latest", "notesStale", "otherMeeting"):
     if d.get(key) is not True:
         sys.exit(f"FAIL (grounded): {key}: {d}")
 if d.get("lineChip") != "12:04 · Speaker 2" or d.get("notesChip") != "Notes · 10:00–15:12":

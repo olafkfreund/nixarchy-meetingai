@@ -52,6 +52,8 @@ Item {
     signal lineRequested(string id)   // Transcript scrolls to the row and flashes it
     property bool viewingPast: false  // the rows are a window around a searched line: live lines are counted, not shown
     property int pastNew: 0
+    // {meeting, id}: jump once the restore's state event names that meeting (its lines are replayed by then)
+    property var pendingJump: null
     readonly property string currentMeeting: String(state.meeting || "")
     // While an item's text is being edited a refresh waits, so typing is not lost.
     property bool itemEditing: false
@@ -279,12 +281,12 @@ Item {
         var t = String(text);
         if (!(max > 0 || notes > 0)) return t;
         return t.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/).map(function(p, i) {
-            return i % 2 ? p : p.replace(/ ?\[(N?)(\d{1,2})\]/g, function(m, n, k) { return Number(k) >= 1 && Number(k) <= (n ? notes : max) ? "" : m; });
+            return i % 2 ? p : p.replace(/ ?\[(N?)(\d{1,2})\](?!\()/g, function(m, n, k) { return Number(k) >= 1 && Number(k) <= (n ? notes : max) ? "" : m; });
         }).join("");
     }
 
     function archiveNow() {
-        if (root.now.body !== "") root.addRow("answer", "", root.now.body, false, root.now.turn, undefined, undefined, { sources: root.now.sources, citeMax: root.now.citeMax, citeNotes: root.now.citeNotes });
+        if (root.now.body !== "") root.addRow("answer", "", root.now.body, false, root.now.turn, undefined, undefined, { sources: root.now.sources, citeMax: root.now.citeMax, citeNotes: root.now.citeNotes, renamedAfter: root.now.renamedAfter === true });
     }
 
     function pushLine(ev, partial) {
@@ -304,7 +306,7 @@ Item {
     function addRow(who, speaker, body, partial, turn, t0, t1, x) {
         x = x || {};
         lines.append({ who: who, speaker: speaker, body: body, partial: partial, turn: turn === undefined ? -1 : turn, t0: t0 === undefined ? -1 : Number(t0), t1: t1 === undefined ? -1 : Number(t1),
-            lineId: String(x.lineId || ""), speakerKey: String(x.speakerKey || ""), sources: String(x.sources || ""), citeMax: Number(x.citeMax) || 0, citeNotes: Number(x.citeNotes) || 0, renamedAfter: false, flash: false });
+            lineId: String(x.lineId || ""), speakerKey: String(x.speakerKey || ""), sources: String(x.sources || ""), citeMax: Number(x.citeMax) || 0, citeNotes: Number(x.citeNotes) || 0, renamedAfter: x.renamedAfter === true, flash: false });
         while (lines.count > root.maxLines) lines.remove(0);
     }
 
@@ -319,7 +321,11 @@ Item {
             lines.clear();   // a reconnect replays the history: it replaces the transcript, it does not add to it
             for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(ev.rows[h].who === "question" ? "asked" : String(ev.rows[h].who), "", String(ev.rows[h].text), false);
             break;
-        case "state": root.state = Object.assign({}, root.state, ev); if (ev.recording === false) { root.micLevel = 0; root.systemLevel = 0; } break;
+        case "state":
+            root.state = Object.assign({}, root.state, ev);
+            if (ev.recording === false) { root.micLevel = 0; root.systemLevel = 0; }
+            if (root.pendingJump && root.currentMeeting === root.pendingJump.meeting) { var jump = root.pendingJump.id; root.pendingJump = null; root.openLine(jump); }
+            break;
         case "levels": root.micLevel = Number(ev.mic) || 0; root.systemLevel = Number(ev.system) || 0; break;
         case "transcript.partial": root.pushLine(ev, true); break;
         case "transcript.final": root.pushLine(ev, false); break;
@@ -381,6 +387,7 @@ Item {
         }
         if (old !== null && root.lastSpeaker === old) root.lastSpeaker = name;
         if (old !== null && root.now.asker === old) root.now = Object.assign({}, root.now, { asker: name });
+        if (root.now.body !== "") root.now = Object.assign({}, root.now, { renamedAfter: true });   // the answer in Now predates the rename too
     }
 
     function failed(msg) {

@@ -57,6 +57,7 @@ ShellRoot {
                 label = root.find(card, "bubbleLabel");
                 root.out.renamed = !!label && String(label.text).indexOf("Alex") >= 0;
                 root.out.namesChanged = !!root.find(card, "namesChanged");
+                root.out.nowNamesChanged = !!root.find(card, "nowNamesChanged");
             } else if (root.phase === 7) {
                 overlay.showLibrary("restore");
                 input = root.find(card, "search");
@@ -89,6 +90,18 @@ ShellRoot {
                 if (notes) notes.clicked();
             } else if (root.phase === 14) {
                 root.out.notesStale = !!root.find(card, "notesStale");
+                input = root.find(card, "search");
+                if (input) input.text = "other migration";
+            } else if (root.phase === 16) {
+                hit = root.find(card, "lineHit0");
+                if (hit) {
+                    for (var j = 0; j < hit.children.length; j++) if (typeof hit.children[j].clicked === "function") { mouse = hit.children[j]; break; }
+                    if (mouse) mouse.clicked(null);
+                }
+            } else if (root.phase === 17) {
+                var at = -1;
+                for (var k = 0; c && k < c.transcript.count; k++) if (c.transcript.get(k).lineId === "other-1") at = k;
+                root.out.otherMeeting = !!c && c.currentMeeting === "m2" && at >= 0 && c.transcript.get(at).flash;
                 console.log("GROUNDED " + JSON.stringify(root.out));
                 Qt.quit();
             }

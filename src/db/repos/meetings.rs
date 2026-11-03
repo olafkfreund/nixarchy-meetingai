@@ -384,14 +384,8 @@ pub fn transcript_excerpt(
     ))
 }
 pub fn name_speaker(c: &Connection, meeting_id: &str, key: &str, name: &str) -> Result<()> {
+    // An empty name stays as a row, so `renamed_at` still sees the reset.
     let name = name.trim();
-    if name.is_empty() {
-        c.execute(
-            "DELETE FROM meeting_speakers WHERE meeting_id=?1 AND speaker_key=?2",
-            params![meeting_id, key],
-        )?;
-        return Ok(());
-    }
     c.execute(
         "INSERT INTO meeting_speakers(meeting_id,speaker_key,name,updated_at)
          VALUES(?1,?2,?3,strftime('%Y-%m-%d %H:%M:%f','now'))
@@ -410,7 +404,9 @@ pub fn renamed_at(c: &Connection, meeting_id: &str) -> Result<Option<String>> {
     )?)
 }
 pub fn speaker_names(c: &Connection, meeting_id: &str) -> Result<BTreeMap<String, String>> {
-    let mut s = c.prepare("SELECT speaker_key,name FROM meeting_speakers WHERE meeting_id=?1")?;
+    let mut s = c.prepare(
+        "SELECT speaker_key,name FROM meeting_speakers WHERE meeting_id=?1 AND name<>''",
+    )?;
     Ok(s.query_map([meeting_id], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<std::result::Result<_, _>>()?)
 }
@@ -628,7 +624,8 @@ mod tests {
         assert_eq!(names["speaker-a"], "Nora");
         name_speaker(c, &id, "speaker-a", "  ").unwrap();
         assert!(speaker_names(c, &id).unwrap().is_empty());
-        assert_eq!(renamed_at(c, &id).unwrap(), None);
+        // Clearing a name is a rename too: notes written before it are stale.
+        assert!(renamed_at(c, &id).unwrap().unwrap() >= second_ts);
     }
 
     #[test]

@@ -22,7 +22,7 @@ Rectangle {
     readonly property string iDown: String.fromCodePoint(0xf0140)
     readonly property string iRight: String.fromCodePoint(0xf0142)
 
-    readonly property real extras: (nowWait.visible ? nowWait.height + nowCol.spacing : 0) + (nowErr.visible ? nowErr.implicitHeight + nowCol.spacing : 0) + (nowSrc.visible ? nowSrc.height + nowCol.spacing : 0)
+    readonly property real extras: (nowWait.visible ? nowWait.height + nowCol.spacing : 0) + (nowErr.visible ? nowErr.implicitHeight + nowCol.spacing : 0) + (nowSrc.visible ? nowSrc.height + nowCol.spacing : 0) + (nowRenamed.visible ? nowRenamed.implicitHeight + nowCol.spacing : 0)
     readonly property real nowWant: !root.open ? nowHead.height + root.theme.padY * 2 : nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.height + nowCol.spacing * 2 + root.extras + root.theme.padY * 2
 
     radius: root.theme.radius
@@ -120,6 +120,19 @@ Rectangle {
             citeMax: root.daemon.now.citeMax || 0
             citeNotes: root.daemon.now.citeNotes || 0
             done: !root.daemon.answering && root.daemon.now.body !== "" && !root.daemon.now.error
+        }
+        UiText {
+            id: nowRenamed
+            objectName: "nowNamesChanged"
+            visible: root.open && root.daemon.now.renamedAfter === true
+            width: parent.width
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: "Speaker names changed after this answer"
+            color: Commons.Color.popups.text
+            opacity: root.theme.dim
+            font.italic: true
+            font.pixelSize: root.theme.caption
         }
     }
 }

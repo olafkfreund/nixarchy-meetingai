@@ -746,6 +746,14 @@ class Handler(socketserver.StreamRequestHandler):
                     if r["key"] == req["args"]["key"]:
                         r["value"] = req["args"]["value"]
                 self.send({"event": "settings", "settings": settings})
+            elif cmd == "session.restore" and grounded:   # reply first, then reset, replayed lines, state: the real daemon's order
+                m = str(req["args"].get("id", ""))
+                state["meeting"] = m
+                self.send({"event": "session.reset"})
+                for r in GROUND_ROWS:
+                    if r["meeting"] == m:
+                        self.send({"event": "transcript.final", **{k: v for k, v in r.items() if k not in ("line", "meeting")}})
+                self.send({"event": "state", **state})
             elif cmd == "session.restore":
                 self.send({"event": "session.reset"})
                 self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})

@@ -130,9 +130,13 @@ Item {
         root.client.send("transcript.search", { query: q }, function(r) { if (r.ok && root.query.trim() === q) root.lineHits = r.data || []; });
     }
     function openHit(h) {
-        var go = function() { root.closeRequested(); root.client.openLine(String(h.id)); };
-        if (String(h.meeting) === root.client.currentMeeting) go();
-        else if (!root.client.recording) root.client.send("session.restore", { id: h.meeting }, function(r) { if (r.ok) go(); else root.error = String(r.error || "request failed"); });
+        if (String(h.meeting) === root.client.currentMeeting) { root.closeRequested(); root.client.openLine(String(h.id)); return; }
+        if (root.client.recording) return;
+        root.client.pendingJump = { meeting: String(h.meeting), id: String(h.id) };
+        root.client.send("session.restore", { id: h.meeting }, function(r) {
+            if (r.ok) root.closeRequested();
+            else { root.client.pendingJump = null; root.error = String(r.error || "request failed"); }
+        });
     }
 
     function match(s) { return root.query === "" || String(s).toLowerCase().indexOf(root.query.toLowerCase()) >= 0; }
