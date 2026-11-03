@@ -147,8 +147,9 @@ Traps for every step:
    `Some("suggestion") if finished` also requires
    `e["turn"].as_u64() == turn`.
 4. `shell/Client.qml`:
-   - `case "suggestion"`: ignore the event when
-     `ev.turn !== undefined && ev.turn !== root.now.turn`.
+   - `case "suggestion"`: ignore the event unless
+     `ev.turn === root.now.turn`. An event with no `turn` is dropped too,
+     as the spec says.
    - `rebuild()` (~235): use `n.turn` for `now.turn` when the answer is not
      live; keep `-2` while it is live.
 
@@ -184,8 +185,16 @@ Traps for every step:
    - `NoteChunk` (~243) gains `created_at: String`, selected in `chunks`
      (~258).
 3. **Callers.** Pass `meetings::speaker_names(c, meeting)` in:
-   - `src/ai/recap.rs`: the `format_lines` calls (~285, ~309, ~666, ~836);
-     load the names once per function;
+   - `src/ai/recap.rs`. The prompt builders have no database connection,
+     so load the names where one exists and pass them down:
+     - In `chunk_pending` (~403) and `notes` (~642), load
+       `meetings::speaker_names` **inside** the existing `db(path, …)`
+       closure, next to the lines.
+     - Add a `names: &BTreeMap<String, String>` parameter to
+       `slice_prompts` (~273), `summarise_slice` (~291), `team_prompts`
+       (~301) and `summarise_team` (~331), and pass it on to
+       `format_lines`. The `notes` call (~666) uses the names it loaded.
+     - The unit tests (~822–842) pass `&BTreeMap::new()`.
    - `meetings.rs` (~143, ~634);
    - `session.rs` `finish_meeting_artifacts` (~2663) and
      `session_restore` (~3187).
@@ -196,15 +205,34 @@ Traps for every step:
      `meeting_id` is set; for a continued meeting it loads that meeting's
      names) and in `session_restore`.
    - It is cleared in `reset_session`.
-   - `Self::who(channel, speaker)` becomes a method that takes `&Inner` (or
-     `&names`) and uses `meetings::label`, keeping the current
-     `who`-to-label output (`mic`/`system`/`room`). Update all callers:
-     `handle_live_event` (partial), `push_transcript`, `transcript_get`,
-     `session_restore`, `export_meeting` (~2579, which drops its own lookup
-     and gains `"them"`).
+   - `Self::who(channel, speaker)` becomes
+     `Self::who(names: &BTreeMap<String,String>, channel, speaker) ->
+     (&str, String /*speaker label*/, String /*speaker_key*/)`. It keeps the
+     current contract for the first two values:
+     - `who` is `mic`, `system` or `room`;
+     - the speaker label is `""` for mic rows, and for remote rows with no
+       speaker **and no `"them"` name** (so `Client.qml`'s
+       `rows[i].who === "system" && rows[i].speaker` check behaves as
+       before);
+     - otherwise the label is the name, or `"Speaker N"`.
+   - Callers pass the right names:
+     - the live paths (`handle_live_event` partial, `push_transcript`)
+       and `session_restore` use `g.speaker_names`;
+     - `transcript_get` and `transcript_search` load
+       `meetings::speaker_names(c, meeting)` for **the meeting they
+       read**, never the cache, because they can read another meeting;
+     - `export_meeting` (~2579) drops its own lookup in favour of the shared
+       resolver and gains `"them"`.
    - The `system_prompt` transcript block (~1229–1252) uses the cache for
      its labels.
-5. **Command.**
+5. **`speaker_key` on the wire.** Every row sent to the shell carries
+   `"speaker_key"`:
+   - the speaker number as a string;
+   - `"them"` for a remote line without a speaker;
+   - `""` for your own lines and room lines.
+   This covers the `transcript.partial` and `transcript.final` emits, the
+   `transcript.get` rows and the `session_restore` emits. Test each one.
+6. **Command.**
    - `protocol::SpeakersRename { meeting: Option<String>, key: String,
      name: String }`.
    - Its `dispatch` arm calls a new `speakers_rename`. That handler: picks
@@ -213,8 +241,8 @@ Traps for every step:
      at 60 characters; calls `name_speaker`; updates the cache when it is
      the current meeting; and emits `speakers.renamed {meeting, key, name}`.
    - Do **not** add it to the MCP allowlist.
-6. **`notes_get`** (~4200) adds `"stale": bool`: `renamed_at` is `Some` and
-   `>=` the recap's `updated_at` when the recap is ready, otherwise `>` the
+7. **`notes_get`** (~4200) adds `"stale": bool`: `renamed_at` is `Some` and
+   `>=` the recap's `updated_at` when the recap is ready, otherwise `>=` the
    newest chunk's `created_at`; it is false when there is nothing to
    compare.
 
@@ -223,8 +251,9 @@ Traps for every step:
 - `label` with a named speaker, a named `"them"`, and unnamed speakers.
 - `format_lines` and `transcript_excerpt` with names.
 - An empty name deletes.
-- Stale after a rename, including within the same second; not stale before
-  one.
+- Stale after a rename, including within the same second and with exactly
+  equal timestamps, in both the recap case and the chunk case. Not stale
+  before a rename.
 - `speakers.rename` updates a partial and a final label and the export.
 - `speakers.rename` from `origin: "mcp"` is refused.
 
@@ -290,18 +319,26 @@ Traps for every step:
      `id` is the first line in the meeting with `start_time >= t0`; if there
      is none, the chunk is not a source.
    - **The transcript block**, from the last ≤20 `g.transcript` entries,
-     labelled `[k] <label>: text` (with the step-2 labels). Entries without
-     an `id` are listed but get no source.
-2. `system_prompt` (~1185) uses `cite_window` for both blocks and the new
-   wording from the spec: the notes block before the transcript; "The notes
+     labelled `[k] <label>: text` (with the step-2 labels). An entry
+     without an `id` (its save failed) is listed **without a label**, so it
+     cannot be cited and does not shift the numbering.
+   - Sources are kept as an explicit label → source map
+     (`Vec<(String /*"3" or "N2"*/, Source)>`), never by position, so a
+     missing source cannot move a citation onto the wrong line.
+2. `begin_send` calls `cite_window` **once** and passes the two blocks into
+   `system_prompt` (~1185, which gains parameters), so the chunks are
+   queried once per turn.
+   - With `no_context: true`, there are no notes block and no labels; the
+     transcript block stays as today; and `g.cite` is empty, so
+     `cite_max` and `cite_notes` are 0.
+   - `system_prompt` uses the blocks and the new wording from the spec: the notes block before the transcript; "The notes
    summarise earlier parts; the transcript below is the most recent
    speech."; and the citation instruction.
-3. `begin_send` (~1403) stores `g.cite` (the sources, in label order:
-   transcript lines as `k`, notes as `Nk`). Clear `g.answer_sources`. Add
+3. `begin_send` (~1403) stores the label → source map in `g.cite`. Clear `g.answer_sources`. Add
    `cite_max` (the number of transcript labels) and `cite_notes` (the
    number of notes labels) to `answer.started`.
 4. `finish_turn` (~1593), on `Ok`: parse `\[(N?)(\d{1,2})\]` from
-   `g.chat.answer()`. Map the labels to `g.cite`, dropping unknown labels
+   `g.chat.answer()`. Look each label up in `g.cite` by label, dropping unknown labels
    and duplicates and keeping first-use order. Store the result in
    `g.answer_sources` and emit `answer.sources {turn, sources}` (before
    `answer.done`).
@@ -313,9 +350,14 @@ Traps for every step:
 - The notes block: budget, order, labels; absent with no chunks or no live
   meeting.
 - Parsing: out of range, `N` labels, duplicates, unknown labels, order.
+- A window where one line failed to save: the next label still resolves to
+  the next line, and the unsaved line has no label.
 - A notes source resolves to the first line at or after `t0`.
 - Sources are cleared after `interrupt` and after a failed turn.
 - `answer.sources` is emitted for the guarded interviewer path.
+- `now.get` returns `turn`, `cite_max`, `cite_notes` and `sources` after an
+  answer that cites.
+- `no_context: true` gives no labels, and `cite_max` = `cite_notes` = 0.
 
 **Check:** the step check.
 
@@ -324,16 +366,31 @@ Traps for every step:
 
 ### 5. A7: MCP privacy (codex)
 
-1. `session.rs` `handle` (~4316): add `"transcript.search"` to the MCP
-   allowlist. Before the guard list, as with `session.list`: when
-   `cmd == "transcript.search"` and `origin == Some("mcp")`, return
-   `self.transcript_search(parse(args)?, true)`.
-2. `transcript_search` with `for_agent = true` drops every hit whose meeting
-   is in `candidates::local_only_ids`, and errors when `meeting` names one
+1. `session.rs` `handle`: add `"transcript.search"` to **both** agent
+   allowlists:
+   - the `origin == Some("agent")` (`ctl --agent`) list at ~4302, which
+     already has `meetings.search`;
+   - the MCP list at ~4320.
+   `speakers.rename` goes on neither. Then, in the agent branch, next to
+   `if cmd == "session.list" { return self.session_list(true); }` (~4352),
+   which only agent calls reach, add:
+   `if cmd == "transcript.search" { return self.transcript_search(parse(args)?, true); }`.
+2. `transcript_search` with `for_agent = true` over-fetches, like
+   `meetings_search` (~3300): it asks `search_lines` for
+   `min(limit * 4, 500)`. It then drops every hit whose meeting is in
+   `candidates::local_only_ids`, takes `limit`, and errors when `meeting` names one
    (`"This interview is local-only"`).
-3. The local-only guard (~4355): for `transcript.get` with `around`, when
-   `meeting` is absent, resolve the meeting from the line id first, so the
-   existing check applies to that meeting.
+3. The local-only guard (~4355): for `transcript.get` with `around`, resolve
+   the meeting from the line id first; an unknown id is an error. Then
+   treat that meeting exactly like an explicit `meeting`:
+   - the `local` test checks that meeting's candidate;
+   - the fallback
+     `(cmd == "now.get" || args["meeting"].as_str().is_none()) && self.local_now(&g)`
+     no longer fires for an `around` call. Use the resolved meeting
+     variable, not `args["meeting"]`.
+   As a result, an agent may read an ordinary meeting's window while a
+   local-only interview is live, and can never read the interview's own
+   lines.
 4. `src/mcp/mod.rs`:
    - a `transcript_search` tool (`read_only_hint`) with
      `TranscriptSearchArgs { query, meeting?, limit? }`, in the style of
@@ -345,8 +402,12 @@ Traps for every step:
 - MCP search across one ordinary meeting and one local-only interview
   returns only ordinary hits.
 - MCP search with `meeting` set to the local-only interview is refused.
+- MCP search where more than `limit` local-only hits sort ahead of ordinary
+  ones still returns `limit` ordinary hits.
 - MCP `transcript.get {around: <local-only line>}` with no `meeting` is
   refused.
+- MCP `transcript.get {around: <ordinary line>}` succeeds while a
+  local-only interview is live.
 - `now.get` from MCP keeps its current refusal during a local-only
   interview.
 
@@ -358,10 +419,8 @@ Files: `shell/Client.qml`, `shell/Transcript.qml`, `shell/NowCard.qml`,
 `shell/Library.qml`, and `shell/Overlay.qml` only to wire signals.
 
 1. **`Client.qml`.**
-   - `addRow` gains `lineId`, `speakerKey` (`"them"` for a remote row
-     without a speaker, else the number from the daemon; make the daemon
-     send `speaker_key` on `transcript.final`/`partial`/`get` rows in this
-     step if steps 2–3 did not), `sources` (a JSON string), `citeMax`,
+   - `addRow` gains `lineId`, `speakerKey` (the daemon's `speaker_key`,
+     from step 2), `sources` (a JSON string), `citeMax`,
      `citeNotes`, `renamedAfter: false` and `flash: false`.
      `pushLine` and `rebuild` pass them through.
    - `openLine(id)`: if the row is loaded, emit `lineRequested(id)`.
@@ -434,7 +493,7 @@ Files: `shell/Client.qml`, `shell/Transcript.qml`, `shell/NowCard.qml`,
 TMPDIR=/tmp devenv shell -- bash shell/tests/lint.sh
 ```
 
-Then the step check (for the daemon `speaker_key` field, if it was added).
+This step changes no Rust.
 
 **Traps.**
 - Escape all user and transcript text before `StyledText` or Markdown.
@@ -531,3 +590,20 @@ fake-daemon unit paths run.
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+
+## Review record (draft plan)
+
+| Finding | From | Verdict |
+|---|---|---|
+| A citation could land on the wrong line when a line in the window is unsaved; use an explicit label → source map | Codex, agy | confirmed → step 4 |
+| MCP search returns fewer hits than its limit after filtering; over-fetch first | Codex | confirmed → step 5 |
+| Chunk stale rule used `>`, but the spec says `>=` | Codex, agy | confirmed → step 2 |
+| `speaker_key` was deferred to the QML step; put the daemon contract in step 2 | Codex, agy | confirmed → step 2.5 |
+| The Client suggestion gate accepted events with no turn | Codex | confirmed → step 1 |
+| `transcript.get` and search would use the current meeting's names for another meeting | agy | confirmed → load per meeting |
+| `recap.rs` prompt builders have no connection; load names in `db(…)` and pass them down | agy | confirmed → step 2.3 |
+| `Self::who` return contract (empty label) must stay for `lastSpeaker` | agy | confirmed → step 2.4 |
+| `around` with a resolved meeting still hits the `local_now` fallback | agy | confirmed → step 5.3 |
+| Build `cite_window` once per turn; define `no_context` | agy | confirmed → step 4.2 |
+| Missing `now.get` field test | agy | confirmed → step 4 tests |
+| `transcript.search` also needs the `ctl --agent` allowlist | Claude | confirmed (session.rs ~4302) → step 5.1 |
