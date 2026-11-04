@@ -11,13 +11,17 @@ intent: intent/2026-11-04-62-mcp-restore-local-only.md
 ### S1. A restored chat brings its candidate back (intent outcome 1)
 
 `src/db/repos/candidates.rs` gains `for_conversation(c, conversation)`. It
-returns the candidate linked to a chat by either route, in one query:
+returns the candidate linked to a chat by either route. If both routes
+link the chat, and to different candidates, a local-only candidate wins, so
+the lookup can never switch local-only off:
 
 ```sql
-SELECT id FROM candidates WHERE meeting_id IN
-  (SELECT meeting_id FROM meeting_conversations WHERE conversation_id = ?1)
-UNION
-SELECT candidate_id FROM candidate_conversations WHERE conversation_id = ?1
+SELECT c.id FROM candidates c
+WHERE c.meeting_id IN
+        (SELECT meeting_id FROM meeting_conversations WHERE conversation_id = ?1)
+   OR c.id IN
+        (SELECT candidate_id FROM candidate_conversations WHERE conversation_id = ?1)
+ORDER BY c.local_only DESC
 LIMIT 1
 ```
 
@@ -32,9 +36,14 @@ local-only prep chat; it now comes back local-only.
 ### S2. The agent guard (intent outcomes 2 and 3)
 
 Only MCP reaches these commands: the `--agent` allowlist (`session.rs`
-~4671) has no `session.restore`, `session.new` or `notes.regenerate`. So the
-guard goes in the MCP part of `handle`, after the allowlist and before
-`dispatch`, next to the existing local-only block (~4730). One block:
+~4671) has no `session.restore`, `session.new` or `notes.regenerate`.
+
+The check must run under the same `inner` lock as the change it guards. A
+check in `handle` releases the lock before `dispatch` takes it again, which
+leaves a window for another request to change the open session. So
+`handle` passes `for_agent = origin == Some("mcp")` into these three
+commands. Each one checks right after it takes the lock (after
+`require_idle`, before `reset_session`):
 
 - `session.restore {id}`: refused if `id` is in
   `candidates::local_only_ids` (local-only meetings, their linked chats and
@@ -47,9 +56,8 @@ guard goes in the MCP part of `handle`, after the allowlist and before
 - `notes.regenerate {meeting}`: refused if that meeting's candidate is
   local-only (`candidates::for_meeting`).
 
-All three return the shared `"This interview is local-only"`. The check runs
-under one `inner` lock and returns before `dispatch`, so `reset_session`
-never runs on a refused call.
+All three return the shared `"This interview is local-only"`. A refused call
+returns before any state change.
 
 ### S3. Tests (in `session.rs` tests)
 
@@ -67,6 +75,12 @@ never runs on a refused call.
 4. MCP `notes.regenerate` of a local-only meeting is refused.
 5. The same calls succeed for an ordinary meeting and chat, from MCP and from
    the shell.
+6. From the shell, all of these still work:
+   - `session.new` while a local-only interview is open;
+   - restoring a local-only meeting;
+   - `notes.regenerate` of a local-only meeting.
+7. A chat linked to an ordinary candidate through one route and a local-only
+   candidate through the other restores as local-only.
 
 ## Alternatives rejected
 
@@ -86,10 +100,17 @@ never runs on a refused call.
 
 - **Agents lose `session.new` while a local-only interview is open.** This is
   intended. The user ends the interview session first.
-- **A chat linked by both routes to different candidates.** It cannot happen
-  today: a prep chat is linked to the candidate whose meeting it later joins.
-  `LIMIT 1` picks one either way, and both routes come from the same
-  `set_candidate` flow.
+- **A chat linked by both routes to different candidates.** Nothing in the
+  repositories prevents it. The lookup prefers the local-only candidate, and
+  S3 test 7 covers it.
+
+## Review record
+
+| Finding | From | Verdict |
+|---|---|---|
+| `UNION … LIMIT 1` can pick an ordinary candidate and switch local-only off | Codex | confirmed → local-only wins (`ORDER BY local_only DESC`), test 7 |
+| A guard in `handle` drops the lock before `dispatch` resets the session | Codex | confirmed → checks inside the locked command, via `for_agent` |
+| Tests miss the shell paths the intent keeps | Codex | confirmed → test 6 |
 
 ## Verification
 
