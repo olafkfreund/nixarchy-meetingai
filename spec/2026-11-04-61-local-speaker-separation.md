@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 61
 intent: intent/2026-11-04-61-local-speaker-separation.md
 ---
