@@ -3459,19 +3459,7 @@ impl Daemon {
         // A chat about an interview brings the candidate back with it: their local-only flag,
         // consent state and the assessment guard all hang off the candidate.
         let candidate =
-            g.db.connection()
-                .query_row(
-                    "SELECT meeting_id FROM meeting_conversations WHERE conversation_id = ?1",
-                    [id],
-                    |r| r.get::<_, String>(0),
-                )
-                .ok()
-                .and_then(|m| {
-                    candidates::for_meeting(g.db.connection(), &m)
-                        .ok()
-                        .flatten()
-                })
-                .map(|c| c.id);
+            candidates::for_conversation(g.db.connection(), id).map_err(|e| e.to_string())?;
         self.set_candidate(g, candidate);
         let messages = g.chat.restore(&g.db, id)?;
         for message in messages
@@ -7679,6 +7667,69 @@ mod command_tests {
         assert!(candidates::get(g.db.connection(), &cand).unwrap().is_none());
         assert!(g.sources.is_empty() && g.candidate.is_none());
         assert!(!d.local_only.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn restoring_prep_chat_brings_back_local_only_candidate() {
+        let d = daemon();
+        let (candidate, chat) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let candidate = candidates::create(c, "Ada").unwrap();
+            candidates::set_local_only(c, &candidate.id, true).unwrap();
+            let chat = conversations::create(c, "Prep", 1).unwrap();
+            candidates::link_conversation(c, &candidate.id, &chat).unwrap();
+            (candidate.id, chat)
+        };
+        d.handle("session.new", json!({}), None).await.unwrap();
+        d.handle("session.restore", json!({"id": chat}), None)
+            .await
+            .unwrap();
+        let state = d.handle("state.get", json!({}), None).await.unwrap();
+        assert_eq!(state["candidate"], json!(candidate));
+        assert!(d.local_only.load(Ordering::Relaxed));
+        let settings = d.inner.lock().settings.clone();
+        let chain = d.chain(&settings, false, d.local_now(&d.inner.lock()));
+        assert_eq!(
+            chain.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["ollama"]
+        );
+    }
+
+    #[tokio::test]
+    async fn restoring_cross_linked_chat_prefers_local_only_candidate() {
+        let d = daemon();
+        let (candidate, chat) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let ordinary = candidates::create(c, "Ordinary").unwrap();
+            let meeting =
+                meetings::start(c, "Ordinary", "", "en", None, Default::default()).unwrap();
+            candidates::link_meeting(c, &ordinary.id, &meeting).unwrap();
+            let candidate = candidates::create(c, "Ada").unwrap();
+            candidates::set_local_only(c, &candidate.id, true).unwrap();
+            let chat = conversations::create(c, "Cross-linked", 1).unwrap();
+            c.execute(
+                "INSERT INTO meeting_conversations VALUES (?1, ?2)",
+                [&meeting, &chat],
+            )
+            .unwrap();
+            candidates::link_conversation(c, &candidate.id, &chat).unwrap();
+            (candidate.id, chat)
+        };
+        d.handle("session.new", json!({}), None).await.unwrap();
+        d.handle("session.restore", json!({"id": chat}), None)
+            .await
+            .unwrap();
+        let state = d.handle("state.get", json!({}), None).await.unwrap();
+        assert_eq!(state["candidate"], json!(candidate));
+        assert!(d.local_only.load(Ordering::Relaxed));
+        let settings = d.inner.lock().settings.clone();
+        let chain = d.chain(&settings, false, d.local_now(&d.inner.lock()));
+        assert_eq!(
+            chain.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["ollama"]
+        );
     }
 
     #[tokio::test]
