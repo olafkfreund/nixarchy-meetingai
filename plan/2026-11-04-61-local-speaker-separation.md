@@ -485,3 +485,16 @@ Check: the step check plus `bash shell/tests/ci.sh`.
     the owner track enrol the owner.
   - The first `--live` on the slice: system and mic latency unchanged, owner
     check results identical, its median +11 ms.
+- Gate test set (owner's choice, 2026-11-04): AMI `ihm` (headsets mixed,
+  like a call) is the gate set. `sdm` (one room microphone) is reported as
+  the hard case. `ami_hf.py` gained `--config ihm`, which sums overlapping
+  segments.
+- Step 5 (Claude): **the gate fails.** See `docs/eval/2026-11-diarization.md`.
+  - On the held-out AMI `ihm` half: 9.3% errors and 36% coverage, against
+    ≤ 5% and ≥ 80%.
+  - Latency and the owner check passed.
+  - Per step 5.3, steps 6–8 are not built.
+  - The revert of steps 1–2 waits for the owner's decision: the harness
+    (step 4) depends on `speakers.rs`, and a dedicated diarization pipeline
+    (spec S1) would reuse the harness. The per-call lock stays either
+    way.

@@ -29,7 +29,7 @@ import wave
 
 import pyarrow.parquet as pq
 
-BASE = "https://huggingface.co/datasets/edinburghcstr/ami/resolve/main/sdm"
+BASE = "https://huggingface.co/datasets/edinburghcstr/ami/resolve/main"
 # One parquet per half is enough for a few meetings; more files mean more meetings.
 FILES = {
     "dev": ["validation-00000-of-00005.parquet"],
@@ -39,10 +39,10 @@ RATE = 16_000
 
 
 def fetch(name: str, raw: pathlib.Path) -> pathlib.Path:
-    path = raw / name
+    path = raw / name.replace("/", "-")
     if not path.is_file() or path.stat().st_size == 0:
         part = path.with_suffix(".part")
-        subprocess.run(["curl", "-fL", "--retry", "3", "-o", str(part), f"{BASE}/{name}"], check=True)
+        subprocess.run(["curl", "-fL", "--retry", "3", "-o", str(part), f"{BASE}/{name}"], check=True)  # name includes the config dir
         part.rename(path)
     return path
 
@@ -73,7 +73,9 @@ def pcm(wav_bytes: bytes) -> bytes:
     raise ValueError(f"unsupported WAV format {tag}/{bits}-bit")
 
 
-def rebuild(table, meeting: str, out: pathlib.Path, half: str) -> None:
+def rebuild(table, meeting: str, out: pathlib.Path, half: str, mix: bool) -> None:
+    """`mix`: add overlapping segments (ihm: each headset carries only its own voice, so the sum
+    is what a call's system channel hears). Otherwise keep the first sample (sdm: one shared mic)."""
     rows = [r for r in table.to_pylist() if r["meeting_id"] == meeting]
     rows.sort(key=lambda r: r["begin_time"])
     speakers = sorted({r["speaker_id"] for r in rows})
@@ -85,9 +87,14 @@ def rebuild(table, meeting: str, out: pathlib.Path, half: str) -> None:
         start = int(r["begin_time"] * RATE)
         for i in range(len(data) // 2):
             j = start + i
-            if j >= len(filled) or filled[j]:
-                continue
-            track[2 * j : 2 * j + 2] = data[2 * i : 2 * i + 2]
+            if j >= len(filled):
+                break
+            new = struct.unpack_from("<h", data, 2 * i)[0]
+            if filled[j]:
+                if not mix:
+                    continue
+                new = max(-32768, min(32767, new + struct.unpack_from("<h", track, 2 * j)[0]))
+            struct.pack_into("<h", track, 2 * j, new)
             filled[j] = 1
     k = f"{len(speakers)}spk"
     clean = out / half / "clean" / k
@@ -108,20 +115,23 @@ def rebuild(table, meeting: str, out: pathlib.Path, half: str) -> None:
 def main() -> None:
     cache = pathlib.Path(os.environ.get("MEETINGAI_EVAL_CACHE", os.path.expanduser("~/.cache/meetingai-eval")))
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("out_dir", nargs="?", default=str(cache / "ami-hf"))
+    parser.add_argument("out_dir", nargs="?", default=None)
+    parser.add_argument("--config", choices=("sdm", "ihm"), default="sdm",
+                        help="sdm: one room mic (worst case); ihm: headsets mixed, like a call")
     parser.add_argument("--meetings", type=int, default=4, help="meetings per half (default 4)")
     args = parser.parse_args()
-    out = pathlib.Path(args.out_dir)
+    out = pathlib.Path(args.out_dir or cache / ("ami-hf" if args.config == "sdm" else "ami-hf-ihm"))
     raw = out / "raw"
     raw.mkdir(parents=True, exist_ok=True)
     for half, names in FILES.items():
+        names = [f"{args.config}/{n}" for n in names]
         done = 0
         for name in names:
             table = pq.read_table(fetch(name, raw), columns=["meeting_id", "speaker_id", "begin_time", "end_time", "audio"])
             for meeting in sorted(set(table.column("meeting_id").to_pylist())):
                 if done >= args.meetings:
                     break
-                rebuild(table, meeting, out, half)
+                rebuild(table, meeting, out, half, mix=args.config == "ihm")
                 done += 1
 
 
