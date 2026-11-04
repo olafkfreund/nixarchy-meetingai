@@ -436,3 +436,14 @@ Check: the step check plus `bash shell/tests/ci.sh`.
     because Codex's sandbox could not run the suite.
   - Claude ran the step check: 457 lib tests.
   - The first real Whisper+VAD run happens in step 3's paced replay.
+- Step 4 (coder; one fix by Claude):
+  - `nix/whisper-turbo-model.nix` (`sha256-sRrLvNZg…`, MIT) and
+    `nix/silero-vad.nix` (`sha256-niRJ4Qh0…`, MIT), both from the k2-fsa
+    sherpa-onnx `asr-models` release, and both build.
+  - They are callable like `parakeet-model.nix`, not flake `packages`
+    outputs; step 7 wires them.
+  - `tools/whisper-export/` pins `nb-whisper-large` at revision `8c6249f`
+    and sherpa-onnx at `v1.12.40` (`d795ccd`).
+  - **Claude corrected the export base from large-v2 to large-v3:**
+    NB-Whisper large's `preprocessor_config.json` has `feature_size: 128`,
+    which means large-v3. The export itself is not run yet (step 5).
