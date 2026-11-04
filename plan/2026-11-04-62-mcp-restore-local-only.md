@@ -197,3 +197,18 @@ agy ran without the `herdr-run` wrapper. Earlier runs through it hung.
     local-only candidate with no meeting.
   - Fail-before was proven by setting the dispatch `agent` flag to `false`:
     the test then fails at the first refusal.
+- Step 3 (review), fixes by Claude:
+  - The Opus review found two error paths that could still switch local-only
+    off on the shell path, and one hardening gap. Codex and agy found nothing
+    blocking; agy also flagged the meeting path.
+  - `restore_chat` now looks up the candidate before it loads the chat's
+    profile and sources. A failed lookup can no longer leave those sources
+    behind with local-only off.
+  - The meeting path of `session_restore` propagates `for_meeting` errors.
+    It keeps a local-only candidate that the meeting's chat already brought
+    back.
+  - MCP `session.new` with a local-only `candidate` is refused.
+  - The S3.7 test also restores the meeting, and there is a new test for MCP
+    `session.new` with a local-only candidate.
+  - Not changed: the S3.2 "state unchanged" check runs against an empty
+    session, which is weak. S3.3 proves the ordering, so it was left as is.
