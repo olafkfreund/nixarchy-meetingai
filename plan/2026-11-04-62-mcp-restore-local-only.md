@@ -83,15 +83,30 @@ This plan implements the approved spec on `fix/62-mcp-restore-local-only`.
      local-only wins;
    - an unlinked chat, which gives `None`.
 2. `src/daemon/session.rs` `restore_chat` (~3459–3474): replace the inline
-   query and `for_meeting` with `candidates::for_conversation(...).ok().flatten()`,
-   then call `set_candidate` as now.
-3. A daemon test (S3.1 and S3.7): create a local-only candidate and a prep
-   chat linked only through `candidate_conversations`. Start a new session
-   and restore the chat with `handle(..., None)`. Then:
-   - `state.get` shows the candidate;
-   - `d.local_only` is true;
-   - `d.chain(...)` holds only `ollama` (as in
-     `interviewer_consent_local_only_and_mcp_refusal`, ~7338).
+   query and `for_meeting` with
+   `candidates::for_conversation(c, id).map_err(|e| e.to_string())?`, then
+   call `set_candidate` as now.
+   - A database error fails the restore. It must never become `None`,
+     because `set_candidate(None)` switches local-only off.
+   - `for_conversation` uses `.optional()?`, like `for_meeting`, so "not
+     linked" is `Ok(None)`.
+3. Two daemon tests.
+   - **S3.1.** Create a local-only candidate and a prep chat linked only
+     through `candidate_conversations`. Start a new session and restore the
+     chat with `handle(..., None)`.
+   - **S3.7.** Link a chat to an ordinary candidate's meeting
+     (`meeting_conversations`) and to a local-only candidate
+     (`candidate_conversations`), then restore it the same way.
+
+   For both, assert:
+   - `state.get` shows the local-only candidate;
+   - `d.local_only.load(Ordering::Relaxed)` is true;
+   - `d.chain(&settings, false, d.local_now(&d.inner.lock()))` holds only
+     `ollama`.
+
+   Do **not** copy the literal `true` from
+   `interviewer_consent_local_only_and_mcp_refusal` (~7380). It would pass
+   even if restore never set local-only.
 
 Check: the step check. The daemon test fails on `main`.
 
@@ -103,15 +118,29 @@ Check: the step check. The daemon test fails on `main`.
 2. `session.restore` (~4916) passes `agent` into `session_restore(id,
    agent)` (~3353). After `require_idle`, before `conversations::
    require_conversation` and `reset_session`, when `agent` is set, refuse
-   if `local_only_ids` contains `id` or `self.local_now(g)`.
-3. `session.new` (~4843): after `require_idle`, when `agent` is set, refuse
-   if `self.local_now(&g)`.
-4. `notes.regenerate` (~5042): inside its existing lock block, when `agent`
-   is set, refuse if `candidates::for_meeting` gives a local-only candidate.
+   if `local_only_ids` contains `id` or `self.local_now(g)`. A
+   `local_only_ids` error is propagated (`map_err(|e| e.to_string())?`, as
+   `session_list` does at ~3519), never treated as "not local-only".
+3. `session.new` (~4843): after `require_idle` and before `known_series`
+   and `candidates::get`, when `agent` is set, refuse if `self.local_now(&g)`.
+4. `notes.regenerate` (~5042): at the **top** of its existing lock block,
+   before the "still recording" check, when `agent` is set, refuse if
+   `candidates::for_meeting(...).map_err(|e| e.to_string())?` gives a
+   local-only candidate. A live local-only interview then gets the
+   local-only error, not the recording one.
 5. Tests S3.2–S3.6, in the style of
    `interviewer_consent_local_only_and_mcp_refusal`.
    - Calls use `handle(cmd, args, Some("mcp"))` and `None` for the shell.
    - For refusals, compare `state.get` before and after.
+   - **S3.5** covers each command from both origins:
+     - `session.restore` of an ordinary meeting;
+     - `session.restore` of an ordinary chat;
+     - `session.new`;
+     - `notes.regenerate` of an ordinary meeting.
+   - A `notes.regenerate` that succeeds spawns `finish_meeting_artifacts`.
+     Wait for it as `regenerating_notes_never_exports_and_waits_for_the_recording`
+     (~8178) does: wait for `items.updated`, then
+     `drop(d.notes.lock().await)`. Or use a meeting with no lines.
 
 Check: the step check. The tests fail on `main`.
 
@@ -141,6 +170,18 @@ Check: the step check. The tests fail on `main`.
 
 `git revert -m 1 <merge>`, revert the nixos lock bump, then switch. There is
 no schema change.
+
+## Review record (draft plan)
+
+| Finding | From | Verdict |
+|---|---|---|
+| `.ok().flatten()` turns a database error into "no candidate" and switches local-only off | Codex, agy | confirmed → propagate errors in steps 1 and 2 |
+| Step 1.3 says S3.7 but describes only the prep chat | Codex, agy | confirmed → separate S3.7 daemon test |
+| Copying the `chain(…, true)` assertion proves nothing | agy | confirmed → use `local_now`, plus the flag |
+| The regenerate check after the recording check returns the wrong error | agy | confirmed → check first |
+| S3.5 is vague; a successful regenerate leaves a task running | agy | confirmed → spelled out, plus how to wait |
+
+agy ran without the `herdr-run` wrapper. Earlier runs through it hung.
 
 ## Deviations
 
