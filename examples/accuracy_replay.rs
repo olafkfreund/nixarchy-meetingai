@@ -382,7 +382,14 @@ async fn replay(
     let (mut at, mut finished) = (0usize, false);
 
     let started = tokio::time::Instant::now();
-    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    // `--speed N` feeds N times faster than real time (default 1). The bleed hold counts audio
+    // time (`chunks.now()`), so it still holds 3 s of audio; only wall-clock release times scale.
+    let speed: u64 = flags
+        .get("--speed")
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1);
+    let mut tick = tokio::time::interval(Duration::from_micros(100_000 / speed));
 
     loop {
         tokio::select! {

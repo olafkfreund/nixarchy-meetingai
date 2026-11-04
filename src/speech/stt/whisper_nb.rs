@@ -78,7 +78,13 @@ fn load() -> Result<Decoder, String> {
         ..Default::default()
     };
     config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
-    config.model_config.num_threads = 4;
+    // Whisper's 32-layer encoder runs a 30 s window per chunk, so threads matter; measured per
+    // host at the gate (`NIXARCHY_MEETINGAI_WHISPER_NB_THREADS`, default 4).
+    config.model_config.num_threads = std::env::var("NIXARCHY_MEETINGAI_WHISPER_NB_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &i32| (1..=64).contains(&n))
+        .unwrap_or(4);
     let recognizer = OfflineRecognizer::create(&config).ok_or("the model could not be created")?;
     let vad_config = VadModelConfig {
         silero_vad: SileroVadModelConfig {
@@ -146,6 +152,9 @@ const PHANTOMS: &[&str] = &[
     "teksting av ai-media",
     "undertekster av ai-media",
 ];
+/// Subtitle credits Whisper learned from TV: the opener is followed by a varying name, so
+/// everything from the opener to the end of its sentence goes.
+const CREDIT_OPENERS: &[&str] = &["teksting av", "undertekster av", "tekst:", "oversatt av"];
 fn filter_phantoms(text: &str) -> String {
     let mut clean = text.to_owned();
     for phrase in PHANTOMS {
@@ -159,6 +168,20 @@ fn filter_phantoms(text: &str) -> String {
             if matches!(clean.as_bytes().get(end), Some(b'.' | b',' | b'!')) {
                 end += 1;
             }
+            clean.replace_range(start..end, "");
+        }
+    }
+    for opener in CREDIT_OPENERS {
+        // ASCII openers matched case-insensitively on the original bytes, so offsets stay valid.
+        while let Some(start) = clean
+            .as_bytes()
+            .windows(opener.len())
+            .position(|w| w.eq_ignore_ascii_case(opener.as_bytes()))
+        {
+            let rest = &clean[start..];
+            let end = rest
+                .find(['.', '!', '?'])
+                .map_or(clean.len(), |at| start + at + 1);
             clean.replace_range(start..end, "");
         }
     }
@@ -244,6 +267,16 @@ mod tests {
         assert_eq!(filter_phantoms("Hei Takk for at du så på. der"), "Hei der");
         assert_eq!(filter_phantoms("Hei Takk for at du så på."), "Hei");
         assert_eq!(filter_phantoms("Takk for at du så på."), "");
+        // Subtitle credits with any name, anywhere in a line.
+        assert_eq!(filter_phantoms("Teksting av Nicolai Winther"), "");
+        assert_eq!(
+            filter_phantoms("Vi går videre. Teksting av Nicolai Winther. Neste sak"),
+            "Vi går videre. Neste sak"
+        );
+        assert_eq!(
+            filter_phantoms("Ærlig talt, UNDERTEKSTER AV Øyvind Ås!"),
+            "Ærlig talt"
+        );
     }
     #[test]
     fn speech_segments_skip_silence_and_keep_short_words() {
