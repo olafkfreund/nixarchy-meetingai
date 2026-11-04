@@ -496,7 +496,8 @@ mod tests {
         link_meeting(c, &a.id, &m).unwrap();
         add_document(c, &a.id, "cv", "cv.md", "Built Rust", None, "").unwrap();
         add_question(c, &a.id, "Q?", "Built Rust", None).unwrap();
-        meetings::add_line(c, &m, "them", None, "I built it", 0.0, 1.0).unwrap();
+        let built = meetings::add_line(c, &m, "them", None, "I built it", 0.0, 1.0).unwrap();
+        meetings::set_bookmark(c, &built, true).unwrap();
         meetings::add_chunk(
             c,
             &m,
@@ -506,6 +507,7 @@ mod tests {
                 body: "notes".into(),
                 last_line: 1,
                 created_at: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -541,6 +543,7 @@ mod tests {
             "conversations",
             "notes_fts",
             "meeting_speakers",
+            "line_bookmarks",
             "candidate_documents",
         ] {
             let left: i64 = match table {
@@ -549,6 +552,7 @@ mod tests {
                 | "meeting_recaps"
                 | "meeting_items"
                 | "meeting_speakers"
+                | "line_bookmarks"
                 | "notes_fts" => c
                     .query_row(
                         &format!("SELECT COUNT(*) FROM {table} WHERE meeting_id = ?1"),

@@ -606,6 +606,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn saved_sources_do_not_change_provider_request_body() {
+        use crate::ai::chat::session::ChatSession;
+        use crate::db::{Database, conversations};
+        let body = |saved: bool| {
+            let db = Database::in_memory().unwrap();
+            let mut chat = ChatSession::new();
+            chat.begin(Some(&db), "First question").unwrap();
+            let row = chat.reply_row().unwrap().to_owned();
+            chat.push_delta(Some(&db), "First answer [1]");
+            chat.finish();
+            if saved {
+                conversations::set_message_sources(
+                    db.connection(),
+                    &row,
+                    r#"{"sources":[{"id":"line"}],"cite_max":1,"cite_notes":0}"#,
+                )
+                .unwrap();
+            }
+            let history = chat.begin(Some(&db), "Second question").unwrap();
+            encode_request_payload(
+                *ChatProvider::by_id("ollama").unwrap(),
+                &ProviderConfig::new("ollama", "k", "model"),
+                &history,
+                &TurnContext {
+                    system: None,
+                    images: Vec::new(),
+                },
+                true,
+            )
+        };
+        assert_eq!(body(false), body(true));
+    }
+
+    #[test]
     fn openai_payload_places_system_prompt_before_history_with_streaming() {
         let provider = ChatProvider::by_id("ollama").unwrap();
         let config = ProviderConfig::new("ollama", "k", "gpt-4o");

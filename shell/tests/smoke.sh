@@ -744,4 +744,36 @@ if bad:
     sys.exit(1)
 print("export: first-time card, Settings row, and Export now ok")
 PY
+
+# Line actions (correct, bookmark, ask), meeting view (timeline, items, bookmarks, regenerate) and saved sources.
+ln -sf "$here/tests/harness-lines.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-lines"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/lines.log" --lines &
+fake=$!
+sleep 0.5
+timeout 15 quickshell -p "$work/cfg" > "$work/lines.out" 2> "$work/lines.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/lines.err" "$work/lines.out" | grep -av 'GEO {'; then echo "FAIL (lines): QML errors above" >&2; exit 1; fi
+python3 "$here/tests/check-geometry.py" "$work/lines.out"
+python3 - "$work/lines.out" "$work/lines.log" <<'PY'
+import json, sys
+line = next((l for l in open(sys.argv[1], errors="replace") if "LINES {" in l), None)
+if line is None:
+    sys.exit("FAIL (lines): no harness dump")
+d = json.loads(line[line.index("LINES ") + 6:])
+bad = []
+for key in ("regenerateHiddenWhenFresh", "shortenedHidesCorrect", "correctedText", "editedMark", "changedAfter", "bookmarkedBefore", "bookmarkReloaded", "quoteShown", "quoteCleared", "staleShown", "regenerateShownWhenStale", "timelineShown", "itemsShown", "bookmarksShown", "regenerated", "chunkJump", "itemJump", "bookmarkJump", "restoredChips", "hasOpenTranscript", "openedTranscript"):
+    if d.get(key) is not True:
+        bad.append(f"{key}: want True, got {d.get(key)!r}")
+cmds = open(sys.argv[2]).read()
+for cmd in ("transcript.edit", "bookmark.set", "bookmarks.list", "notes.get", "items.list", "notes.regenerate", "chat.send line=line-1 text=What does this mean, and what should I say?"):
+    if cmd not in cmds:
+        bad.append(f"daemon never received {cmd!r}")
+if bad:
+    for b in bad:
+        print("FAIL (lines):", b, file=sys.stderr)
+    sys.exit(1)
+print("lines: correct, bookmark, ask, meeting view links, regenerate and saved sources ok")
+PY
 echo "smoke ok"

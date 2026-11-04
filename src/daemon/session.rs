@@ -1234,7 +1234,11 @@ impl Daemon {
         (config.speech_usable() && (!local || (stays_local(&config) && !streams))).then_some(config)
     }
 
-    fn cite_window(&self, g: &Inner) -> (Vec<(String, Source)>, String, String) {
+    fn cite_window(
+        &self,
+        g: &Inner,
+        quoted: Option<meetings::LineRecord>,
+    ) -> (Vec<(String, Source)>, String, String) {
         let mut sources = Vec::new();
         let mut notes = String::new();
         if let Some(meeting) = &g.meeting_id {
@@ -1290,6 +1294,34 @@ impl Daemon {
             }
         }
         let mut transcript = String::new();
+        if let Some(line) = &quoted {
+            let names =
+                g.db.connection()
+                    .query_row(
+                        "SELECT meeting_id FROM meeting_lines WHERE id=?1",
+                        [&line.id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok()
+                    .and_then(|meeting| meetings::speaker_names(g.db.connection(), &meeting).ok())
+                    .unwrap_or_default();
+            let speaker = meetings::label(&names, &line.who, line.speaker);
+            transcript.push_str(&format!(
+                "[1] {speaker}: {}\n",
+                line.text.chars().take(2000).collect::<String>()
+            ));
+            sources.push((
+                "1".into(),
+                Source {
+                    kind: "line",
+                    id: line.id.clone(),
+                    t0: line.start_time,
+                    t1: line.end_time,
+                    speaker,
+                    snippet: line.text.chars().take(160).collect(),
+                },
+            ));
+        }
         for entry in g
             .transcript
             .iter()
@@ -1299,6 +1331,12 @@ impl Daemon {
             .into_iter()
             .rev()
         {
+            if quoted
+                .as_ref()
+                .is_some_and(|line| entry.id.as_ref() == Some(&line.id))
+            {
+                continue;
+            }
             let speaker = meetings::label(&g.speaker_names, entry.who, entry.speaker);
             if let Some(id) = &entry.id {
                 let label = (sources
@@ -1571,7 +1609,14 @@ impl Daemon {
             }
             image
         };
-        match self.begin_send(question, image, false, args.no_context, Some(epoch))? {
+        match self.begin_send(
+            question,
+            image,
+            false,
+            args.no_context,
+            args.line,
+            Some(epoch),
+        )? {
             Some(turn) => Ok(json!({"turn": turn})),
             None => cancelled(),
         }
@@ -1584,6 +1629,7 @@ impl Daemon {
         image: Option<CapturedImage>,
         automatic: bool,
         no_context: bool,
+        line: Option<String>,
         epoch: Option<u64>,
     ) -> Result<Option<u64>, String> {
         let mut guard = self.inner.lock();
@@ -1597,6 +1643,37 @@ impl Daemon {
         if g.dictation.is_some() {
             return Err("Finish dictation before sending your message.".into());
         }
+        let quoted = line
+            .as_deref()
+            .map(|id| {
+                let c = g.db.connection();
+                let meeting: String = c
+                    .query_row(
+                        "SELECT meeting_id FROM meeting_lines WHERE id=?1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "That line no longer exists.".to_owned())?;
+                let open = [
+                    g.meeting_id.as_deref(),
+                    g.finishing_meeting.as_deref(),
+                    g.resume_meeting.as_deref(),
+                ]
+                .contains(&Some(meeting.as_str()));
+                if !open
+                    && candidates::for_meeting(c, &meeting)
+                        .map_err(|e| e.to_string())?
+                        .is_some()
+                {
+                    return Err("Open that interview to ask about its lines.".into());
+                }
+                meetings::line(c, id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "That line no longer exists.".to_owned())
+            })
+            .transpose()?;
         let local = self.local_now(g);
         let chain = self.chain(&g.settings, automatic, local);
         if chain.is_empty() {
@@ -1618,10 +1695,15 @@ impl Daemon {
                 g.settings.response_language.clone(),
             ));
         }
-        let history = g
+        let mut history = g
             .chat
             .begin(Some(&g.db), &question)
             .map_err(|e| e.message())?;
+        if quoted.is_some()
+            && let Some(last) = history.last_mut()
+        {
+            last.content = format!("The user is asking about line [1].\n\n{}", last.content);
+        }
         if let Some(id) = g.chat.conversation_id() {
             let context = sessions::SavedContext {
                 profile_id: g.active_profile_id.clone(),
@@ -1660,10 +1742,10 @@ impl Daemon {
         g.conversation.push(Message::user(question));
         let mut images: Vec<String> = image.map(|i| vec![i.base64]).unwrap_or_default();
         images.extend(g.sources.iter().filter_map(|s| s.image.clone()));
-        let (cite, notes, transcript) = if no_context {
+        let (cite, notes, transcript) = if no_context && quoted.is_none() {
             (Vec::new(), String::new(), Self::plain_transcript(g))
         } else {
-            self.cite_window(g)
+            self.cite_window(g, quoted)
         };
         let cite_max = cite
             .iter()
@@ -1802,9 +1884,24 @@ impl Daemon {
         match result {
             Ok(()) => {
                 g.chat.checkpoint(Some(&g.db));
+                let reply_row = g.chat.reply_row().map(str::to_owned);
                 g.chat.finish();
                 let text = g.chat.answer().to_owned();
                 g.answer_sources = cited_sources(&text, &g.cite);
+                if !g.answer_sources.is_empty()
+                    && let Some(row) = reply_row
+                {
+                    let saved = json!({"sources": g.answer_sources,
+                        "cite_max": g.cite.iter().filter(|(label, _)| !label.starts_with('N')).count(),
+                        "cite_notes": g.cite.iter().filter(|(label, _)| label.starts_with('N')).count()});
+                    if let Err(err) = conversations::set_message_sources(
+                        g.db.connection(),
+                        &row,
+                        &saved.to_string(),
+                    ) {
+                        tracing::warn!(%err, "failed to save assistant sources");
+                    }
+                }
                 if !text.is_empty() {
                     g.conversation.push(Message::assistant(text));
                 }
@@ -1869,7 +1966,7 @@ impl Daemon {
         )));
         let context = TurnContext {
             system: Some({
-                let (_, notes, _) = self.cite_window(g);
+                let (_, notes, _) = self.cite_window(g, None);
                 self.system_prompt(g, false, false, &notes, &Self::plain_transcript(g), false)
             }),
             images: Vec::new(),
@@ -2038,7 +2135,7 @@ impl Daemon {
             g.pending_question.take()
         };
         if let Some(question) = question
-            && let Err(error) = self.begin_send(question, None, true, false, None)
+            && let Err(error) = self.begin_send(question, None, true, false, None, None)
         {
             self.error(error);
         }
@@ -2187,7 +2284,8 @@ impl Daemon {
         if g.transcript.len() >= 500 {
             g.transcript.drain(..100);
         }
-        let shown = if text.len() > 32_000 {
+        let shortened = text.len() > 32_000;
+        let shown = if shortened {
             format!(
                 "{}\n[Line shortened in the live view; the complete original is saved.]",
                 text.chars().take(8000).collect::<String>()
@@ -2198,7 +2296,7 @@ impl Daemon {
         let (label, name, key) = Self::who(&g.speaker_names, who, speaker);
         self.emit(
             "transcript.final",
-            json!({"who": label, "speaker": name, "speaker_key": key, "text": shown, "t0": start, "t1": end, "id": row}),
+            json!({"who": label, "speaker": name, "speaker_key": key, "text": shown, "t0": start, "t1": end, "id": row, "edited": false, "bookmarked": false, "shortened": shortened}),
         );
         g.transcript.push(Entry {
             text: shown,
@@ -2737,7 +2835,7 @@ impl Daemon {
             }
             self.emit_state(g);
         }
-        self.finish_meeting_artifacts(meeting, true).await;
+        self.finish_meeting_artifacts(meeting, true, false).await;
         let mut g = self.inner.lock();
         g.finishing_meeting = None;
         self.emit_state(&g); // the shell shows "Finishing" until it hears this
@@ -2878,7 +2976,12 @@ impl Daemon {
     }
 
     /// Name the meeting, then summarise what is left and consolidate every chunk.
-    async fn finish_meeting_artifacts(self: &Arc<Self>, meeting: &str, export: bool) {
+    async fn finish_meeting_artifacts(
+        self: &Arc<Self>,
+        meeting: &str,
+        export: bool,
+        regenerate: bool,
+    ) {
         self.settle_checks().await;
         let _serial = self.notes.lock().await;
         let (config, language, body, local, interview, said, named) = {
@@ -2896,12 +2999,13 @@ impl Daemon {
                 g.named_meeting.as_deref() == Some(meeting),
             )
         };
-        // Merging duplicates needs no model, so every path ends here, and tells the shell once.
         let finalize = || async {
             {
                 let g = self.inner.lock();
                 let c = g.db.connection();
-                let _ = if team_items(c, meeting) {
+                // Regenerate never merges items; it only clears `draft` on items it extracted
+                // for the first time, so they carry over like any other.
+                let _ = if team_items(c, meeting) && !regenerate {
                     recap::reconcile(c, meeting)
                 } else {
                     items::finalize(c, meeting)
@@ -2930,7 +3034,8 @@ impl Daemon {
             finalize().await;
             return;
         };
-        if !named
+        if !regenerate
+            && !named
             && !body.trim().is_empty()
             && let Some(title) =
                 titling::request_title(&engine::http_client(), &config, &body).await
@@ -2939,7 +3044,14 @@ impl Daemon {
             let g = self.inner.lock();
             let _ = meetings::rename(g.db.connection(), meeting, &title);
         }
-        match recap::generate(&self.db_path, meeting, Some(config), &language).await {
+        if regenerate
+            && let Err(error) =
+                recap::refresh_chunks(&self.db_path, meeting, &config, &language).await
+        {
+            self.error(format!("Could not refresh the meeting notes: {error}"));
+            return;
+        }
+        match recap::generate(&self.db_path, meeting, Some(config), &language, !regenerate).await {
             Ok(()) => {
                 self.emit("notes.updated", json!({"meeting": meeting}));
             }
@@ -3394,12 +3506,16 @@ impl Daemon {
         g.speaker_offset = last_speaker.map_or(0, |s| s + 1);
         g.speaker_names =
             meetings::speaker_names(g.db.connection(), id).map_err(|e| e.to_string())?;
+        let bookmarked =
+            meetings::bookmarked_ids(g.db.connection(), id).map_err(|e| e.to_string())?;
         for line in &lines {
             let (who, speaker, key) = Self::who(&g.speaker_names, &line.who, line.speaker);
-            self.emit(
-                "transcript.final",
-                json!({"who": who, "speaker": speaker, "speaker_key": key, "text": line.text, "t0": line.start_time, "t1": line.end_time, "id": line.id}),
-            );
+            // recent_lines cuts each line at 8 000 characters: the shell must not offer Correct on it.
+            let mut row = json!({"who": who, "speaker": speaker, "speaker_key": key, "text": line.text, "t0": line.start_time, "t1": line.end_time, "id": line.id, "edited": line.edited, "bookmarked": bookmarked.contains(&line.id), "shortened": line.text.chars().count() >= 8_000});
+            if let Some(heard) = &line.heard {
+                row["heard"] = json!(heard);
+            }
+            self.emit("transcript.final", row);
             g.transcript.push(Entry {
                 text: line.text.clone(),
                 who: match line.who.as_str() {
@@ -3412,29 +3528,10 @@ impl Daemon {
                 t0: line.start_time,
             });
         }
-        // Keep the recap plus beginning and recent speech as bounded background.
-        let recap = meetings::recap(g.db.connection(), id)
-            .ok()
-            .flatten()
-            .filter(|r| r.status == "ready")
-            .map(|r| r.content)
-            .unwrap_or_default();
-        let mut text = format!(
-            "Restored meeting: {}\n{}\nSaved recap:\n{}\nEarlier speech:\n",
-            record.title,
-            record.context.chars().take(1_000).collect::<String>(),
-            recap.chars().take(3_000).collect::<String>()
-        );
-        text.push_str(
-            &meetings::transcript_excerpt(g.db.connection(), id, 10_000, &g.speaker_names)
-                .map_err(|e| e.to_string())?,
-        );
-        let source = Attachment::text(
-            format!("restored-meeting:{id}"),
-            format!("Restored meeting: {}", record.title),
-            text,
-        );
-        context::add(&mut g.sources, source)?;
+        context::add(
+            &mut g.sources,
+            Self::restored_source(g.db.connection(), id, &g.speaker_names)?,
+        )?;
         g.resume_meeting = Some(id.to_owned());
         g.series = items::meeting_series(g.db.connection(), id).ok().flatten();
         // Errors fail the restore rather than switch local-only off, and a chat that already
@@ -3448,6 +3545,37 @@ impl Daemon {
         }
         self.emit_state(g);
         Ok(json!({"kind": "meeting"}))
+    }
+
+    fn restored_source(
+        c: &rusqlite::Connection,
+        id: &str,
+        names: &BTreeMap<String, String>,
+    ) -> Result<Attachment, String> {
+        let record = meetings::get(c, id)
+            .map_err(|e| e.to_string())?
+            .ok_or("This session no longer exists.")?;
+        // Keep the recap plus beginning and recent speech as bounded background.
+        let recap = meetings::recap(c, id)
+            .ok()
+            .flatten()
+            .filter(|r| r.status == "ready")
+            .map(|r| r.content)
+            .unwrap_or_default();
+        let mut text = format!(
+            "Restored meeting: {}\n{}\nSaved recap:\n{}\nEarlier speech:\n",
+            record.title,
+            record.context.chars().take(1_000).collect::<String>(),
+            recap.chars().take(3_000).collect::<String>()
+        );
+        text.push_str(
+            &meetings::transcript_excerpt(c, id, 10_000, names).map_err(|e| e.to_string())?,
+        );
+        Ok(Attachment::text(
+            format!("restored-meeting:{id}"),
+            format!("Restored meeting: {}", record.title),
+            text,
+        ))
     }
 
     fn restore_chat(&self, g: &mut Inner, id: &str) -> Result<(), String> {
@@ -3476,7 +3604,29 @@ impl Daemon {
             g.conversation_response = Some((length, saved.response_language));
         }
         let messages = g.chat.restore(&g.db, id)?;
-        for message in messages
+        let rows: Vec<Value> = messages
+            .iter()
+            .filter_map(|(m, saved)| {
+                let who = match m.role {
+                    Role::User => "question",
+                    Role::Assistant => "answer",
+                    Role::System => return None,
+                };
+                let mut row = json!({"who": who, "text": m.content});
+                if let Some(saved) = saved
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                {
+                    for key in ["sources", "cite_max", "cite_notes"] {
+                        if let Some(value) = saved.get(key) {
+                            row[key] = value.clone();
+                        }
+                    }
+                }
+                Some(row)
+            })
+            .collect();
+        for (message, _) in messages
             .into_iter()
             .rev()
             .take(200)
@@ -3485,17 +3635,6 @@ impl Daemon {
         {
             g.conversation.push(message);
         }
-        let rows: Vec<Value> = g
-            .conversation
-            .messages()
-            .iter()
-            .filter_map(|m| match m.role {
-                Role::User => Some(("question", &m.content)),
-                Role::Assistant => Some(("answer", &m.content)),
-                Role::System => None,
-            })
-            .map(|(who, text)| json!({"who": who, "text": text}))
-            .collect();
         self.emit("history", json!({"rows": rows}));
         Ok(())
     }
@@ -4438,26 +4577,128 @@ impl Daemon {
     fn notes_get(&self, meeting: &str) -> Result<Value, String> {
         let g = self.inner.lock();
         let c = g.db.connection();
+        let chunks = meetings::chunks(c, meeting).map_err(|e| e.to_string())?;
+        let mut timeline = Vec::new();
+        for chunk in &chunks {
+            let line: Option<String> = c.query_row(
+                "SELECT id FROM meeting_lines WHERE meeting_id=?1 AND start_time>=?2 ORDER BY start_time,rowid LIMIT 1",
+                rusqlite::params![meeting, chunk.t0], |r| r.get(0),
+            ).optional().map_err(|e| e.to_string())?;
+            timeline
+                .push(json!({"t0": chunk.t0, "t1": chunk.t1, "body": chunk.body, "line": line}));
+        }
+        if timeline.is_empty() {
+            let first: Option<String> = c.query_row(
+                "SELECT id FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time,rowid LIMIT 1",
+                [meeting], |r| r.get(0),
+            ).optional().map_err(|e| e.to_string())?;
+            if let Some(line) = first {
+                let t1: f64 = c
+                    .query_row(
+                        "SELECT max(end_time) FROM meeting_lines WHERE meeting_id=?1",
+                        [meeting],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                timeline.push(json!({"t0": 0.0, "t1": t1, "body": "", "line": line}));
+            }
+        }
         let ready = meetings::recap(c, meeting)
             .map_err(|e| e.to_string())?
             .filter(|r| r.status == "ready");
         let (text, written_at) = match ready {
-            Some(r) => (r.content, Some(r.updated_at)),
+            Some(r) => (r.content, Some(r.read_at.unwrap_or(r.updated_at))),
             // No recap yet: show the rolling notes written so far.
             None => {
-                let chunks = meetings::chunks(c, meeting).map_err(|e| e.to_string())?;
-                let written_at = chunks.last().map(|chunk| chunk.created_at.clone());
+                let written_at = chunks.last().map(|chunk| {
+                    chunk
+                        .read_at
+                        .clone()
+                        .unwrap_or_else(|| chunk.created_at.clone())
+                });
                 let text = chunks
-                    .into_iter()
-                    .map(|chunk| chunk.body)
+                    .iter()
+                    .map(|chunk| chunk.body.as_str())
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 (text, written_at)
             }
         };
-        let renamed_at = meetings::renamed_at(c, meeting).map_err(|e| e.to_string())?;
-        let stale = matches!((renamed_at, written_at), (Some(r), Some(w)) if r >= w);
-        Ok(json!({"text": text, "stale": stale}))
+        let changed_at = meetings::changed_at(c, meeting).map_err(|e| e.to_string())?;
+        // Also stale when a correction landed after the chunk covering it was read: that catches
+        // an edit made while Regenerate re-summarised other chunks (the recap's own read time is later).
+        let stale = matches!((changed_at, written_at), (Some(r), Some(w)) if r >= w)
+            || meetings::edited_after_chunk(c, meeting).map_err(|e| e.to_string())?;
+        Ok(json!({"text": text, "stale": stale, "chunks": timeline}))
+    }
+
+    fn bookmark_set(&self, args: protocol::BookmarkSet) -> Result<Value, String> {
+        let g = self.inner.lock();
+        if !meetings::set_bookmark(g.db.connection(), &args.line, args.on)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("That line no longer exists.".into());
+        }
+        self.emit(
+            "transcript.bookmarked",
+            json!({"id": args.line, "on": args.on}),
+        );
+        Ok(json!({}))
+    }
+
+    fn bookmarks_list(&self, meeting: &str) -> Result<Value, String> {
+        let g = self.inner.lock();
+        let c = g.db.connection();
+        let names = meetings::speaker_names(c, meeting).map_err(|e| e.to_string())?;
+        let rows = meetings::bookmarks(c, meeting)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|line| {
+                let (who, speaker, speaker_key) = Self::who(&names, &line.who, line.speaker);
+                json!({"line": line.id, "who": who, "speaker": speaker, "speaker_key": speaker_key,
+                    "text": line.text, "t0": line.start_time})
+            })
+            .collect::<Vec<_>>();
+        Ok(json!(rows))
+    }
+
+    fn transcript_edit(&self, args: protocol::TranscriptEdit) -> Result<Value, String> {
+        let text = args.text.trim();
+        if text.is_empty() {
+            return Err("A line cannot be empty.".into());
+        }
+        if text.chars().count() > 32_000 {
+            return Err("A line cannot exceed 32,000 characters.".into());
+        }
+        let mut g = self.inner.lock();
+        let edited = meetings::edit_line(g.db.connection(), &args.id, text)
+            .map_err(|e| e.to_string())?
+            .ok_or("That line no longer exists.")?;
+        if let Some(entry) = g
+            .transcript
+            .iter_mut()
+            .find(|entry| entry.id.as_deref() == Some(&args.id))
+        {
+            entry.text.clone_from(&edited.text);
+        }
+        if g.resume_meeting.as_deref() == Some(&edited.meeting_id) {
+            let source_id = format!("restored-meeting:{}", edited.meeting_id);
+            if let Some(index) = g.sources.iter().position(|s| s.id == source_id) {
+                // The edit is already saved: a failed rebuild keeps the old source, never the event.
+                match Self::restored_source(g.db.connection(), &edited.meeting_id, &g.speaker_names)
+                {
+                    Ok(source) => g.sources[index] = source,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not refresh the restored meeting source")
+                    }
+                }
+            }
+        }
+        self.emit(
+            "transcript.edited",
+            json!({"id": args.id, "text": edited.text, "edited": true, "heard": edited.heard}),
+        );
+        Ok(json!({}))
     }
 
     fn speakers_rename(&self, args: protocol::SpeakersRename) -> Result<Value, String> {
@@ -4527,17 +4768,22 @@ impl Daemon {
         };
         let limit = args.limit.unwrap_or(200).clamp(1, 500);
         let names = meetings::speaker_names(c, &meeting).map_err(|e| e.to_string())?;
-        let select = "SELECT rowid, who, speaker, text, start_time, end_time, id FROM meeting_lines
+        let bookmarked = meetings::bookmarked_ids(c, &meeting).map_err(|e| e.to_string())?;
+        let select = "SELECT rowid, who, speaker, text, start_time, end_time, id, heard, edited_at IS NOT NULL FROM meeting_lines
                  WHERE meeting_id = ?1";
         let read = |r: &rusqlite::Row| {
             let who: String = r.get(1)?;
             let speaker: Option<i64> = r.get(2)?;
             let (who, name, key) = Self::who(&names, &who, speaker);
-            Ok(
-                json!({"line": r.get::<_, i64>(0)?, "id": r.get::<_, String>(6)?, "who": who,
+            let id: String = r.get(6)?;
+            let mut row = json!({"line": r.get::<_, i64>(0)?, "id": id, "who": who,
                       "speaker": name, "speaker_key": key, "text": r.get::<_, String>(3)?,
-                      "t0": r.get::<_, f64>(4)?, "t1": r.get::<_, f64>(5)?}),
-            )
+                      "t0": r.get::<_, f64>(4)?, "t1": r.get::<_, f64>(5)?,
+                      "edited": r.get::<_, bool>(8)?, "bookmarked": bookmarked.contains(&id)});
+            if let Some(heard) = r.get::<_, Option<String>>(7)? {
+                row["heard"] = json!(heard);
+            }
+            Ok(row)
         };
         let query = |sql: String, cursor: i64, n: usize| -> Result<Vec<Value>, String> {
             c.prepare(&sql)
@@ -4676,6 +4922,7 @@ impl Daemon {
                 "session.list"
                     | "meetings.search"
                     | "notes.get"
+                    | "bookmarks.list"
                     | "items.list"
                     | "series.list"
                     | "last_time.get"
@@ -4695,6 +4942,7 @@ impl Daemon {
                 "chat.send"
                     | "items.list"
                     | "notes.get"
+                    | "bookmarks.list"
                     | "notes.regenerate"
                     | "now.get"
                     | "record.start"
@@ -4711,7 +4959,9 @@ impl Daemon {
             ) || (cmd == "settings.set"
                 && !crate::mcp::MCP_SETTINGS.contains(&args["key"].as_str().unwrap_or_default()))
                 || (cmd == "chat.send"
-                    && (args.get("attachments").is_some() || args.get("screenshot").is_some())))
+                    && (args.get("attachments").is_some()
+                        || args.get("screenshot").is_some()
+                        || args["line"].as_str().is_some())))
         {
             return Err("not allowed for agents".into());
         }
@@ -4731,7 +4981,12 @@ impl Daemon {
         }
         if matches!(
             cmd,
-            "transcript.get" | "notes.get" | "now.get" | "chat.send" | "items.list"
+            "transcript.get"
+                | "notes.get"
+                | "now.get"
+                | "chat.send"
+                | "items.list"
+                | "bookmarks.list"
         ) {
             let g = self.inner.lock();
             let around_meeting = if cmd == "transcript.get" {
@@ -5050,6 +5305,9 @@ impl Daemon {
                     .await
             }
             "transcript.get" => self.transcript_get(parse(args)?),
+            "transcript.edit" => self.transcript_edit(parse(args)?),
+            "bookmark.set" => self.bookmark_set(parse(args)?),
+            "bookmarks.list" => self.bookmarks_list(&parse::<protocol::MeetingArg>(args)?.meeting),
             "transcript.search" => self.transcript_search(parse(args)?, false),
             "speakers.rename" => self.speakers_rename(parse(args)?),
             "now.get" => Ok(self.now_get()),
@@ -5070,7 +5328,9 @@ impl Daemon {
                     }
                 }
                 let me = self.clone();
-                tokio::spawn(async move { me.finish_meeting_artifacts(&meeting, false).await });
+                tokio::spawn(
+                    async move { me.finish_meeting_artifacts(&meeting, false, true).await },
+                );
                 Ok(json!({}))
             }
             "meetings.export" => {
@@ -5166,7 +5426,7 @@ mod citation_tests {
             id: Some(next.clone()),
             t0: 12.0,
         });
-        let (sources, notes, transcript) = d.cite_window(&g);
+        let (sources, notes, transcript) = d.cite_window(&g, None);
         assert!(notes.contains("[N1] (0:10–0:20) newest"));
         assert!(!notes.contains("[N2]") && !notes.contains(&"x".repeat(5900)));
         assert_eq!(
@@ -5187,7 +5447,67 @@ mod citation_tests {
             next
         );
         g.meeting_id = None;
-        assert!(d.cite_window(&g).1.is_empty());
+        assert!(d.cite_window(&g, None).1.is_empty());
+    }
+
+    #[test]
+    fn quoted_line_is_first_citation_without_duplicating_recent_speech() {
+        let d = daemon();
+        let mut g = d.inner.lock();
+        let (meeting, old, past_id, recent, entries) = {
+            let c = g.db.connection();
+            let meeting =
+                meetings::start(c, "Current", "", "en", None, MeetingMode::General).unwrap();
+            let old = meetings::add_line(c, &meeting, "them", None, "old words", 0.0, 1.0).unwrap();
+            let mut entries = Vec::new();
+            for i in 1..=21 {
+                let id = meetings::add_line(
+                    c,
+                    &meeting,
+                    "them",
+                    None,
+                    &format!("line {i}"),
+                    i as f64,
+                    i as f64 + 1.0,
+                )
+                .unwrap();
+                entries.push(Entry {
+                    text: format!("line {i}"),
+                    who: "them",
+                    speaker: None,
+                    id: Some(id),
+                    t0: i as f64,
+                });
+            }
+            let past = meetings::start(c, "Past", "", "en", None, MeetingMode::General).unwrap();
+            let past_id =
+                meetings::add_line(c, &past, "them", None, "past words", 0.0, 1.0).unwrap();
+            let recent = meetings::line(c, entries.last().unwrap().id.as_deref().unwrap())
+                .unwrap()
+                .unwrap();
+            (meeting, old, past_id, recent, entries)
+        };
+        g.meeting_id = Some(meeting);
+        g.transcript = entries;
+        for id in [&old, &past_id] {
+            let quote = meetings::line(g.db.connection(), id).unwrap().unwrap();
+            let (sources, _, transcript) = d.cite_window(&g, Some(quote));
+            assert_eq!(
+                sources.iter().find(|(label, _)| label == "1").unwrap().1.id,
+                *id
+            );
+            assert!(transcript.contains("[1]"));
+            assert_eq!(cited_sources("See [1].", &sources)[0].id, *id);
+        }
+        let (sources, _, transcript) = d.cite_window(&g, Some(recent.clone()));
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|(_, source)| source.id == recent.id)
+                .count(),
+            1
+        );
+        assert_eq!(transcript.matches(&recent.text).count(), 1);
     }
 
     #[test]
@@ -5250,6 +5570,26 @@ mod citation_tests {
         assert_eq!(now["cite_max"], 1);
         assert_eq!(now["cite_notes"], 0);
         assert_eq!(now["sources"][0]["id"], "saved");
+        let conversation = {
+            let g = d.inner.lock();
+            let id = g.chat.conversation_id().unwrap().to_owned();
+            let rows = conversations::messages(g.db.connection(), &id).unwrap();
+            let saved: Value =
+                serde_json::from_str(rows.last().unwrap().sources.as_deref().unwrap()).unwrap();
+            assert_eq!(saved["sources"][0]["id"], "saved");
+            assert_eq!(saved["cite_max"], 1);
+            assert_eq!(saved["cite_notes"], 0);
+            id
+        };
+        let mut replay = d.subscribe();
+        {
+            let mut g = d.inner.lock();
+            d.restore_chat(&mut g, &conversation).unwrap();
+        }
+        let history = replay.try_recv().unwrap();
+        assert_eq!(history["event"], "history");
+        assert_eq!(history["rows"][1]["sources"][0]["id"], "saved");
+        assert!(history["rows"][0].get("sources").is_none());
         {
             let mut g = d.inner.lock();
             let g = &mut *g;
@@ -5394,11 +5734,11 @@ mod routing_tests {
             let g = d.inner.lock();
             (
                 {
-                    let (_, n, t) = d.cite_window(&g);
+                    let (_, n, t) = d.cite_window(&g, None);
                     d.system_prompt(&g, false, false, &n, &t, false)
                 },
                 {
-                    let (_, n, t) = d.cite_window(&g);
+                    let (_, n, t) = d.cite_window(&g, None);
                     d.system_prompt(&g, false, true, &n, &t, false)
                 },
             )
@@ -6348,7 +6688,7 @@ mod command_tests {
         };
         d.inner.lock().settings.chat_provider = "none".into();
         let mut events = d.subscribe();
-        d.finish_meeting_artifacts(&meeting, true).await;
+        d.finish_meeting_artifacts(&meeting, true, false).await;
         let mut folder_needed = false;
         while let Ok(event) = events.try_recv() {
             folder_needed |= event["event"] == "export.folder_needed";
@@ -6362,7 +6702,7 @@ mod command_tests {
 
         let root = d.db_path.parent().unwrap().join("exports");
         d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
-        d.finish_meeting_artifacts(&meeting, true).await;
+        d.finish_meeting_artifacts(&meeting, true, false).await;
         assert!(
             exports::get(d.inner.lock().db.connection(), &meeting)
                 .unwrap()
@@ -6382,7 +6722,7 @@ mod command_tests {
             .unwrap()
         };
         d.inner.lock().settings.export_meetings = false;
-        d.finish_meeting_artifacts(&other, true).await;
+        d.finish_meeting_artifacts(&other, true, false).await;
         assert!(
             exports::get(d.inner.lock().db.connection(), &other)
                 .unwrap()
@@ -7281,7 +7621,7 @@ mod command_tests {
             }
             m
         };
-        d.finish_meeting_artifacts(&m, true).await;
+        d.finish_meeting_artifacts(&m, true, false).await;
         let mut updated = 0;
         while let Ok(e) = events.try_recv() {
             updated += usize::from(e["event"] == "items.updated");
@@ -8419,6 +8759,53 @@ mod command_tests {
     }
 
     #[tokio::test]
+    async fn regenerate_without_provider_keeps_title_and_duplicate_items() {
+        let d = daemon();
+        let meeting = {
+            let mut g = d.inner.lock();
+            g.settings.chat_provider = "none".into();
+            let c = g.db.connection();
+            let meeting =
+                meetings::start(c, "My title", "", "en", None, MeetingMode::TeamMeeting).unwrap();
+            for text in ["Send the draft", "Send the draft."] {
+                items::insert(
+                    c,
+                    &items::NewItem {
+                        meeting_id: &meeting,
+                        kind: "action",
+                        text,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            meeting
+        };
+        let before = {
+            let g = d.inner.lock();
+            items::list(g.db.connection(), items::Scope::Meeting(&meeting), None).unwrap()
+        };
+        assert!(before.iter().all(|i| i.draft));
+        d.finish_meeting_artifacts(&meeting, false, true).await;
+        let g = d.inner.lock();
+        // Nothing merged or rewritten: only `draft` is cleared, so the items carry over.
+        let after = items::list(g.db.connection(), items::Scope::Meeting(&meeting), None).unwrap();
+        assert!(after.iter().all(|i| !i.draft));
+        let undrafted: Vec<_> = before
+            .into_iter()
+            .map(|i| items::ItemRecord { draft: false, ..i })
+            .collect();
+        assert_eq!(after, undrafted);
+        let title: String =
+            g.db.connection()
+                .query_row("SELECT title FROM meetings WHERE id=?1", [&meeting], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+        assert_eq!(title, "My title");
+    }
+
+    #[tokio::test]
     async fn regenerating_notes_never_exports_and_waits_for_the_recording() {
         let d = daemon();
         let meeting = {
@@ -8487,9 +8874,72 @@ mod command_tests {
             let epoch = d.send_epoch.load(Ordering::Relaxed);
             d.handle(cmd, json!({}), None).await.unwrap();
             // The send that started before it must not start a turn afterwards.
-            let turn = d.begin_send("old question".into(), None, false, false, Some(epoch));
+            let turn = d.begin_send("old question".into(), None, false, false, None, Some(epoch));
             assert_eq!(turn, Ok(None), "{cmd}");
         }
+    }
+
+    #[tokio::test]
+    async fn ask_line_rejects_unknown_and_other_interview_before_changing_turn() {
+        let d = daemon();
+        let (other_line, current_line, past_line) = {
+            let mut g = d.inner.lock();
+            let c = g.db.connection();
+            let current =
+                meetings::start(c, "Open", "", "en", None, MeetingMode::Interviewer).unwrap();
+            let other =
+                meetings::start(c, "Other", "", "en", None, MeetingMode::Interview).unwrap();
+            let current_line =
+                meetings::add_line(c, &current, "them", None, "open", 0.0, 1.0).unwrap();
+            let other_line =
+                meetings::add_line(c, &other, "them", None, "secret", 0.0, 1.0).unwrap();
+            let past = meetings::start(c, "Past", "", "en", None, MeetingMode::General).unwrap();
+            let past_line = meetings::add_line(c, &past, "them", None, "old", 0.0, 1.0).unwrap();
+            let candidate = candidates::create(c, "Ada").unwrap();
+            candidates::link_meeting(c, &candidate.id, &other).unwrap();
+            g.meeting_id = Some(current);
+            g.settings.meeting_mode = MeetingMode::Interviewer;
+            (other_line, current_line, past_line)
+        };
+        let before = d.now_get();
+        for (line, expected) in [
+            ("missing", "That line no longer exists."),
+            (&other_line, "Open that interview to ask about its lines."),
+        ] {
+            assert_eq!(
+                d.handle("chat.send", json!({"text":"Explain", "line":line}), None)
+                    .await
+                    .unwrap_err(),
+                expected
+            );
+            assert_eq!(d.now_get(), before);
+        }
+        assert!(
+            d.handle(
+                "chat.send",
+                json!({"text":"Explain", "line":current_line}),
+                None
+            )
+            .await
+            .is_ok()
+        );
+        {
+            let g = d.inner.lock();
+            assert_eq!(g.cite[0].0, "1");
+            assert_eq!(g.cite[0].1.id, current_line);
+            assert!(Daemon::guarded(&g));
+        }
+        d.handle("chat.cancel", json!({}), None).await.unwrap();
+        d.handle(
+            "chat.send",
+            json!({"text":"Explain", "line":past_line}),
+            None,
+        )
+        .await
+        .unwrap();
+        let g = d.inner.lock();
+        assert_eq!(g.cite[0].1.id, past_line);
+        assert!(Daemon::guarded(&g));
     }
 
     #[tokio::test]
@@ -8672,7 +9122,7 @@ mod command_tests {
         // System prompt uses cached speaker names.
         let prompt = {
             let g = d.inner.lock();
-            let (_, n, t) = d.cite_window(&g);
+            let (_, n, t) = d.cite_window(&g, None);
             d.system_prompt(&g, false, false, &n, &t, false)
         };
         assert!(prompt.contains("Ada: final words\n"), "{prompt}");
@@ -8810,6 +9260,7 @@ mod command_tests {
                     last_line: 1,
                     body: "chunk body".into(),
                     created_at: String::new(),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -8866,7 +9317,7 @@ mod command_tests {
             )
             .unwrap();
             c.execute(
-                "UPDATE meeting_recaps SET updated_at = '2026-11-03 12:00:00' WHERE meeting_id = ?1",
+                "UPDATE meeting_recaps SET read_at = '2026-11-03 12:00:00' WHERE meeting_id = ?1",
                 [&m_recap],
             )
             .unwrap();
@@ -8898,7 +9349,7 @@ mod command_tests {
             let g = d.inner.lock();
             let c = g.db.connection();
             c.execute(
-                "UPDATE meeting_recaps SET updated_at = '2026-11-03 12:00:01' WHERE meeting_id = ?1",
+                "UPDATE meeting_recaps SET read_at = '2026-11-03 12:00:01' WHERE meeting_id = ?1",
                 [&m_recap],
             )
             .unwrap();
@@ -8920,6 +9371,376 @@ mod command_tests {
                 .unwrap()["stale"],
             false
         );
+
+        // A correction made after the inputs were read makes both kinds stale.
+        let (recap_line, chunk_line) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            (
+                meetings::add_line(c, &m_recap, "them", None, "heard", 0.0, 1.0).unwrap(),
+                meetings::add_line(c, &m_chunk, "them", None, "heard", 0.0, 1.0).unwrap(),
+            )
+        };
+        for line in [recap_line, chunk_line] {
+            d.handle(
+                "transcript.edit",
+                json!({"id": line, "text": "corrected"}),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        for m in [&m_recap, &m_chunk] {
+            assert_eq!(
+                d.handle("notes.get", json!({"meeting": m}), None)
+                    .await
+                    .unwrap()["stale"],
+                true
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_marks_lines_it_cut_so_they_cannot_be_corrected() {
+        let d = daemon();
+        let meeting = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let meeting = meetings::start(c, "Test", "", "en", None, Default::default()).unwrap();
+            meetings::add_line(c, &meeting, "them", None, &"a".repeat(9_000), 0.0, 1.0).unwrap();
+            meetings::add_line(c, &meeting, "them", None, "short", 1.0, 2.0).unwrap();
+            meeting
+        };
+        let mut events = d.subscribe();
+        d.handle("session.restore", json!({"id": meeting}), None)
+            .await
+            .unwrap();
+        let mut replayed = Vec::new();
+        while replayed.len() < 2 {
+            let ev = events.recv().await.unwrap();
+            if ev["event"] == "transcript.final" {
+                replayed.push(
+                    ev["data"]["shortened"]
+                        .as_bool()
+                        .or(ev["shortened"].as_bool()),
+                );
+            }
+        }
+        assert_eq!(replayed, [Some(true), Some(false)]);
+    }
+
+    #[tokio::test]
+    async fn transcript_edit_updates_live_and_restored_context() {
+        let d = daemon();
+        let meeting = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let meeting = meetings::start(c, "Test", "", "en", None, Default::default()).unwrap();
+            meetings::add_line(c, &meeting, "them", None, "heard words", 0.0, 1.0).unwrap();
+            meeting
+        };
+        let mut events = d.subscribe();
+        d.handle("session.restore", json!({"id": meeting}), None)
+            .await
+            .unwrap();
+        let id = d.handle("transcript.get", json!({}), None).await.unwrap()["lines"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        d.handle(
+            "transcript.edit",
+            json!({"id": id, "text": "  corrected words  "}),
+            None,
+        )
+        .await
+        .unwrap();
+        let edited = loop {
+            let ev = events.recv().await.unwrap();
+            if ev["event"] == "transcript.edited" {
+                break ev;
+            }
+        };
+        assert_eq!(edited["text"], "corrected words");
+        assert_eq!(edited["heard"], "heard words");
+        assert_eq!(edited["edited"], true);
+        {
+            let g = d.inner.lock();
+            assert_eq!(g.transcript[0].text, "corrected words");
+            assert!(
+                g.sources
+                    .iter()
+                    .find(|s| s.id == format!("restored-meeting:{meeting}"))
+                    .unwrap()
+                    .text
+                    .contains("Them: corrected words")
+            );
+            let (_, _, cited) = d.cite_window(&g, None);
+            assert!(cited.contains("Them: corrected words"));
+        }
+        let row = &d.handle("transcript.get", json!({}), None).await.unwrap()["lines"][0];
+        assert_eq!(row["text"], "corrected words");
+        assert_eq!(row["edited"], true);
+        assert_eq!(row["heard"], "heard words");
+        assert_eq!(row["bookmarked"], false);
+
+        {
+            let g = d.inner.lock();
+            meetings::set_bookmark(g.db.connection(), &id, true).unwrap();
+        }
+        let mut replay = d.subscribe();
+        d.handle("session.restore", json!({"id": meeting}), None)
+            .await
+            .unwrap();
+        let restored = loop {
+            let ev = replay.recv().await.unwrap();
+            if ev["event"] == "transcript.final" {
+                break ev;
+            }
+        };
+        assert_eq!(restored["edited"], true);
+        assert_eq!(restored["heard"], "heard words");
+        assert_eq!(restored["bookmarked"], true);
+        assert_eq!(
+            d.handle("transcript.get", json!({}), None).await.unwrap()["lines"][0]["bookmarked"],
+            true
+        );
+
+        d.handle(
+            "transcript.edit",
+            json!({"id": id, "text": "heard words"}),
+            None,
+        )
+        .await
+        .unwrap();
+        let reverted = &d.handle("transcript.get", json!({}), None).await.unwrap()["lines"][0];
+        assert_eq!(reverted["edited"], true);
+        assert!(reverted.get("heard").is_none());
+    }
+
+    #[tokio::test]
+    async fn transcript_edit_refuses_bad_text_missing_lines_and_agents() {
+        let d = daemon();
+        let (meeting, id) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let meeting = meetings::start(c, "Test", "", "en", None, Default::default()).unwrap();
+            let id = meetings::add_line(c, &meeting, "them", None, "original", 0.0, 1.0).unwrap();
+            (meeting, id)
+        };
+        for text in ["  ".to_owned(), "x".repeat(32_001)] {
+            assert!(
+                d.handle("transcript.edit", json!({"id": id, "text": text}), None)
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            d.handle(
+                "transcript.edit",
+                json!({"id": "missing", "text": "ok"}),
+                None
+            )
+            .await
+            .unwrap_err(),
+            "That line no longer exists."
+        );
+        for origin in ["mcp", "agent"] {
+            assert_eq!(
+                d.handle(
+                    "transcript.edit",
+                    json!({"id": id, "text": "changed"}),
+                    Some(origin)
+                )
+                .await
+                .unwrap_err(),
+                "not allowed for agents"
+            );
+        }
+        let g = d.inner.lock();
+        assert_eq!(
+            meetings::lines(g.db.connection(), &meeting).unwrap()[0].text,
+            "original"
+        );
+    }
+
+    #[tokio::test]
+    async fn bookmarks_list_orders_named_lines_and_rejects_agent_writes() {
+        let d = daemon();
+        let (meeting, early, late) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let meeting = meetings::start(c, "Test", "", "en", None, Default::default()).unwrap();
+            let late = meetings::add_line(c, &meeting, "them", Some(0), "later", 8.0, 9.0).unwrap();
+            let early =
+                meetings::add_line(c, &meeting, "them", Some(0), "earlier", 1.0, 2.0).unwrap();
+            meetings::name_speaker(c, &meeting, "0", "Ada").unwrap();
+            (meeting, early, late)
+        };
+        let mut events = d.subscribe();
+        for id in [&late, &early] {
+            d.handle("bookmark.set", json!({"line": id, "on": true}), None)
+                .await
+                .unwrap();
+            let event = events.recv().await.unwrap();
+            assert_eq!(event["event"], "transcript.bookmarked");
+            assert_eq!(event["id"], id.as_str());
+            assert_eq!(event["on"], true);
+        }
+        let rows = d
+            .handle("bookmarks.list", json!({"meeting": meeting}), None)
+            .await
+            .unwrap();
+        assert_eq!(rows[0]["line"], early);
+        assert_eq!(rows[1]["line"], late);
+        assert_eq!(rows[0]["speaker"], "Ada");
+        assert_eq!(
+            d.handle("transcript.get", json!({"meeting": meeting}), None)
+                .await
+                .unwrap()["lines"][0]["bookmarked"],
+            true
+        );
+        d.handle("bookmark.set", json!({"line": early, "on": false}), None)
+            .await
+            .unwrap();
+        let event = events.recv().await.unwrap();
+        assert_eq!(event["event"], "transcript.bookmarked");
+        assert_eq!(event["id"], early);
+        assert_eq!(event["on"], false);
+        assert_eq!(
+            d.handle("bookmark.set", json!({"line": "missing", "on": true}), None)
+                .await
+                .unwrap_err(),
+            "That line no longer exists."
+        );
+        assert_eq!(
+            d.handle("bookmarks.list", json!({"meeting": meeting}), None)
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        for origin in ["agent", "mcp"] {
+            assert_eq!(
+                d.handle(
+                    "bookmark.set",
+                    json!({"line": late, "on": false}),
+                    Some(origin)
+                )
+                .await
+                .unwrap_err(),
+                "not allowed for agents"
+            );
+            assert_eq!(
+                d.handle("bookmarks.list", json!({"meeting": meeting}), Some(origin))
+                    .await
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        let candidate = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let candidate = candidates::create(c, "Private").unwrap();
+            candidates::link_meeting(c, &candidate.id, &meeting).unwrap();
+            candidates::set_local_only(c, &candidate.id, true).unwrap();
+            candidate.id
+        };
+        assert!(!candidate.is_empty());
+        assert_eq!(
+            d.handle("bookmarks.list", json!({"meeting": meeting}), Some("mcp"))
+                .await
+                .unwrap_err(),
+            "This interview is local-only"
+        );
+        assert_eq!(
+            d.handle(
+                "chat.send",
+                json!({"text":"why", "line":"line-id"}),
+                Some("mcp")
+            )
+            .await
+            .unwrap_err(),
+            "not allowed for agents"
+        );
+    }
+
+    #[tokio::test]
+    async fn notes_timeline_links_chunks_and_short_meetings() {
+        let d = daemon();
+        let (chunked, short, first, second, short_id) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let chunked =
+                meetings::start(c, "Chunked", "", "en", None, Default::default()).unwrap();
+            let first = meetings::add_line(c, &chunked, "them", None, "first", 2.0, 3.0).unwrap();
+            let second =
+                meetings::add_line(c, &chunked, "them", None, "second", 12.0, 13.0).unwrap();
+            meetings::add_chunk(
+                c,
+                &chunked,
+                &meetings::NoteChunk {
+                    t0: 0.0,
+                    t1: 10.0,
+                    body: "a".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            meetings::add_chunk(
+                c,
+                &chunked,
+                &meetings::NoteChunk {
+                    t0: 10.0,
+                    t1: 20.0,
+                    body: "b".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let short = meetings::start(c, "Short", "", "en", None, Default::default()).unwrap();
+            let short_id = meetings::add_line(c, &short, "me", None, "one", 3.0, 4.0).unwrap();
+            (chunked, short, first, second, short_id)
+        };
+        let chunks = d
+            .handle("notes.get", json!({"meeting": chunked}), None)
+            .await
+            .unwrap()["chunks"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0]["line"], first);
+        assert_eq!(chunks[1]["line"], second);
+        let whole = d
+            .handle("notes.get", json!({"meeting": short}), None)
+            .await
+            .unwrap();
+        assert_eq!(whole["chunks"].as_array().unwrap().len(), 1);
+        assert_eq!(whole["chunks"][0]["body"], "");
+        assert_eq!(whole["chunks"][0]["line"], short_id);
+        assert_eq!(whole["chunks"][0]["t0"], 0.0);
+        assert_eq!(whole["chunks"][0]["t1"], 4.0);
+    }
+
+    #[tokio::test]
+    async fn live_transcript_marks_shortened_rows() {
+        let d = daemon();
+        let mut events = d.subscribe();
+        {
+            let mut g = d.inner.lock();
+            d.push_transcript(&mut g, "short", 0.0, 1.0, 1, None);
+            d.push_transcript(&mut g, &"x".repeat(32_001), 1.0, 2.0, 1, None);
+        }
+        assert_eq!(events.recv().await.unwrap()["shortened"], false);
+        let shortened = events.recv().await.unwrap();
+        assert_eq!(shortened["shortened"], true);
+        assert_eq!(shortened["edited"], false);
+        assert_eq!(shortened["bookmarked"], false);
     }
     #[tokio::test]
     async fn lines_carry_ids_and_around_windows_them() {

@@ -438,13 +438,19 @@ async fn chunk_pending(
     let (mut made, mut continued) = (0, Vec::new());
     loop {
         let owned = id.to_owned();
-        let (rows, names) = db(path, move |db| {
+        let (rows, names, read_at) = db(path, move |db| {
             let last = meetings::chunks(db.connection(), &owned)?
                 .last()
                 .map_or(0, |c| c.last_line);
+            let read_at = db.connection().query_row(
+                "SELECT strftime('%Y-%m-%d %H:%M:%f','now')",
+                [],
+                |r| r.get::<_, String>(0),
+            )?;
             Ok((
                 meetings::lines_after(db.connection(), &owned, last)?,
                 meetings::speaker_names(db.connection(), &owned)?,
+                read_at,
             ))
         })
         .await?;
@@ -468,7 +474,9 @@ async fn chunk_pending(
             t1: slice.iter().map(|l| l.end_time).fold(f64::MIN, f64::max),
             last_line: ids[n - 1],
             body,
+            read_at: Some(read_at),
             created_at: String::new(),
+            ..Default::default()
         };
         // `source_line` counts the numbered slice; store the line's rowid.
         let spoken_text = slice
@@ -537,6 +545,72 @@ async fn chunk_pending(
     }
 }
 
+/// Rebuild only chunks whose covered lines were corrected after their inputs were read.
+pub async fn refresh_chunks(
+    path: &Path,
+    id: &str,
+    config: &ProviderConfig,
+    language: &str,
+) -> Result<usize, String> {
+    let owned = id.to_owned();
+    let (team, interview, said, names, open, pending) = db(path, move |db| {
+        let c = db.connection();
+        let mode = meetings::mode(c, &owned);
+        let interview = mode == MeetingMode::Interviewer
+            || candidates::for_meeting(c, &owned)?.is_some();
+        let team = mode == MeetingMode::TeamMeeting && !interview;
+        let open = if team {
+            items::meeting_series(c, &owned)?
+                .map(|s| items::open_for_series(c, &s, Some(&owned)))
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut pending = Vec::new();
+        let mut previous = 0;
+        for chunk in meetings::chunks(c, &owned)? {
+            let changed: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meeting_lines WHERE meeting_id=?1 AND rowid>?2 AND rowid<=?3 AND edited_at>=?4)",
+                rusqlite::params![owned, previous, chunk.last_line, chunk.read_at.as_deref().unwrap_or(&chunk.created_at)],
+                |r| r.get(0),
+            )?;
+            if changed {
+                let read_at = c.query_row("SELECT strftime('%Y-%m-%d %H:%M:%f','now')", [], |r| r.get::<_, String>(0))?;
+                let lines = meetings::lines_after(c, &owned, previous)?
+                    .into_iter()
+                    .take_while(|(rowid, _)| *rowid <= chunk.last_line)
+                    .map(|(_, line)| line)
+                    .collect::<Vec<_>>();
+                pending.push((chunk.id, spoken(&lines), read_at));
+            }
+            previous = chunk.last_line;
+        }
+        Ok((team, interview, candidates::said(c, &owned), meetings::speaker_names(c, &owned)?, open, pending))
+    }).await?;
+    let count = pending.len();
+    for (chunk_id, lines, read_at) in pending {
+        let body = if team {
+            parse_team_chunk(
+                &summarise_team(config, &lines, &open_items_text(&open), language, &names).await?,
+            )
+            .0
+        } else {
+            let body = summarise_slice(config, &lines, language, interview, &names).await?;
+            if interview && guard::assessment(&body, &said).is_some() {
+                WITHHELD_CHUNK.into()
+            } else {
+                body
+            }
+        };
+        db(path, move |db| {
+            meetings::update_chunk_body(db.connection(), chunk_id, &body, &read_at)
+        })
+        .await?;
+    }
+    Ok(count)
+}
+
 /// Called after each final line while recording: writes a chunk when 8k characters
 /// or 5 minutes of new speech have built up. Returns whether one was written.
 pub async fn maybe_chunk(
@@ -581,6 +655,7 @@ pub async fn generate(
     id: &str,
     config: Option<ProviderConfig>,
     language: &str,
+    reconcile_items: bool,
 ) -> Result<(), String> {
     let owned = id.to_owned();
     db(path, move |db| {
@@ -619,13 +694,15 @@ pub async fn generate(
                 guard::with_retry(&said, |extra| {
                     let prompt = format!("{prompt}\n\n{bank}\n\n{extra}");
                     let config = &config;
-                    async move { notes(path, id, config, &prompt, language, false).await }
+                    async move {
+                        notes(path, id, config, &prompt, language, false, reconcile_items).await
+                    }
                 })
                 .await
             }
             Some(config) => {
                 let team = mode == MeetingMode::TeamMeeting;
-                notes(path, id, &config, prompt, language, team).await
+                notes(path, id, &config, prompt, language, team, reconcile_items).await
             }
         }
     }
@@ -661,6 +738,7 @@ async fn notes(
     prompt: &str,
     language: &str,
     team: bool,
+    reconcile_items: bool,
 ) -> Result<String, String> {
     let owned = id.to_owned();
     let (saved, rest, names) = db(path, move |db| {
@@ -688,6 +766,8 @@ async fn notes(
         )
         .await;
     }
+    // Lines no chunk covers yet are summarised for the first time: keep their items, even on
+    // Regenerate. Only re-summarised chunks (`refresh_chunks`) discard extracted items.
     chunk_pending(path, id, config, language, true).await?;
     let owned = id.to_owned();
     let bodies = db(path, move |db| {
@@ -696,7 +776,9 @@ async fn notes(
             .map(|c| c.body)
             .collect();
         if team {
-            reconcile(db.connection(), &owned)?;
+            if reconcile_items {
+                reconcile(db.connection(), &owned)?;
+            }
             let touched = items::touched(db.connection(), &owned)?;
             if !touched.is_empty() {
                 let mut list = String::new();
@@ -741,7 +823,11 @@ mod tests {
             id
         };
         let config = ProviderConfig::new("none", "", "");
-        assert!(generate(&path, &id, Some(config), "en").await.is_err());
+        assert!(
+            generate(&path, &id, Some(config), "en", true)
+                .await
+                .is_err()
+        );
         let db = Database::open(&path).unwrap();
         let recap = meetings::recap(db.connection(), &id).unwrap().unwrap();
         assert_eq!(recap.status, "failed");
@@ -820,6 +906,8 @@ mod tests {
                 text: "Let's check the schedule".into(),
                 start_time: 0.0,
                 end_time: 2.0,
+                heard: None,
+                edited: false,
             },
             LineRecord {
                 id: "2".into(),
@@ -828,6 +916,8 @@ mod tests {
                 text: "I will take the trash out".into(),
                 start_time: 2.0,
                 end_time: 4.0,
+                heard: None,
+                edited: false,
             },
             LineRecord {
                 id: "3".into(),
@@ -836,6 +926,8 @@ mod tests {
                 text: "Ship on Monday".into(),
                 start_time: 4.0,
                 end_time: 6.0,
+                heard: None,
+                edited: false,
             },
         ];
         let (slice_sys, slice_user) = slice_prompts(&lines, "Auto", false, &BTreeMap::new());
@@ -869,6 +961,8 @@ mod tests {
             text: "x".into(),
             start_time: s,
             end_time: e,
+            heard: None,
+            edited: false,
         };
         // Arrived last but spoken first: the span is 0..400, not 350..360.
         assert!(due(&[at(350.0, 360.0), at(0.0, 5.0), at(390.0, 400.0)]));
