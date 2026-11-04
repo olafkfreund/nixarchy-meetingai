@@ -170,7 +170,7 @@ async fn transcribe_with_prompt(
         transcribe_custom(config, custom, wav, language).await
     } else if let Some(provider) = SttProvider::by_id(&config.id) {
         match provider.wire {
-            SttWire::InProcess => transcribe_parakeet(wav).await,
+            SttWire::InProcess => transcribe_in_process(&config.id, wav).await,
             SttWire::OpenAiMultipart => {
                 transcribe_openai(config, provider, wav, language, prompt).await
             }
@@ -315,6 +315,15 @@ async fn transcribe_custom(
                 None,
                 config.model.as_bytes(),
             );
+            if let Some(language) = language.filter(|language| !language.is_empty()) {
+                form_part(
+                    &mut body,
+                    &boundary,
+                    "form-data; name=\"language\"",
+                    None,
+                    language.as_bytes(),
+                );
+            }
             form_part(
                 &mut body,
                 &boundary,
@@ -395,10 +404,15 @@ pub async fn transcribe_chunk(
     samples: &[f32],
     prompt: &str,
 ) -> Result<String, SttError> {
-    transcribe_with_prompt(config, to_wav(samples)?, None, prompt).await
+    let began = Instant::now();
+    let result = transcribe_with_prompt(config, to_wav(samples)?, None, prompt).await;
+    if result.is_ok() {
+        super::record_chunk_latency(began.elapsed().as_secs_f64());
+    }
+    result
 }
-async fn transcribe_parakeet(wav: Vec<u8>) -> Result<String, SttError> {
-    // Parakeet takes no prompt or language; it is multilingual and resamples itself.
+async fn transcribe_in_process(id: &str, wav: Vec<u8>) -> Result<String, SttError> {
+    // In-process engines take no prompt or language.
     let reader = hound::WavReader::new(std::io::Cursor::new(wav))
         .map_err(|e| SttError::Encode(e.to_string()))?;
     let spec = reader.spec();
@@ -406,16 +420,31 @@ async fn transcribe_parakeet(wav: Vec<u8>) -> Result<String, SttError> {
         || spec.bits_per_sample != 16
         || spec.sample_format != hound::SampleFormat::Int
     {
-        return Err(SttError::Encode("Parakeet needs mono 16-bit audio".into()));
+        let engine = if id == "parakeet-local" {
+            "Parakeet"
+        } else {
+            "Norwegian Whisper"
+        };
+        return Err(SttError::Encode(format!(
+            "{engine} needs mono 16-bit audio"
+        )));
     }
     let samples = reader
         .into_samples::<i16>()
         .map(|s| s.map(|v| f32::from(v) / 32768.0))
         .collect::<Result<Vec<f32>, _>>()
         .map_err(|e| SttError::Encode(e.to_string()))?;
-    crate::speech::stt::parakeet::transcribe(samples, spec.sample_rate as i32)
-        .await
-        .map(|t| t.trim().to_owned())
+    let result = match id {
+        "parakeet-local" => {
+            crate::speech::stt::parakeet::transcribe(samples, spec.sample_rate as i32).await
+        }
+        "whisper-nb-local" => {
+            crate::speech::stt::whisper_nb::transcribe(samples, spec.sample_rate as i32).await
+        }
+        _ => return Err(SttError::NotConfigured),
+    };
+    result
+        .map(|text| text.trim().to_owned())
         .map_err(SttError::Protocol)
 }
 async fn transcribe_openai(
@@ -1653,6 +1682,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn custom_multipart_sends_its_language_code() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                let count = socket.read(&mut buf).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buf[..count]);
+                if let Some(split) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..split]);
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|s| s.parse().ok())
+                        })
+                        .unwrap();
+                    if request.len() >= split + 4 + length {
+                        break;
+                    }
+                }
+            }
+            assert!(String::from_utf8_lossy(&request).contains("name=\"language\"\r\n\r\nnb"));
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        let mut config = ProviderConfig::new("custom-test", "", "model");
+        config.base_url = format!("http://127.0.0.1:{port}/speech");
+        config.language = "nb".into();
+        config.custom = Some(crate::ai::catalog::custom::CustomProvider {
+            request_format: "multipart-wav".into(),
+            response_format: "text".into(),
+            auth: "none".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            transcribe(&config, b"RIFFtest".to_vec(), None)
+                .await
+                .unwrap(),
+            "ok"
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn openai_multipart_rejects_query_and_fragment_in_base_url() {
         let mut config =
             crate::ai::providers::ProviderConfig::new("openai-compatible-stt", "", "parakeet");
@@ -1696,6 +1779,50 @@ mod tests {
     /// and `finish` flushes chunks that never saw trailing silence.
     /// The fake Parakeet decoder is process-global: tests that install one run one at a time.
     static DECODER_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn in_process_dispatch_ignores_prompt_and_keeps_parakeet() {
+        let _one_at_a_time = DECODER_TESTS.lock().await;
+        crate::speech::stt::parakeet::set_decoder(Box::new(|_, _| "parakeet".into()));
+        crate::speech::stt::whisper_nb::set_decoder(Box::new(|_, _| "norwegian".into()));
+        let wav = to_wav(&[0.1; 16_000]).unwrap();
+        for (id, expected) in [
+            ("parakeet-local", "parakeet"),
+            ("whisper-nb-local", "norwegian"),
+        ] {
+            let config = ProviderConfig::new(id, "", "");
+            assert_eq!(
+                transcribe_with_prompt(&config, wav.clone(), None, "secret glossary")
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn load_modes_keep_or_unload_the_inactive_engine() {
+        use crate::speech::stt::{LoadMode, parakeet, set_load_mode, whisper_nb};
+        let _one_at_a_time = DECODER_TESTS.lock().await;
+        let wav = to_wav(&[0.1; 16_000]).unwrap();
+        let config = ProviderConfig::new("whisper-nb-local", "", "");
+        set_load_mode(LoadMode::Resident);
+        parakeet::set_decoder(Box::new(|_, _| "parakeet".into()));
+        whisper_nb::set_decoder(Box::new(|_, _| "norwegian".into()));
+        transcribe(&config, wav.clone(), None).await.unwrap();
+        assert!(parakeet::loaded() && whisper_nb::loaded());
+        set_load_mode(LoadMode::UnloadInactive);
+        transcribe(&config, wav, None).await.unwrap();
+        assert!(!parakeet::loaded() && whisper_nb::loaded());
+        parakeet::set_decoder(Box::new(|_, _| "parakeet".into()));
+        let parakeet_config = ProviderConfig::new("parakeet-local", "", "");
+        transcribe(&parakeet_config, to_wav(&[0.1; 16_000]).unwrap(), None)
+            .await
+            .unwrap();
+        assert!(parakeet::loaded() && !whisper_nb::loaded());
+        set_load_mode(LoadMode::Resident);
+        whisper_nb::unload();
+    }
 
     #[tokio::test]
     async fn parakeet_batch_keeps_channel_and_times_and_flushes_on_stop() {

@@ -278,12 +278,14 @@ struct Dictation {
     samples: Vec<f32>,
     started: Instant,
     meeting: bool,
+    speech: ProviderConfig,
 }
 
 struct Recording {
     started: Instant,
     since_ms: i64,
     stop: Arc<AtomicBool>,
+    speech: Option<ProviderConfig>,
 }
 
 struct Inner {
@@ -644,8 +646,202 @@ fn speech_not_ready(provider: &str, other: &'static str) -> String {
     if provider == "parakeet-local" {
         let reason = crate::speech::stt::parakeet::not_ready_reason().unwrap_or_default();
         format!("Speech-to-text is not ready: {reason}.")
+    } else if provider == "whisper-nb-local" {
+        let reason = crate::speech::stt::whisper_nb::not_ready_reason().unwrap_or_default();
+        format!("Speech-to-text is not ready: {reason}.")
     } else {
         other.to_owned()
+    }
+}
+
+struct ResolvedSpeech {
+    id: String,
+    config: ProviderConfig,
+    language: String,
+}
+
+fn resolve_speech(settings: &Settings) -> ResolvedSpeech {
+    let chosen = settings.speech_provider.trim();
+    let chosen = if chosen.is_empty() {
+        "parakeet-local"
+    } else {
+        chosen
+    };
+    let raw = settings.speech_language.trim();
+    let raw = if raw.eq_ignore_ascii_case("auto") {
+        ""
+    } else {
+        raw
+    };
+    // "NB", "nb-NO" and "nn" all mean Norwegian.
+    let base = raw
+        .split(['-', '_'])
+        .next()
+        .unwrap_or(raw)
+        .to_ascii_lowercase();
+    let norwegian = matches!(base.as_str(), "nb" | "no" | "nn");
+    let id = if chosen == "parakeet-local" && norwegian {
+        "whisper-nb-local"
+    } else {
+        chosen
+    };
+    let language = if norwegian && !id.starts_with("custom-") {
+        "no"
+    } else {
+        raw
+    };
+    let mut config = ProviderConfig::new(
+        id,
+        "",
+        SttProvider::by_id(id).map_or("", |provider| provider.default_model),
+    );
+    // The model setting belongs to the engine the user chose, not one routing picked for them.
+    if !settings.speech_model.is_empty() && id == chosen {
+        config.model.clone_from(&settings.speech_model);
+    }
+    ResolvedSpeech {
+        id: id.into(),
+        config,
+        language: language.into(),
+    }
+}
+
+/// Engines that keep audio on this machine or a server the user runs.
+fn local_speech(id: &str) -> bool {
+    matches!(
+        id,
+        "parakeet-local" | "whisper-nb-local" | "openai-compatible-stt"
+    ) || id.starts_with("custom-")
+}
+
+fn speech_guard(speech: &ResolvedSpeech) -> Result<Option<String>, String> {
+    let language = speech.language.as_str();
+    if language.is_empty() {
+        return Ok(None);
+    }
+    // "EN" and "en_US" are English: compare the lowercase base code.
+    let base = language
+        .split(['-', '_'])
+        .next()
+        .unwrap_or(language)
+        .to_ascii_lowercase();
+    let base = base.as_str();
+    let supported = match speech.id.as_str() {
+        // NVIDIA Parakeet TDT v3's 25 languages.
+        "parakeet-local" => Some(matches!(
+            base,
+            "bg" | "hr"
+                | "cs"
+                | "da"
+                | "nl"
+                | "en"
+                | "et"
+                | "fi"
+                | "fr"
+                | "de"
+                | "el"
+                | "hu"
+                | "it"
+                | "lv"
+                | "lt"
+                | "mt"
+                | "pl"
+                | "pt"
+                | "ro"
+                | "sk"
+                | "sl"
+                | "es"
+                | "sv"
+                | "ru"
+                | "uk"
+        )),
+        "whisper-nb-local" => Some(language == "no"),
+        // Deepgram Nova-3 general; other models have different support.
+        "deepgram-stt"
+            if speech.config.model == "nova-3" || speech.config.model == "nova-3-general" =>
+        {
+            Some(matches!(
+                base,
+                "af" | "ar"
+                    | "be"
+                    | "bn"
+                    | "bs"
+                    | "bg"
+                    | "ca"
+                    | "zh"
+                    | "hr"
+                    | "cs"
+                    | "da"
+                    | "nl"
+                    | "en"
+                    | "et"
+                    | "fi"
+                    | "fr"
+                    | "gl"
+                    | "de"
+                    | "el"
+                    | "gu"
+                    | "he"
+                    | "hi"
+                    | "hu"
+                    | "id"
+                    | "it"
+                    | "ja"
+                    | "kn"
+                    | "ko"
+                    | "lv"
+                    | "lt"
+                    | "mk"
+                    | "ms"
+                    | "mr"
+                    | "no"
+                    | "fa"
+                    | "pl"
+                    | "pt"
+                    | "ro"
+                    | "ru"
+                    | "sr"
+                    | "sk"
+                    | "sl"
+                    | "es"
+                    | "sv"
+                    | "tl"
+                    | "ta"
+                    | "te"
+                    | "th"
+                    | "tr"
+                    | "uk"
+                    | "vi"
+                    | "xh"
+                    | "zu"
+            ))
+        }
+        _ => None,
+    };
+    match supported {
+        Some(true) => Ok(None),
+        Some(false) => {
+            let alternative = if matches!(base, "nb" | "no" | "nn") {
+                "Norwegian Whisper or Deepgram"
+            } else {
+                "Deepgram or an OpenAI-compatible speech engine that supports it"
+            };
+            let engine = SttProvider::by_id(&speech.id).map_or(speech.id.as_str(), |p| p.name);
+            Err(format!(
+                "language_unsupported: {engine} cannot transcribe {language}. Choose {alternative} before recording."
+            ))
+        }
+        None => Ok(Some(format!(
+            "This speech engine's support for {language} cannot be checked. Confirm that its model supports the language."
+        ))),
+    }
+}
+
+fn preload_speech(id: &str) -> Result<(), String> {
+    match id {
+        "parakeet-local" => crate::speech::stt::parakeet::preload(),
+        "whisper-nb-local" => crate::speech::stt::whisper_nb::preload(),
+        _ => Ok(()),
     }
 }
 
@@ -983,6 +1179,7 @@ impl Daemon {
         let local = self.local_now(g);
         let chat = self.chat_config(&g.settings, local).is_some();
         let speech = self.speech_config(&g.settings, local).is_some();
+        let resolved = resolve_speech(&g.settings);
         json!({
             "recording": g.recording.as_ref().is_some_and(|r| !r.stop.load(Ordering::Relaxed)),
             "since": g.recording.as_ref().map_or(0, |r| r.since_ms),
@@ -1003,9 +1200,9 @@ impl Daemon {
                     "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama."
                 }),
                 "speech": (!speech).then(|| speech_not_ready(
-                    &g.settings.speech_provider,
+                    &resolved.id,
                     if local {
-                        "Local-only is on: speech-to-text must run on this machine (Parakeet, or an OpenAI-compatible server on a loopback address)."
+                        "Local-only is on: speech-to-text must run on this machine (Parakeet, Norwegian Whisper, or an OpenAI-compatible server on a loopback address)."
                     } else {
                         "Speech-to-text is not ready. Check the Parakeet model, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
                     },
@@ -1191,15 +1388,9 @@ impl Daemon {
     }
 
     fn speech_config(&self, s: &Settings, local: bool) -> Option<ProviderConfig> {
-        let id = if s.speech_provider.is_empty() {
-            "parakeet-local"
-        } else {
-            &s.speech_provider
-        };
-        if local
-            && !matches!(id, "parakeet-local" | "openai-compatible-stt")
-            && !id.starts_with("custom-")
-        {
+        let resolved = resolve_speech(s);
+        let id = resolved.id.as_str();
+        if local && !local_speech(id) {
             return None;
         }
         let mut config = match credentials::load(&self.vault, Kind::Speech, id) {
@@ -1210,7 +1401,7 @@ impl Daemon {
                         || (id == "deepgram-stt"
                             && std::env::var_os("NIXARCHY_MEETINGAI_DEEPGRAM_KEY_FILE").is_some())
                 })
-                .map(|p| ProviderConfig::new(id, "", p.default_model))?,
+                .map(|_| resolved.config.clone())?,
         };
         if id == "deepgram-stt" {
             apply_deepgram_key(
@@ -1224,10 +1415,11 @@ impl Daemon {
         if id == "openai-compatible-stt" {
             config.base_url.clone_from(&s.speech_base_url);
         }
-        config.language.clone_from(&s.speech_language);
+        // resolve_speech applied speech_model only if this is the engine the user chose.
         if !s.speech_model.is_empty() && config.custom.is_none() {
-            config.model.clone_from(&s.speech_model);
+            config.model = resolved.config.model;
         }
+        config.language = resolved.language;
         // A streaming custom record sends audio to its stream_url, which stays_local does not
         // see: local-only sessions never use one.
         let streams = config.custom.as_ref().is_some_and(|c| c.streaming);
@@ -2405,6 +2597,9 @@ impl Daemon {
                 return Err("Wait for your voice sample to finish recording.".into());
             }
             g.settings = Settings::load(&g.db).unwrap_or_default();
+            let resolved = resolve_speech(&g.settings);
+            // Refuse before the consent prompt; the notice for unknown support comes below.
+            speech_guard(&resolved)?;
             let local = self.local_now(g);
             if local && self.speech_config(&g.settings, true).is_none() {
                 return Err(
@@ -2422,9 +2617,9 @@ impl Daemon {
             let speech = if self.capture {
                 Some(self.speech_config(&g.settings, local).ok_or_else(|| {
                     speech_not_ready(
-                        &g.settings.speech_provider,
+                        &resolved.id,
                         if local {
-                            "local_only: speech-to-text must run on this machine (Parakeet, or an OpenAI-compatible server on a loopback address)."
+                            "local_only: speech-to-text must run on this machine (Parakeet, Norwegian Whisper, or an OpenAI-compatible server on a loopback address)."
                         } else {
                             "Speech-to-text is not ready. Check the Parakeet model, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
                         },
@@ -2433,6 +2628,13 @@ impl Daemon {
             } else {
                 None
             };
+            let mut guard_speech = resolved;
+            if let Some(config) = &speech {
+                guard_speech.config = config.clone();
+            }
+            if let Some(notice) = speech_guard(&guard_speech)? {
+                self.emit("notice", json!({"text": notice}));
+            }
             self.interrupt(g);
             // Play reconnects capture in the current conversation. Only New clears it.
             g.meeting_offset = g.last_elapsed.max(g.meeting_offset);
@@ -2456,6 +2658,7 @@ impl Daemon {
                 started: Instant::now(),
                 since_ms: now_ms(),
                 stop: stop.clone(),
+                speech: speech.clone(),
             });
             (
                 stop,
@@ -2481,9 +2684,14 @@ impl Daemon {
             daemon: self,
             armed: true,
         };
-        // Load Parakeet before capture makes chunks, so a slow first load cannot back them up.
-        if speech.as_ref().is_some_and(|c| c.id == "parakeet-local") {
-            let loaded = tokio::task::spawn_blocking(crate::speech::stt::parakeet::preload)
+        // Load the selected local engine before capture makes chunks.
+        if let Some(id) = speech
+            .as_ref()
+            .map(|c| c.id.as_str())
+            .filter(|id| matches!(*id, "parakeet-local" | "whisper-nb-local"))
+        {
+            let id = id.to_owned();
+            let loaded = tokio::task::spawn_blocking(move || preload_speech(&id))
                 .await
                 .map_err(|e| e.to_string())
                 .and_then(|r| r);
@@ -3270,26 +3478,13 @@ impl Daemon {
 
     fn dictate_start(self: &Arc<Self>) -> Result<Value, String> {
         // Opening the microphone runs pactl, so do it without the daemon lock.
-        let (meeting, device) = {
+        let (meeting, device, speech) = {
             let g = self.inner.lock();
             if g.dictation.is_some() {
                 return Err("Dictation is already running.".into());
             }
             if self.enrolling.load(Ordering::Acquire) {
                 return Err("Wait for your voice sample to finish recording.".into());
-            }
-            if self
-                .speech_config(&g.settings, self.local_now(&g))
-                .is_none()
-            {
-                return Err(speech_not_ready(
-                    &g.settings.speech_provider,
-                    "Speech-to-text is not ready; dictation needs it.",
-                ));
-            }
-            if g.settings.speech_provider == "parakeet-local" {
-                // Warm the model while the user speaks; a failure shows when the text is transcribed.
-                tokio::task::spawn_blocking(crate::speech::stt::parakeet::preload);
             }
             let meeting = g
                 .recording
@@ -3298,9 +3493,38 @@ impl Daemon {
             if g.recording.is_some() && !meeting {
                 return Err("Wait for the previous meeting transcript to finish.".into());
             }
+            let resolved = resolve_speech(&g.settings);
+            if !meeting && matches!(resolved.id.as_str(), "parakeet-local" | "whisper-nb-local") {
+                speech_guard(&resolved)?;
+            }
+            let Some(speech) = g
+                .recording
+                .as_ref()
+                .and_then(|recording| recording.speech.clone())
+                .or_else(|| self.speech_config(&g.settings, self.local_now(&g)))
+            else {
+                return Err(speech_not_ready(
+                    &resolved.id,
+                    "Speech-to-text is not ready; dictation needs it.",
+                ));
+            };
+            let guard_speech = ResolvedSpeech {
+                id: speech.id.clone(),
+                config: speech.clone(),
+                language: speech.language.clone(),
+            };
+            if let Some(notice) = speech_guard(&guard_speech)? {
+                self.emit("notice", json!({"text": notice}));
+            }
+            if matches!(speech.id.as_str(), "parakeet-local" | "whisper-nb-local") {
+                // Warm the model while the user speaks; a failure shows when the text is transcribed.
+                let id = speech.id.clone();
+                tokio::task::spawn_blocking(move || preload_speech(&id));
+            }
             (
                 meeting,
                 Some(g.settings.input_device.clone()).filter(|d| !d.is_empty()),
+                speech,
             )
         };
         let microphone = if meeting {
@@ -3330,6 +3554,7 @@ impl Daemon {
             samples: Vec::new(),
             started: Instant::now(),
             meeting,
+            speech,
         });
         let me = self.clone();
         // The microphone buffer holds about two seconds, so drain it steadily.
@@ -3367,15 +3592,15 @@ impl Daemon {
                 dictation.samples.extend(mic.take(32_000));
                 mic.stop();
             }
-            (
-                dictation.samples,
-                self.speech_config(&g.settings, self.local_now(&g)),
-            )
+            // Local-only may have been switched on since dictation started.
+            if self.local_now(&g) && !local_speech(&dictation.speech.id) {
+                return Err("Your speech provider is unavailable.".into());
+            }
+            (dictation.samples, dictation.speech)
         };
         if samples.len() < 1600 || audio::rms(&samples) < 0.003 {
             return Err("No speech captured. Hold the microphone while speaking.".into());
         }
-        let config = config.ok_or("Your speech provider is unavailable.")?;
         let wav = audio::encode_wav(&samples).map_err(|e| e.to_string())?;
         let result = tokio::time::timeout(
             Duration::from_secs(30),
@@ -3783,8 +4008,15 @@ impl Daemon {
         if args.key == "export_folder" && !text.is_empty() && !Path::new(&text).is_absolute() {
             return Err("Choose an absolute folder.".into());
         }
+        let before = resolve_speech(&g.settings);
         Settings::set(&g.db, &args.key, &text).map_err(|e| e.to_string())?;
         g.settings = Settings::load(&g.db).unwrap_or_default();
+        let after = resolve_speech(&g.settings);
+        if (g.recording.is_some() || g.dictation.is_some())
+            && (before.id != after.id || before.language != after.language)
+        {
+            self.emit("notice", json!({"text": "Speech engine and language changes apply at the next recording start."}));
+        }
         let all = self.settings_reply(g)?;
         self.emit("settings", json!({"settings": all}));
         self.emit_state(g); // a provider or Local-only change flips state.ready
@@ -6416,6 +6648,165 @@ mod command_tests {
         assert!(d.speech_config(&s, true).is_none());
     }
 
+    #[test]
+    fn norwegian_routing_and_codes() {
+        let mut s = Settings::default();
+        for language in ["nb", "no", "nn", "NB", "nb-NO", "nn_NO"] {
+            s.speech_language = language.into();
+            let speech = resolve_speech(&s);
+            assert_eq!(speech.id, "whisper-nb-local", "{language}");
+            assert_eq!(speech.language, "no", "{language}");
+        }
+        // A model chosen for Parakeet never follows the route to the Norwegian engine.
+        s.speech_language = "nb".into();
+        s.speech_model = "parakeet-custom".into();
+        assert_ne!(resolve_speech(&s).config.model, "parakeet-custom");
+        // ...but a model chosen for the Norwegian engine itself does apply.
+        s.speech_provider = "whisper-nb-local".into();
+        assert_eq!(resolve_speech(&s).config.model, "parakeet-custom");
+        s.speech_provider = Settings::default().speech_provider;
+        s.speech_model = String::new();
+        for language in ["", "Auto", "aUtO", "fr"] {
+            s.speech_language = language.into();
+            let speech = resolve_speech(&s);
+            assert_eq!(speech.id, "parakeet-local");
+            assert_eq!(speech.language, if language == "fr" { "fr" } else { "" });
+        }
+        s.speech_language = "nb".into();
+        s.speech_provider = "deepgram-stt".into();
+        assert_eq!(resolve_speech(&s).language, "no");
+        s.speech_provider = "openai-compatible-stt".into();
+        assert_eq!(resolve_speech(&s).language, "no");
+        s.speech_provider = "custom-example".into();
+        let speech = resolve_speech(&s);
+        assert_eq!(speech.id, "custom-example");
+        assert_eq!(speech.language, "nb");
+    }
+
+    #[tokio::test]
+    async fn dictation_rechecks_local_only_before_sending() {
+        let d = daemon();
+        d.inner.lock().dictation = Some(Dictation {
+            id: 1,
+            microphone: None,
+            samples: vec![0.1; 16_000],
+            started: Instant::now(),
+            meeting: false,
+            speech: ProviderConfig::new("deepgram-stt", "", "nova-3"),
+        });
+        d.local_only.store(true, Ordering::Relaxed);
+        let error = d.dictate_stop().await.unwrap_err();
+        assert_eq!(error, "Your speech provider is unavailable.");
+        // Local-only admits the Norwegian engine and refuses cloud ones.
+        assert!(local_speech("whisper-nb-local") && !local_speech("deepgram-stt"));
+    }
+
+    #[test]
+    fn unsupported_language_is_refused_with_an_alternative() {
+        let mut s = Settings {
+            speech_language: "ja".into(),
+            ..Default::default()
+        };
+        let error = speech_guard(&resolve_speech(&s)).unwrap_err();
+        assert!(error.contains("Parakeet"));
+        assert!(error.contains("Deepgram"));
+        s.speech_provider = "openai-compatible-stt".into();
+        assert!(speech_guard(&resolve_speech(&s)).unwrap().is_some());
+        s.speech_provider = Settings::default().speech_provider;
+        for language in ["EN", "en_US", "de-AT"] {
+            s.speech_language = language.into();
+            assert_eq!(speech_guard(&resolve_speech(&s)), Ok(None), "{language}");
+        }
+    }
+
+    #[tokio::test]
+    async fn start_guard_blocks_capture_and_unknown_support_gets_one_notice() {
+        let d = daemon();
+        d.handle(
+            "settings.set",
+            json!({"key":"auto_record_on_call", "value":true}),
+            None,
+        )
+        .await
+        .unwrap();
+        d.handle(
+            "settings.set",
+            json!({"key":"speech_language", "value":"ja"}),
+            None,
+        )
+        .await
+        .unwrap();
+        let error = d.handle("record.start", json!({}), None).await.unwrap_err();
+        assert!(
+            error.contains("Parakeet") && error.contains("Deepgram"),
+            "{error}"
+        );
+        assert!(d.inner.lock().recording.is_none());
+
+        d.handle(
+            "settings.set",
+            json!({"key":"speech_provider", "value":"openai-compatible-stt"}),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut events = d.subscribe();
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let notices = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event["event"] == "notice")
+            .count();
+        assert_eq!(notices, 1);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_norwegian_model_has_its_own_state_hint() {
+        let Some(reason) = crate::speech::stt::whisper_nb::not_ready_reason() else {
+            return; // The test host has the optional model installed.
+        };
+        let d = daemon();
+        d.handle(
+            "settings.set",
+            json!({"key":"speech_language", "value":"nb"}),
+            None,
+        )
+        .await
+        .unwrap();
+        let state = d.handle("state.get", json!({}), None).await.unwrap();
+        assert_eq!(state["ready"]["speech"], false);
+        assert!(state["hints"]["speech"].as_str().unwrap().contains(&reason));
+        assert_eq!(
+            resolve_speech(&d.inner.lock().settings).id,
+            "whisper-nb-local"
+        );
+    }
+
+    #[tokio::test]
+    async fn speech_setting_change_waits_for_next_start_and_preserves_response_language() {
+        let d = daemon();
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let mut events = d.subscribe();
+        d.handle(
+            "settings.set",
+            json!({"key":"speech_language", "value":"nb"}),
+            None,
+        )
+        .await
+        .unwrap();
+        let notices: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event["event"] == "notice")
+            .collect();
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("next recording")
+        );
+        assert_eq!(d.inner.lock().settings.response_language, "Auto");
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
     /// A streaming custom speech record sends audio to its stream_url, so a local base_url
     /// must not let it into a local-only session.
     #[tokio::test]
@@ -7791,6 +8182,18 @@ mod command_tests {
     }
 
     #[test]
+    fn norwegian_whisper_is_not_migrated() {
+        use crate::db::settings::{get, set};
+        let db = Database::open_in_memory().unwrap();
+        set(db.connection(), "speech_provider", "whisper-nb-local").unwrap();
+        assert_eq!(migrate_whisper(&db), None);
+        assert_eq!(
+            get(db.connection(), "speech_provider").unwrap().as_deref(),
+            Some("whisper-nb-local")
+        );
+    }
+
+    #[test]
     fn an_unset_provider_gets_the_notice_once_without_being_written() {
         use crate::db::settings::{get, set};
         let db = Database::open_in_memory().unwrap();
@@ -7934,6 +8337,7 @@ mod command_tests {
             started: Instant::now(),
             since_ms: 0,
             stop: Arc::new(AtomicBool::new(false)),
+            speech: None,
         });
         d.local_only.store(true, Ordering::Relaxed);
         let err = d.handle("record.tap", tap, None).await.unwrap_err();

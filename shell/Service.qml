@@ -76,7 +76,11 @@ Item {
         client.send("record.start", title ? { new: true, title: title } : { new: true }, function(r) {
             var e = String(r.error || "");
             if (r.ok) { if (!quiet) Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", "Taking notes"]); return; }
-            Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", e.replace(/^(consent_required|local_only): /, "") + (e.indexOf("consent_required: ") === 0 ? " Open the overlay and start recording." : "")]);
+            if (!quiet && e.indexOf("language_unsupported: ") === 0) {
+                root.offer(e.replace("language_unsupported: ", "Recording was not started: "), "no", "Dismiss", calls.since || 1);
+                return;
+            }
+            Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", e.replace(/^(consent_required|local_only|language_unsupported): /, "") + (e.indexOf("consent_required: ") === 0 ? " Open the overlay and start recording." : "")]);
         });
     }
 
@@ -95,7 +99,8 @@ Item {
     }
 
     function offer(body, action, label, key, meeting, timeoutMs) {
-        var command = ["notify-send", "-a", "nixarchy-meetingai", "-A", action + "=" + label, "-A", "no=Not now"];
+        var command = ["notify-send", "-a", "nixarchy-meetingai", "-A", action + "=" + label];
+        if (action !== "no") command.push("-A", "no=Not now");
         if (timeoutMs !== undefined) command.push("-t", String(timeoutMs));
         command.push("nixarchy-meetingai", body);
         var p = notifier.createObject(root, {

@@ -118,6 +118,13 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
         default_model: "parakeet-tdt-0.6b-v3",
     },
     SttProvider {
+        id: "whisper-nb-local",
+        name: "Norwegian Whisper (local)",
+        endpoint: "",
+        wire: SttWire::InProcess,
+        default_model: "whisper-nb",
+    },
+    SttProvider {
         id: "openai-compatible-stt",
         name: "OpenAI-compatible speech",
         endpoint: "",
@@ -226,7 +233,11 @@ impl ProviderConfig {
         };
         let key_ok = !provider.requires_key() || self.has_key();
         match provider.wire {
-            SttWire::InProcess => crate::speech::stt::parakeet::model_ready_in(parakeet_dir),
+            SttWire::InProcess => match self.id.as_str() {
+                "parakeet-local" => crate::speech::stt::parakeet::model_ready_in(parakeet_dir),
+                "whisper-nb-local" => crate::speech::stt::whisper_nb::not_ready_reason().is_none(),
+                _ => false,
+            },
             SttWire::OpenAiMultipart => {
                 key_ok && endpoint_allowed(&self.base_url) && !self.model.trim().is_empty()
             }
@@ -296,7 +307,7 @@ mod tests {
         );
         assert!(ChatProvider::by_id("agy-sub ").is_none());
         assert!(ChatProvider::by_id("legacy-chat").is_none());
-        assert_eq!(STT_PROVIDERS.len(), 3);
+        assert_eq!(STT_PROVIDERS.len(), 4);
         assert_eq!(
             SttProvider::by_id("deepgram-stt").unwrap().default_model,
             "nova-3"
