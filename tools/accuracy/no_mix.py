@@ -576,6 +576,9 @@ def build_calls(
     manifest = []
     if not pool:
         return manifest
+    # Cutting audio while keeping the full reference text scores every cut word as an error, so
+    # over-long sentences are left out instead (turns up to 14 s; overlaps up to 10 s).
+    pool = [u for u in pool if u.get("duration", 0.0) <= 14.0]
     turns_per_call = min(6 if remote_only else 10, len(pool))
     cursor = 0
     call_idx = 0
@@ -595,8 +598,6 @@ def build_calls(
         for turn in range(turns_per_call):
             u = batch[turn]
             s = get_samples(u)
-            if len(s) > 14 * RATE:
-                s = s[: 14 * RATE]
             if remote_only or turn % 2 == 0:
                 place(right, t, s, 1.0)
                 if double_talk or remote_only:
@@ -605,8 +606,6 @@ def build_calls(
                 if double_talk and turn in (4, 8) and extra:
                     over = extra.pop(0)
                     m = get_samples(over)
-                    if len(m) > 10 * RATE:
-                        m = m[: 10 * RATE]
                     place(left, t + len(s) // 2, m, 1.0)
                     ref.append(f"me: {over['text']}")
                     t += max(0, len(s) // 2 + len(m) - len(s))

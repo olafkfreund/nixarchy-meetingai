@@ -18,7 +18,7 @@ import sys
 from safetensors.torch import load_file
 
 src, hf_dir, base, out = sys.argv[1:5]
-assert base in ("large-v3", "medium"), base  # NB-Whisper large is large-v3 (128 mels, feature_size in its preprocessor_config.json)
+assert base in ("large-v3", "medium", "small"), base  # large is large-v3 (128 mels); medium/small 80 (feature_size in preprocessor_config.json)
 hf_dir = os.path.abspath(hf_dir)
 
 # HF name -> OpenAI name; applied in this order (longer, more specific first).
@@ -46,9 +46,13 @@ RENAMES = [
 
 
 def openai_state(hf_dir):
-    index = json.load(open(os.path.join(hf_dir, "model.safetensors.index.json")))
+    index_path = os.path.join(hf_dir, "model.safetensors.index.json")
+    if os.path.isfile(index_path):  # sharded (large)
+        shards = sorted(set(json.load(open(index_path))["weight_map"].values()))
+    else:  # one file (medium, small)
+        shards = ["model.safetensors"]
     hf = {}
-    for shard in sorted(set(index["weight_map"].values())):
+    for shard in shards:
         hf.update(load_file(os.path.join(hf_dir, shard)))
     state = {}
     for key, tensor in hf.items():
@@ -90,6 +94,12 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 m.load_model = load_nb_whisper
 sys.argv = ["export-onnx.py", "--model", base]
+# The dynamo exporter (default in newer torch) ignores dynamic_axes and bakes static shapes
+# into the decoder (Reshape {1,4,1280} vs {1280} at runtime); the legacy exporter honours them.
+import torch
+
+_export = torch.onnx.export
+torch.onnx.export = lambda *a, **k: _export(*a, **{**k, "dynamo": False})
 from whisper.model import disable_sdpa  # same workaround as the script's __main__
 
 with disable_sdpa():
