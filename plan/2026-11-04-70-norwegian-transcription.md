@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 70
 spec: spec/2026-11-04-70-norwegian-transcription.md
 coders:
