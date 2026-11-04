@@ -1234,7 +1234,11 @@ impl Daemon {
         (config.speech_usable() && (!local || (stays_local(&config) && !streams))).then_some(config)
     }
 
-    fn cite_window(&self, g: &Inner) -> (Vec<(String, Source)>, String, String) {
+    fn cite_window(
+        &self,
+        g: &Inner,
+        quoted: Option<meetings::LineRecord>,
+    ) -> (Vec<(String, Source)>, String, String) {
         let mut sources = Vec::new();
         let mut notes = String::new();
         if let Some(meeting) = &g.meeting_id {
@@ -1290,6 +1294,34 @@ impl Daemon {
             }
         }
         let mut transcript = String::new();
+        if let Some(line) = &quoted {
+            let names =
+                g.db.connection()
+                    .query_row(
+                        "SELECT meeting_id FROM meeting_lines WHERE id=?1",
+                        [&line.id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok()
+                    .and_then(|meeting| meetings::speaker_names(g.db.connection(), &meeting).ok())
+                    .unwrap_or_default();
+            let speaker = meetings::label(&names, &line.who, line.speaker);
+            transcript.push_str(&format!(
+                "[1] {speaker}: {}\n",
+                line.text.chars().take(2000).collect::<String>()
+            ));
+            sources.push((
+                "1".into(),
+                Source {
+                    kind: "line",
+                    id: line.id.clone(),
+                    t0: line.start_time,
+                    t1: line.end_time,
+                    speaker,
+                    snippet: line.text.chars().take(160).collect(),
+                },
+            ));
+        }
         for entry in g
             .transcript
             .iter()
@@ -1299,6 +1331,12 @@ impl Daemon {
             .into_iter()
             .rev()
         {
+            if quoted
+                .as_ref()
+                .is_some_and(|line| entry.id.as_ref() == Some(&line.id))
+            {
+                continue;
+            }
             let speaker = meetings::label(&g.speaker_names, entry.who, entry.speaker);
             if let Some(id) = &entry.id {
                 let label = (sources
@@ -1571,7 +1609,14 @@ impl Daemon {
             }
             image
         };
-        match self.begin_send(question, image, false, args.no_context, Some(epoch))? {
+        match self.begin_send(
+            question,
+            image,
+            false,
+            args.no_context,
+            args.line,
+            Some(epoch),
+        )? {
             Some(turn) => Ok(json!({"turn": turn})),
             None => cancelled(),
         }
@@ -1584,6 +1629,7 @@ impl Daemon {
         image: Option<CapturedImage>,
         automatic: bool,
         no_context: bool,
+        line: Option<String>,
         epoch: Option<u64>,
     ) -> Result<Option<u64>, String> {
         let mut guard = self.inner.lock();
@@ -1597,6 +1643,37 @@ impl Daemon {
         if g.dictation.is_some() {
             return Err("Finish dictation before sending your message.".into());
         }
+        let quoted = line
+            .as_deref()
+            .map(|id| {
+                let c = g.db.connection();
+                let meeting: String = c
+                    .query_row(
+                        "SELECT meeting_id FROM meeting_lines WHERE id=?1",
+                        [id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "That line no longer exists.".to_owned())?;
+                let open = [
+                    g.meeting_id.as_deref(),
+                    g.finishing_meeting.as_deref(),
+                    g.resume_meeting.as_deref(),
+                ]
+                .contains(&Some(meeting.as_str()));
+                if !open
+                    && candidates::for_meeting(c, &meeting)
+                        .map_err(|e| e.to_string())?
+                        .is_some()
+                {
+                    return Err("Open that interview to ask about its lines.".into());
+                }
+                meetings::line(c, id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "That line no longer exists.".to_owned())
+            })
+            .transpose()?;
         let local = self.local_now(g);
         let chain = self.chain(&g.settings, automatic, local);
         if chain.is_empty() {
@@ -1618,10 +1695,15 @@ impl Daemon {
                 g.settings.response_language.clone(),
             ));
         }
-        let history = g
+        let mut history = g
             .chat
             .begin(Some(&g.db), &question)
             .map_err(|e| e.message())?;
+        if quoted.is_some()
+            && let Some(last) = history.last_mut()
+        {
+            last.content = format!("The user is asking about line [1].\n\n{}", last.content);
+        }
         if let Some(id) = g.chat.conversation_id() {
             let context = sessions::SavedContext {
                 profile_id: g.active_profile_id.clone(),
@@ -1660,10 +1742,10 @@ impl Daemon {
         g.conversation.push(Message::user(question));
         let mut images: Vec<String> = image.map(|i| vec![i.base64]).unwrap_or_default();
         images.extend(g.sources.iter().filter_map(|s| s.image.clone()));
-        let (cite, notes, transcript) = if no_context {
+        let (cite, notes, transcript) = if no_context && quoted.is_none() {
             (Vec::new(), String::new(), Self::plain_transcript(g))
         } else {
-            self.cite_window(g)
+            self.cite_window(g, quoted)
         };
         let cite_max = cite
             .iter()
@@ -1884,7 +1966,7 @@ impl Daemon {
         )));
         let context = TurnContext {
             system: Some({
-                let (_, notes, _) = self.cite_window(g);
+                let (_, notes, _) = self.cite_window(g, None);
                 self.system_prompt(g, false, false, &notes, &Self::plain_transcript(g), false)
             }),
             images: Vec::new(),
@@ -2053,7 +2135,7 @@ impl Daemon {
             g.pending_question.take()
         };
         if let Some(question) = question
-            && let Err(error) = self.begin_send(question, None, true, false, None)
+            && let Err(error) = self.begin_send(question, None, true, false, None, None)
         {
             self.error(error);
         }
@@ -5312,7 +5394,7 @@ mod citation_tests {
             id: Some(next.clone()),
             t0: 12.0,
         });
-        let (sources, notes, transcript) = d.cite_window(&g);
+        let (sources, notes, transcript) = d.cite_window(&g, None);
         assert!(notes.contains("[N1] (0:10–0:20) newest"));
         assert!(!notes.contains("[N2]") && !notes.contains(&"x".repeat(5900)));
         assert_eq!(
@@ -5333,7 +5415,67 @@ mod citation_tests {
             next
         );
         g.meeting_id = None;
-        assert!(d.cite_window(&g).1.is_empty());
+        assert!(d.cite_window(&g, None).1.is_empty());
+    }
+
+    #[test]
+    fn quoted_line_is_first_citation_without_duplicating_recent_speech() {
+        let d = daemon();
+        let mut g = d.inner.lock();
+        let (meeting, old, past_id, recent, entries) = {
+            let c = g.db.connection();
+            let meeting =
+                meetings::start(c, "Current", "", "en", None, MeetingMode::General).unwrap();
+            let old = meetings::add_line(c, &meeting, "them", None, "old words", 0.0, 1.0).unwrap();
+            let mut entries = Vec::new();
+            for i in 1..=21 {
+                let id = meetings::add_line(
+                    c,
+                    &meeting,
+                    "them",
+                    None,
+                    &format!("line {i}"),
+                    i as f64,
+                    i as f64 + 1.0,
+                )
+                .unwrap();
+                entries.push(Entry {
+                    text: format!("line {i}"),
+                    who: "them",
+                    speaker: None,
+                    id: Some(id),
+                    t0: i as f64,
+                });
+            }
+            let past = meetings::start(c, "Past", "", "en", None, MeetingMode::General).unwrap();
+            let past_id =
+                meetings::add_line(c, &past, "them", None, "past words", 0.0, 1.0).unwrap();
+            let recent = meetings::line(c, entries.last().unwrap().id.as_deref().unwrap())
+                .unwrap()
+                .unwrap();
+            (meeting, old, past_id, recent, entries)
+        };
+        g.meeting_id = Some(meeting);
+        g.transcript = entries;
+        for id in [&old, &past_id] {
+            let quote = meetings::line(g.db.connection(), id).unwrap().unwrap();
+            let (sources, _, transcript) = d.cite_window(&g, Some(quote));
+            assert_eq!(
+                sources.iter().find(|(label, _)| label == "1").unwrap().1.id,
+                *id
+            );
+            assert!(transcript.contains("[1]"));
+            assert_eq!(cited_sources("See [1].", &sources)[0].id, *id);
+        }
+        let (sources, _, transcript) = d.cite_window(&g, Some(recent.clone()));
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|(_, source)| source.id == recent.id)
+                .count(),
+            1
+        );
+        assert_eq!(transcript.matches(&recent.text).count(), 1);
     }
 
     #[test]
@@ -5560,11 +5702,11 @@ mod routing_tests {
             let g = d.inner.lock();
             (
                 {
-                    let (_, n, t) = d.cite_window(&g);
+                    let (_, n, t) = d.cite_window(&g, None);
                     d.system_prompt(&g, false, false, &n, &t, false)
                 },
                 {
-                    let (_, n, t) = d.cite_window(&g);
+                    let (_, n, t) = d.cite_window(&g, None);
                     d.system_prompt(&g, false, true, &n, &t, false)
                 },
             )
@@ -8451,9 +8593,72 @@ mod command_tests {
             let epoch = d.send_epoch.load(Ordering::Relaxed);
             d.handle(cmd, json!({}), None).await.unwrap();
             // The send that started before it must not start a turn afterwards.
-            let turn = d.begin_send("old question".into(), None, false, false, Some(epoch));
+            let turn = d.begin_send("old question".into(), None, false, false, None, Some(epoch));
             assert_eq!(turn, Ok(None), "{cmd}");
         }
+    }
+
+    #[tokio::test]
+    async fn ask_line_rejects_unknown_and_other_interview_before_changing_turn() {
+        let d = daemon();
+        let (other_line, current_line, past_line) = {
+            let mut g = d.inner.lock();
+            let c = g.db.connection();
+            let current =
+                meetings::start(c, "Open", "", "en", None, MeetingMode::Interviewer).unwrap();
+            let other =
+                meetings::start(c, "Other", "", "en", None, MeetingMode::Interview).unwrap();
+            let current_line =
+                meetings::add_line(c, &current, "them", None, "open", 0.0, 1.0).unwrap();
+            let other_line =
+                meetings::add_line(c, &other, "them", None, "secret", 0.0, 1.0).unwrap();
+            let past = meetings::start(c, "Past", "", "en", None, MeetingMode::General).unwrap();
+            let past_line = meetings::add_line(c, &past, "them", None, "old", 0.0, 1.0).unwrap();
+            let candidate = candidates::create(c, "Ada").unwrap();
+            candidates::link_meeting(c, &candidate.id, &other).unwrap();
+            g.meeting_id = Some(current);
+            g.settings.meeting_mode = MeetingMode::Interviewer;
+            (other_line, current_line, past_line)
+        };
+        let before = d.now_get();
+        for (line, expected) in [
+            ("missing", "That line no longer exists."),
+            (&other_line, "Open that interview to ask about its lines."),
+        ] {
+            assert_eq!(
+                d.handle("chat.send", json!({"text":"Explain", "line":line}), None)
+                    .await
+                    .unwrap_err(),
+                expected
+            );
+            assert_eq!(d.now_get(), before);
+        }
+        assert!(
+            d.handle(
+                "chat.send",
+                json!({"text":"Explain", "line":current_line}),
+                None
+            )
+            .await
+            .is_ok()
+        );
+        {
+            let g = d.inner.lock();
+            assert_eq!(g.cite[0].0, "1");
+            assert_eq!(g.cite[0].1.id, current_line);
+            assert!(Daemon::guarded(&g));
+        }
+        d.handle("chat.cancel", json!({}), None).await.unwrap();
+        d.handle(
+            "chat.send",
+            json!({"text":"Explain", "line":past_line}),
+            None,
+        )
+        .await
+        .unwrap();
+        let g = d.inner.lock();
+        assert_eq!(g.cite[0].1.id, past_line);
+        assert!(Daemon::guarded(&g));
     }
 
     #[tokio::test]
@@ -8636,7 +8841,7 @@ mod command_tests {
         // System prompt uses cached speaker names.
         let prompt = {
             let g = d.inner.lock();
-            let (_, n, t) = d.cite_window(&g);
+            let (_, n, t) = d.cite_window(&g, None);
             d.system_prompt(&g, false, false, &n, &t, false)
         };
         assert!(prompt.contains("Ada: final words\n"), "{prompt}");
@@ -8959,7 +9164,7 @@ mod command_tests {
                     .text
                     .contains("Them: corrected words")
             );
-            let (_, _, cited) = d.cite_window(&g);
+            let (_, _, cited) = d.cite_window(&g, None);
             assert!(cited.contains("Them: corrected words"));
         }
         let row = &d.handle("transcript.get", json!({}), None).await.unwrap()["lines"][0];

@@ -550,3 +550,10 @@ grounded run. Give `--lines` the same.
     `tests/mcp_flow.rs` from 15 to 16 (the new `meeting_bookmarks` tool).
   - `cli::tests::cancel_kills_the_whole_group` failed once under load and
     passed 5 of 5 on its own. It is unrelated to this step.
+- Step 5 (Codex):
+  - It adds `meetings::line(c, id)`, a one-row lookup, so the quoted line is
+    loaded without reading the whole meeting.
+  - The prompt sentence goes only into the provider's copy of the question;
+    the stored conversation is unchanged.
+  - Claude ran the step check (Codex's sandbox could not), and it passed
+    first time.

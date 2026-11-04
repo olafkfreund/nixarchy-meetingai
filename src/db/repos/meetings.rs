@@ -281,6 +281,14 @@ pub fn lines(c: &Connection, meeting_id: &str) -> Result<Vec<LineRecord>> {
     Ok(s.query_map([meeting_id], |r| line_row(r, 0))?
         .collect::<std::result::Result<_, _>>()?)
 }
+pub fn line(c: &Connection, id: &str) -> Result<Option<LineRecord>> {
+    Ok(c.query_row(
+        &format!("SELECT {LINE_COLS} FROM meeting_lines WHERE id=?1"),
+        [id],
+        |r| line_row(r, 0),
+    )
+    .optional()?)
+}
 pub fn recent_lines(c: &Connection, meeting_id: &str, limit: usize) -> Result<Vec<LineRecord>> {
     let mut s=c.prepare("SELECT id,who,speaker,substr(text,1,8000),start_time,end_time,heard,edited_at IS NOT NULL FROM (SELECT rowid,id,who,speaker,text,start_time,end_time,heard,edited_at FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time DESC,rowid DESC LIMIT ?2) ORDER BY start_time,rowid")?;
     Ok(
