@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 61
 spec: spec/2026-11-04-61-local-speaker-separation.md
 coders:
