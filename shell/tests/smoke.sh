@@ -634,7 +634,11 @@ ShellRoot {
                 root.out.settingsFolder = ff ? String(ff.text) : "";
                 root.out.hasChangeBtn = !!cb;
                 if (sw) sw.toggled();
+                var sl = root.find(card, "speechLanguage");
+                root.out.hintAuto = !!root.find(card, "speechLanguageHint");
+                if (sl) sl.changed("nb");
             } else if (root.phase === 9) {
+                root.out.hintNb = !!root.find(card, "speechLanguageHint");
                 var sw2 = root.find(card, "exportMeetingsToggle");
                 root.out.settingsToggleAfter = sw2 ? sw2.checked : null;
                 overlay.exportFolderHook("/tmp/vault");
@@ -735,7 +739,9 @@ if not all(d.get(k) for k in ("hasGrip", "grew", "maxOk", "minOk", "dragOk", "ke
     bad.append(f"notes pane resize check failed: {d}")
 if "Could not export the meeting" not in d.get("exportStatusErr", ""):
     bad.append(f"Export now error check failed: {d}")
-for need in ("settings.set export_folder", "settings.set export_meetings", "meetings.export"):
+if d.get("hintAuto") is not True or d.get("hintNb") is not False:
+    bad.append(f"speech language hint must show for Auto only: {d}")
+for need in ("settings.set export_folder", "settings.set export_meetings", "settings.set speech_language", "meetings.export"):
     if need not in log:
         bad.append(f"daemon log missing {need!r}: {log}")
 if bad:

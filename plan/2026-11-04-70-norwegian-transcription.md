@@ -500,3 +500,15 @@ Check: the step check plus `bash shell/tests/ci.sh`.
     model name never follows the route to `whisper-nb-local`. Both are
     tested in `norwegian_routing_and_codes`.
   - Claude ran the step check: 466 lib tests.
+- Step 7 (coder; flake check and README by Claude):
+  - A separate `whisperNb.vad` option (default `nix/silero-vad.nix`), so the
+    VAD can be overridden like the model.
+  - The picker offers Auto, English and Norwegian (`nb`), not every language
+    of the active engine; more is one line in its options.
+  - `fake-daemon.py` is unchanged: it already echoes any `settings.set`.
+  - The refusal and "unknown support" notices use existing paths (step 6's
+    `Service.qml` notice and the transcript notice row); no new shell code.
+  - No assertion ties `whisperNb.enable` to the language; choosing Norwegian
+    without the model gives step 6's "model missing" hint.
+  - Claude regenerated the README "Nix options" block (`nix build .#docs`),
+    which `docs-match` requires; `nix flake check` passes.

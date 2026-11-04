@@ -1256,6 +1256,69 @@ pkgs.callPackage ./nix/speaker-model.nix { }
 ```
 
 
+
+## programs\.nixarchy-meetingai\.whisperNb\.enable
+
+
+
+Give the daemon the local Norwegian speech model (NB-Whisper small plus the Silero voice detector)\. Off by default: Parakeet does not transcribe Norwegian, so set ` settings.speechLanguage = "nb" ` and turn this on to record Norwegian meetings\.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+
+```nix
+false
+```
+
+
+
+## programs\.nixarchy-meetingai\.whisperNb\.model
+
+
+
+The NB-Whisper model for Norwegian (` speechLanguage ` nb, no or nn)\. The daemon gets it as ` NIXARCHY_MEETINGAI_WHISPER_NB_DIR `\.
+
+
+
+*Type:*
+package
+
+
+
+*Default:*
+
+```nix
+pkgs.callPackage ./nix/whisper-nb-model.nix { }
+```
+
+
+
+## programs\.nixarchy-meetingai\.whisperNb\.vad
+
+
+
+The Silero voice-activity model (` silero_vad.onnx `) the Norwegian engine uses to cut speech into segments\. The daemon gets it as ` NIXARCHY_MEETINGAI_SILERO_VAD `\.
+
+
+
+*Type:*
+package
+
+
+
+*Default:*
+
+```nix
+pkgs.callPackage ./nix/silero-vad.nix { }
+```
+
+
 <!-- nix-options:end -->
 
 ## Use from AI agents

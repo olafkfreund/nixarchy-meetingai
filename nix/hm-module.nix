@@ -79,6 +79,10 @@ let
   ]
   ++ [ "NIXARCHY_MEETINGAI_OLLAMA_URL=${cfg.ollama.url}" ]
   ++ lib.optional cfg.parakeet.enable "NIXARCHY_MEETINGAI_PARAKEET_DIR=${cfg.parakeet.model}"
+  ++ lib.optionals cfg.whisperNb.enable [
+    "NIXARCHY_MEETINGAI_WHISPER_NB_DIR=${cfg.whisperNb.model}"
+    "NIXARCHY_MEETINGAI_SILERO_VAD=${cfg.whisperNb.vad}"
+  ]
   ++ [ "MEETINGAI_SPEAKER_MODEL=${cfg.speakerModel}" ]
   ++ lib.optional (
     cfg.ollamaCloud.keyFile != null
@@ -178,6 +182,26 @@ in
       default = pkgs.callPackage ./parakeet-model.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ./nix/parakeet-model.nix { }";
       description = "The Parakeet speech model for `speechProvider = \"parakeet-local\"`: a directory with `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt` (NVIDIA Parakeet TDT 0.6B v3, CC-BY-4.0). The daemon gets it as `NIXARCHY_MEETINGAI_PARAKEET_DIR`. Once Parakeet has been used the model stays loaded (about 1.1 GB RAM) while the daemon runs.";
+    };
+
+    whisperNb.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Give the daemon the local Norwegian speech model (NB-Whisper small plus the Silero voice detector). Off by default: Parakeet does not transcribe Norwegian, so set `settings.speechLanguage = \"nb\"` and turn this on to record Norwegian meetings.";
+    };
+
+    whisperNb.model = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.callPackage ./whisper-nb-model.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./nix/whisper-nb-model.nix { }";
+      description = "The NB-Whisper model for Norwegian (`speechLanguage` nb, no or nn). The daemon gets it as `NIXARCHY_MEETINGAI_WHISPER_NB_DIR`.";
+    };
+
+    whisperNb.vad = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.callPackage ./silero-vad.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./nix/silero-vad.nix { }";
+      description = "The Silero voice-activity model (`silero_vad.onnx`) the Norwegian engine uses to cut speech into segments. The daemon gets it as `NIXARCHY_MEETINGAI_SILERO_VAD`.";
     };
 
     speakerModel = lib.mkOption {
