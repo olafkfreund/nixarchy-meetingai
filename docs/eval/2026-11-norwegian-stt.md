@@ -66,3 +66,20 @@ Stortinget speech, the same domain.
     was not retried.
   - small (rev `e9bb5cb`) and medium (rev `0ed074d`): both decode
     correctly.
+
+## Decision (owner, 2026-11-04)
+
+**Approved: ship NB-Whisper small, opt-in, with relaxed bars for Norwegian.**
+- It is used only when the speech language is set to Norwegian and
+  `whisperNb.enable` is on (off by default).
+- Accepted for this release:
+  - 23.9% word error rate through the call pipeline (14.4% for the model);
+  - 2.4 s median and 7.8 s p95 per chunk on p620;
+  - 7 of 16 short words kept.
+
+  All three are far better than today's Swedish output (85% word error
+  rate).
+- The loading mode is `Resident` (peak 2.1 GB).
+- Follow-ups are filed as their own issues: the call pipeline's word loss,
+  which affects every engine; Norwegian latency and short words; razer
+  measurement.
