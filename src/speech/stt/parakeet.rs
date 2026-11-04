@@ -111,16 +111,26 @@ fn ensure(
 /// Load the model now (blocking, about 2.5 s) so a recording does not start with a slow first decode.
 pub fn preload() -> Result<(), String> {
     let _decode = super::DECODE.lock().unwrap_or_else(|e| e.into_inner());
-    let mut slot = DECODER.lock().unwrap_or_else(|e| e.into_inner());
-    ensure(&mut slot, load)?;
     if super::unload_inactive() {
         super::whisper_nb::unload_locked();
     }
+    let mut slot = DECODER.lock().unwrap_or_else(|e| e.into_inner());
+    ensure(&mut slot, load)?;
     Ok(())
 }
 
 pub(crate) fn unload_locked() {
-    *DECODER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if DECODER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .is_some()
+    {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
 }
 
 pub fn unload() {
@@ -172,11 +182,11 @@ pub(crate) fn decode_pieces(
 pub async fn transcribe(samples: Vec<f32>, rate: i32) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let _decode = super::DECODE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut slot = DECODER.lock().unwrap_or_else(|e| e.into_inner());
-        let decode = ensure(&mut slot, load)?;
         if super::unload_inactive() {
             super::whisper_nb::unload_locked();
         }
+        let mut slot = DECODER.lock().unwrap_or_else(|e| e.into_inner());
+        let decode = ensure(&mut slot, load)?;
         Ok(decode_pieces(decode, rate, &samples))
     })
     .await

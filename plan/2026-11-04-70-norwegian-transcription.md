@@ -447,3 +447,18 @@ Check: the step check plus `bash shell/tests/ci.sh`.
   - **Claude corrected the export base from large-v2 to large-v3:**
     NB-Whisper large's `preprocessor_config.json` has `feature_size: 128`,
     which means large-v3. The export itself is not run yet (step 5).
+- Step 3 (agy, `agent-run` reported "empty response"; the work was in the
+  tree):
+  - It adds `no_mix.py`, extends `score.py` and the README, and rewrites
+    `examples/accuracy_replay.rs` for paced live replay by engine.
+  - agy also edited `src/speech/stt/`, outside its brief. Claude kept
+    `malloc_trim(0)` after an engine unloads: glibc does not return freed
+    memory otherwise, so the unload mode could not show a saving.
+  - Claude made agy's per-chunk latency recorder **opt-in**. As written it
+    pushed on every daemon chunk with no reader: a slow leak. Now only the
+    replay switches it on, and a test pins that the daemon never records.
+  - Claude fixed one clippy `while_let_loop`, and ran the step check: 458
+    lib tests.
+  - The functional check (paced replay with Parakeet and turbo, the 3 s
+    hold, RSS) runs in step 5, so it does not share the CPU with the
+    NB-Whisper export.

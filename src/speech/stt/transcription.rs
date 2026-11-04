@@ -395,7 +395,12 @@ pub async fn transcribe_chunk(
     samples: &[f32],
     prompt: &str,
 ) -> Result<String, SttError> {
-    transcribe_with_prompt(config, to_wav(samples)?, None, prompt).await
+    let began = Instant::now();
+    let result = transcribe_with_prompt(config, to_wav(samples)?, None, prompt).await;
+    if result.is_ok() {
+        super::record_chunk_latency(began.elapsed().as_secs_f64());
+    }
+    result
 }
 async fn transcribe_in_process(id: &str, wav: Vec<u8>) -> Result<String, SttError> {
     // In-process engines take no prompt or language.

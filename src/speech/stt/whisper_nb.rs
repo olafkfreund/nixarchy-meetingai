@@ -186,15 +186,25 @@ fn ensure(slot: &mut Option<Decoder>) -> Result<&mut Decoder, String> {
 }
 pub fn preload() -> Result<(), String> {
     let _decode = super::DECODE.lock().unwrap_or_else(|e| e.into_inner());
-    let mut slot = DECODER.lock().unwrap_or_else(|e| e.into_inner());
-    ensure(&mut slot)?;
     if super::unload_inactive() {
         super::parakeet::unload_locked();
     }
+    let mut slot = DECODER.lock().unwrap_or_else(|e| e.into_inner());
+    ensure(&mut slot)?;
     Ok(())
 }
 pub(crate) fn unload_locked() {
-    *DECODER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if DECODER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .is_some()
+    {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
 }
 pub fn unload() {
     let _decode = super::DECODE.lock().unwrap_or_else(|e| e.into_inner());
@@ -206,11 +216,11 @@ pub async fn transcribe(samples: Vec<f32>, rate: i32) -> Result<String, String> 
     }
     tokio::task::spawn_blocking(move || {
         let _decode = super::DECODE.lock().unwrap_or_else(|e| e.into_inner());
-        let mut slot = DECODER.lock().unwrap_or_else(|e| e.into_inner());
-        let decode = ensure(&mut slot)?;
         if super::unload_inactive() {
             super::parakeet::unload_locked();
         }
+        let mut slot = DECODER.lock().unwrap_or_else(|e| e.into_inner());
+        let decode = ensure(&mut slot)?;
         Ok(decode(rate, &samples))
     })
     .await
