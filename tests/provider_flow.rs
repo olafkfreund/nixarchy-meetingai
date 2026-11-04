@@ -409,7 +409,7 @@ async fn recap_includes_words_that_arrived_after_the_meeting_ended() {
         id
     };
 
-    recap::generate(&path, &id, Some(config), "Swahili")
+    recap::generate(&path, &id, Some(config), "Swahili", true)
         .await
         .unwrap();
 

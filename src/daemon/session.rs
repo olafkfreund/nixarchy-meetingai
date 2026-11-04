@@ -2738,7 +2738,7 @@ impl Daemon {
             }
             self.emit_state(g);
         }
-        self.finish_meeting_artifacts(meeting, true).await;
+        self.finish_meeting_artifacts(meeting, true, false).await;
         let mut g = self.inner.lock();
         g.finishing_meeting = None;
         self.emit_state(&g); // the shell shows "Finishing" until it hears this
@@ -2879,7 +2879,12 @@ impl Daemon {
     }
 
     /// Name the meeting, then summarise what is left and consolidate every chunk.
-    async fn finish_meeting_artifacts(self: &Arc<Self>, meeting: &str, export: bool) {
+    async fn finish_meeting_artifacts(
+        self: &Arc<Self>,
+        meeting: &str,
+        export: bool,
+        regenerate: bool,
+    ) {
         self.settle_checks().await;
         let _serial = self.notes.lock().await;
         let (config, language, body, local, interview, said, named) = {
@@ -2897,16 +2902,17 @@ impl Daemon {
                 g.named_meeting.as_deref() == Some(meeting),
             )
         };
-        // Merging duplicates needs no model, so every path ends here, and tells the shell once.
         let finalize = || async {
             {
                 let g = self.inner.lock();
                 let c = g.db.connection();
-                let _ = if team_items(c, meeting) {
-                    recap::reconcile(c, meeting)
-                } else {
-                    items::finalize(c, meeting)
-                };
+                if !regenerate {
+                    let _ = if team_items(c, meeting) {
+                        recap::reconcile(c, meeting)
+                    } else {
+                        items::finalize(c, meeting)
+                    };
+                }
             }
             self.emit("items.updated", json!({"meeting": meeting}));
             let (enabled, has_folder) = {
@@ -2931,7 +2937,8 @@ impl Daemon {
             finalize().await;
             return;
         };
-        if !named
+        if !regenerate
+            && !named
             && !body.trim().is_empty()
             && let Some(title) =
                 titling::request_title(&engine::http_client(), &config, &body).await
@@ -2940,7 +2947,14 @@ impl Daemon {
             let g = self.inner.lock();
             let _ = meetings::rename(g.db.connection(), meeting, &title);
         }
-        match recap::generate(&self.db_path, meeting, Some(config), &language).await {
+        if regenerate
+            && let Err(error) =
+                recap::refresh_chunks(&self.db_path, meeting, &config, &language).await
+        {
+            self.error(format!("Could not refresh the meeting notes: {error}"));
+            return;
+        }
+        match recap::generate(&self.db_path, meeting, Some(config), &language, !regenerate).await {
             Ok(()) => {
                 self.emit("notes.updated", json!({"meeting": meeting}));
             }
@@ -5108,7 +5122,9 @@ impl Daemon {
                     }
                 }
                 let me = self.clone();
-                tokio::spawn(async move { me.finish_meeting_artifacts(&meeting, false).await });
+                tokio::spawn(
+                    async move { me.finish_meeting_artifacts(&meeting, false, true).await },
+                );
                 Ok(json!({}))
             }
             "meetings.export" => {
@@ -6386,7 +6402,7 @@ mod command_tests {
         };
         d.inner.lock().settings.chat_provider = "none".into();
         let mut events = d.subscribe();
-        d.finish_meeting_artifacts(&meeting, true).await;
+        d.finish_meeting_artifacts(&meeting, true, false).await;
         let mut folder_needed = false;
         while let Ok(event) = events.try_recv() {
             folder_needed |= event["event"] == "export.folder_needed";
@@ -6400,7 +6416,7 @@ mod command_tests {
 
         let root = d.db_path.parent().unwrap().join("exports");
         d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
-        d.finish_meeting_artifacts(&meeting, true).await;
+        d.finish_meeting_artifacts(&meeting, true, false).await;
         assert!(
             exports::get(d.inner.lock().db.connection(), &meeting)
                 .unwrap()
@@ -6420,7 +6436,7 @@ mod command_tests {
             .unwrap()
         };
         d.inner.lock().settings.export_meetings = false;
-        d.finish_meeting_artifacts(&other, true).await;
+        d.finish_meeting_artifacts(&other, true, false).await;
         assert!(
             exports::get(d.inner.lock().db.connection(), &other)
                 .unwrap()
@@ -7319,7 +7335,7 @@ mod command_tests {
             }
             m
         };
-        d.finish_meeting_artifacts(&m, true).await;
+        d.finish_meeting_artifacts(&m, true, false).await;
         let mut updated = 0;
         while let Ok(e) = events.try_recv() {
             updated += usize::from(e["event"] == "items.updated");
@@ -8210,6 +8226,48 @@ mod command_tests {
             let result = mcp(cmd, json!({})).await;
             assert_ne!(result, Err("not allowed for agents".into()), "{cmd}");
         }
+    }
+
+    #[tokio::test]
+    async fn regenerate_without_provider_keeps_title_and_duplicate_items() {
+        let d = daemon();
+        let meeting = {
+            let mut g = d.inner.lock();
+            g.settings.chat_provider = "none".into();
+            let c = g.db.connection();
+            let meeting =
+                meetings::start(c, "My title", "", "en", None, MeetingMode::TeamMeeting).unwrap();
+            for text in ["Send the draft", "Send the draft."] {
+                items::insert(
+                    c,
+                    &items::NewItem {
+                        meeting_id: &meeting,
+                        kind: "action",
+                        text,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            meeting
+        };
+        let before = {
+            let g = d.inner.lock();
+            items::list(g.db.connection(), items::Scope::Meeting(&meeting), None).unwrap()
+        };
+        d.finish_meeting_artifacts(&meeting, false, true).await;
+        let g = d.inner.lock();
+        assert_eq!(
+            items::list(g.db.connection(), items::Scope::Meeting(&meeting), None).unwrap(),
+            before
+        );
+        let title: String =
+            g.db.connection()
+                .query_row("SELECT title FROM meetings WHERE id=?1", [&meeting], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+        assert_eq!(title, "My title");
     }
 
     #[tokio::test]

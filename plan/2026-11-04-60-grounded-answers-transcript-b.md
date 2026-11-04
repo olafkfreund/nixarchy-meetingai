@@ -531,3 +531,14 @@ grounded run. Give `--lines` the same.
     `nix develop`.
   - Fix: before a build, run
     `find target/debug -maxdepth 2 -name 'lib*.so*' ! -perm -u+w -delete`.
+- Step 3 (Codex, finished by Claude):
+  - The fake-provider tests live in `tests/recap_rolling.rs` (the existing
+    integration file), not in `recap.rs`.
+  - Claude changed one behaviour. Codex had tied `chunk_pending`'s new
+    `write_items` to `reconcile_items`, so Regenerate also dropped items from
+    lines no chunk covered yet (for example after notes failed at meeting
+    end). Those are first-time extractions; dropping them loses action items.
+    Regenerate now writes them. Existing items stay untouched (no reconcile,
+    no re-extraction), and the test checks existing items, not the total
+    count.
+  - Codex's sandbox could not run the suite, so Claude ran the step check.
