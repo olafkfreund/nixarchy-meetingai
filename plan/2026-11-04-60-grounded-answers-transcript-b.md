@@ -557,3 +557,10 @@ grounded run. Give `--lines` the same.
     the stored conversation is unchanged.
   - Claude ran the step check (Codex's sandbox could not), and it passed
     first time.
+- Step 7 (agy, through `agent-run`; it did not hang this time):
+  - It adds a fake-daemon `--lines` scenario, `shell/tests/harness-lines.qml`
+    and a smoke block.
+  - It is committed before step 6, so the `--lines` block fails until the UI
+    lands; every existing scenario passes.
+  - Claude sent the coder the `objectName` / accessible-name contract the
+    harness uses.
