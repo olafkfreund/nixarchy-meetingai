@@ -456,3 +456,21 @@ Check: the step check plus `bash shell/tests/ci.sh`.
   `nix develop`, so Claude ran the step check (431 lib tests).
 - Step 2 (Codex): no deviation. The daemon passes `speakers: None`, so the
   plumbing stays dormant. Claude ran the step check (435 lib tests).
+- Step 3 (agy, AMI part replaced by Claude, with the owner's choice):
+  - The Edinburgh AMI mirror answers most whole-file downloads with HTTP
+    403. Only some explicit byte ranges get through, and it looks
+    rate-limited.
+  - Ranged and retried downloads got one meeting (ES2002a) but not a second.
+  - The owner chose the Hugging Face copy (`edinburghcstr/ami`, CC BY 4.0).
+    `ami_hf.py` rebuilds each meeting on one track from the `sdm` (single
+    distant microphone) segments at `begin_time`. Where segments overlap,
+    the samples already placed are kept, not added. The segment WAVs are
+    32-bit float, which the script reads itself.
+  - The halves follow AMI's official partition: `validation` is dev and
+    `test` is held out, with no speaker in both.
+  - `ami_subset.sh` and `ami_words.py` were removed.
+  - pyarrow comes from nixpkgs at run time (`python3.withPackages`); nothing
+    is added to the dev shell.
+  - Slice check, on 2 LibriSpeech conversations per speaker count and half,
+    plus ES2011a (dev, 4 speakers) and EN2002a (held out, 4 speakers): 14
+    clean and 14 Opus "call" WAVs, with truth files.
