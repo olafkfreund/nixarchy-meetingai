@@ -218,8 +218,8 @@ async fn list_output(
             Ok(())
         });
     }
-    let child = command
-        .spawn()
+    let child = spawn(&mut command)
+        .await
         .map_err(|e| format!("could not run `{shown}`: {e}"))?;
     let pid = child.id();
     match tokio::time::timeout(limit, child.wait_with_output()).await {
@@ -237,6 +237,19 @@ async fn list_output(
             Ok(output.stdout)
         }
     }
+}
+
+/// Spawn, retrying ETXTBSY: a script just written can stay "busy" while another thread forks.
+pub(crate) async fn spawn(command: &mut Command) -> std::io::Result<tokio::process::Child> {
+    for _ in 0..5 {
+        match command.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            other => return other,
+        }
+    }
+    command.spawn()
 }
 
 /// Provider credentials the CLIs must never inherit: they would bypass the subscription login.
@@ -516,12 +529,13 @@ pub(super) async fn run<F: Future<Output = ()>>(
             Ok(())
         });
     }
-    let mut child = command
+    command
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = spawn(&mut command)
+        .await
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => ChatError::Cli(format!(
                 "`{program}` was not found in PATH; install it and sign in with your subscription"

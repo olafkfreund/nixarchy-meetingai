@@ -27,13 +27,138 @@ pub enum SystemAudioError {
     Stopped,
 }
 
+struct Recorder {
+    child: Child,
+    reader: Option<JoinHandle<()>>,
+    /// Only the recorder in use feeds the queue; a replacement stays muted until the old one is gone.
+    live: Arc<AtomicBool>,
+}
+
+impl Recorder {
+    fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+struct Follow {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
 /// A running `parec` process and its buffered samples.
 pub struct SystemAudio {
     source: String,
     samples: Arc<Mutex<SampleQueue>>,
-    child: Mutex<Child>,
-    reader: Option<JoinHandle<()>>,
+    recorder: Arc<Mutex<Recorder>>,
     exited: AtomicBool,
+    follow: Option<Follow>,
+    moved: Arc<Mutex<Option<String>>>,
+    /// Set on every recorder swap, so the session can realign the system channel.
+    swapped: Arc<AtomicBool>,
+}
+
+fn spawn_recorder(
+    program: &str,
+    device: &str,
+    queue: Arc<Mutex<SampleQueue>>,
+    live: bool,
+) -> Result<Recorder, SystemAudioError> {
+    let mut child = Command::new(program)
+        .args([
+            "--latency-msec=50",
+            "--format=float32le",
+            "--rate=16000",
+            "--channels=1",
+            "--device",
+            device,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                SystemAudioError::NoServer
+            } else {
+                SystemAudioError::Spawn(format!("{program} could not start: {error}"))
+            }
+        })?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(SystemAudioError::Spawn(format!(
+            "{program} did not provide an output pipe"
+        )));
+    };
+    let live = Arc::new(AtomicBool::new(live));
+    let feeding = Arc::clone(&live);
+    // Ends at EOF, which killing the child (see Drop) or its own exit produces.
+    let reader = thread::spawn(move || {
+        let mut input = BufReader::with_capacity(16 * 1024, stdout);
+        let mut frame = [0_u8; 2048];
+        let mut carry = Vec::new();
+        let mut decoded = Vec::with_capacity(frame.len() / 4);
+        loop {
+            // Checked before the read: a block read while muted overlaps the old recorder's audio.
+            let was_live = feeding.load(Ordering::Acquire);
+            match input.read(&mut frame) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => {
+                    decoded.clear();
+                    decode_samples(&mut carry, &frame[..count], &mut decoded);
+                    if !was_live {
+                        continue;
+                    }
+                    if let Ok(mut queue) = queue.lock() {
+                        queue.push(&decoded);
+                    }
+                }
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let verdict = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break Err(SystemAudioError::NoServer),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => break Ok(()),
+            Err(error) => {
+                break Err(SystemAudioError::Spawn(format!(
+                    "could not inspect {program}: {error}"
+                )));
+            }
+        }
+    };
+    if let Err(error) = verdict {
+        Recorder {
+            child,
+            reader: Some(reader),
+            live,
+        }
+        .stop();
+        return Err(error);
+    }
+    Ok(Recorder {
+        child,
+        reader: Some(reader),
+        live,
+    })
+}
+
+/// The server's readable name for a sink's monitor, or the sink id when it can't be listed.
+fn describe(sink: &str) -> String {
+    let device = monitor_id(sink);
+    super::devices::pactl(&["--format=json", "list", "sources"])
+        .ok()
+        .and_then(|text| {
+            monitor_sources(&text)
+                .into_iter()
+                .find(|(id, _)| *id == device)
+        })
+        .map_or_else(|| sink.to_owned(), |(_, name)| name)
 }
 
 impl SystemAudio {
@@ -45,17 +170,105 @@ impl SystemAudio {
         if let Some(id) = source.filter(|id| !id.trim().is_empty()) {
             return Self::launch("parec", &monitor_id(id), id);
         }
-        let text = super::devices::pactl(&["--format=json", "list", "sources"])
-            .map_err(|_| SystemAudioError::NoMonitor)?;
-        let monitors = monitor_sources(&text);
-        let preferred = super::devices::pactl(&["get-default-sink"])
+        Self::start_following("parec", || {
+            super::devices::pactl(&["get-default-sink"])
+                .ok()
+                .and_then(|text| text.lines().next().map(str::trim).map(str::to_owned))
+                .filter(|sink| !sink.is_empty())
+        })
+    }
+
+    fn start_following(
+        program: &str,
+        probe: impl Fn() -> Option<String> + Send + 'static,
+    ) -> Result<Self, SystemAudioError> {
+        let preferred = probe();
+        let monitors = super::devices::pactl(&["--format=json", "list", "sources"])
             .ok()
-            .and_then(|text| text.lines().next().map(|line| monitor_id(line.trim())));
-        let (id, name) = monitors
-            .iter()
-            .min_by_key(|(id, _)| Some(id.as_str()) != preferred.as_deref())
-            .ok_or(SystemAudioError::NoMonitor)?;
-        Self::launch("parec", id, name)
+            .map(|text| monitor_sources(&text))
+            .unwrap_or_default();
+        let (device, name, current_sink) = if let Some(sink) = preferred {
+            let device = monitor_id(&sink);
+            let name = monitors
+                .iter()
+                .find(|(id, _)| id == &device)
+                .map_or_else(|| sink.clone(), |(_, name)| name.clone());
+            (device, name, sink)
+        } else {
+            let (device, name) = monitors.first().ok_or(SystemAudioError::NoMonitor)?;
+            let sink = device.strip_suffix(".monitor").unwrap_or(device).to_owned();
+            (device.clone(), name.clone(), sink)
+        };
+        let mut audio = Self::launch(program, &device, &name)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let recorder = Arc::clone(&audio.recorder);
+        let samples = Arc::clone(&audio.samples);
+        let moved = Arc::clone(&audio.moved);
+        let swapped = Arc::clone(&audio.swapped);
+        let thread_stop = Arc::clone(&stop);
+        let program = program.to_owned();
+        let thread = thread::spawn(move || {
+            let mut current_sink = current_sink;
+            let mut next_probe = Instant::now() + Duration::from_secs(2);
+            'watch: while !thread_stop.load(Ordering::Relaxed) {
+                // 250 ms between checks, in slices, so Drop waits at most about 50 ms for a quiet watcher.
+                for _ in 0..5 {
+                    thread::sleep(Duration::from_millis(50));
+                    if thread_stop.load(Ordering::Relaxed) {
+                        break 'watch;
+                    }
+                }
+                let alive = recorder.lock().is_ok_and(|mut recorder| {
+                    recorder
+                        .child
+                        .try_wait()
+                        .is_ok_and(|status| status.is_none())
+                });
+                // A dead recorder usually means its sink vanished: ask for the new default at once.
+                let due = !alive || Instant::now() >= next_probe;
+                let selected = if due {
+                    next_probe = Instant::now() + Duration::from_secs(2);
+                    probe().filter(|sink| !sink.trim().is_empty())
+                } else {
+                    None
+                };
+                let target = selected.unwrap_or_else(|| current_sink.clone());
+                if alive && target == current_sink {
+                    continue;
+                }
+                // Spawning includes a 200 ms wait, so it must stay outside the lock.
+                match spawn_recorder(&program, &monitor_id(&target), Arc::clone(&samples), false) {
+                    Ok(new) => {
+                        // Before the handover, so a slow lookup cannot delay the notice (and its echo-gate reset).
+                        let label = (target != current_sink).then(|| describe(&target));
+                        let live = Arc::clone(&new.live);
+                        let old = {
+                            let mut recorder = recorder
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            std::mem::replace(&mut *recorder, new)
+                        };
+                        let mut old = old;
+                        old.stop();
+                        if let Some(label) = label {
+                            *moved
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(label);
+                            current_sink = target;
+                        }
+                        swapped.store(true, Ordering::Release);
+                        live.store(true, Ordering::Release);
+                    }
+                    Err(_) if !alive => break,
+                    Err(_) => {}
+                }
+            }
+        });
+        audio.follow = Some(Follow {
+            stop,
+            thread: Some(thread),
+        });
+        Ok(audio)
     }
 
     /// Record one input source exactly as named by the server.
@@ -68,80 +281,18 @@ impl SystemAudio {
 
     /// Run `program` (normally `parec`) on `device` and wait briefly to see that it stays up.
     fn launch(program: &str, device: &str, shown: &str) -> Result<Self, SystemAudioError> {
-        let mut child = Command::new(program)
-            .args([
-                "--latency-msec=50",
-                "--format=float32le",
-                "--rate=16000",
-                "--channels=1",
-                "--device",
-                device,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    SystemAudioError::NoServer
-                } else {
-                    SystemAudioError::Spawn(format!("{program} could not start: {error}"))
-                }
-            })?;
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(SystemAudioError::Spawn(format!(
-                "{program} did not provide an output pipe"
-            )));
-        };
         let samples = Arc::new(Mutex::new(SampleQueue::new(
             crate::audio::SAMPLE_RATE as usize * 2,
         )));
-        let queue = Arc::clone(&samples);
-        // Ends at EOF, which killing the child (see Drop) or its own exit produces.
-        let reader = thread::spawn(move || {
-            let mut input = BufReader::with_capacity(16 * 1024, stdout);
-            let mut frame = [0_u8; 2048];
-            let mut carry = Vec::new();
-            let mut decoded = Vec::with_capacity(frame.len() / 4);
-            loop {
-                match input.read(&mut frame) {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) => {
-                        decoded.clear();
-                        decode_samples(&mut carry, &frame[..count], &mut decoded);
-                        if let Ok(mut queue) = queue.lock() {
-                            queue.push(&decoded);
-                        }
-                    }
-                }
-            }
-        });
-        let deadline = Instant::now() + Duration::from_millis(200);
-        let verdict = loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break Err(SystemAudioError::NoServer),
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
-                Ok(None) => break Ok(()),
-                Err(error) => {
-                    break Err(SystemAudioError::Spawn(format!(
-                        "could not inspect {program}: {error}"
-                    )));
-                }
-            }
-        };
-        if let Err(error) = verdict {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(error);
-        }
+        let recorder = spawn_recorder(program, device, Arc::clone(&samples), true)?;
         Ok(Self {
             source: shown.to_owned(),
             samples,
-            child: Mutex::new(child),
-            reader: Some(reader),
+            recorder: Arc::new(Mutex::new(recorder)),
             exited: AtomicBool::new(false),
+            follow: None,
+            moved: Arc::new(Mutex::new(None)),
+            swapped: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -157,17 +308,35 @@ impl SystemAudio {
 
     /// Whether the recorder process is still alive.
     pub fn is_running(&self) -> bool {
+        if let Some(follow) = &self.follow {
+            return follow
+                .thread
+                .as_ref()
+                .is_some_and(|thread| !thread.is_finished());
+        }
         if self.exited.load(Ordering::Relaxed) {
             return false;
         }
-        let alive = self
-            .child
-            .lock()
-            .is_ok_and(|mut child| child.try_wait().is_ok_and(|status| status.is_none()));
+        let alive = self.recorder.lock().is_ok_and(|mut recorder| {
+            recorder
+                .child
+                .try_wait()
+                .is_ok_and(|status| status.is_none())
+        });
         if !alive {
             self.exited.store(true, Ordering::Relaxed);
         }
         alive
+    }
+
+    /// Whether the recorder was replaced since the last call.
+    pub fn take_swapped(&self) -> bool {
+        self.swapped.swap(false, Ordering::AcqRel)
+    }
+
+    /// Take the latest output name reported by the watcher.
+    pub fn take_moved(&self) -> Option<String> {
+        self.moved.lock().ok().and_then(|mut moved| moved.take())
     }
 
     /// Whether unread samples are available.
@@ -185,8 +354,7 @@ impl SystemAudio {
 
     /// Report an ended recorder to the caller.
     pub fn failure(&self) -> Option<String> {
-        self.is_running();
-        if self.exited.load(Ordering::Relaxed) {
+        if !self.is_running() {
             Some("audio recorder has stopped".to_owned())
         } else {
             None
@@ -203,24 +371,49 @@ impl SystemAudio {
         Self {
             source: "fake output".to_owned(),
             samples: Arc::new(Mutex::new(SampleQueue::new(16))),
-            child: Mutex::new(child),
-            reader: None,
+            recorder: Arc::new(Mutex::new(Recorder {
+                child,
+                reader: None,
+                live: Arc::new(AtomicBool::new(true)),
+            })),
             exited: AtomicBool::new(true),
+            follow: None,
+            moved: Arc::new(Mutex::new(None)),
+            swapped: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn moved_for_test(name: &str) -> Self {
+        let mut audio = Self::stopped_for_test();
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        audio.recorder = Arc::new(Mutex::new(Recorder {
+            child,
+            reader: None,
+            live: Arc::new(AtomicBool::new(true)),
+        }));
+        audio.exited.store(false, Ordering::Relaxed);
+        *audio.moved.lock().expect("lock moved") = Some(name.to_owned());
+        audio.swapped.store(true, Ordering::Relaxed);
+        audio
     }
 }
 
 impl Drop for SystemAudio {
     fn drop(&mut self) {
-        let mut child = self
-            .child
+        if let Some(follow) = &mut self.follow {
+            follow.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = follow.thread.take() {
+                let _ = thread.join();
+            }
+        }
+        let mut recorder = self
+            .recorder
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = child.kill();
-        let _ = child.wait();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
+        recorder.stop();
     }
 }
 
@@ -257,6 +450,196 @@ fn decode_samples(carry: &mut Vec<u8>, bytes: &[u8], out: &mut Vec<f32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn fake_parec(name: &str) -> (PathBuf, PathBuf) {
+        fake_parec_with(name, "")
+    }
+
+    /// `extra` is shell run before the recorder settles, e.g. to refuse a device.
+    fn fake_parec_with(name: &str, extra: &str) -> (PathBuf, PathBuf) {
+        let stem = format!(
+            "fake-parec-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let script = std::env::temp_dir().join(&stem);
+        let args = std::env::temp_dir().join(format!("{stem}-args"));
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n{extra}\nexec sleep 30\n",
+                args.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        (script, args)
+    }
+
+    fn wait_until(mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(Instant::now() < deadline, "condition did not become true");
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn recorded_device(args: &std::path::Path) -> Option<String> {
+        let text = std::fs::read_to_string(args).ok()?;
+        let mut args = text.lines();
+        args.find(|arg| *arg == "--device")?;
+        args.next().map(str::to_owned)
+    }
+
+    /// Another test forking while a fake script was open for writing gives ETXTBSY; retry that.
+    fn retry_busy(mut start: impl FnMut() -> Result<SystemAudio, SystemAudioError>) -> SystemAudio {
+        for _ in 0..20 {
+            match start() {
+                Err(SystemAudioError::Spawn(text)) if text.contains("Text file busy") => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                other => return other.unwrap(),
+            }
+        }
+        panic!("fake recorder stayed busy");
+    }
+
+    fn following(script: &std::path::Path, sink: &Arc<Mutex<Option<String>>>) -> SystemAudio {
+        retry_busy(|| {
+            let probe_sink = Arc::clone(sink);
+            SystemAudio::start_following(script.to_str().unwrap(), move || {
+                probe_sink.lock().unwrap().clone()
+            })
+        })
+    }
+
+    #[test]
+    fn follows_new_default_once_and_stays_running() {
+        let (script, args) = fake_parec("switch");
+        let sink = Arc::new(Mutex::new(Some("A".to_owned())));
+        let audio = following(&script, &sink);
+        wait_until(|| recorded_device(&args).as_deref() == Some("A.monitor"));
+        assert!(audio.is_running());
+        *sink.lock().unwrap() = Some("B".to_owned());
+        wait_until(|| {
+            assert!(audio.is_running());
+            recorded_device(&args).as_deref() == Some("B.monitor")
+        });
+        wait_until(|| audio.take_moved().as_deref() == Some("B"));
+        assert!(audio.is_running());
+        assert_eq!(audio.take_moved(), None);
+        drop(audio);
+        let _ = std::fs::remove_file(script);
+        let _ = std::fs::remove_file(args);
+    }
+
+    #[test]
+    fn dead_child_restarts_on_new_default() {
+        // Once `gone` exists, sink A has vanished: parec on A.monitor exits at once.
+        let gone = std::env::temp_dir().join(format!("fake-parec-gone-{}", std::process::id()));
+        let _ = std::fs::remove_file(&gone);
+        let (script, args) = fake_parec_with(
+            "dead-switch",
+            &format!(
+                "case \"$*\" in *A.monitor*) [ -e '{}' ] && exit 1;; esac",
+                gone.display()
+            ),
+        );
+        let sink = Arc::new(Mutex::new(Some("A".to_owned())));
+        let audio = following(&script, &sink);
+        *sink.lock().unwrap() = Some("C".to_owned());
+        std::fs::write(&gone, "").unwrap();
+        audio.recorder.lock().unwrap().child.kill().unwrap();
+        wait_until(|| recorded_device(&args).as_deref() == Some("C.monitor"));
+        wait_until(|| audio.take_moved().as_deref() == Some("C"));
+        assert!(audio.is_running());
+        drop(audio);
+        let _ = std::fs::remove_file(script);
+        let _ = std::fs::remove_file(args);
+        let _ = std::fs::remove_file(gone);
+    }
+
+    #[test]
+    fn a_switch_never_interleaves_old_and_new_audio() {
+        // Each recorder streams one value: 1.0 on A.monitor, 2.0 on B.monitor (float32le).
+        let (script, args) = fake_parec_with(
+            "pcm",
+            r#"case "$*" in *B.monitor*) s='\000\000\000\100';; *) s='\000\000\200\077';; esac
+p=$s$s$s$s$s$s$s$s; p=$p$p$p$p$p$p$p$p
+while :; do printf "$p" || exit; sleep 0.004; done"#,
+        );
+        let sink = Arc::new(Mutex::new(Some("A".to_owned())));
+        let audio = following(&script, &sink);
+        let mut heard = Vec::new();
+        wait_until(|| {
+            heard.extend(audio.take(usize::MAX));
+            heard.contains(&1.0)
+        });
+        *sink.lock().unwrap() = Some("B".to_owned());
+        wait_until(|| {
+            heard.extend(audio.take(usize::MAX));
+            heard.contains(&2.0)
+        });
+        // Let the new recorder run on, so a late block from either one would show.
+        let settle = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < settle {
+            heard.extend(audio.take(usize::MAX));
+            thread::sleep(Duration::from_millis(10));
+        }
+        let first_new = heard.iter().position(|&v| v == 2.0).unwrap();
+        assert!(
+            heard[first_new..].iter().all(|&v| v == 2.0),
+            "old audio after new audio began"
+        );
+        drop(audio);
+        let _ = std::fs::remove_file(script);
+        let _ = std::fs::remove_file(args);
+    }
+
+    #[test]
+    fn dead_child_with_failed_relaunch_ends_watcher() {
+        let (script, args) = fake_parec("failed-relaunch");
+        let sink = Arc::new(Mutex::new(Some("A".to_owned())));
+        let audio = following(&script, &sink);
+        std::fs::remove_file(&script).unwrap();
+        audio.recorder.lock().unwrap().child.kill().unwrap();
+        wait_until(|| !audio.is_running());
+        drop(audio);
+        let _ = std::fs::remove_file(args);
+    }
+
+    #[test]
+    fn explicit_launch_has_no_watcher() {
+        let (script, args) = fake_parec("explicit");
+        let audio = retry_busy(|| {
+            SystemAudio::launch(script.to_str().unwrap(), "chosen.monitor", "chosen")
+        });
+        assert!(audio.follow.is_none());
+        assert_eq!(recorded_device(&args).as_deref(), Some("chosen.monitor"));
+        drop(audio);
+        let _ = std::fs::remove_file(script);
+        let _ = std::fs::remove_file(args);
+    }
+
+    #[test]
+    fn dropping_following_recorder_reaps_last_child() {
+        let (script, args) = fake_parec("drop");
+        let sink = Arc::new(Mutex::new(Some("A".to_owned())));
+        let audio = following(&script, &sink);
+        *sink.lock().unwrap() = Some("B".to_owned());
+        wait_until(|| recorded_device(&args).as_deref() == Some("B.monitor"));
+        wait_until(|| audio.take_moved().as_deref() == Some("B"));
+        let pid = audio.recorder.lock().unwrap().child.id();
+        drop(audio);
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        let _ = std::fs::remove_file(script);
+        let _ = std::fs::remove_file(args);
+    }
 
     #[test]
     fn monitor_rules() {
@@ -336,7 +719,7 @@ mod tests {
         };
         let _ = std::fs::remove_file(&script);
         let live = launched.unwrap();
-        let pid = live.child.lock().unwrap().id();
+        let pid = live.recorder.lock().unwrap().child.id();
         drop(live);
         assert!(
             !std::path::Path::new(&format!("/proc/{pid}")).exists(),
