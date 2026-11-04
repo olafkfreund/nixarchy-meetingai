@@ -15,15 +15,26 @@ only understands English.
 
 - **Questions can go unanswered.** With the default setting (`auto_response` is
   `Questions`), an answer is triggered only by `is_question`
-  (`src/daemon/session.rs:458`). It accepts a `?` in any language, or an English
-  opener such as "what ", "can you " or "tell me ". A Norwegian "hva mener du"
-  with no `?` from the speech engine gets no answer.
-- **The quick action can answer in the wrong language.** The "What should I
-  say?" button sends that English text as the question (`shell/Overlay.qml:417`).
+  (`src/daemon/session.rs:458`). For text of two or more words, it accepts a `?`
+  in any language, or an English opener such as "what ", "can you " or "tell me ".
+  A Norwegian "hva mener du" with no `?` from the speech engine gets no answer.
+- **Answers the app asks for itself can come back in the wrong language.** Some
+  actions send fixed English text as the user's question:
+  - the "What should I say?" button (`shell/Overlay.qml:417`);
+  - asking about a quoted line with nothing typed (`shell/Overlay.qml:231`);
+  - a screenshot or attachment sent with nothing typed
+    (`src/daemon/session.rs:1732`);
+  - the follow-up suggestions generated after a typed or quick-action answer
+    (`src/daemon/session.rs:2155`).
+
   With `response_language` on Auto, the instruction is to reply in the language
-  of the user's latest question (`src/core/models/settings.rs:167`), and that
-  question is the button text. A Norwegian call can therefore get an English
-  answer. How often has not been measured.
+  of the user's latest question (`src/core/models/settings.rs:167`), which here is
+  that English text. The same prompt also carries the Norwegian transcript and
+  says to continue the exchange (`src/daemon/session.rs:1645`), so the model gets
+  two competing cues. An English answer on a Norwegian call is possible, not
+  established; how often it happens, and on which models, has not been measured.
+  Automatic answers do not have this conflict: their question is the remote
+  speaker's own line.
 
 How large the first problem is has not been measured. If the speech engines
 usually punctuate spoken questions, the `?` rule already catches most of them.
@@ -48,19 +59,20 @@ language.
 
 On a call in a language the transcript supports:
 
-- A spoken question in that language gets an automatic answer about as often as
-  the same question does in English, without answers firing on ordinary
-  statements.
-- "What should I say?" answers in the language of the call, or in the language
-  set in `response_language` if one is set.
+- **Detection:** a finished remote line that is a spoken question is recognised
+  about as often as in English, without ordinary statements being taken for
+  questions. The spec sets the test set and the thresholds. This covers detection
+  only: pace, expiry and provider availability work as they do today.
+- **Language:** answers to the fixed-text actions above come back in the language
+  of the call, or in the language set in `response_language` if one is set.
 - English calls behave as they do today.
 
 ## Affected users and systems
 
 - Anyone on a non-English call in **Assist** or **Interview me**; in practice
   today, the owner's Norwegian and possibly Polish calls.
-- `src/daemon/session.rs` (`is_question`, and how the quick action reaches the
-  prompt) and `shell/Overlay.qml` (the quick action text).
+- `src/daemon/session.rs` (`is_question`, the fixed texts, follow-ups and the
+  language instruction), `src/core/models/settings.rs` and `shell/Overlay.qml`.
 - All hosts through the daemon; no database or Nix option is expected to change.
 
 ## Constraints
@@ -68,6 +80,7 @@ On a call in a language the transcript supports:
 - **No extra cost on the live path.** `is_question` runs on every finished remote
   line. It must not add a network or model call there without an explicit
   decision, since it would add delay and could send call text to a provider.
+  Any local work there must be too small to notice.
 - **Local-only stays intact.** Nothing here may send text anywhere a Local-only
   interview does not already allow.
 - **False answers are worse than missed ones.** An answer popping up on a
@@ -91,5 +104,5 @@ On a call in a language the transcript supports:
 3. **What should the quick action button show?** Recommended: keep the label in
    English and make only the answer follow the call's language. Translating the
    interface is a separate job.
-4. **Delete the dead filler list in `meaningful_remark`?** Recommended: yes, as
-   part of this work, since it misleads readers into thinking filler is filtered.
+4. **Delete the dead filler list in `meaningful_remark`?** Recommended: not here.
+   It has no effect on the outcome, so it is a separate small cleanup.
