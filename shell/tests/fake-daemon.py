@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stand-in for the nixarchy-meetingai daemon (stdlib only).
 
-usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--live-since=MS_AGO] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--reask] [--call] [--providers] [--locked] [--export-ask] [--library] [--scale=PERCENT] [--size=WxH]
+usage: fake-daemon.py SOCKET_PATH LOG_PATH [--auto] [--live] [--live-since=MS_AGO] [--k8s] [--team] [--interviewer] [--first-run] [--error] [--drop] [--stale] [--reask] [--call] [--providers] [--locked] [--export-ask] [--library] [--lines] [--scale=PERCENT] [--size=WxH]
 
 --k8s is --live with one scene: Priya asks "Explain k8s and how it is working?", a real claude-sub haiku
 answer (fixtures/k8s-live-answer.md if present, else k8s-answer.md) streams in, then its real suggestions. --scale sets the text_scale setting.
@@ -55,6 +55,7 @@ slow = "--slow-settings" in sys.argv   # settings.get answers after 2.5 s and no
 locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, meeting_mode, text_scale
 voice_mode = "--voice" in sys.argv     # transcript.get room row, transcript.relabel, direct room final, and voice.* commands
 grounded = "--grounded" in sys.argv   # citations, search, old-window jump, rename, and stale suggestion
+lines_mode = "--lines" in sys.argv    # line actions (correct, bookmark, ask), meeting view, regenerate, and saved sources
 export_ask = "--export-ask" in sys.argv   # emit export.folder_needed after connect
 library = "--library" in sys.argv     # a second meeting, per-meeting notes answered after 0.8 s, and notes.bump
 LIB_NOTES = {"1": "# Meeting recap\n## Summary\nfake", "3": ""}
@@ -87,7 +88,7 @@ settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider"
 
 if voice_mode:
     state["meeting"] = "m1"
-if grounded:
+if grounded or lines_mode:
     state["meeting"] = "m1"
 
 GROUND_ROWS = [
@@ -102,6 +103,25 @@ GROUND_SOURCES = [
 ]
 RENAMED = [False]
 GROUND_NOW = {"status": "idle", "question": "", "answer": "", "turn": 0, "cite_max": 0, "cite_notes": 0, "sources": [], "suggestions": []}
+LINE_ROWS = [
+    {"line": 1, "id": "line-1", "meeting": "m1", "who": "system", "speaker": "Sam", "speaker_key": "0", "text": "Misheard Kafka lag", "t0": 65.0, "t1": 69.0, "edited": False, "bookmarked": False},
+    {"line": 2, "id": "line-2", "meeting": "m1", "who": "mic", "speaker": "", "speaker_key": "", "text": "We will pad the migration by two days", "t0": 125.0, "t1": 129.0, "edited": False, "bookmarked": False},
+    {"line": 1, "id": "past-chunk", "meeting": "1", "who": "system", "speaker": "Alex", "speaker_key": "0", "text": "Past chunk moment", "t0": 60.0, "t1": 64.0, "edited": False, "bookmarked": False},
+    {"line": 2, "id": "past-item", "meeting": "1", "who": "mic", "speaker": "", "speaker_key": "", "text": "Past item moment", "t0": 125.0, "t1": 129.0, "edited": False, "bookmarked": False},
+    {"line": 3, "id": "past-bmark", "meeting": "1", "who": "system", "speaker": "Alex", "speaker_key": "0", "text": "Past bookmark moment", "t0": 240.0, "t1": 244.0, "edited": False, "bookmarked": True},
+]
+LINE_NOTES = {
+    "text": "## Summary\nInitial notes",
+    "stale": False,
+    "chunks": [{"t0": 60.0, "t1": 180.0, "body": "Discussed the rollout window.", "line": "past-chunk"}],
+}
+LINE_ITEMS = [
+    {"id": "li-1", "meeting_id": "1", "series_id": None, "kind": "action", "text": "Pad the migration by two days", "owner": "Sam", "due": "Tuesday", "status": "open", "source_line": 2, "t0": 125.0, "line": "past-item", "origin_item": None, "origin_text": None, "draft": 0, "created_at": "2026-10-30 09:02:00"},
+    {"id": "li-2", "meeting_id": "1", "series_id": None, "kind": "decision", "text": "Keep single-region first", "owner": None, "due": None, "status": "open", "source_line": None, "t0": 180.0, "line": None, "origin_item": None, "origin_text": None, "draft": 0, "created_at": "2026-10-30 09:03:00"},
+]
+LINE_SAVED_SOURCES = [
+    {"kind": "line", "id": "past-chunk", "t0": 60.0, "t1": 64.0, "speaker": "Alex", "snippet": "Past chunk moment"},
+]
 
 
 def voice_status():
@@ -462,6 +482,16 @@ class Handler(socketserver.StreamRequestHandler):
         self.send({"event": "suggestion", "turn": 1, "text": "STALE SUGGESTION"})
         self.send({"event": "suggestion", "turn": 2, "text": "Current follow-up"})
 
+    def stream_lines(self):
+        time.sleep(0.3)
+        self.send({"event": "settings", "settings": settings})
+        self.send({"event": "state", **state})
+        self.send({"event": "transcript.final", "id": "live-short", "who": "system", "speaker": "Sam", "speaker_key": "0", "text": "Shortened live line", "t0": 180.0, "t1": 184.0, "edited": False, "bookmarked": False, "shortened": True})
+        self.send({"event": "answer.started", "turn": 1, "question": "Initial question?", "automatic": True, "cite_max": 1, "cite_notes": 0, **PROVIDER})
+        self.send({"event": "answer.delta", "turn": 1, "text": "Initial answer [1].", **PROVIDER})
+        self.send({"event": "answer.sources", "turn": 1, "sources": [{"kind": "line", "id": "line-1", "t0": 65.0, "t1": 69.0, "speaker": "Sam", "snippet": "Misheard Kafka lag"}]})
+        self.send({"event": "answer.done", "turn": 1, **PROVIDER})
+
     def reask_tail(self, question):
         """--reask: the late tail of turn 1 arrives before the new question's answer.started."""
         time.sleep(0.2)
@@ -599,15 +629,21 @@ class Handler(socketserver.StreamRequestHandler):
         for text in json.load(open(os.path.join(FIXTURES, "k8s-suggestions.json"))):
             self.send({"event": "suggestion", "turn": 1, "text": text})
 
-    def typed(self, question):
+    def typed(self, question, line_id=None):
         """A typed question: started carries it, then deltas, done, and at most 3 follow-ups."""
         time.sleep(0.2)
         typed_provider = {"provider": "claude-sub", "model": "sonnet"}
         turn = next(TURNS)   # like the daemon: every question is a new turn
-        self.send({"event": "answer.started", "turn": turn, "question": question, "automatic": False, "cite_max": 0, "cite_notes": 0, **typed_provider})
+        qrow = next((r for r in LINE_ROWS if r["id"] == line_id), None) if line_id else None
+        self.send({"event": "answer.started", "turn": turn, "question": question, "automatic": False, "cite_max": 1 if qrow else 0, "cite_notes": 0, **typed_provider})
         if err:
             time.sleep(4)
             return self.send({"event": "answer.error", "turn": turn, "message": "claude: the provider did not answer within 30 s", **typed_provider})
+        if qrow:
+            self.send({"event": "answer.delta", "turn": turn, "text": "About that moment [1].", **typed_provider})
+            self.send({"event": "answer.sources", "turn": turn, "sources": [{"kind": "line", "id": qrow["id"], "t0": qrow["t0"], "t1": qrow["t1"], "speaker": qrow["speaker"], "snippet": qrow["text"]}]})
+            self.send({"event": "answer.done", "turn": turn, **typed_provider})
+            return
         for chunk in ["Say the number first: ", "**under a minute of lag** ", "is fine, past ten minutes ", "you page someone."]:
             self.send({"event": "answer.delta", "turn": turn, "text": chunk, **typed_provider})
             time.sleep(0.25)
@@ -625,7 +661,7 @@ class Handler(socketserver.StreamRequestHandler):
         for raw in self.rfile:
             req = json.loads(raw)
             cmd = req["cmd"]
-            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") if cmd == "record.start" else ""))
+            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") if cmd == "record.start" else "") + (" line=" + str(req.get("args", {}).get("line")) + " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" and req.get("args", {}).get("line") else ""))
             if cmd == "record.start" and iv and not (state["consent"] or req.get("args", {}).get("consent")):
                 self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed."})
                 continue
@@ -672,6 +708,25 @@ class Handler(socketserver.StreamRequestHandler):
                 data = dict(GROUND_NOW)
             elif grounded and cmd == "notes.get":
                 data = {"text": "## Summary\nfake", "stale": RENAMED[0]}
+            elif lines_mode and cmd == "transcript.get":
+                args = req.get("args", {})
+                around = args.get("around")
+                m = str(args.get("meeting") or state.get("meeting") or "m1")
+                if around:
+                    hit = next((r for r in LINE_ROWS if r["id"] == around), None)
+                    m = hit["meeting"] if hit else m
+                    rows = [r for r in LINE_ROWS if r["meeting"] == m] if hit else []
+                else:
+                    rows = [r for r in LINE_ROWS if r["meeting"] == m and r["line"] > (args.get("after_line") or 0)]
+                data = {"meeting": m, "lines": [{k: v for k, v in r.items() if k not in ("meeting", "shortened")} for r in rows]}
+            elif lines_mode and cmd == "bookmarks.list":
+                m = str(req.get("args", {}).get("meeting") or state.get("meeting") or "1")
+                data = [{"line": r["id"], "who": r["who"], "speaker": r["speaker"], "speaker_key": r["speaker_key"], "text": r["text"], "t0": r["t0"]} for r in LINE_ROWS if r["meeting"] == m and r.get("bookmarked")]
+            elif lines_mode and cmd == "notes.get":
+                data = dict(LINE_NOTES)
+            elif lines_mode and cmd == "items.list":
+                m = str(req.get("args", {}).get("meeting") or state.get("meeting") or "1")
+                data = [dict(i) for i in LINE_ITEMS if i["meeting_id"] == m]
             elif library and cmd == "notes.get":
                 data = {"text": LIB_NOTES.get(str(req.get("args", {}).get("meeting")), ""), "stale": False}
             elif drop and cmd == "transcript.get":
@@ -759,6 +814,48 @@ class Handler(socketserver.StreamRequestHandler):
                 self.send({"id": req["id"], "ok": True, "data": {}})
                 cast({"event": "speakers.renamed", "meeting": "m1", "key": "1", "name": args.get("name", "").strip()})
                 continue
+            if lines_mode and cmd == "transcript.edit":
+                args = req.get("args", {})
+                lid = str(args.get("id") or "")
+                txt = str(args.get("text") or "").strip()
+                row = next((r for r in LINE_ROWS if r["id"] == lid), None)
+                if not txt:
+                    self.send({"id": req["id"], "ok": False, "error": "A line cannot be empty."})
+                    continue
+                if row is None:
+                    self.send({"id": req["id"], "ok": False, "error": "That line no longer exists."})
+                    continue
+                heard = row.get("heard") or row["text"]
+                row["text"] = txt
+                row["edited"] = True
+                if txt == heard:
+                    row.pop("heard", None)
+                    heard_out = None
+                else:
+                    row["heard"] = heard
+                    heard_out = heard
+                LINE_NOTES["stale"] = True
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "transcript.edited", "id": lid, "text": txt, "edited": True, "heard": heard_out})
+                continue
+            if lines_mode and cmd == "bookmark.set":
+                args = req.get("args", {})
+                lid = str(args.get("line") or "")
+                on = bool(args.get("on"))
+                row = next((r for r in LINE_ROWS if r["id"] == lid), None)
+                if row is None:
+                    self.send({"id": req["id"], "ok": False, "error": "That line no longer exists."})
+                    continue
+                row["bookmarked"] = on
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "transcript.bookmarked", "id": lid, "on": on})
+                continue
+            if lines_mode and cmd == "notes.regenerate":
+                m = req.get("args", {}).get("meeting", "1")
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                LINE_NOTES.update(text="## Summary\nRegenerated notes", stale=False)
+                cast({"event": "notes.updated", "meeting": m})
+                continue
             self.send({"id": req["id"], "ok": True, "data": data})
             if cmd == "settings.set":
                 settings[req["args"]["key"]] = req["args"]["value"]
@@ -774,13 +871,26 @@ class Handler(socketserver.StreamRequestHandler):
                     if r["meeting"] == m:
                         self.send({"event": "transcript.final", **{k: v for k, v in r.items() if k not in ("line", "meeting")}})
                 self.send({"event": "state", **state})
+            elif cmd == "session.restore" and lines_mode:
+                m = str(req["args"].get("id", ""))
+                self.send({"event": "session.reset"})
+                self.send({"event": "history", "rows": [
+                    {"who": "question", "text": "What was the rollout plan?"},
+                    {"who": "answer", "text": "See the rollout window [1].", "sources": LINE_SAVED_SOURCES, "cite_max": 1, "cite_notes": 0},
+                ]})
+                if m != "2":
+                    state["meeting"] = m
+                    for r in LINE_ROWS:
+                        if r["meeting"] == m:
+                            self.send({"event": "transcript.final", **{k: v for k, v in r.items() if k not in ("line", "meeting", "shortened")}})
+                    self.send({"event": "state", **state})
             elif cmd == "session.restore":
                 self.send({"event": "session.reset"})
                 self.send({"event": "history", "rows": [{"who": "question", "text": "old q"}, {"who": "answer", "text": "old a"}]})
             if cmd == "chat.send":
-                threading.Thread(target=self.reask_tail if reask else self.typed, args=(req["args"].get("text", ""),), daemon=True).start()
+                threading.Thread(target=self.reask_tail if reask else self.typed, args=(req["args"].get("text", ""),) if reask else (req["args"].get("text", ""), req["args"].get("line")), daemon=True).start()
             if cmd == "state.get":
-                threading.Thread(target=self.stream_grounded if grounded else self.stream_stale if stale else self.stream_resume if reask else self.stream_voice if voice_mode else self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
+                threading.Thread(target=self.stream_grounded if grounded else self.stream_lines if lines_mode else self.stream_stale if stale else self.stream_resume if reask else self.stream_voice if voice_mode else self.stream_resume if drop and dropped[0] else self.stream_live if live else self.stream, daemon=True).start()
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

@@ -103,10 +103,17 @@ Item {
                 required property string sources
                 required property int citeMax
                 required property int citeNotes
-                required property bool renamedAfter
+                required property bool changedAfter
+                required property bool edited
+                required property string heard
+                required property bool bookmarked
+                required property bool shortened
                 required property bool flash
                 property bool expanded: false
                 property bool editing: false
+                property bool correcting: false   // the Correct field is open
+                property bool more: false         // the row's actions are shown
+                readonly property bool actionable: lineId !== "" && !partial && !answer
                 readonly property bool renamable: who === "system" && speakerKey !== "" && !partial
                 readonly property bool answer: who === "answer"
                 readonly property bool mine: who === "mic" || who === "asked"
@@ -122,7 +129,7 @@ Item {
                     id: bub
                     visible: row.bubble
                     x: row.mine ? row.width - width : 0
-                    width: Math.min(row.width * 0.8, Math.max(btxt.implicitWidth, blabel.implicitWidth, row.editing ? Style.space(160) * root.theme.ts : 0) + root.theme.padX * 1.5)
+                    width: Math.min(row.width * 0.8, Math.max(btxt.implicitWidth, hdr.implicitWidth, row.more ? acts.implicitWidth : 0, row.editing || row.correcting ? Style.space(160) * root.theme.ts : 0) + root.theme.padX * 1.5)
                     height: bcol.implicitHeight + root.theme.padY * 1.5
                     radius: root.theme.radius
                     border.width: row.flash ? 2 : 0
@@ -133,30 +140,75 @@ Item {
                         x: root.theme.padX * 0.75; y: root.theme.padY * 0.75
                         width: parent.width - root.theme.padX * 1.5
                         spacing: Style.space(3)
-                        UiText {
-                            id: blabel
-                            objectName: "bubbleLabel"
+                        Row {
+                            id: hdr
                             visible: !row.editing
-                            textFormat: Text.PlainText
-                            text: row.label + row.stamp
-                            color: Commons.Color.popups.text
-                            opacity: root.theme.dim
-                            font.pixelSize: root.theme.caption
-                            font.bold: true
-                            font.underline: row.renamable && lmouse.containsMouse
-                            Accessible.role: row.renamable ? Accessible.Button : Accessible.StaticText
-                            Accessible.name: row.renamable ? "Rename " + row.label : text
-                            Accessible.onPressAction: { if (row.renamable) row.editing = true; }
-                            MouseArea {
-                                id: lmouse
-                                objectName: "renameLabel"
-                                anchors.fill: parent
-                                enabled: row.renamable
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: row.editing = true
-                                ToolTip.visible: containsMouse && row.speakerKey === "them"
-                                ToolTip.text: "All remote speakers (this engine does not tell them apart)"
+                            spacing: Style.spacing.xs
+                            UiText {
+                                id: blabel
+                                objectName: "bubbleLabel"
+                                anchors.verticalCenter: parent.verticalCenter
+                                textFormat: Text.PlainText
+                                text: row.label + row.stamp
+                                color: Commons.Color.popups.text
+                                opacity: root.theme.dim
+                                font.pixelSize: root.theme.caption
+                                font.bold: true
+                                font.underline: row.renamable && lmouse.containsMouse
+                                Accessible.role: row.renamable ? Accessible.Button : Accessible.StaticText
+                                Accessible.name: row.renamable ? "Rename " + row.label : text
+                                Accessible.onPressAction: { if (row.renamable) row.editing = true; }
+                                MouseArea {
+                                    id: lmouse
+                                    objectName: "renameLabel"
+                                    anchors.fill: parent
+                                    enabled: row.renamable
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: { row.more = false; row.editing = true; }
+                                    ToolTip.visible: containsMouse && row.speakerKey === "them"
+                                    ToolTip.text: "All remote speakers (this engine does not tell them apart)"
+                                }
+                            }
+                            UiText {
+                                objectName: "bookmarkStar"
+                                visible: row.bookmarked
+                                anchors.verticalCenter: parent.verticalCenter
+                                textFormat: Text.PlainText
+                                text: "\u2605"
+                                color: Commons.Color.accent
+                                font.pixelSize: root.theme.caption
+                                Accessible.role: Accessible.StaticText
+                                Accessible.name: "Bookmarked"
+                            }
+                            UiText {
+                                objectName: "editedMark"
+                                visible: row.edited
+                                anchors.verticalCenter: parent.verticalCenter
+                                textFormat: Text.PlainText
+                                text: "edited"
+                                color: Commons.Color.popups.text
+                                opacity: root.theme.dim
+                                font.italic: true
+                                font.pixelSize: root.theme.caption
+                                Accessible.role: Accessible.StaticText
+                                Accessible.name: row.heard !== "" ? "Edited, heard: " + row.heard : "Edited"
+                                MouseArea {
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    ToolTip.visible: containsMouse && row.heard !== ""
+                                    ToolTip.text: "Heard: " + row.heard
+                                }
+                            }
+                            IconButton {
+                                objectName: "rowMore"
+                                visible: row.actionable
+                                anchors.verticalCenter: parent.verticalCenter
+                                ts: root.theme.ts
+                                text: "\u22ef"
+                                Accessible.name: "more"
+                                tooltipText: "Correct, bookmark or ask about this line"
+                                onClicked: { row.more = !row.more; row.correcting = false; }
                             }
                         }
                         Input {
@@ -172,8 +224,34 @@ Item {
                             onActiveFocusChanged: { if (!activeFocus) row.editing = false; }
                             Keys.onEscapePressed: function(e) { row.editing = false; e.accepted = true; }
                         }
+                        Input {
+                            id: correctInput
+                            objectName: "correctInput"
+                            ts: root.theme.ts
+                            visible: row.correcting
+                            width: parent.width
+                            accessibleName: "Correct this line"
+                            maximumLength: 32000
+                            onVisibleChanged: { if (visible) { text = row.body; forceActiveFocus(); selectAll(); } }
+                            onAccepted: {
+                                var t = text.trim();
+                                if (t !== "" && t !== row.body) root.daemon.send("transcript.edit", { id: row.lineId, text: t });
+                                row.correcting = false; row.more = false;
+                            }
+                            onActiveFocusChanged: { if (!activeFocus) row.correcting = false; }
+                            Keys.onEscapePressed: function(e) { row.correcting = false; e.accepted = true; }
+                        }
+                        Row {
+                            id: acts
+                            visible: row.more && row.actionable && !row.correcting
+                            spacing: Style.spacing.xs
+                            IconButton { objectName: "correctLine"; ts: root.theme.ts; visible: !row.shortened; text: "Correct"; tooltipText: "Fix what was heard"; onClicked: row.correcting = true }
+                            IconButton { objectName: "bookmarkLine"; ts: root.theme.ts; text: "Bookmark"; tooltipText: row.bookmarked ? "Remove the bookmark" : "Mark this moment"; onClicked: { root.daemon.send("bookmark.set", { line: row.lineId, on: !row.bookmarked }); row.more = false; } }
+                            IconButton { objectName: "askLine"; ts: root.theme.ts; text: "Ask"; tooltipText: "Ask about this line"; onClicked: { root.daemon.quote = { line: row.lineId, label: (row.speaker !== "" ? row.speaker : row.label) + " \u00b7 " + root.daemon.fmtTime(row.t0) + " \u00b7 " + row.body.slice(0, 80) }; row.more = false; } }
+                        }
                         UiText {
                             id: btxt
+                            visible: !row.correcting
                             width: parent.width
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
@@ -232,11 +310,11 @@ Item {
                         }
                         UiText {
                             objectName: "namesChanged"
-                            visible: row.renamedAfter
+                            visible: row.changedAfter
                             width: parent.width
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
-                            text: "Speaker names changed after this answer"
+                            text: "Names or lines changed after this answer"
                             color: Commons.Color.popups.text
                             opacity: root.theme.dim
                             font.italic: true

@@ -4,7 +4,7 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, PartialEq)]
 pub struct Recap {
@@ -12,10 +12,11 @@ pub struct Recap {
     pub status: String,
     pub error: String,
     pub updated_at: String,
+    pub read_at: Option<String>,
 }
 pub fn recap(c: &Connection, id: &str) -> Result<Option<Recap>> {
     Ok(c.query_row(
-        "SELECT content,status,error,updated_at FROM meeting_recaps WHERE meeting_id=?1",
+        "SELECT content,status,error,updated_at,read_at FROM meeting_recaps WHERE meeting_id=?1",
         [id],
         |r| {
             Ok(Recap {
@@ -23,6 +24,7 @@ pub fn recap(c: &Connection, id: &str) -> Result<Option<Recap>> {
                 status: r.get(1)?,
                 error: r.get(2)?,
                 updated_at: r.get(3)?,
+                read_at: r.get(4)?,
             })
         },
     )
@@ -30,10 +32,13 @@ pub fn recap(c: &Connection, id: &str) -> Result<Option<Recap>> {
 }
 pub fn begin_recap(c: &Connection, id: &str) -> Result<()> {
     if c.execute(
-        "UPDATE meeting_recaps SET status='pending',error='',updated_at=datetime('now') WHERE meeting_id=?1",
+        "UPDATE meeting_recaps SET status='pending',error='',updated_at=datetime('now'),read_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE meeting_id=?1",
         [id],
     )? == 0 {
-        c.execute("INSERT INTO meeting_recaps(meeting_id) VALUES(?1)", [id])?;
+        c.execute(
+            "INSERT INTO meeting_recaps(meeting_id,read_at) VALUES(?1,strftime('%Y-%m-%d %H:%M:%f','now'))",
+            [id],
+        )?;
     }
     Ok(())
 }
@@ -73,6 +78,10 @@ pub struct LineRecord {
     pub text: String,
     pub start_time: f64,
     pub end_time: f64,
+    /// What was first heard, when the line has been corrected.
+    pub heard: Option<String>,
+    /// Corrected at least once (a revert stays marked).
+    pub edited: bool,
 }
 pub fn start(
     c: &Connection,
@@ -252,53 +261,150 @@ pub fn index_notes(c: &Connection, id: &str, body: &str) -> Result<()> {
     tx.commit()?;
     Ok(())
 }
+const LINE_COLS: &str = "id,who,speaker,text,start_time,end_time,heard,edited_at IS NOT NULL";
+fn line_row(r: &rusqlite::Row, o: usize) -> rusqlite::Result<LineRecord> {
+    Ok(LineRecord {
+        id: r.get(o)?,
+        who: r.get(o + 1)?,
+        speaker: r.get(o + 2)?,
+        text: r.get(o + 3)?,
+        start_time: r.get(o + 4)?,
+        end_time: r.get(o + 5)?,
+        heard: r.get(o + 6)?,
+        edited: r.get(o + 7)?,
+    })
+}
 pub fn lines(c: &Connection, meeting_id: &str) -> Result<Vec<LineRecord>> {
-    let mut s=c.prepare("SELECT id,who,speaker,text,start_time,end_time FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time,rowid")?;
-    Ok(s.query_map([meeting_id], |r| {
-        Ok(LineRecord {
-            id: r.get(0)?,
-            who: r.get(1)?,
-            speaker: r.get(2)?,
-            text: r.get(3)?,
-            start_time: r.get(4)?,
-            end_time: r.get(5)?,
-        })
-    })?
-    .collect::<std::result::Result<_, _>>()?)
+    let mut s = c.prepare(&format!(
+        "SELECT {LINE_COLS} FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time,rowid"
+    ))?;
+    Ok(s.query_map([meeting_id], |r| line_row(r, 0))?
+        .collect::<std::result::Result<_, _>>()?)
+}
+pub fn line(c: &Connection, id: &str) -> Result<Option<LineRecord>> {
+    Ok(c.query_row(
+        &format!("SELECT {LINE_COLS} FROM meeting_lines WHERE id=?1"),
+        [id],
+        |r| line_row(r, 0),
+    )
+    .optional()?)
 }
 pub fn recent_lines(c: &Connection, meeting_id: &str, limit: usize) -> Result<Vec<LineRecord>> {
-    let mut s=c.prepare("SELECT id,who,speaker,substr(text,1,8000),start_time,end_time FROM (SELECT rowid,id,who,speaker,text,start_time,end_time FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time DESC,rowid DESC LIMIT ?2) ORDER BY start_time,rowid")?;
-    Ok(s.query_map(params![meeting_id, limit as i64], |r| {
-        Ok(LineRecord {
-            id: r.get(0)?,
-            who: r.get(1)?,
-            speaker: r.get(2)?,
-            text: r.get(3)?,
-            start_time: r.get(4)?,
-            end_time: r.get(5)?,
-        })
-    })?
-    .collect::<std::result::Result<_, _>>()?)
+    let mut s=c.prepare("SELECT id,who,speaker,substr(text,1,8000),start_time,end_time,heard,edited_at IS NOT NULL FROM (SELECT rowid,id,who,speaker,text,start_time,end_time,heard,edited_at FROM meeting_lines WHERE meeting_id=?1 ORDER BY start_time DESC,rowid DESC LIMIT ?2) ORDER BY start_time,rowid")?;
+    Ok(
+        s.query_map(params![meeting_id, limit as i64], |r| line_row(r, 0))?
+            .collect::<std::result::Result<_, _>>()?,
+    )
+}
+
+pub struct EditedLine {
+    pub meeting_id: String,
+    pub text: String,
+    pub heard: Option<String>,
+}
+/// Replace a line's text. `heard` keeps the first text heard; editing back to it clears `heard`
+/// but `edited_at` stays. `None` means no such line.
+pub fn edit_line(c: &Connection, id: &str, text: &str) -> Result<Option<EditedLine>> {
+    Ok(c.query_row(
+        "UPDATE meeting_lines SET
+           heard=CASE WHEN COALESCE(heard,text)=?2 THEN NULL ELSE COALESCE(heard,text) END,
+           text=?2,edited_at=strftime('%Y-%m-%d %H:%M:%f','now')
+         WHERE id=?1 RETURNING meeting_id,text,heard",
+        params![id, text],
+        |r| {
+            Ok(EditedLine {
+                meeting_id: r.get(0)?,
+                text: r.get(1)?,
+                heard: r.get(2)?,
+            })
+        },
+    )
+    .optional()?)
+}
+/// Bookmark or unbookmark a line; false when the line does not exist.
+pub fn set_bookmark(c: &Connection, line: &str, on: bool) -> Result<bool> {
+    let found = if on {
+        c.execute(
+            "INSERT OR IGNORE INTO line_bookmarks(line_id,meeting_id)
+             SELECT id,meeting_id FROM meeting_lines WHERE id=?1",
+            [line],
+        )?;
+        c.query_row(
+            "SELECT 1 FROM meeting_lines WHERE id=?1",
+            [line],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some()
+    } else {
+        c.execute("DELETE FROM line_bookmarks WHERE line_id=?1", [line])?;
+        c.query_row(
+            "SELECT 1 FROM meeting_lines WHERE id=?1",
+            [line],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some()
+    };
+    Ok(found)
+}
+pub fn bookmarks(c: &Connection, meeting_id: &str) -> Result<Vec<LineRecord>> {
+    let mut s = c.prepare(
+        "SELECT l.id,l.who,l.speaker,l.text,l.start_time,l.end_time,l.heard,l.edited_at IS NOT NULL
+         FROM line_bookmarks b JOIN meeting_lines l ON l.id=b.line_id
+         WHERE b.meeting_id=?1 ORDER BY l.start_time,l.rowid",
+    )?;
+    Ok(s.query_map([meeting_id], |r| line_row(r, 0))?
+        .collect::<std::result::Result<_, _>>()?)
+}
+pub fn bookmarked_ids(c: &Connection, meeting_id: &str) -> Result<HashSet<String>> {
+    let mut s = c.prepare("SELECT line_id FROM line_bookmarks WHERE meeting_id=?1")?;
+    Ok(s.query_map([meeting_id], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?)
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NoteChunk {
+    pub id: i64,
     pub t0: f64,
     pub t1: f64,
     pub last_line: i64,
     pub body: String,
     pub created_at: String,
+    /// When the lines were read to write this chunk (milliseconds); None for old rows.
+    pub read_at: Option<String>,
 }
 pub fn add_chunk(c: &Connection, meeting_id: &str, chunk: &NoteChunk) -> Result<()> {
     c.execute(
-        "INSERT INTO meeting_note_chunks(meeting_id,t0,t1,last_line,body) VALUES(?1,?2,?3,?4,?5)",
-        params![meeting_id, chunk.t0, chunk.t1, chunk.last_line, chunk.body],
+        "INSERT INTO meeting_note_chunks(meeting_id,t0,t1,last_line,body,read_at) VALUES(?1,?2,?3,?4,?5,?6)",
+        params![meeting_id, chunk.t0, chunk.t1, chunk.last_line, chunk.body, chunk.read_at],
+    )?;
+    Ok(())
+}
+/// Whether a line was corrected at or after the read time of the chunk that covers it.
+pub fn edited_after_chunk(c: &Connection, meeting_id: &str) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM (
+             SELECT last_line, COALESCE(read_at, created_at) AS r,
+                    LAG(last_line, 1, 0) OVER (ORDER BY id) AS prev
+             FROM meeting_note_chunks WHERE meeting_id=?1) ch
+           JOIN meeting_lines l ON l.meeting_id=?1 AND l.rowid>ch.prev AND l.rowid<=ch.last_line
+           WHERE l.edited_at>=ch.r)",
+        [meeting_id],
+        |r| r.get(0),
+    )?)
+}
+pub fn update_chunk_body(c: &Connection, chunk_id: i64, body: &str, read_at: &str) -> Result<()> {
+    c.execute(
+        "UPDATE meeting_note_chunks SET body=?2,read_at=?3 WHERE id=?1",
+        params![chunk_id, body, read_at],
     )?;
     Ok(())
 }
 pub fn chunks(c: &Connection, meeting_id: &str) -> Result<Vec<NoteChunk>> {
     let mut s = c.prepare(
-        "SELECT t0,t1,last_line,body,created_at FROM meeting_note_chunks WHERE meeting_id=?1 ORDER BY id",
+        "SELECT t0,t1,last_line,body,created_at,id,read_at FROM meeting_note_chunks WHERE meeting_id=?1 ORDER BY id",
     )?;
     Ok(s.query_map([meeting_id], |r| {
         Ok(NoteChunk {
@@ -307,6 +413,8 @@ pub fn chunks(c: &Connection, meeting_id: &str) -> Result<Vec<NoteChunk>> {
             last_line: r.get(2)?,
             body: r.get(3)?,
             created_at: r.get(4)?,
+            id: r.get(5)?,
+            read_at: r.get(6)?,
         })
     })?
     .collect::<std::result::Result<_, _>>()?)
@@ -316,19 +424,11 @@ pub fn lines_after(
     meeting_id: &str,
     last_line: i64,
 ) -> Result<Vec<(i64, LineRecord)>> {
-    let mut s=c.prepare("SELECT rowid,id,who,speaker,text,start_time,end_time FROM meeting_lines WHERE meeting_id=?1 AND rowid>?2 ORDER BY rowid")?;
+    let mut s = c.prepare(&format!(
+        "SELECT rowid,{LINE_COLS} FROM meeting_lines WHERE meeting_id=?1 AND rowid>?2 ORDER BY rowid"
+    ))?;
     Ok(s.query_map(params![meeting_id, last_line], |r| {
-        Ok((
-            r.get(0)?,
-            LineRecord {
-                id: r.get(1)?,
-                who: r.get(2)?,
-                speaker: r.get(3)?,
-                text: r.get(4)?,
-                start_time: r.get(5)?,
-                end_time: r.get(6)?,
-            },
-        ))
+        Ok((r.get(0)?, line_row(r, 1)?))
     })?
     .collect::<std::result::Result<_, _>>()?)
 }
@@ -384,7 +484,7 @@ pub fn transcript_excerpt(
     ))
 }
 pub fn name_speaker(c: &Connection, meeting_id: &str, key: &str, name: &str) -> Result<()> {
-    // An empty name stays as a row, so `renamed_at` still sees the reset.
+    // An empty name stays as a row, so `changed_at` still sees the reset.
     let name = name.trim();
     c.execute(
         "INSERT INTO meeting_speakers(meeting_id,speaker_key,name,updated_at)
@@ -396,9 +496,12 @@ pub fn name_speaker(c: &Connection, meeting_id: &str, key: &str, name: &str) -> 
     )?;
     Ok(())
 }
-pub fn renamed_at(c: &Connection, meeting_id: &str) -> Result<Option<String>> {
+/// The later of the last speaker rename and the last line edit.
+pub fn changed_at(c: &Connection, meeting_id: &str) -> Result<Option<String>> {
     Ok(c.query_row(
-        "SELECT MAX(updated_at) FROM meeting_speakers WHERE meeting_id=?1",
+        "SELECT MAX(t) FROM (
+           SELECT updated_at AS t FROM meeting_speakers WHERE meeting_id=?1
+           UNION ALL SELECT edited_at FROM meeting_lines WHERE meeting_id=?1)",
         [meeting_id],
         |r| r.get(0),
     )?)
@@ -540,6 +643,7 @@ mod tests {
                 last_line: 1,
                 body: "summary".into(),
                 created_at: String::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -615,9 +719,9 @@ mod tests {
         let listed = list(c, 10).unwrap();
         assert_eq!(listed[0].title, "After");
         name_speaker(c, &id, "speaker-a", "Mira").unwrap();
-        let first_ts = renamed_at(c, &id).unwrap().unwrap();
+        let first_ts = changed_at(c, &id).unwrap().unwrap();
         name_speaker(c, &id, "speaker-a", "Nora").unwrap();
-        let second_ts = renamed_at(c, &id).unwrap().unwrap();
+        let second_ts = changed_at(c, &id).unwrap().unwrap();
         assert!(second_ts >= first_ts);
         let names = speaker_names(c, &id).unwrap();
         assert_eq!(names.len(), 1);
@@ -625,7 +729,164 @@ mod tests {
         name_speaker(c, &id, "speaker-a", "  ").unwrap();
         assert!(speaker_names(c, &id).unwrap().is_empty());
         // Clearing a name is a rename too: notes written before it are stale.
-        assert!(renamed_at(c, &id).unwrap().unwrap() >= second_ts);
+        assert!(changed_at(c, &id).unwrap().unwrap() >= second_ts);
+    }
+
+    #[test]
+    fn edit_line_keeps_the_first_heard_text_and_reverts() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let m = start(c, "T", "", "en", None, Default::default()).unwrap();
+        let l = add_line(c, &m, "them", None, "Anna", 0.0, 1.0).unwrap();
+        let first = edit_line(c, &l, "Hannah").unwrap().unwrap();
+        assert_eq!(
+            (
+                first.meeting_id.as_str(),
+                first.text.as_str(),
+                first.heard.as_deref()
+            ),
+            (m.as_str(), "Hannah", Some("Anna"))
+        );
+        let second = edit_line(c, &l, "Hanna").unwrap().unwrap();
+        assert_eq!(second.heard.as_deref(), Some("Anna"));
+        let back = edit_line(c, &l, "Anna").unwrap().unwrap();
+        assert_eq!(back.heard, None);
+        let rec = &lines(c, &m).unwrap()[0];
+        assert_eq!(
+            (rec.text.as_str(), rec.heard.as_deref(), rec.edited),
+            ("Anna", None, true)
+        );
+        assert!(edit_line(c, "nope", "x").unwrap().is_none());
+    }
+
+    #[test]
+    fn changed_at_is_the_later_of_renames_and_edits() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let m = start(c, "T", "", "en", None, Default::default()).unwrap();
+        let l = add_line(c, &m, "them", None, "a", 0.0, 1.0).unwrap();
+        assert_eq!(changed_at(c, &m).unwrap(), None);
+        edit_line(c, &l, "b").unwrap();
+        let edited = changed_at(c, &m).unwrap().unwrap();
+        c.execute(
+            "UPDATE meeting_lines SET edited_at='2000-01-01 00:00:00.000' WHERE id=?1",
+            [&l],
+        )
+        .unwrap();
+        name_speaker(c, &m, "0", "Ada").unwrap();
+        let renamed = changed_at(c, &m).unwrap().unwrap();
+        assert!(renamed >= edited && renamed.as_str() > "2000-01-01 00:00:00.000");
+        edit_line(c, &l, "c").unwrap();
+        assert!(changed_at(c, &m).unwrap().unwrap() >= renamed);
+    }
+
+    #[test]
+    fn bookmarks_follow_the_line_and_cascade() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let m = start(c, "T", "", "en", None, Default::default()).unwrap();
+        let late = add_line(c, &m, "them", None, "late", 5.0, 6.0).unwrap();
+        let early = add_line(c, &m, "me", None, "early", 1.0, 2.0).unwrap();
+        assert!(!set_bookmark(c, "nope", true).unwrap());
+        assert!(set_bookmark(c, &late, true).unwrap());
+        assert!(set_bookmark(c, &late, true).unwrap());
+        assert!(set_bookmark(c, &early, true).unwrap());
+        let ids = bookmarked_ids(c, &m).unwrap();
+        assert_eq!(ids.len(), 2);
+        let texts: Vec<_> = bookmarks(c, &m)
+            .unwrap()
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        assert_eq!(texts, ["early", "late"]);
+        assert!(set_bookmark(c, &early, false).unwrap());
+        assert_eq!(bookmarked_ids(c, &m).unwrap().len(), 1);
+        delete(c, &m).unwrap();
+        let left: i64 = c
+            .query_row("SELECT COUNT(*) FROM line_bookmarks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn an_edit_after_its_chunk_was_read_is_detected() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let m = start(c, "T", "", "en", None, Default::default()).unwrap();
+        let first = add_line(c, &m, "them", None, "one", 0.0, 1.0).unwrap();
+        let row = |id: &str| -> i64 {
+            c.query_row("SELECT rowid FROM meeting_lines WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let second = add_line(c, &m, "them", None, "two", 1.0, 2.0).unwrap();
+        for (line, read_at) in [
+            (&first, "2026-11-04 10:00:00.000"),
+            (&second, "2026-11-04 10:00:00.000"),
+        ] {
+            add_chunk(
+                c,
+                &m,
+                &NoteChunk {
+                    last_line: row(line),
+                    body: "b".into(),
+                    read_at: Some(read_at.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        assert!(!edited_after_chunk(c, &m).unwrap());
+        // A correction older than the chunk's read time is already in it.
+        c.execute(
+            "UPDATE meeting_lines SET edited_at='2026-11-04 09:59:59.999' WHERE id=?1",
+            [&second],
+        )
+        .unwrap();
+        assert!(!edited_after_chunk(c, &m).unwrap());
+        // One at or after the read time is not, whichever chunk covers it.
+        c.execute(
+            "UPDATE meeting_lines SET edited_at='2026-11-04 10:00:00.000' WHERE id=?1",
+            [&second],
+        )
+        .unwrap();
+        assert!(edited_after_chunk(c, &m).unwrap());
+    }
+
+    #[test]
+    fn chunk_and_recap_remember_when_they_were_read() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let m = start(c, "T", "", "en", None, Default::default()).unwrap();
+        add_chunk(
+            c,
+            &m,
+            &NoteChunk {
+                body: "old".into(),
+                read_at: Some("2020-01-01 00:00:00.000".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let chunk = chunks(c, &m).unwrap().remove(0);
+        assert_eq!(chunk.read_at.as_deref(), Some("2020-01-01 00:00:00.000"));
+        update_chunk_body(c, chunk.id, "new", "2021-01-01 00:00:00.000").unwrap();
+        let chunk = chunks(c, &m).unwrap().remove(0);
+        assert_eq!(
+            (chunk.body.as_str(), chunk.read_at.as_deref()),
+            ("new", Some("2021-01-01 00:00:00.000"))
+        );
+        begin_recap(c, &m).unwrap();
+        let first = recap(c, &m).unwrap().unwrap().read_at.unwrap();
+        assert_eq!(first.len(), 23);
+        c.execute(
+            "UPDATE meeting_recaps SET read_at='2000-01-01 00:00:00.000'",
+            [],
+        )
+        .unwrap();
+        begin_recap(c, &m).unwrap();
+        assert!(recap(c, &m).unwrap().unwrap().read_at.unwrap().as_str() > "2000");
     }
 
     #[test]
@@ -682,6 +943,8 @@ mod tests {
                 text: "hello".into(),
                 start_time: 0.0,
                 end_time: 1.0,
+                heard: None,
+                edited: false,
             },
             LineRecord {
                 id: "2".into(),
@@ -690,6 +953,8 @@ mod tests {
                 text: "welcome".into(),
                 start_time: 1.0,
                 end_time: 2.0,
+                heard: None,
+                edited: false,
             },
             LineRecord {
                 id: "3".into(),
@@ -698,6 +963,8 @@ mod tests {
                 text: "next".into(),
                 start_time: 2.0,
                 end_time: 3.0,
+                heard: None,
+                edited: false,
             },
             LineRecord {
                 id: "4".into(),
@@ -706,6 +973,8 @@ mod tests {
                 text: "passing by".into(),
                 start_time: 3.0,
                 end_time: 4.0,
+                heard: None,
+                edited: false,
             },
         ];
         assert_eq!(

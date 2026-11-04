@@ -26,7 +26,10 @@ Item {
     property var found: []        // settings.search results: { key, label, value }
     property string promptMode: "general"
     property string notes: ""
-    property bool notesStale: false   // notes.get: names changed after the notes were written
+    property bool notesStale: false   // notes.get: names or lines changed after the notes were written
+    property var notesChunks: []      // notes.get chunks: the timeline
+    property var meetingItems: []     // items.list of the selected meeting
+    property var meetingBookmarks: [] // bookmarks.list of the selected meeting
     property string selectedId: ""
     property string notesPhase: ""
     property string menuFor: ""
@@ -136,10 +139,12 @@ Item {
         root.menuFor = "";
         root.notes = "";
         root.notesStale = false;
+        root.notesChunks = []; root.meetingItems = []; root.meetingBookmarks = [];
         if (s.kind !== "meeting") { root.notesPhase = ""; return; }
         root.notesMeeting = s.id;   // an export.done for the meeting being read shows its status line
         root.notesPhase = "loading";
         root.fetchNotes(s.id);
+        root.fetchMeetingView(s.id);
     }
     // The reply lands only while that meeting is still selected; a live refresh keeps the old text until it does.
     function fetchNotes(meeting) {
@@ -148,7 +153,21 @@ Item {
             if (root.selectedId !== id) return;
             root.notes = r.ok ? String((r.data && r.data.text !== undefined) ? r.data.text : r.data) : String(r.error || "request failed");
             root.notesStale = r.ok && !!r.data && r.data.stale === true;
+            root.notesChunks = r.ok && r.data && Array.isArray(r.data.chunks) ? r.data.chunks : [];
             root.notesPhase = !r.ok ? "error" : (root.notes === "" ? "empty" : "ready");
+        });
+    }
+    function fetchMeetingView(meeting) {
+        var id = String(meeting);
+        root.client.send("items.list", { meeting: meeting }, function(r) { if (r.ok && root.selectedId === id) root.meetingItems = r.data || []; });
+        root.client.send("bookmarks.list", { meeting: meeting }, function(r) { if (r.ok && root.selectedId === id) root.meetingBookmarks = r.data || []; });
+    }
+    function openMeeting(meeting) {   // "Open transcript": restore it, no jump
+        if (String(meeting) === root.client.currentMeeting) { root.closeRequested(); return; }
+        if (root.client.recording) return;
+        root.client.send("session.restore", { id: meeting }, function(r) {
+            if (r.ok) root.closeRequested();
+            else root.error = String(r.error || "request failed");
         });
     }
     function capHeadings(md) {
@@ -300,7 +319,7 @@ Item {
         function onLibraryError(message) { root.error = message; }
         function onNotesUpdated(meeting) {
             root.load();
-            if (String(meeting) === root.selectedId) root.fetchNotes(meeting);   // in place: no "Loading", the menu stays
+            if (String(meeting) === root.selectedId) { root.fetchNotes(meeting); root.fetchMeetingView(meeting); }   // in place: no "Loading", the menu stays
         }
         function onExportDone(meeting, path) { if (root.notesMeeting !== null && String(root.notesMeeting) === String(meeting) && path !== "") root.exportStatus = "Exported to " + path; }
         function onProvidersChanged() { root.load(); }
@@ -592,17 +611,29 @@ Item {
                         font.pixelSize: root.theme.caption
                     }
                 }
-                UiText {
-                    objectName: "notesStale"
+                Flow {   // header: out of date, and Regenerate
                     visible: root.notesStale
                     width: parent.width
-                    textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
-                    text: "Names changed after these notes were written"
-                    color: Commons.Color.popups.text
-                    opacity: root.theme.dim
-                    font.italic: true
-                    font.pixelSize: root.theme.caption
+                    spacing: Style.spacing.xs
+                    UiText {
+                        objectName: "notesStale"
+                        height: root.theme.ctl
+                        verticalAlignment: Text.AlignVCenter
+                        textFormat: Text.PlainText
+                        text: "Names or lines changed after these notes were written"
+                        color: Commons.Color.popups.text
+                        opacity: root.theme.dim
+                        font.italic: true
+                        font.pixelSize: root.theme.caption
+                    }
+                    IconButton {
+                        objectName: "regenerateNotes"
+                        ts: root.theme.ts
+                        text: "Regenerate"
+                        bordered: true
+                        tooltipText: "Write the notes again from the corrected transcript"
+                        onClicked: root.client.send("notes.regenerate", { meeting: root.selectedId }, function(r) { if (!r.ok) root.error = String(r.error || "request failed"); })
+                    }
                 }
                 UiText {
                     objectName: "notesStateText"
@@ -623,6 +654,77 @@ Item {
                     text: root.capHeadings(root.notes)
                     color: Commons.Color.popups.text
                     font.pixelSize: root.theme.body
+                }
+                component Link: IconButton {   // m:ss that jumps to the line; plain time when there is none
+                    id: lnk
+                    required property var meeting
+                    property string line: ""
+                    property real at: 0
+                    ts: root.theme.ts
+                    text: root.client.fmtTime(at)
+                    bordered: true
+                    enabled: line !== ""
+                    tooltipText: "Open the transcript at this moment"
+                    onClicked: root.openHit({ meeting: lnk.meeting, id: lnk.line })
+                }
+                component Heading: UiText {
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    color: Commons.Color.popups.text
+                    opacity: root.theme.dim
+                    font.pixelSize: root.theme.caption
+                    font.bold: true
+                }
+                Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.notesChunks.length > 0; text: "Timeline" }
+                Repeater {
+                    model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.notesChunks : []
+                    Row {
+                        id: crow
+                        required property var modelData
+                        required property int index
+                        objectName: "chunk" + index
+                        width: notesBox.availableWidth
+                        spacing: Style.spacing.xs
+                        Link { objectName: "chunkLink" + crow.index; meeting: root.selectedId; line: String(crow.modelData.line || ""); at: crow.modelData.t0; text: root.client.fmtTime(crow.modelData.t0) + "\u2013" + root.client.fmtTime(crow.modelData.t1) }
+                        UiText { width: parent.width - x - Style.spacing.xs; x: 0; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(crow.modelData.body || ""); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                    }
+                }
+                Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.meetingItems.length > 0; text: "Items" }
+                Repeater {
+                    model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.meetingItems : []
+                    Row {
+                        id: irow
+                        required property var modelData
+                        required property int index
+                        objectName: "item" + index
+                        width: notesBox.availableWidth
+                        spacing: Style.spacing.xs
+                        Link { objectName: "itemLink" + irow.index; visible: irow.modelData.t0 !== null && irow.modelData.t0 !== undefined; meeting: root.selectedId; line: String(irow.modelData.line || ""); at: Number(irow.modelData.t0) || 0 }
+                        UiText { width: parent.width - x - Style.spacing.xs; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: [irow.modelData.text, irow.modelData.owner, irow.modelData.due].filter(function(x) { return x; }).join(" \u00b7 "); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                    }
+                }
+                Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.meetingBookmarks.length > 0; text: "Bookmarks" }
+                Repeater {
+                    model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.meetingBookmarks : []
+                    Row {
+                        id: brow
+                        required property var modelData
+                        required property int index
+                        objectName: "bookmark" + index
+                        width: notesBox.availableWidth
+                        spacing: Style.spacing.xs
+                        Link { objectName: "bookmarkLink" + brow.index; meeting: root.selectedId; line: String(brow.modelData.line || ""); at: brow.modelData.t0 }
+                        UiText { width: parent.width - x - Style.spacing.xs; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: (String(brow.modelData.speaker || "") !== "" ? brow.modelData.speaker + ": " : "") + brow.modelData.text; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                    }
+                }
+                IconButton {
+                    objectName: "openTranscript"
+                    visible: (root.notesPhase === "ready" || root.notesPhase === "empty")
+                    ts: root.theme.ts
+                    text: "Open transcript"
+                    bordered: true
+                    tooltipText: "Restore this meeting and show its transcript"
+                    onClicked: root.openMeeting(root.selectedId)
                 }
             }
         }

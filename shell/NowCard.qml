@@ -124,11 +124,11 @@ Rectangle {
         UiText {
             id: nowRenamed
             objectName: "nowNamesChanged"
-            visible: root.open && root.daemon.now.renamedAfter === true
+            visible: root.open && root.daemon.now.changedAfter === true
             width: parent.width
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: "Speaker names changed after this answer"
+            text: "Names or lines changed after this answer"
             color: Commons.Color.popups.text
             opacity: root.theme.dim
             font.italic: true
