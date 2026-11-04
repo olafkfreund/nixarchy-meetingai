@@ -110,13 +110,27 @@ fn ensure(
 
 /// Load the model now (blocking, about 2.5 s) so a recording does not start with a slow first decode.
 pub fn preload() -> Result<(), String> {
+    let _decode = super::DECODE.lock().unwrap_or_else(|e| e.into_inner());
     let mut slot = DECODER.lock().unwrap_or_else(|e| e.into_inner());
-    ensure(&mut slot, load).map(|_| ())
+    ensure(&mut slot, load)?;
+    if super::unload_inactive() {
+        super::whisper_nb::unload_locked();
+    }
+    Ok(())
+}
+
+pub(crate) fn unload_locked() {
+    *DECODER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+pub fn unload() {
+    let _decode = super::DECODE.lock().unwrap_or_else(|e| e.into_inner());
+    unload_locked();
 }
 
 /// Piece boundaries: at most 30 s each, cut at the quietest 100 ms of the last 2 s before a
 /// boundary rather than blindly through a word.
-fn split_points(samples: &[f32], rate: usize) -> Vec<usize> {
+pub(crate) fn split_points(samples: &[f32], rate: usize) -> Vec<usize> {
     let (max, window) = (rate * MAX_SECONDS, rate / 10);
     let mut cuts = vec![0];
     let mut start = 0;
@@ -140,7 +154,11 @@ fn split_points(samples: &[f32], rate: usize) -> Vec<usize> {
 }
 
 /// Decode `samples` (mono) piece by piece with `decode`.
-fn decode_pieces(decode: &mut Decoder, rate: i32, samples: &[f32]) -> String {
+pub(crate) fn decode_pieces(
+    decode: &mut dyn FnMut(i32, &[f32]) -> String,
+    rate: i32,
+    samples: &[f32],
+) -> String {
     let cuts = split_points(samples, rate.max(1) as usize);
     let parts: Vec<String> = cuts
         .windows(2)
@@ -153,8 +171,12 @@ fn decode_pieces(decode: &mut Decoder, rate: i32, samples: &[f32]) -> String {
 /// Transcribe mono samples at `rate` on a blocking worker, loading the model on first use.
 pub async fn transcribe(samples: Vec<f32>, rate: i32) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
+        let _decode = super::DECODE.lock().unwrap_or_else(|e| e.into_inner());
         let mut slot = DECODER.lock().unwrap_or_else(|e| e.into_inner());
         let decode = ensure(&mut slot, load)?;
+        if super::unload_inactive() {
+            super::whisper_nb::unload_locked();
+        }
         Ok(decode_pieces(decode, rate, &samples))
     })
     .await
@@ -165,6 +187,11 @@ pub async fn transcribe(samples: Vec<f32>, rate: i32) -> Result<String, String> 
 #[cfg(test)]
 pub fn set_decoder(decode: Decoder) {
     *DECODER.lock().unwrap_or_else(|e| e.into_inner()) = Some(decode);
+}
+
+#[cfg(test)]
+pub(crate) fn loaded() -> bool {
+    DECODER.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
 #[cfg(test)]

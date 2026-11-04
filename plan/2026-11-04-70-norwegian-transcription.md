@@ -428,3 +428,11 @@ Check: the step check plus `bash shell/tests/ci.sh`.
     the model load, at 2.0 GB peak RSS on p620.
   - FLEURS WAVs are not 16-bit PCM. The measurement converts with `ffmpeg
     -c:a pcm_s16le`.
+- Step 2 (Codex; checks by Claude):
+  - `whisper-nb-local` is registered in `STT_PROVIDERS` but reaches no
+    picker: only a transcription test iterates the list, and routing comes in
+    step 6.
+  - The dispatch and loading-mode tests were added after the implementation,
+    because Codex's sandbox could not run the suite.
+  - Claude ran the step check: 457 lib tests.
+  - The first real Whisper+VAD run happens in step 3's paced replay.
