@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 60
 spec: spec/2026-11-04-60-grounded-answers-transcript-b.md
 coders:
