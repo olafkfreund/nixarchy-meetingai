@@ -160,6 +160,9 @@ Item {
         for (let i = 0; i < backend.transcript.count; i++) rows.push(backend.transcript.get(i).who + "|" + backend.transcript.get(i).body);
         return JSON.stringify({ rows: rows, now: backend.now.body, error: backend.now.error || "", answering: backend.answering, connected: backend.connected, voice: backend.voice, voiceEnrolling: backend.voiceEnrolling, voiceError: backend.voiceError });
     }
+    // The question box lives in the PanelWindow, which tests cannot walk to: they drive it through the overlay (tests/harness-lines.qml).
+    function addChip(chip) { composer.addChip(chip); }
+    function send() { composer.send(); }
     function geometryRoot() { return card; }   // tests/geometry.js walks this item
     readonly property real ctl: metrics.ctl
 
@@ -225,10 +228,11 @@ Item {
         return JSON.stringify({ chat: root.chatProvider, models: root.models, error: root.modelsError, fix: root.fix(root.chatProvider), model: String(backend.settings.chat_model || ""), live: root.liveProvider, liveModels: root.liveModels, liveError: root.liveModelsError, liveModel: String(backend.settings.live_model || "") });
     }
 
-    function submit(text, chips) {
+    function submit(text, chips, quote) {
         var files = chips.filter(function(c) { return c.kind === "file"; }).map(function(c) { return c.path; });
         var inline = chips.filter(function(c) { return c.kind === "text"; }).map(function(c) { return c.text; });
-        backend.ask([text].concat(inline).join("\n\n"), files, false, root.noContext);
+        backend.ask([text !== "" || !quote ? text : "What does this mean, and what should I say?"].concat(inline).join("\n\n"), files, false, root.noContext, quote ? quote.line : "");
+        if (quote) backend.quote = null;
     }
 
     function pickSuggestion(n) {
@@ -404,8 +408,10 @@ Item {
                         onSeriesPicked: function(id) { backend.send("session.new", id === "" ? {} : { series: id }, function(r) { root.seriesError = r.ok ? "" : String(r.error); }); }
                         onSeriesCreated: function(name) { backend.send("series.create", { name: name }, function(r) { if (!r.ok) { root.seriesError = String(r.error); return; } backend.refreshSeries(); backend.send("session.new", { series: r.data.id }, function(r2) { root.seriesError = r2.ok ? "" : String(r2.error); }); }); }
                         captured: backend.state.capture === true
+                        quote: backend.quote
+                        onClearQuote: backend.quote = null
                         onClearCapture: backend.send("capture.clear", {})
-                        onSubmit: function(text, chips) { root.submit(text, chips); }
+                        onSubmit: function(text, chips) { root.submit(text, chips, backend.quote); }
                         onPreview: function(text) { root.previewText = text; }
                         onScreenshot: backend.send("screenshot.capture", { region: true })
                         onQuick: root.submit("What should I say?", [])

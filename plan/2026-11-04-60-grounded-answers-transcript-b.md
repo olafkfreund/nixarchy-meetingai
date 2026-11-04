@@ -564,3 +564,20 @@ grounded run. Give `--lines` the same.
     lands; every existing scenario passes.
   - Claude sent the coder the `objectName` / accessible-name contract the
     harness uses.
+- Step 6 (coder; the first coder teammate's process had exited, so Claude
+  started a new one):
+  - The Now-card caption keeps `objectName: "nowNamesChanged"`, because
+    `harness-grounded.qml` and `smoke.sh` depend on it. Its text is now
+    "Names or lines changed after this answer".
+  - `Overlay.qml` gains `addChip()` / `send()` forwarders. The harness
+    cannot walk into the composer's `PanelWindow`; the other option was to
+    change the harness.
+  - The quote attaches only on the composer's send, not to "What should I
+    say?" or suggestion picks.
+  - "Open transcript" uses a new `Library.openMeeting` (restore, no jump).
+  - The coder saw `grounded` fail in 2 of its 4 runs. Claude ran it 5 times
+    on step 6 and 5 times on the baseline: 10 of 10 passed. The cause is
+    likely timing under load (the harness has a fixed budget).
+  - Build trap: the `.#shell` dev shell sets a different
+    `SHERPA_ONNX_LIB_DIR`. Clear the read-only libraries before
+    `smoke-real`.

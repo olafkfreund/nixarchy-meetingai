@@ -26,6 +26,7 @@ Item {
     // The live answer (NOW panel). A finished one moves into the transcript when the next starts.
     property var now: ({ turn: -1, question: "", automatic: false, asker: "", provider: "", model: "", body: "" })
     property string lastSpeaker: ""   // last remote speaker, for "who asked"
+    property var quote: null             // {line, label}: the transcript line the next question is about (Ask)
     property var lastAsk: null           // the last typed question, for Retry
     property int minTurn: -1             // the highest turn that has started: replies of earlier turns are dropped
     property int staleTurn: -1           // the turn that was streaming when a new question was asked: its late events are dropped
@@ -190,8 +191,8 @@ Item {
         root.send("settings.set", { key: key, value: value });
     }
 
-    function ask(text, attachments, screenshot, noContext) {
-        root.lastAsk = { text: text, attachments: attachments || [], screenshot: screenshot === true, noContext: noContext === true };
+    function ask(text, attachments, screenshot, noContext, line) {
+        root.lastAsk = { text: text, attachments: attachments || [], screenshot: screenshot === true, noContext: noContext === true, line: String(line || "") };
         root.archiveNow();
         root.staleTurn = root.now.turn;
         root.awaitingStart = true;
@@ -199,9 +200,9 @@ Item {
         root.suggestions = [];
         // NOW shows the question and the waiting bar at once; answer.started fills in the rest
         root.now = { turn: -1, question: text, automatic: false, asker: "You", provider: "", model: "", body: "", error: "" };
-        root.send("chat.send", { text: text, attachments: root.lastAsk.attachments, screenshot: root.lastAsk.screenshot, no_context: root.lastAsk.noContext }, function(r) { if (!r.ok) root.answerFailed(String(r.error || "request failed")); });
+        root.send("chat.send", { text: text, attachments: root.lastAsk.attachments, screenshot: root.lastAsk.screenshot, no_context: root.lastAsk.noContext, line: root.lastAsk.line !== "" ? root.lastAsk.line : undefined }, function(r) { if (!r.ok) root.answerFailed(String(r.error || "request failed")); });
     }
-    function retry() { if (root.lastAsk) root.ask(root.lastAsk.text, root.lastAsk.attachments, root.lastAsk.screenshot, root.lastAsk.noContext); }
+    function retry() { if (root.lastAsk) root.ask(root.lastAsk.text, root.lastAsk.attachments, root.lastAsk.screenshot, root.lastAsk.noContext, root.lastAsk.line); }
     // A failed answer stays in NOW, with Retry, instead of becoming a line in the transcript.
     function answerFailed(message) {
         root.awaitingStart = false;
@@ -212,6 +213,7 @@ Item {
     // Everything the daemon's current session owns; also what a lost connection leaves behind.
     function resetSession() {
         lines.clear();
+        root.quote = null;
         root.viewingPast = false; root.pastNew = 0;
         root.staleTurn = -1;
         root.minTurn = -1;
@@ -250,7 +252,7 @@ Item {
     function addServerRows(rows) {
         for (var i = 0; i < rows.length; i++) {
             if (rows[i].who === "system" && rows[i].speaker) root.lastSpeaker = String(rows[i].speaker);
-            root.addRow(String(rows[i].who), String(rows[i].speaker || ""), String(rows[i].text), false, -1, rows[i].t0, rows[i].t1, { lineId: rows[i].id, speakerKey: rows[i].speaker_key });
+            root.addRow(String(rows[i].who), String(rows[i].speaker || ""), String(rows[i].text), false, -1, rows[i].t0, rows[i].t1, { lineId: rows[i].id, speakerKey: rows[i].speaker_key, edited: rows[i].edited, heard: rows[i].heard, bookmarked: rows[i].bookmarked, shortened: rows[i].shortened });
         }
     }
 
@@ -286,7 +288,7 @@ Item {
     }
 
     function archiveNow() {
-        if (root.now.body !== "") root.addRow("answer", "", root.now.body, false, root.now.turn, undefined, undefined, { sources: root.now.sources, citeMax: root.now.citeMax, citeNotes: root.now.citeNotes, renamedAfter: root.now.renamedAfter === true });
+        if (root.now.body !== "") root.addRow("answer", "", root.now.body, false, root.now.turn, undefined, undefined, { sources: root.now.sources, citeMax: root.now.citeMax, citeNotes: root.now.citeNotes, changedAfter: root.now.changedAfter === true });
     }
 
     function pushLine(ev, partial) {
@@ -298,15 +300,16 @@ Item {
                 break;
             }
         }
-        root.addRow(String(ev.who || ""), String(ev.speaker || ""), String(ev.text || ""), partial, -1, ev.t0, ev.t1, { lineId: ev.id, speakerKey: ev.speaker_key });
+        root.addRow(String(ev.who || ""), String(ev.speaker || ""), String(ev.text || ""), partial, -1, ev.t0, ev.t1, { lineId: ev.id, speakerKey: ev.speaker_key, edited: ev.edited, heard: ev.heard, bookmarked: ev.bookmarked, shortened: ev.shortened });
     }
 
     // Answers and errors share the transcript model: one virtualized list.
-    // x: optional lineId, speakerKey (remote rows), and sources (JSON string), citeMax, citeNotes (answers)
+    // x: optional lineId, speakerKey (remote rows), edited, heard, bookmarked, shortened (lines), and sources (JSON string), citeMax, citeNotes (answers)
     function addRow(who, speaker, body, partial, turn, t0, t1, x) {
         x = x || {};
         lines.append({ who: who, speaker: speaker, body: body, partial: partial, turn: turn === undefined ? -1 : turn, t0: t0 === undefined ? -1 : Number(t0), t1: t1 === undefined ? -1 : Number(t1),
-            lineId: String(x.lineId || ""), speakerKey: String(x.speakerKey || ""), sources: String(x.sources || ""), citeMax: Number(x.citeMax) || 0, citeNotes: Number(x.citeNotes) || 0, renamedAfter: x.renamedAfter === true, flash: false });
+            lineId: String(x.lineId || ""), speakerKey: String(x.speakerKey || ""), sources: String(x.sources || ""), citeMax: Number(x.citeMax) || 0, citeNotes: Number(x.citeNotes) || 0, changedAfter: x.changedAfter === true,
+            edited: x.edited === true, heard: String(x.heard || ""), bookmarked: x.bookmarked === true, shortened: x.shortened === true, flash: false });
         while (lines.count > root.maxLines) lines.remove(0);
     }
 
@@ -319,7 +322,10 @@ Item {
         case "session.reset": root.resetSession(); root.state = Object.assign({}, root.state, { capture: false }); break;
         case "history":
             lines.clear();   // a reconnect replays the history: it replaces the transcript, it does not add to it
-            for (var h = 0; h < (ev.rows || []).length; h++) root.addRow(ev.rows[h].who === "question" ? "asked" : String(ev.rows[h].who), "", String(ev.rows[h].text), false);
+            for (var h = 0; h < (ev.rows || []).length; h++) {
+                var hr = ev.rows[h];
+                root.addRow(hr.who === "question" ? "asked" : String(hr.who), "", String(hr.text), false, -1, undefined, undefined, hr.sources ? { sources: JSON.stringify(hr.sources), citeMax: hr.cite_max, citeNotes: hr.cite_notes } : undefined);
+            }
             break;
         case "state":
             root.state = Object.assign({}, root.state, ev);
@@ -362,6 +368,19 @@ Item {
         case "answer.error": if (ev.turn === undefined || ev.turn === root.now.turn || root.now.turn === -2) root.answerFailed(String(ev.message || ev.error || "")); break;
         case "suggestion": if (ev.turn === root.now.turn) root.suggestions = root.suggestions.concat([String(ev.text)]).slice(0, 3); break;
         case "speakers.renamed": root.speakerRenamed(ev); break;
+        case "transcript.edited":
+            for (var e = 0; e < lines.count; e++) {
+                if (lines.get(e).who === "answer") lines.setProperty(e, "changedAfter", true);
+                if (lines.get(e).lineId !== ev.id) continue;
+                lines.setProperty(e, "body", String(ev.text));
+                lines.setProperty(e, "edited", ev.edited === true);
+                lines.setProperty(e, "heard", String(ev.heard || ""));
+            }
+            if (root.now.body !== "") root.now = Object.assign({}, root.now, { changedAfter: true });
+            break;
+        case "transcript.bookmarked":
+            for (var b = 0; b < lines.count; b++) if (lines.get(b).lineId === ev.id) lines.setProperty(b, "bookmarked", ev.on === true);
+            break;
         case "notice": if (ev.kind === "providers") root.providerNotice = String(ev.text || ""); else root.addRow("notice", "", String(ev.text || ""), false); break;
         case "items.updated": if (ev.meeting === root.state.meeting) root.refreshItems(ev.meeting); break;
         case "earlier_item": if (ev.meeting === root.state.meeting) root.earlierItem = { item: ev.item || ({}), quote: String(ev.quote || ""), line: ev.line, meeting: ev.meeting, new_item: ev.new_item }; break;
@@ -382,14 +401,14 @@ Item {
         if (name === "") name = key === "them" ? "" : "Speaker " + (Number(key) + 1);   // the daemon's own default label
         for (var i = 0; i < lines.count; i++) {
             var row = lines.get(i);
-            if (row.who === "answer") lines.setProperty(i, "renamedAfter", true);
+            if (row.who === "answer") lines.setProperty(i, "changedAfter", true);
             if (row.who !== "system" || row.speakerKey !== key) continue;
             if (old === null) old = row.speaker;
             lines.setProperty(i, "speaker", name);
         }
         if (old !== null && root.lastSpeaker === old) root.lastSpeaker = name;
         if (old !== null && root.now.asker === old) root.now = Object.assign({}, root.now, { asker: name });
-        if (root.now.body !== "") root.now = Object.assign({}, root.now, { renamedAfter: true });   // the answer in Now predates the rename too
+        if (root.now.body !== "") root.now = Object.assign({}, root.now, { changedAfter: true });   // the answer in Now predates the rename too
     }
 
     function failed(msg) {

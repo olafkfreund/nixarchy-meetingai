@@ -27,6 +27,8 @@ Item {
     property bool captured: false   // a screenshot waits for the next question (daemon state.capture)
     signal clearCapture()
     signal quick()
+    property var quote: null       // {line, label}: Ask put a transcript line here
+    signal clearQuote()
     property bool team: false      // team meeting mode: show the series picker
     property var seriesList: []    // series.list rows
     property string seriesId: ""
@@ -35,7 +37,7 @@ Item {
     signal seriesPicked(string id)         // "" = no series
     signal seriesCreated(string name)
     signal pick(int n)   // 1..3 typed into an empty composer: choose that suggestion
-    readonly property bool empty: input.text.trim() === "" && root.chips.length === 0 && !root.captured
+    readonly property bool empty: input.text.trim() === "" && root.chips.length === 0 && !root.captured && !root.quote
 
     implicitHeight: col.implicitHeight
 
@@ -45,7 +47,7 @@ Item {
 
     function send() {
         var t = input.text.trim();
-        if (t === "" && root.chips.length === 0 && !root.captured) return;
+        if (t === "" && root.chips.length === 0 && !root.captured && !root.quote) return;
         root.submit(t, root.chips);
         input.text = "";
         root.chips = [];
@@ -59,7 +61,13 @@ Item {
         Flow {
             width: parent.width
             spacing: Style.spacing.xs
-            visible: root.chips.length > 0 || root.captured
+            visible: root.chips.length > 0 || root.captured || !!root.quote
+
+            Row {   // the line Ask quoted
+                visible: !!root.quote
+                IconButton { ts: root.theme.ts; objectName: "quoteChip"; text: root.quote ? root.quote.label : ""; bordered: true; elidable: true; tooltipText: "The question is about this line" }
+                IconButton { ts: root.theme.ts; text: "\u00d7"; tooltipText: "Remove"; Accessible.name: "Remove quoted line"; onClicked: root.clearQuote() }
+            }
 
             Row {   // the screenshot taken with the camera button or the screenshot key
                 visible: root.captured
