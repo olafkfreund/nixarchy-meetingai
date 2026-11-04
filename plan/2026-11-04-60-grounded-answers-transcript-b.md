@@ -542,3 +542,11 @@ grounded run. Give `--lines` the same.
     no re-extraction), and the test checks existing items, not the total
     count.
   - Codex's sandbox could not run the suite, so Claude ran the step check.
+- Step 4 (Codex, finished by Claude):
+  - `ChatSession::restore` returns `(Message, Option<String>)` pairs, so the
+    saved sources never enter the provider history. A test asserts the
+    request body is unchanged.
+  - Claude fixed a clippy `collapsible_if` and raised the MCP tool count in
+    `tests/mcp_flow.rs` from 15 to 16 (the new `meeting_bookmarks` tool).
+  - `cli::tests::cancel_kills_the_whole_group` failed once under load and
+    passed 5 of 5 on its own. It is unrelated to this step.

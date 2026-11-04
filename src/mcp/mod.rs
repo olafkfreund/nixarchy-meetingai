@@ -248,10 +248,10 @@ fn line_text(l: &Value) -> String {
     let who = name.map_or_else(|| who.to_owned(), |n| format!("{who} ({n})"));
     format!(
         "[{}] {} {:.0}s: {}",
-        // search hits have no rowid: show the line id, unquoted
-        l["id"]
+        // Search hits and bookmarks use UUIDs; transcript pages use rowids.
+        l["line"]
             .as_str()
-            .filter(|_| l["line"].is_null())
+            .or_else(|| l["id"].as_str())
             .map_or_else(|| l["line"].to_string(), str::to_owned),
         who,
         l["t0"].as_f64().unwrap_or(0.0),
@@ -568,6 +568,21 @@ impl Server {
                     .join("\n");
                 (text, json!({"items": items}))
             }),
+        )
+    }
+
+    #[tool(
+        description = "List bookmarked transcript lines of a meeting in time order.",
+        annotations(read_only_hint = true)
+    )]
+    async fn meeting_bookmarks(&self, Parameters(a): Parameters<MeetingArgs>) -> CallToolResult {
+        done(
+            request("bookmarks.list", json!({"meeting": a.meeting}))
+                .await
+                .map(|data| {
+                    let lines = data.as_array().cloned().unwrap_or_default();
+                    (lines_text(&lines), data)
+                }),
         )
     }
 

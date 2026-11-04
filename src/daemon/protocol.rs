@@ -56,6 +56,7 @@ pub fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, String> {
 #[serde(default)]
 pub struct ChatSend {
     pub text: String,
+    pub line: Option<String>,
     pub attachments: Vec<String>,
     pub screenshot: bool,
     pub no_context: bool,
@@ -151,6 +152,12 @@ pub struct ItemsUpdate {
 #[derive(Debug, Deserialize)]
 pub struct MeetingArg {
     pub meeting: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BookmarkSet {
+    pub line: String,
+    pub on: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -317,5 +324,8 @@ mod tests {
     fn missing_args_parse_as_defaults() {
         let args: ChatSend = parse(Value::Null).unwrap();
         assert!(args.text.is_empty() && !args.no_context);
+        assert!(args.line.is_none());
+        let args: ChatSend = parse(json!({"text":"why", "line":"line-id"})).unwrap();
+        assert_eq!(args.line.as_deref(), Some("line-id"));
     }
 }

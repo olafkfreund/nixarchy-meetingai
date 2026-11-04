@@ -82,6 +82,10 @@ impl ChatSession {
         self.in_progress
     }
 
+    pub fn reply_row(&self) -> Option<&str> {
+        self.pending_reply_row.as_deref()
+    }
+
     /// Returns the text accumulated for the current or most recent turn.
     pub fn answer(&self) -> &str {
         &self.reply_buffer
@@ -93,7 +97,11 @@ impl ChatSession {
     }
 
     /// Binds this session to an existing conversation and returns up to 200 recent non-blank messages.
-    pub fn restore(&mut self, database: &Database, id: &str) -> Result<Vec<Message>, String> {
+    pub fn restore(
+        &mut self,
+        database: &Database,
+        id: &str,
+    ) -> Result<Vec<(Message, Option<String>)>, String> {
         let conn = database.connection();
         conversations::require_conversation(conn, id).map_err(|err| err.to_string())?;
         let records = conversations::recent_messages(conn, id, RESTORE_MESSAGE_LIMIT)
@@ -101,7 +109,10 @@ impl ChatSession {
         let loaded = records
             .into_iter()
             .filter(|rec| !rec.content.trim().is_empty())
-            .map(record_to_message)
+            .map(|rec| {
+                let sources = rec.sources.clone();
+                (record_to_message(rec), sources)
+            })
             .collect();
         self.reset();
         self.active_conversation = Some(id.to_owned());
@@ -557,11 +568,12 @@ mod tests {
         let restored = session.restore(&db, &cid).unwrap();
         assert_eq!(session.conversation_id(), Some(cid.as_str()));
         assert_eq!(restored.len(), 3);
-        assert_eq!(restored[0].role, Role::System);
-        assert_eq!(restored[0].content, "System setup");
-        assert_eq!(restored[1].role, Role::User);
-        assert_eq!(restored[1].content, "User prompt");
-        assert_eq!(restored[2].role, Role::Assistant);
-        assert_eq!(restored[2].content, "Assistant reply");
+        assert_eq!(restored[0].0.role, Role::System);
+        assert_eq!(restored[0].0.content, "System setup");
+        assert_eq!(restored[1].0.role, Role::User);
+        assert_eq!(restored[1].0.content, "User prompt");
+        assert_eq!(restored[2].0.role, Role::Assistant);
+        assert_eq!(restored[2].0.content, "Assistant reply");
+        assert!(restored.iter().all(|(_, sources)| sources.is_none()));
     }
 }
