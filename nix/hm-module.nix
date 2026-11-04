@@ -187,7 +187,7 @@ in
     whisperNb.enable = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Give the daemon the local Norwegian speech model (NB-Whisper small plus the Silero voice detector). Off by default: Parakeet does not transcribe Norwegian, so set `settings.speechLanguage = \"nb\"` and turn this on to record Norwegian meetings.";
+      description = "Give the daemon the local Norwegian speech model (NB-Whisper small plus the Silero voice detector). Off by default. Parakeet does not transcribe Norwegian, so turn this on and choose Norwegian under Settings, Speech language, for Norwegian meetings. It is about 2.1 GB of RAM once used.";
     };
 
     whisperNb.model = lib.mkOption {
