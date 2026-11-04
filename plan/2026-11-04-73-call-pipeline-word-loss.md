@@ -242,3 +242,14 @@ Nothing deployed changes. `git revert` the merge; sets and logs in the cache can
     `--musan-dir ~/.cache/meetingai-eval/no/musan`, and each sample needs its own `--out-dir`.
   - `selfcheck.py` does not run `--calls-only`, `--language en` or NPSC exclusion through `main`.
     Claude read those paths; step 4's builds are their first real run.
+- Step 2 (coder; README wording by Claude):
+  - A notice invalidates a run if it starts with "lost speech for" or contains "failed". Both the
+    queue-drop and failed-chunk paths use the first form (`lost_speech_notice`).
+  - `--from-logs` and `--json-out` work in suite mode only, and logs are read from
+    `DIR/<set>/<call>.jsonl`.
+  - Not exercised by a check: a live suite through `run_replay`, and the single-file report path.
+- Step 3 (Codex; step check by Claude):
+  - `whisper_spike.rs` and `accuracy_replay.rs` each have their own copy of `cut_turn`; examples
+    cannot share code without a new module, and the plan keeps `src/` untouched.
+  - Run B's chunk records carry `closed`, the audio time `BatchChunks::push` returned the chunk.
+  - The clock stepping has unit checks; a real run first happens in step 4.

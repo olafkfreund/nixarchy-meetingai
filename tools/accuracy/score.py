@@ -6,7 +6,9 @@ Usage:
                       [--model-dir DIR] [--parakeet-dir DIR] [--vad PATH] [--speaker-model PATH]
                       [--load-mode resident|unload] [--dictation] [--replay-log FILE]
                       [--model M] [--language L] [--glossary G]
-  python3 -I score.py SET_DIR (--engine parakeet|whisper-nb|turbo | ...)
+  python3 -I score.py SET_DIR (--engine parakeet|whisper-nb|turbo | ...) [--replay-log DIR] [--json-out FILE]
+  python3 -I score.py SET_DIR --from-logs LOGDIR [--json-out FILE] [REPLAY FLAGS, used only to tell paced runs]
+    (scores saved `LOGDIR/<set>/<call>.jsonl` logs instead of launching a replay)
 
 Reference (see ref.example.txt): `me: words` / `them: words` per utterance (prefix case-insensitive),
 `[silence]` (ignored) or `[silence mm:ss-mm:ss]` (output lines inside the span are invented).
@@ -295,7 +297,7 @@ def wav_duration(path: str) -> float:
         return 0.0
 
 
-def score_ext(records: list[dict], me: list[str], them: list[str], silence: list[tuple[float, float]], turns: list[tuple[str, list[str]]] | None = None, tags: set[str] | None = None, audio_duration: float = 0.0):
+def score_ext(records: list[dict], me: list[str], them: list[str], silence: list[tuple[float, float]], turns: list[tuple[str, list[str]]] | None = None, tags: set[str] | None = None, audio_duration: float = 0.0, paced: bool = True):
     turns = turns or []
     tags = tags or set()
     kept = [o for o in records if o.get("kind") == "line"]
@@ -315,7 +317,7 @@ def score_ext(records: list[dict], me: list[str], them: list[str], silence: list
     sys_hyp = [w for o in sys_lines for w in words(o["text"])]
     all_hyp = [w for o in kept for w in words(o["text"])]
 
-    lost = Counter(me) - Counter(w for o in clean for w in words(o["text"]))
+    missing_words = Counter(me) - Counter(w for o in clean for w in words(o["text"]))
     remote_words = Counter(w for o in mic for w in words(o["text"]) if w in them_only)
 
     if silence:
@@ -343,8 +345,11 @@ def score_ext(records: list[dict], me: list[str], them: list[str], silence: list
     ]
 
     # Sequence edit-distance WER per channel
-    edits = edit_distance(me, mic_hyp) + edit_distance(them, sys_hyp)
+    edits_me, edits_them = edit_distance(me, mic_hyp), edit_distance(them, sys_hyp)
+    edits = edits_me + edits_them
     ref_total = len(me) + len(them)
+    wer_me = edits_me / len(me) if me else None
+    wer_them = edits_them / len(them) if them else None
     wer = (edits / ref_total) if ref_total > 0 else (float(len(all_hyp)) if all_hyp else 0.0)
 
     # Short words kept ("ja", "nei", "takk", "greit", or short_words-tagged turns)
@@ -371,6 +376,15 @@ def score_ext(records: list[dict], me: list[str], them: list[str], silence: list
         cs_edits = sum((cs_en_ref - cs_en_hyp).values())
     cs_wer = (cs_edits / cs_ref_len) if cs_ref_len > 0 else None
 
+    # Speech to line only means something when the replay was paced (C at 1x); offline logs have null.
+    lags: dict[int, list[float]] = {0: [], 1: []}
+    if paced:
+        for o in kept:
+            if o.get("released_at") is not None:
+                lags[o["channel"]].append(float(o["released_at"]) - float(o["end"]))
+    notices = [o.get("text", "") for o in records if o.get("kind") == "notice"]
+    bad_notices = [t for t in notices if t.lower().startswith("lost speech for") or "failed" in t.lower()]
+
     requests = [float(o["latency"]) for o in records if o.get("kind") == "request"]
     s_lat = sorted(requests)
     latency_mean = sum(s_lat) / len(s_lat) if s_lat else 0.0
@@ -385,7 +399,7 @@ def score_ext(records: list[dict], me: list[str], them: list[str], silence: list
 
     return {
         "bleed": bleed,
-        "lost": lost,
+        "missing_words": missing_words,
         "remote_words": remote_words,
         "in_silence": in_silence,
         "unknown": unknown,
@@ -396,6 +410,16 @@ def score_ext(records: list[dict], me: list[str], them: list[str], silence: list
         "num_kept": len(kept),
         "wer": wer,
         "edits": edits,
+        "edits_me": edits_me,
+        "edits_them": edits_them,
+        "ref_me": len(me),
+        "ref_them": len(them),
+        "wer_me": wer_me,
+        "wer_them": wer_them,
+        "lags": lags,
+        "notices": len(notices),
+        "bad_notices": bad_notices,
+        "invalid": bool(bad_notices),
         "ref_total": ref_total,
         "invented_per_hour": invented_per_hour,
         "silence_sec": silence_sec,
@@ -418,13 +442,38 @@ def score(records, me, them, silence):
     m = score_ext(records, me, them, silence)
     return (
         m["bleed"],
-        m["lost"],
+        m["missing_words"],
         m["remote_words"],
         m["in_silence"],
         m["unknown"],
         m["latency_mean"],
         m["num_kept"],
     )
+
+
+def is_paced(rest: list[str]) -> bool:
+    """Only the production replay at 1x gives a speech-to-line time worth printing."""
+    if any(f in rest for f in ("--no-filter", "--filter-lines", "--turns")):
+        return False
+    return "--speed" not in rest or float(rest[rest.index("--speed") + 1]) == 1.0
+
+
+def stl_text(lags: dict[int, list[float]]) -> str:
+    parts = []
+    for ch, name in ((0, "me"), (1, "them")):
+        v = sorted(lags[ch])
+        parts.append(f"{name} median {statistics.median(v):.2f}s p95 {percentile(v, 0.95):.2f}s ({len(v)} lines)" if v else f"{name} n/a")
+    return ", ".join(parts)
+
+
+def pct(x: float | None) -> str:
+    return "n/a" if x is None else f"{x * 100:.1f}%"
+
+
+def read_log(path: Path) -> list[dict]:
+    if not path.is_file():
+        sys.exit(f"missing log {path}")
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
 def run_replay(wav: str, rest: list[str], replay_log: Path | None = None) -> list[dict]:
@@ -452,9 +501,16 @@ def print_single_report(m: dict, is_dictation: bool = False) -> None:
         for o in items:
             print(f"{name}: [{o['start']:.1f}s] {o['text']}")
     print(f"word error rate (WER): {m['wer'] * 100:.1f}% ({m['edits']}/{m['ref_total']} words)")
+    print(
+        f"  me {pct(m['wer_me'])} ({m['edits_me']}/{m['ref_me']}), "
+        f"them {pct(m['wer_them'])} ({m['edits_them']}/{m['ref_them']})"
+    )
     if m["cs_wer"] is not None:
         print(f"code-switch WER: {m['cs_wer'] * 100:.1f}% ({m['cs_edits']}/{m['cs_ref_len']} words)")
-    print(f"lost owner words: {sum(m['lost'].values())} {dict(m['lost'])}")
+    print(
+        "missing owner words (includes misheard words and lines judged as bleed): "
+        f"{sum(m['missing_words'].values())} {dict(m['missing_words'])}"
+    )
     print(f"remote words on the mic channel: {sum(m['remote_words'].values())} {dict(m['remote_words'])}")
     print(f"bleed lines: {len(m['bleed'])}")
     print(
@@ -478,21 +534,27 @@ def print_single_report(m: dict, is_dictation: bool = False) -> None:
         f"(median={m['latency_median']:.2f}s, p95={m['latency_p95']:.2f}s) "
         f"over {m['num_requests']} requests ({m['num_kept']} lines kept)"
     )
+    print(f"speech to line: {stl_text(m['lags'])}")
+    print(f"notices: {m['notices']}" + (f" -- RUN INVALID: {m['bad_notices']}" if m["invalid"] else ""))
     print(
         f"peak RSS (VmHWM): {m['vm_hwm_kb'] / (1024 * 1024):.2f} GB "
         f"({m['vm_hwm_kb']} kB, VmRSS={m['vm_rss_kb']} kB, load_mode={m['load_mode']})"
     )
 
 
-def score_suite(suite_dir: Path, rest: list[str], replay_log_dir: Path | None = None) -> None:
+def score_suite(suite_dir: Path, rest: list[str], replay_log_dir: Path | None = None, from_logs: Path | None = None, json_out: Path | None = None) -> None:
     manifest_path = suite_dir / "manifest.json"
     if not manifest_path.is_file():
         sys.exit(f"missing {manifest_path}; run tools/accuracy/no_mix.py first")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    per_call: dict[str, dict] = {}
+    paced = is_paced(rest)
     for set_name, entries in manifest.items():
         if not entries:
             continue
-        tot_edits = tot_ref = tot_bleed = tot_lost = tot_invented = tot_phantoms = 0
+        tot_edits_me = tot_edits_them = tot_ref_me = tot_ref_them = tot_invalid = 0
+        all_lags: dict[int, list[float]] = {0: [], 1: []}
+        tot_edits = tot_ref = tot_bleed = tot_missing = tot_invented = tot_phantoms = 0
         tot_short_kept = tot_short_ref = tot_cs_edits = tot_cs_ref = 0
         tot_silence_sec = 0.0
         dict_pass = 0
@@ -508,12 +570,37 @@ def score_suite(suite_dir: Path, rest: list[str], replay_log_dir: Path | None = 
                 flags.append("--dictation")
             log_file = (replay_log_dir / set_name / f"{item['name']}.jsonl") if replay_log_dir else None
             me, them, silence, turns, tags = parse_reference(Path(ref).read_text(encoding="utf-8"))
-            records = run_replay(wav, flags, replay_log=log_file)
-            m = score_ext(records, me, them, silence, turns=turns, tags=tags, audio_duration=float(item.get("duration") or 0.0))
+            if from_logs:
+                records = read_log(from_logs / set_name / f"{item['name']}.jsonl")
+            else:
+                records = run_replay(wav, flags, replay_log=log_file)
+            m = score_ext(records, me, them, silence, turns=turns, tags=tags, audio_duration=float(item.get("duration") or 0.0), paced=paced)
+            turns_file = Path(wav).with_suffix(".turns.json")
+            per_call.setdefault(set_name, {})[item["name"]] = {
+                "lines": [
+                    {k: o.get(k) for k in ("channel", "start", "end", "text")}
+                    for o in records if o.get("kind") == "line"
+                ],
+                "chunks": [
+                    {k: o.get(k) for k in ("channel", "start", "end")}
+                    for o in records if o.get("kind") == "chunk"
+                ],
+                "turns": json.loads(turns_file.read_text(encoding="utf-8")) if turns_file.is_file() else [],
+                "edits_me": m["edits_me"], "ref_me": m["ref_me"],
+                "edits_them": m["edits_them"], "ref_them": m["ref_them"],
+                "notices": m["notices"], "invalid": m["invalid"],
+            }
+            tot_edits_me += m["edits_me"]
+            tot_edits_them += m["edits_them"]
+            tot_ref_me += m["ref_me"]
+            tot_ref_them += m["ref_them"]
+            tot_invalid += m["invalid"]
+            for ch in (0, 1):
+                all_lags[ch].extend(m["lags"][ch])
             tot_edits += m["edits"]
             tot_ref += m["ref_total"]
             tot_bleed += len(m["bleed"])
-            tot_lost += sum(m["lost"].values())
+            tot_missing += sum(m["missing_words"].values())
             tot_invented += len(m["in_silence"])
             tot_silence_sec += m["silence_sec"]
             tot_phantoms += len(m["phantom_lines"])
@@ -536,21 +623,27 @@ def score_suite(suite_dir: Path, rest: list[str], replay_log_dir: Path | None = 
         cs_str = f"{tot_cs_edits / tot_cs_ref * 100:.1f}%" if tot_cs_ref > 0 else "n/a"
         print(
             f"[{set_name}] files={len(entries)} WER={wer_pct:.1f}% ({tot_edits}/{tot_ref}) "
-            f"cs_WER={cs_str} bleed={tot_bleed} lost={tot_lost} "
+            f"WER_me={pct(tot_edits_me / tot_ref_me if tot_ref_me else None)} "
+            f"WER_them={pct(tot_edits_them / tot_ref_them if tot_ref_them else None)} "
+            f"cs_WER={cs_str} bleed={tot_bleed} missing={tot_missing} "
             f"invented={tot_invented} ({inv_hr:.2f}/h) phantoms={tot_phantoms} "
+            f"invalid_runs={tot_invalid} stl=[{stl_text(all_lags)}] "
             f"short={short_str} dict_ok={dict_pass}/{len(entries)} "
             f"median={med:.2f}s p95={p95:.2f}s VmHWM={max_hwm_kb / (1024 * 1024):.2f}GB ({last_mode})"
         )
+    if json_out:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(per_call, indent=1) + "\n", encoding="utf-8")
 
 
-def extract_replay_log_flag(args: list[str]) -> tuple[list[str], Path | None]:
+def take_flag(args: list[str], flag: str) -> tuple[list[str], Path | None]:
     out = []
     log_path = None
     i = 0
     while i < len(args):
-        if args[i] == "--replay-log":
+        if args[i] == flag:
             if i + 1 >= len(args):
-                sys.exit("--replay-log needs a file or directory path")
+                sys.exit(f"{flag} needs a file or directory path")
             log_path = Path(args[i + 1])
             i += 2
         else:
@@ -562,10 +655,12 @@ def extract_replay_log_flag(args: list[str]) -> tuple[list[str], Path | None]:
 def main(argv: list[str]) -> None:
     if len(argv) < 2:
         sys.exit(__doc__)
-    cleaned, replay_log = extract_replay_log_flag(argv)
+    cleaned, replay_log = take_flag(argv, "--replay-log")
+    cleaned, from_logs = take_flag(cleaned, "--from-logs")
+    cleaned, json_out = take_flag(cleaned, "--json-out")
     first = Path(cleaned[0])
     if first.is_dir():
-        score_suite(first.resolve(), cleaned[1:], replay_log_dir=replay_log)
+        score_suite(first.resolve(), cleaned[1:], replay_log_dir=replay_log, from_logs=from_logs, json_out=json_out)
         return
     if len(cleaned) < 3:
         sys.exit(__doc__)
@@ -574,7 +669,7 @@ def main(argv: list[str]) -> None:
     records = run_replay(wav, rest, replay_log=replay_log)
     m = score_ext(
         records, me, them, silence,
-        turns=turns, tags=tags, audio_duration=wav_duration(wav),
+        turns=turns, tags=tags, audio_duration=wav_duration(wav), paced=is_paced(rest),
     )
     print_single_report(m, is_dictation=("--dictation" in rest))
 
