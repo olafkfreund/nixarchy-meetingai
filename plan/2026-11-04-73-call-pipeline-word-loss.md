@@ -73,19 +73,27 @@ plan steps. It is not covered here.
 ### 1. Test sets (coder) — `tools/accuracy/no_mix.py`
 
 1. **Turn data.** `build_calls` (:557) writes `<name>.turns.json` beside each call: for each
-   turn its `id`, `channel` (0 = me, 1 = them), `start`, `end`, `text`. In the turn loop (:598)
-   it is known where each sentence is placed.
+   turn its `id`, `channel` (0 = me, 1 = them), `start`, `end` in float seconds, `text`. In the
+   turn loop (:598) `t` is in samples, so divide by `RATE`.
 2. **`--exclude-ids FILE`:** remove these sentence IDs **before** selection, inside `load_npsc`
    (:485) and the new loader. Filtering afterwards would not refill the selection, because
-   `load_npsc` stops at a target duration (:543). Each build writes `used_ids.json`. If fewer
-   than 20 calls can be built, exit non-zero with the count.
+   `load_npsc` stops at a target duration (:543). Each build writes `used_ids.json`, listing only
+   the IDs actually placed in that build's 20 measured calls, not the loader's whole pool, which
+   would starve the second sample. If fewer than 20 calls can be built, exit non-zero with the
+   count.
 3. **LibriSpeech loader:** `load_librispeech(dir, seed)` for the extracted `test-clean` under
    `~/.cache/meetingai-eval/librispeech/LibriSpeech`, returning the items `build_calls` takes,
-   and using `--language en` to select it in `main` (:840). Words lowercased as `norm_text`
-   does (:325).
-4. **`--calls-only`:** build `npsc` or the English set with `double_talk` (:891), `remote_only`
-   (:895), silence, room-tone, bursts and short words, and skip FLEURS, dictation and
-   code-switch, which this work does not use.
+   with each item's `duration` read from the audio, since `build_calls` filters on it (:579), and
+   words lowercased as `norm_text` does (:325). `--language en` selects it in `main` (:840), under
+   the manifest key and directory `libri`, and skips the NPSC and FLEURS checks that exit today
+   (:871–877).
+4. **`--calls-only`:** build `npsc` or `libri` with `double_talk` (:891), `remote_only` (:895),
+   silence, room-tone, bursts and short words, and skip FLEURS, dictation and code-switch, which
+   this work does not use. **Every measured set uses `max_calls=20`.** Without it, `build_calls`
+   would use all of LibriSpeech (about 250 calls), leaving nothing for sample 2. Only `build_calls`
+   sets get turn data; the guard-only sets do not need it. `SHORT_WORDS` (:51) is Norwegian only,
+   so on English `build_short_words` uses its existing 1.2 s clip fallback (:705), and the results
+   say that this English short-word guard is weaker.
 5. **`tools/accuracy/selfcheck.py`** (new, assert-based, no downloads): on a tiny synthetic
    pool, turn data matches the WAV length; a repeat build with the same seed gives identical
    bytes; `--exclude-ids` removes those IDs; too small a pool exits non-zero.
@@ -98,8 +106,9 @@ Check: `python3 -I tools/accuracy/selfcheck.py` passes, and `python3 -I tools/ac
 1. **Per channel.** `score_ext` (:298) adds `wer_me` and `wer_them` beside `wer` (:346), and
    the single and suite reports (:445, :487) print them. Overall stays the sum of the two
    channels' edit distances over all reference words, and suite totals use the same sum.
-2. **Rename** `lost` (:318) to `missing_words`, printed as "missing owner words (includes
-   misheard words and lines judged as bleed)" at :457, and in the suite line at :539.
+2. **Rename** `lost` (:318) to `missing_words` everywhere it is used, including `score()` (:421)
+   and `tot_lost` (:495, :516), printed as "missing owner words (includes misheard words and lines
+   judged as bleed)" at :457, and in the suite line at :539.
 3. **Speech to line.** From `released_at` minus `end` on `"kind": "line"` records, median and p95
    per channel, in the report, for paced runs only: C at 1×. It is not meaningful for B, B+F, A
    or C at 8×, and is printed as "n/a" there. Per-chunk decode time (:374) stays.
@@ -111,7 +120,8 @@ Check: `python3 -I tools/accuracy/selfcheck.py` passes, and `python3 -I tools/ac
    timestamps. The rule is inferred where the public API allows: an exact repeat, a silence
    phrase, otherwise "echo or loop". It also reports seconds of turn audio covered by no
    `"kind":"chunk"` span, labelled as an upper bound because it includes silence before the
-   first word. `score_suite` writes the per-call JSON with a new `--json-out`.
+   first word. `score_suite` writes the per-call JSON with a new `--json-out`: each call's kept
+   lines, and `edits_me`, `ref_me`, `edits_them` and `ref_them`, so suites sum correctly.
 6. **`--from-logs DIR`:** `score_suite` (:487) reads each call's saved JSONL from `DIR` instead of launching a
    replay. Today `--replay-log` (:546) only writes logs, and suite mode passes the same flags to every call, which
    cannot give B+F each call's own B log, or run `whisper_spike`.
@@ -125,29 +135,35 @@ Check: `python3 -I tools/accuracy/selfcheck.py` passes.
 
 1. **Notices.** In the event match (:397–410), `LiveEvent::Notice` prints
    `{"kind":"notice","text":...}` instead of falling through `Some(_)`.
-2. **`--no-filter` (run B).** After `live` setup is skipped, read the WAV into `BatchChunks`, with
-   the same tail silence as `replay`, and call `transcribe_chunk` on each chunk in order, with an
-   empty prompt. In-process engines ignore the prompt. Print each as a
-   `{"kind":"line","channel","start","end","released_at","text"}` record, in chunk-finish order,
-   and print chunk spans as `{"kind":"chunk",...}`. Chunk errors exit non-zero. No wall-clock
-   pacing.
-3. **`--filter-lines FILE` (run B+F).** Read a run B log. Step an audio clock in 0.1 s ticks up to
-   the last chunk's end. At each tick, `accept` every line whose `end` has passed, in finish order,
-   and call `filter.tick(now, earliest, open_end)`, computing the two arguments as the batch task
-   does (`earliest_system`, `open_only_system_end`, transcription.rs:1192): `earliest` is the first
-   system chunk that has begun with its line not yet accepted, and `open_end` is set only while a
-   system chunk is open and no closed one is still pending. Then `flush`. Print released lines. No
-   engine is loaded.
+2. **`--no-filter` (run B).** Read the WAV into `BatchChunks`, with the same tail silence as
+   `replay`, and call `transcribe_chunk` on each chunk in order, with an empty prompt. In-process
+   engines ignore the prompt. Print every chunk as `{"kind":"chunk","channel","start","end"}`, and,
+   only when the text is non-empty (`handle_chunk_result` also skips empty text), a
+   `{"kind":"line","channel","start","end","released_at","text"}` record, in chunk-finish order.
+   Offline modes print `released_at` as `null`. Chunk errors exit non-zero. No wall-clock pacing.
+3. **`--filter-lines FILE` (run B+F).** Branch in `main` before `resolve_engine` and the preload
+   calls (:244–262), so no WAV, engine or model is needed. Read a run B log. Step an audio clock in
+   0.1 s ticks up to the last chunk's end **plus 4 s of tail**, so the 3 s hold still runs on the last
+   turn, as the replay's tail does. At each tick, **first** `filter.tick(now, earliest, open_end)`, then
+   `accept` every line whose chunk has closed by `now`, in finish order. Use `"kind":"chunk"` spans, not
+   lines, for the arguments, because empty chunks have no line: `earliest` is the start of the system
+   chunk with `start <= now < end`, and `open_end` is `now` while one is open. With zero decode time no
+   closed system chunk is ever pending, which is why this is simpler than `earliest_system` and
+   `open_only_system_end` (transcription.rs:1192). A chunk cut at 15 s closes at `start + 15 s`, not at
+   its cut point, so take the close time from when `BatchChunks::push` returned it, and print that as
+   `"closed"` on the chunk record. Then `flush`. Print released lines.
 
    **This is an approximation, and is labelled so in the results:** decode time is treated as zero,
    so a line arrives when its audio ends, while in production it arrives when decoding finishes.
    B → B+F is "what the filter removes with no decode delay". B+F → C is reported separately, and can
    come from scheduling, concurrency or decode order, so it is not automatically charged to the filter.
 4. **`--turns FILE` (run A).** For each turn in the turn data, cut `start`..`end` from that channel,
-   and send it whole through `transcribe`. Print a line record for each.
+   and send it whole through `transcribe`. Print a line record for each non-empty result, with the
+   turn's channel, start and end.
 5. **`whisper_spike.rs`:** optional `--stem-prefix` (default `turbo-`, empty for NB-Whisper) and
    `--threads` (default 4). Add `--turns FILE WAV` printing the same JSON line records as run A, no
-   VAD, so `score.py` can read its output.
+   VAD, so `score.py` can read its output. It rejects stereo today (:40); in `--turns` mode it accepts
+   the call's stereo WAV and cuts the turn's channel. The plain single-file mode stays as it is.
 6. **Unit checks** in the example, with no model: the clock stepping on hand-written lines holds a
    microphone line 3 s, then releases it; an echo of a system line is removed; the same turn cut
    twice is identical.
@@ -213,3 +229,7 @@ the figures. The tools land in the same PR. No deploy, since nothing under `src/
 ## Rollback
 
 Nothing deployed changes. `git revert` the merge; sets and logs in the cache can be deleted.
+
+## Deviations
+
+(Recorded here during implementation, in the same commit as the code.)
