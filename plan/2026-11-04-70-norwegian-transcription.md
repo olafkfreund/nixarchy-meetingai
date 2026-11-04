@@ -44,8 +44,12 @@ This plan implements the approved spec on `fix/70-norwegian-transcription`.
   ~172);
 - a Silero VAD (sherpa-onnx, pinned) decodes only speech segments, and a
   chunk with none is not sent;
-- phantom phrases from a fixed list are removed anywhere in a line, and a
-  line left empty is dropped.
+- phantom phrases from a fixed list are removed **anywhere** in a line, and
+  a line left empty is dropped. The spec's Risks section still says "only
+  whole-line"; the plan follows S3 and the review record;
+- the VAD adds **no minimum length** of its own beyond its speech segments,
+  so "ja" and "nei" survive;
+- the OpenAI-compatible path keeps its prompt: it is the user's engine.
 
 **Measurement:**
 - **Sets:** NPSC (`NbAiLab/NPSC`, CC0) is the gate set; the owner's private
@@ -125,6 +129,15 @@ Of the engines that pass, the lower NPSC error rate wins.
 - Local-only: `speech_config`'s allowlist (~1199) admits `whisper-nb-local`;
   `migrate_whisper` (~744) rewrites only `whisper-local`.
 
+**Rules that must hold:**
+- any language other than `nb`/`no`/`nn` with `parakeet-local` stays on
+  Parakeet;
+- "Auto" is matched in any case, and an empty value means Auto, including
+  values set through Nix `speechLanguage`;
+- `speech_language` never changes `response_language`;
+- code-switch error rate is reported (S1), and the picker hint for an
+  English call with `nb` set says to use Auto.
+
 **Out of scope:** Auto language detection (a later issue), English-only live
 triggers (#71), and the `"en"` meeting language column.
 
@@ -169,58 +182,101 @@ cache.
 ### 2. The dormant engine (codex)
 
 1. **`src/speech/stt/whisper_nb.rs`:**
-   - load lazily from `NIXARCHY_MEETINGAI_WHISPER_NB_DIR`;
-   - `not_ready_reason()`, `preload()` and `transcribe(samples) -> String`,
-     mirroring `parakeet.rs`;
-   - the decode mutex shared the same way;
-   - split with `parakeet::split_points`/`decode_pieces`, made `pub(crate)`;
-   - the VAD from `NIXARCHY_MEETINGAI_SILERO_VAD`;
-   - the phantom-phrase filter as a pure function with a fixed list.
-2. **`SttWire::InProcess`** dispatches on the provider id: `parakeet-local`
-   → Parakeet, `whisper-nb-local` → `whisper_nb`. Register
-   `whisper-nb-local` as an in-process speech provider that no setting or
-   route selects yet.
-3. **Tests:**
+   - load from `NIXARCHY_MEETINGAI_WHISPER_NB_DIR` (the model folder: the
+     turbo export or the NB-Whisper export, same layout);
+   - `not_ready_reason()`, `preload()`, `unload()` and
+     `transcribe(samples) -> String`, mirroring `parakeet.rs`.
+2. **One decode lock and loading modes:**
+   - Both in-process engines decode under **one global decode mutex** (move
+     Parakeet's into a shared `stt::DECODE`), so decodes serialise as they
+     do live.
+   - Add `unload()` to Parakeet (drop the recognizer).
+   - Add `LoadMode { Resident, UnloadInactive }`: when one engine loads
+     under `UnloadInactive`, the other is unloaded. The gate picks the mode;
+     until then the default is `Resident`, which is today's behaviour.
+3. **Splitting:** use `parakeet::split_points`/`decode_pieces`, made
+   `pub(crate)`.
+4. **VAD:** from `NIXARCHY_MEETINGAI_SILERO_VAD`. The phantom-phrase filter
+   is a pure function with a fixed list.
+5. **Dispatch and registration:**
+   - `SttWire::InProcess` dispatches on the provider id: `parakeet-local` →
+     Parakeet, `whisper-nb-local` → `whisper_nb`.
+   - `transcribe_with_prompt` ignores the prompt for in-process engines
+     (~164–175).
+   - Register `whisper-nb-local` in the STT provider catalogue next to
+     `parakeet-local`, as in-process. No setting or route selects it yet.
+6. **Tests:**
    - the phantom filter removes a phrase at the start, middle and end;
    - VAD and splitting with a fake decoder: no speech → nothing sent; 0.3 s
      of speech kept; 45 s split under 30 s;
    - dispatch by id;
+   - the prompt is ignored in-process;
+   - `UnloadInactive` unloads the other engine, and `Resident` keeps both;
    - the Parakeet path is unchanged.
 
 Check: the step check.
 
 ### 3. Measurement tools (agy)
 
-Under `tools/accuracy/`, beside the existing files:
-1. **`no_mix.py`** builds every set in the decisions above from NPSC,
-   FLEURS `nb_no` and MUSAN, in `libri_mix.py`'s truth format, with seeds.
-   It also builds the owner set from a folder if one is given.
-2. **`score.py`** gains:
-   - `--engine parakeet|whisper-nb|turbo`;
+1. **`tools/accuracy/no_mix.py`** builds every set in the decisions above,
+   in `libri_mix.py`'s truth format, with seeds:
+   - **NPSC:** the test split from `NbAiLab/NPSC` on Hugging Face (parquet,
+     CC0), about 2 h, selected by a fixed seed;
+   - **FLEURS `nb_no` test** (`google/fleurs`);
+   - **MUSAN** noise subset (OpenSLR 17), only the `noise/` part, about
+     1 GB;
+   - the owner set from a folder, if one is given.
+
+   Download commands and sizes go in the README.
+2. **`examples/accuracy_replay.rs`:**
+   - `--engine parakeet|whisper-nb|turbo` plus `--model-dir`. It builds the
+     provider config by id (`parakeet-local`, or `whisper-nb-local` with the
+     given folder; turbo is `whisper-nb-local` pointed at the turbo export)
+     and sets the VAD env var. No settings routing is involved.
+   - **Live pacing:** it drives the real
+     `LiveTranscriber::connect_config_with` with PCM at 1× wall-clock, as
+     `examples/diarize_eval.rs --live` does. Input, decode results and
+     `filter.tick` interleave exactly as in a call, so the 3 s bleed hold is
+     exercised.
+   - `--load-mode resident|unload` selects the step 2 mode.
+   - **Peak RSS** is measured in this Rust process (`VmHWM`), after loading
+     Parakeet and the speaker model too.
+   - **Dictation** goes through `transcription::transcribe(&config, wav,
+     None)`, the dictation path, not `BatchChunks`.
+3. **`score.py`** reads the replay's output and adds:
    - word error rate (edit distance, NPSC normalisation);
    - invented lines per hour;
    - phantom phrases anywhere;
    - short words kept;
    - dictation success;
    - median and p95;
-   - peak RSS (`/proc/self/status` VmHWM).
-3. **1× pacing** in the replay (`examples/accuracy_replay.rs`, or the
-   driver `score.py` uses): feed PCM at wall-clock speed.
-4. **README:** licences (NPSC CC0, FLEURS CC BY 4.0, MUSAN CC BY 4.0),
-   sizes and commands.
+   - code-switch error rate;
+   - the RSS reported by the replay.
+4. **README:** licences (NPSC CC0, FLEURS CC BY 4.0, MUSAN CC BY 4.0), sizes
+   and commands.
 
-Check: `python3 -I -m py_compile` on the new scripts, and a small slice
-built and scored with Parakeet.
+Check:
+- `python3 -I -m py_compile` on the scripts;
+- a small slice scored with **Parakeet and with the turbo export**, both
+  through the paced replay;
+- a held mic line is released about 3 s after its chunk, shown in the
+  replay log;
+- RSS is reported from the replay process.
 
-### 4. Packaging (coder)
+### 4. Packaging and the NB-Whisper export (coder)
 
 1. `nix/whisper-turbo-model.nix` and `nix/silero-vad.nix`, with pinned
    hashes, following `nix/parakeet-model.nix`.
 2. **`tools/whisper-export/`:** the script, the pinned NB-Whisper revision,
    the export-tool version and the exact command to export NB-Whisper to
-   sherpa-onnx int8. **Claude runs it once** and publishes the result as a
-   release asset of this repo, then adds `nix/whisper-nb-model.nix` pinned to
-   it.
+   sherpa-onnx int8.
+   - **Claude runs it once.** It succeeds only if the step 1 spike decodes a
+     FLEURS `nb_no` clip with the result.
+   - On success, Claude publishes it as a release asset of this repo and
+     adds `nix/whisper-nb-model.nix` pinned to it.
+   - **If the export fails,** NB-Whisper drops out and the gate compares
+     turbo against Parakeet only. That is recorded as a deviation, as the
+     spec allows.
 3. Each model's licence travels with it.
 
 Check: `nix build` of each model derivation, plus `nix flake check -L
@@ -256,8 +312,28 @@ In `src/daemon/session.rs`, `src/speech/stt/transcription.rs` and
    with the known-support table and the auto-record rule.
 4. **Local-only:** `speech_config`'s allowlist admits `whisper-nb-local`;
    `migrate_whisper` is untouched for the new id.
-5. **Tests:** every routing, code, guard, local-only, dictation and
-   setting-change case listed in the spec's Verification.
+5. **Tests:**
+   - `resolve_speech`:
+     - the default engine plus `nb`/`no`/`nn` gives `whisper-nb-local`;
+     - a chosen provider is never replaced;
+     - other languages stay on Parakeet;
+     - "Auto" in any case and empty are both Auto;
+   - preload, `speech_not_ready` and `state_value` follow the resolved
+     engine, and a missing Norwegian model gives its own message;
+   - codes for every engine and path, including Deepgram live `en`, custom
+     streaming and multipart `language`;
+   - the guard:
+     - known unsupported is refused before capture, naming an engine that
+       can;
+     - unknown engines start with one notice;
+     - auto-record with a known-unsupported language does not capture, and
+       shows the notice;
+   - local-only: `whisper-nb-local` is admitted, cloud is refused, and
+     `migrate_whisper` leaves the new id alone;
+   - dictation of 1–3 s and 40–60 s with `nb`;
+   - a setting change during a recording applies at the next start, with a
+     notice;
+   - `speech_language` leaves `response_language` unchanged.
 
 Check: the step check.
 
@@ -321,6 +397,21 @@ Check: the step check plus `bash shell/tests/ci.sh`.
 - **Live switch-off:** set `speech_language` back to Auto (Parakeet), or
   `whisperNb.enable = false`.
 - **No database change.**
+
+## Review record (draft plan)
+
+| Finding | From | Verdict |
+|---|---|---|
+| No unload mechanism to measure; RSS read from the Python scorer | Codex, agy | confirmed → step 2 `unload()` and `LoadMode`; replay measures VmHWM |
+| The replay cannot select the Whisper engines or the VAD | Codex, agy | confirmed → `--engine`/`--model-dir` by provider id |
+| 1× pacing alone does not exercise the bleed hold | Codex | confirmed → drive the real `LiveTranscriber`; check the 3 s release |
+| Dictation is not measured through its own path | agy | confirmed → `transcription::transcribe` |
+| The decode mutex is ambiguous | agy | confirmed → one global `stt::DECODE` |
+| Prompt suppression and provider registration anchors | agy | confirmed → step 2.5 |
+| Decisions delegated to the spec; missing rules | Codex, agy | confirmed → "Rules that must hold"; step 6 tests listed inline |
+| No export success check or fallback; no NPSC/MUSAN acquisition | Codex | confirmed → step 4 check and turbo fallback; step 3 sources and sizes |
+| The spec's Risks contradicts S3 on phantom phrases | Codex | confirmed → the plan follows S3 and the review record (anywhere) |
+| A pre-gate smoke check for both candidates | Codex | confirmed → step 3 check |
 
 ## Deviations
 
