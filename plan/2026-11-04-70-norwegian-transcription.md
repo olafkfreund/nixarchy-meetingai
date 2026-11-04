@@ -544,3 +544,7 @@ Check: the step check plus `bash shell/tests/ci.sh`.
     harness does not load `Service.qml`), a dictation unit test through the
     real Whisper path (the eval ran 20 dictations), the dictation timeout
     under decode contention (#74), and razer numbers.
+- After the merge (Claude; the owner asked for this): the README gains a
+  "Norwegian" section, and the `whisperNb.enable` description now points to the
+  picker, because setting `speechLanguage` in Nix locks it. The owner also asked
+  for `whisperNb.enable` on p620, in its own nixos PR.
