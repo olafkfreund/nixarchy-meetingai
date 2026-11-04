@@ -315,6 +315,15 @@ async fn transcribe_custom(
                 None,
                 config.model.as_bytes(),
             );
+            if let Some(language) = language.filter(|language| !language.is_empty()) {
+                form_part(
+                    &mut body,
+                    &boundary,
+                    "form-data; name=\"language\"",
+                    None,
+                    language.as_bytes(),
+                );
+            }
             form_part(
                 &mut body,
                 &boundary,
@@ -1668,6 +1677,60 @@ mod tests {
                 .await
                 .unwrap(),
             "hello"
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn custom_multipart_sends_its_language_code() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            loop {
+                let count = socket.read(&mut buf).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buf[..count]);
+                if let Some(split) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..split]);
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|s| s.parse().ok())
+                        })
+                        .unwrap();
+                    if request.len() >= split + 4 + length {
+                        break;
+                    }
+                }
+            }
+            assert!(String::from_utf8_lossy(&request).contains("name=\"language\"\r\n\r\nnb"));
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        let mut config = ProviderConfig::new("custom-test", "", "model");
+        config.base_url = format!("http://127.0.0.1:{port}/speech");
+        config.language = "nb".into();
+        config.custom = Some(crate::ai::catalog::custom::CustomProvider {
+            request_format: "multipart-wav".into(),
+            response_format: "text".into(),
+            auth: "none".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            transcribe(&config, b"RIFFtest".to_vec(), None)
+                .await
+                .unwrap(),
+            "ok"
         );
         server.join().unwrap();
     }

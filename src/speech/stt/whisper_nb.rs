@@ -25,6 +25,9 @@ fn model_dir() -> Option<PathBuf> {
 fn vad_path() -> Option<PathBuf> {
     env_path("NIXARCHY_MEETINGAI_SILERO_VAD")
 }
+fn default_threads() -> i32 {
+    std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).clamp(1, 16) as i32)
+}
 fn model_file(dir: &Path, stem: &str, ext: &str) -> Option<PathBuf> {
     [
         format!("{stem}.int8.{ext}"),
@@ -78,13 +81,12 @@ fn load() -> Result<Decoder, String> {
         ..Default::default()
     };
     config.model_config.tokens = Some(tokens.to_string_lossy().into_owned());
-    // Whisper's 32-layer encoder runs a 30 s window per chunk, so threads matter; measured per
-    // host at the gate (`NIXARCHY_MEETINGAI_WHISPER_NB_THREADS`, default 4).
+    // Whisper's 32-layer encoder runs a 30 s window per chunk, so threads matter.
     config.model_config.num_threads = std::env::var("NIXARCHY_MEETINGAI_WHISPER_NB_THREADS")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n: &i32| (1..=64).contains(&n))
-        .unwrap_or(4);
+        .unwrap_or_else(default_threads);
     let recognizer = OfflineRecognizer::create(&config).ok_or("the model could not be created")?;
     let vad_config = VadModelConfig {
         silero_vad: SileroVadModelConfig {
@@ -261,6 +263,13 @@ pub(crate) fn loaded() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_thread_count_is_half_available_with_bounds() {
+        let expected =
+            std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).clamp(1, 16) as i32);
+        assert_eq!(default_threads(), expected);
+        assert!((1..=16).contains(&default_threads()));
+    }
     #[test]
     fn phantom_phrases_are_removed_anywhere() {
         assert_eq!(filter_phantoms("Takk for at du så på. Hei"), "Hei");

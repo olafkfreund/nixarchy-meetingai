@@ -487,3 +487,16 @@ Check: the step check plus `bash shell/tests/ci.sh`.
   - The loader now reads those, keeps the `nb-NO` sentences, and decodes
     each MP3 once to 16 kHz WAV. The README download commands are fixed to
     match.
+- Step 6 (Codex; review fixes, tests and checks by Claude):
+  - Codex also changed `shell/Service.qml`: an auto-record refusal for an
+    unsupported language shows as a notice with one "Dismiss" button
+    (`offer` with action `no` drops the "Not now" button), not a bare
+    `notify-send`. It belongs to step 7's shell work and is kept.
+  - Codex made `whisper_nb.rs` default to half the cores, capped at 16,
+    instead of a fixed count; the gate ran at 16 on p620.
+  - **Claude fixed two routing gaps in `resolve_speech`:** Norwegian codes
+    now match regardless of case and region (`NB`, `nb-NO`, `nn_NO`), and
+    `speech_model` applies only to the engine the user chose, so a Parakeet
+    model name never follows the route to `whisper-nb-local`. Both are
+    tested in `norwegian_routing_and_codes`.
+  - Claude ran the step check: 466 lib tests.
