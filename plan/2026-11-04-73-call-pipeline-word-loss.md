@@ -75,9 +75,10 @@ plan steps. It is not covered here.
 1. **Turn data.** `build_calls` (:557) writes `<name>.turns.json` beside each call: for each
    turn its `id`, `channel` (0 = me, 1 = them), `start`, `end`, `text`. In the turn loop (:598)
    it is known where each sentence is placed.
-2. **`--exclude-ids FILE`:** drop these sentence IDs from every pool, after `load_npsc` (:485)
-   and the new loader. Each build writes `used_ids.json`. If fewer than 20 calls can be built,
-   exit non-zero with the count.
+2. **`--exclude-ids FILE`:** remove these sentence IDs **before** selection, inside `load_npsc`
+   (:485) and the new loader. Filtering afterwards would not refill the selection, because
+   `load_npsc` stops at a target duration (:543). Each build writes `used_ids.json`. If fewer
+   than 20 calls can be built, exit non-zero with the count.
 3. **LibriSpeech loader:** `load_librispeech(dir, seed)` for the extracted `test-clean` under
    `~/.cache/meetingai-eval/librispeech/LibriSpeech`, returning the items `build_calls` takes,
    and using `--language en` to select it in `main` (:840). Words lowercased as `norm_text`
@@ -95,20 +96,28 @@ Check: `python3 -I tools/accuracy/selfcheck.py` passes, and `python3 -I tools/ac
 ### 2. Scoring (coder) — `tools/accuracy/score.py`
 
 1. **Per channel.** `score_ext` (:298) adds `wer_me` and `wer_them` beside `wer` (:346), and
-   the single and suite reports (:445, :487) print them.
+   the single and suite reports (:445, :487) print them. Overall stays the sum of the two
+   channels' edit distances over all reference words, and suite totals use the same sum.
 2. **Rename** `lost` (:318) to `missing_words`, printed as "missing owner words (includes
    misheard words and lines judged as bleed)" at :457, and in the suite line at :539.
 3. **Speech to line.** From `released_at` minus `end` on `"kind": "line"` records, median and p95
-   per channel, in the report. Per-chunk decode time (:374) stays.
+   per channel, in the report, for paced runs only: C at 1×. It is not meaningful for B, B+F, A
+   or C at 8×, and is printed as "n/a" there. Per-chunk decode time (:374) stays.
 4. **Notices.** Counts `"kind": "notice"` records, and marks the run invalid if any is a lost
    speech or failed chunk notice.
 5. **`tools/accuracy/compare_runs.py`** (new): takes two suites' per-call JSON and prints each
    run's score per channel and overall, the difference, and in how many calls it was worse. For
    B and B+F it lists each removed line with its text and channel, matched on identical
-   timestamps. `score_suite` writes the per-call JSON with a new `--json-out`.
-6. **`selfcheck.py` additions:** per-channel error counts add up to the overall count; a misheard
+   timestamps. The rule is inferred where the public API allows: an exact repeat, a silence
+   phrase, otherwise "echo or loop". It also reports seconds of turn audio covered by no
+   `"kind":"chunk"` span, labelled as an upper bound because it includes silence before the
+   first word. `score_suite` writes the per-call JSON with a new `--json-out`.
+6. **`--from-logs DIR`:** `score_suite` (:487) reads each call's saved JSONL from `DIR` instead of launching a
+   replay. Today `--replay-log` (:546) only writes logs, and suite mode passes the same flags to every call, which
+   cannot give B+F each call's own B log, or run `whisper_spike`.
+7. **`selfcheck.py` additions:** per-channel error counts add up to the overall count; a misheard
    word appears in `missing_words`; a notice invalidates a run; speech-to-line per channel on
-   hand-written records.
+   hand-written records; `--from-logs` scores a hand-written log.
 
 Check: `python3 -I tools/accuracy/selfcheck.py` passes.
 
@@ -124,14 +133,21 @@ Check: `python3 -I tools/accuracy/selfcheck.py` passes.
    pacing.
 3. **`--filter-lines FILE` (run B+F).** Read a run B log. Step an audio clock in 0.1 s ticks up to
    the last chunk's end. At each tick, `accept` every line whose `end` has passed, in finish order,
-   and call `filter.tick(now, earliest, open_end)`. `earliest` is the start of a system chunk that
-   has begun but whose line has not been accepted, and `open_end` is `now` while one is open. Then
-   `flush`. Print released lines. No engine is loaded. Decode time is treated as zero, and any
-   difference from C is reported as a finding, not hidden.
+   and call `filter.tick(now, earliest, open_end)`, computing the two arguments as the batch task
+   does (`earliest_system`, `open_only_system_end`, transcription.rs:1192): `earliest` is the first
+   system chunk that has begun with its line not yet accepted, and `open_end` is set only while a
+   system chunk is open and no closed one is still pending. Then `flush`. Print released lines. No
+   engine is loaded.
+
+   **This is an approximation, and is labelled so in the results:** decode time is treated as zero,
+   so a line arrives when its audio ends, while in production it arrives when decoding finishes.
+   B → B+F is "what the filter removes with no decode delay". B+F → C is reported separately, and can
+   come from scheduling, concurrency or decode order, so it is not automatically charged to the filter.
 4. **`--turns FILE` (run A).** For each turn in the turn data, cut `start`..`end` from that channel,
    and send it whole through `transcribe`. Print a line record for each.
 5. **`whisper_spike.rs`:** optional `--stem-prefix` (default `turbo-`, empty for NB-Whisper) and
-   `--threads` (default 4). Add `--turns FILE WAV` printing the same records as run A, no VAD.
+   `--threads` (default 4). Add `--turns FILE WAV` printing the same JSON line records as run A, no
+   VAD, so `score.py` can read its output.
 6. **Unit checks** in the example, with no model: the clock stepping on hand-written lines holds a
    microphone line 3 s, then releases it; an echo of a system line is removed; the same turn cut
    twice is identical.
@@ -157,9 +173,23 @@ Stop and report if a sanity check fails.
 
 ### 5. Measure (Claude)
 
-Run A, B, B+F and C at 1× for each pair and sample, A-noVAD on Norwegian, C at `--speed 8` on Norwegian,
-all on p620 with 16 threads for NB-Whisper as in #70. Run speech-to-line runs with nothing else loading
-the machine. Check the bus and that no recording is active before heavy runs. Save the logs in the cache.
+All on p620, with `NIXARCHY_MEETINGAI_WHISPER_NB_THREADS=16` for NB-Whisper as in #70. Check the bus and
+that no recording is active before heavy runs. Nothing else loads the machine during C at 1×. Logs stay in
+`~/.cache/meetingai-eval/results/p620/73/`.
+
+| Run | Pairs and samples | How |
+|---|---|---|
+| A | both, both samples | `accuracy_replay CALL.wav --engine E --turns CALL.turns.json` |
+| B | both, both samples | `accuracy_replay CALL.wav --engine E --no-filter > CALL.b.jsonl` |
+| B+F | both, both samples | `accuracy_replay --filter-lines CALL.b.jsonl` |
+| C at 1× | both, both samples | `accuracy_replay CALL.wav --engine E` (existing path) |
+| C at 8× | Norwegian, sample 1 | the same, with `--speed 8` (existing flag) |
+| A-noVAD | Norwegian, both samples | `whisper_spike MODEL_DIR --stem-prefix "" --threads 16 --turns CALL.turns.json CALL.wav` |
+| Guard baselines | both pairs, today's build, 1× | `score.py` on double-talk, remote-only, silence, room-tone, bursts and short-word sets |
+
+All modes are logged first, then scored against each call's reference with step 2's `--from-logs`. The guard runs and C at 1× together save
+the baselines for any later fix: bleed lines, microphone remote words, invented lines, phantom phrases, short
+words, speech-to-line per channel, and NB-Whisper chunk decode time.
 
 ### 6. Results and gate (Claude, then STOP)
 
