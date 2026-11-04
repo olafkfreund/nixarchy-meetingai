@@ -233,3 +233,12 @@ Nothing deployed changes. `git revert` the merge; sets and logs in the cache can
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+- Step 1 (coder; review by Claude):
+  - `load_librispeech(root, exclude)` has no seed, because `build_calls` already shuffles by seed.
+  - `--language en` without `--calls-only` is an error.
+  - A default build also writes `*.turns.json` now; `manifest.json` and the printed summary do not change.
+  - `--slice N` replaces the 20-call count, for smoke runs.
+  - **For step 4:** the English build uses `<cache>/librispeech` as its base, so it needs
+    `--musan-dir ~/.cache/meetingai-eval/no/musan`, and each sample needs its own `--out-dir`.
+  - `selfcheck.py` does not run `--calls-only`, `--language en` or NPSC exclusion through `main`.
+    Claude read those paths; step 4's builds are their first real run.
