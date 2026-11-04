@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 73
 intent: intent/2026-11-04-73-call-pipeline-word-loss.md
 ---
