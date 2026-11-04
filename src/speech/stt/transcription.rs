@@ -1955,4 +1955,25 @@ mod tests {
         );
         sink.abort();
     }
+
+    #[tokio::test]
+    async fn a_push_after_the_worker_ended_reports_stream_ended() {
+        let config = ProviderConfig::new("parakeet-local", "", "");
+        let mut live = LiveTranscriber::connect_batch(config, SttHints::default());
+        live.worker.abort();
+        let _ = std::mem::replace(&mut live.worker, tokio::spawn(async {})).await;
+        let samples = vec![0.0; 800];
+        let mut err = None;
+        for _ in 0..64 {
+            if let Err(e) = live.push(&samples).await {
+                err = Some(e);
+                break;
+            }
+        }
+        let err = err.expect("push after worker ended must fail");
+        assert!(
+            matches!(err, SttError::Socket(ref m) if m == STREAM_ENDED),
+            "{err:?}"
+        );
+    }
 }

@@ -22,7 +22,7 @@ Rectangle {
     readonly property string iDown: String.fromCodePoint(0xf0140)
     readonly property string iRight: String.fromCodePoint(0xf0142)
 
-    readonly property real extras: (nowWait.visible ? nowWait.height + nowCol.spacing : 0) + (nowErr.visible ? nowErr.implicitHeight + nowCol.spacing : 0)
+    readonly property real extras: (nowWait.visible ? nowWait.height + nowCol.spacing : 0) + (nowErr.visible ? nowErr.implicitHeight + nowCol.spacing : 0) + (nowSrc.visible ? nowSrc.height + nowCol.spacing : 0) + (nowRenamed.visible ? nowRenamed.implicitHeight + nowCol.spacing : 0)
     readonly property real nowWant: !root.open ? nowHead.height + root.theme.padY * 2 : nowHead.height + (nowQ.visible ? nowQ.implicitHeight : 0) + answerText.height + nowCol.spacing * 2 + root.extras + root.theme.padY * 2
 
     radius: root.theme.radius
@@ -101,13 +101,38 @@ Rectangle {
                 width: parent.width - Style.space(10)   // room for the scroll bar
                 textFormat: Text.MarkdownText
                 wrapMode: Text.Wrap
-                text: root.themedLinks(root.daemon.now.body)
+                text: root.themedLinks(root.daemon.stripCites(root.daemon.now.body, root.daemon.now.citeMax || 0, root.daemon.now.citeNotes || 0))
                 color: Commons.Color.popups.text
                 linkColor: Commons.Color.accent
                 font.pixelSize: root.theme.nowBody
                 lineHeight: root.theme.leading
                 onLinkActivated: function(link) { Qt.openUrlExternally(link); }
             }
+        }
+        Sources {
+            id: nowSrc
+            objectName: "nowSources"
+            width: parent.width
+            daemon: root.daemon
+            theme: root.theme
+            show: root.open
+            sources: root.daemon.now.sources || ""
+            citeMax: root.daemon.now.citeMax || 0
+            citeNotes: root.daemon.now.citeNotes || 0
+            done: !root.daemon.answering && root.daemon.now.body !== "" && !root.daemon.now.error
+        }
+        UiText {
+            id: nowRenamed
+            objectName: "nowNamesChanged"
+            visible: root.open && root.daemon.now.renamedAfter === true
+            width: parent.width
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: "Speaker names changed after this answer"
+            color: Commons.Color.popups.text
+            opacity: root.theme.dim
+            font.italic: true
+            font.pixelSize: root.theme.caption
         }
     }
 }

@@ -128,6 +128,16 @@ impl Database {
                 connection
                     .execute_batch("ALTER TABLE meeting_exports ADD COLUMN notes_sha256 TEXT")?;
             }
+            let has_speaker_updated_at: bool = connection.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meeting_speakers')
+                 WHERE name = 'updated_at'",
+                [],
+                |r| r.get(0),
+            )?;
+            if !has_speaker_updated_at {
+                connection
+                    .execute_batch("ALTER TABLE meeting_speakers ADD COLUMN updated_at TEXT")?;
+            }
             // Recaps written before notes_fts existed become searchable, once.
             let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             if version < 1 {
@@ -180,6 +190,48 @@ mod tests {
             Default::default(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn speaker_updated_at_column_is_added_to_an_old_database() {
+        let dir = std::env::temp_dir().join(format!("nm-spk-old-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("h.db");
+        {
+            let db = Database::open(&path).unwrap();
+            let c = db.connection();
+            c.execute_batch(
+                "DROP TABLE meeting_speakers;
+                 CREATE TABLE meeting_speakers (
+                   meeting_id TEXT NOT NULL,
+                   speaker_key TEXT NOT NULL,
+                   name TEXT NOT NULL,
+                   PRIMARY KEY (meeting_id, speaker_key)
+                 );
+                 INSERT INTO meeting_speakers VALUES ('m1', '0', 'Old');",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let c = db.connection();
+        let has_col: bool = c
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meeting_speakers') WHERE name = 'updated_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(has_col);
+        assert_eq!(meetings::speaker_names(c, "m1").unwrap()["0"], "Old");
+        meetings::name_speaker(c, "m1", "0", "Ada").unwrap();
+        let updated: Option<String> = c
+            .query_row(
+                "SELECT updated_at FROM meeting_speakers WHERE meeting_id = 'm1' AND speaker_key = '0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(updated.is_some());
     }
 
     #[test]

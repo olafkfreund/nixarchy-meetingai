@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS meeting_speakers (
   meeting_id TEXT NOT NULL
 , speaker_key TEXT NOT NULL
 , name TEXT NOT NULL
+, updated_at TEXT
 , PRIMARY KEY (meeting_id, speaker_key)
 );
 

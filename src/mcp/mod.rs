@@ -135,6 +135,10 @@ async fn request(cmd: &str, args: Value) -> Result<Value, String> {
     .map_err(|_| "The daemon did not answer in time.".to_owned())?
 }
 
+fn matching_suggestion(event: &Value, turn: Option<u64>, finished: bool) -> bool {
+    finished && event["turn"].as_u64() == turn
+}
+
 /// Send `chat.send` and follow its turn until `answer.done` or `answer.error`.
 async fn ask_daemon(question: String) -> Result<Value, String> {
     let want_suggestions = request("settings.get", json!({})).await?["smart_follow_ups"] != false;
@@ -187,7 +191,7 @@ async fn ask_daemon(question: String) -> Result<Value, String> {
                         .unwrap_or("The answer failed.")
                         .to_owned());
                 }
-                Some("suggestion") if finished => {
+                Some("suggestion") if matching_suggestion(&e, turn, finished) => {
                     if suggestions.is_empty() {
                         deadline = deadline.min(Instant::now() + Duration::from_millis(500));
                     }
@@ -204,6 +208,19 @@ async fn ask_daemon(question: String) -> Result<Value, String> {
         json!({"answer": answer, "provider": provider, "model": model,
               "suggestions": suggestions, "partial": partial}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggestions_from_another_turn_are_ignored() {
+        assert!(!matching_suggestion(&json!({"turn": 1}), Some(2), true));
+        assert!(!matching_suggestion(&json!({}), Some(2), true));
+        assert!(matching_suggestion(&json!({"turn": 2}), Some(2), true));
+        assert!(!matching_suggestion(&json!({"turn": 2}), Some(2), false));
+    }
 }
 
 // ----- formatting ------------------------------------------------------------
@@ -231,7 +248,11 @@ fn line_text(l: &Value) -> String {
     let who = name.map_or_else(|| who.to_owned(), |n| format!("{who} ({n})"));
     format!(
         "[{}] {} {:.0}s: {}",
-        l["line"],
+        // search hits have no rowid: show the line id, unquoted
+        l["id"]
+            .as_str()
+            .filter(|_| l["line"].is_null())
+            .map_or_else(|| l["line"].to_string(), str::to_owned),
         who,
         l["t0"].as_f64().unwrap_or(0.0),
         l["text"].as_str().unwrap_or_default()
@@ -287,7 +308,20 @@ struct TranscriptArgs {
     meeting: Option<String>,
     /// Only lines after this line number (the `line` of the last one you saw).
     after_line: Option<i64>,
+    /// Window around this transcript line id.
+    around: Option<String>,
     /// Maximum lines to return (default 200, at most 500).
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+struct TranscriptSearchArgs {
+    /// Text to find in transcript lines (at least 2 characters).
+    query: String,
+    /// Restrict results to this meeting id.
+    meeting: Option<String>,
+    /// Maximum matches to return (default 20, at most 50).
     limit: Option<usize>,
 }
 
@@ -390,11 +424,35 @@ impl Server {
         if let Some(n) = a.after_line {
             args["after_line"] = n.into();
         }
+        if let Some(id) = a.around {
+            args["around"] = id.into();
+        }
         if let Some(n) = a.limit {
             args["limit"] = n.into();
         }
         done(request("transcript.get", args).await.map(|data| {
             let lines = data["lines"].as_array().cloned().unwrap_or_default();
+            (lines_text(&lines), data)
+        }))
+    }
+
+    #[tool(
+        description = "Search transcript lines across saved meetings, or within one meeting.",
+        annotations(read_only_hint = true)
+    )]
+    async fn transcript_search(
+        &self,
+        Parameters(a): Parameters<TranscriptSearchArgs>,
+    ) -> CallToolResult {
+        let mut args = json!({"query": a.query});
+        if let Some(m) = a.meeting {
+            args["meeting"] = m.into();
+        }
+        if let Some(n) = a.limit {
+            args["limit"] = n.into();
+        }
+        done(request("transcript.search", args).await.map(|data| {
+            let lines = data.as_array().cloned().unwrap_or_default();
             (lines_text(&lines), data)
         }))
     }
@@ -644,7 +702,7 @@ impl ServerHandler for Server {
             env!("CARGO_PKG_VERSION"),
         ))
         .with_instructions(
-            "Live meeting copilot. Use meeting_status first; poll transcript_get with after_line during a meeting.",
+            "Live meeting copilot. Use meeting_status first; poll transcript_get with after_line during a meeting, or use transcript_search to find saved lines.",
         )
     }
 

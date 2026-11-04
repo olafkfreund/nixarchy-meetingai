@@ -135,6 +135,22 @@ pub fn for_meeting(connection: &Connection, meeting_id: &str) -> Result<Option<C
         .optional()?)
 }
 
+pub fn for_conversation(connection: &Connection, conversation: &str) -> Result<Option<String>> {
+    Ok(connection
+        .query_row(
+            "SELECT c.id FROM candidates c
+             WHERE c.meeting_id IN
+                     (SELECT meeting_id FROM meeting_conversations WHERE conversation_id = ?1)
+                OR c.id IN
+                     (SELECT candidate_id FROM candidate_conversations WHERE conversation_id = ?1)
+             ORDER BY c.local_only DESC
+             LIMIT 1",
+            [conversation],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 pub fn add_document(
     connection: &Connection,
     candidate_id: &str,
@@ -318,7 +334,7 @@ pub fn delete_all(connection: &Connection, id: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Database, meetings};
+    use crate::db::{Database, conversations, meetings};
 
     fn count(c: &Connection, table: &str) -> i64 {
         c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
@@ -376,6 +392,41 @@ mod tests {
         assert!(update_question(c, &q1.id, &bad).is_err());
         assert!(!update_question(c, "nope", &QuestionPatch::default()).unwrap());
         assert!(delete_question(c, &q2.id).unwrap() && !delete_question(c, &q2.id).unwrap());
+    }
+
+    #[test]
+    fn conversation_candidate_lookup_prefers_local_only() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let local = create(c, "Ada").unwrap();
+        set_local_only(c, &local.id, true).unwrap();
+        let ordinary = create(c, "Ordinary").unwrap();
+        let meeting = meetings::start(c, "Ordinary", "", "en", None, Default::default()).unwrap();
+        link_meeting(c, &ordinary.id, &meeting).unwrap();
+        let prep = conversations::create(c, "Prep", 1).unwrap();
+        link_conversation(c, &local.id, &prep).unwrap();
+        let meeting_chat = conversations::create(c, "Meeting", 2).unwrap();
+        c.execute(
+            "INSERT INTO meeting_conversations VALUES (?1, ?2)",
+            [&meeting, &meeting_chat],
+        )
+        .unwrap();
+        let cross = conversations::create(c, "Cross", 3).unwrap();
+        c.execute(
+            "INSERT INTO meeting_conversations VALUES (?1, ?2)",
+            [&meeting, &cross],
+        )
+        .unwrap();
+        link_conversation(c, &local.id, &cross).unwrap();
+        let unlinked = conversations::create(c, "Unlinked", 4).unwrap();
+
+        assert_eq!(for_conversation(c, &prep).unwrap(), Some(local.id.clone()));
+        assert_eq!(
+            for_conversation(c, &meeting_chat).unwrap(),
+            Some(ordinary.id)
+        );
+        assert_eq!(for_conversation(c, &cross).unwrap(), Some(local.id));
+        assert_eq!(for_conversation(c, &unlinked).unwrap(), None);
     }
 
     #[test]
@@ -454,6 +505,7 @@ mod tests {
                 t1: 1.0,
                 body: "notes".into(),
                 last_line: 1,
+                created_at: String::new(),
             },
         )
         .unwrap();
@@ -464,11 +516,7 @@ mod tests {
             params![m],
         )
         .unwrap();
-        c.execute(
-            "INSERT INTO meeting_speakers VALUES (?1, '1', 'Ada')",
-            params![m],
-        )
-        .unwrap();
+        meetings::name_speaker(c, &m, "1", "Ada").unwrap();
         set_local_only(c, &a.id, true).unwrap();
         c.execute("INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('conv', 't', 0, 0)", []).unwrap();
         c.execute(
