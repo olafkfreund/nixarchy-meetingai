@@ -51,7 +51,7 @@ All raw datasets and generated sets stay in `~/.cache/meetingai-eval/no/` (overr
 
 ### Licences and sizes
 
-- **NPSC (`NbAiLab/NPSC`, Norwegian Parliamentary Speech Corpus)** — National Library of Norway (`NbAiLab`), licensed under **CC0 1.0** (`https://huggingface.co/datasets/NbAiLab/NPSC`). Test split (`16K_mp3_bokmaal` parquetshards): ~1.2 GB raw parquet; a fixed-seed ~2 h subset is selected by `no_mix.py`.
+- **NPSC (`NbAiLab/NPSC`, Norwegian Parliamentary Speech Corpus)** — National Library of Norway (`NbAiLab`), licensed under **CC0 1.0** (`https://huggingface.co/datasets/NbAiLab/NPSC`). Test split, published per sitting as `data/test/<date>.json` (JSONL) + `<date>_16K_mp3.tar.gz`. Three sittings (~70 MB) give several hours of speech; `no_mix.py` keeps the `nb-NO` sentences and selects a fixed-seed ~2 h subset.
 - **FLEURS `nb_no` (`google/fleurs`)** — Google, licensed under **CC BY 4.0** (`https://huggingface.co/datasets/google/fleurs`). Norwegian Bokmål `test` split (`test.tar.gz` + `test.tsv`): ~233 MB archive. Note: FLEURS WAVs are 32-bit float; `no_mix.py` converts them with `ffmpeg -c:a pcm_s16le`.
 - **MUSAN (`noise/` subset, OpenSLR 17)** — David Snyder, Guoguo Chen and Daniel Povey, licensed under **CC BY 4.0** (`https://www.openslr.org/17/`). Only the `noise/` subset is extracted: ~1.0 GB (`musan.tar.gz` full archive is ~11 GB; extract `musan/noise` only).
 - **Models in `~/.cache/meetingai-eval/no/models/`:**
@@ -64,10 +64,12 @@ All raw datasets and generated sets stay in `~/.cache/meetingai-eval/no/` (overr
 ```bash
 mkdir -p ~/.cache/meetingai-eval/no/{npsc,clips,musan,models}
 
-# 1. NPSC test split parquet shards (CC0, ~1.2 GB)
-for i in 00000 00001 00002 00003; do
-    curl -fL --retry 3 -o ~/.cache/meetingai-eval/no/npsc/test-${i}-of-00004.parquet \
-        "https://huggingface.co/datasets/NbAiLab/NPSC/resolve/main/16K_mp3_bokmaal/test-${i}-of-00004.parquet"
+# 1. NPSC test sittings (CC0): one JSONL + one 16 kHz MP3 archive per sitting, ~70 MB for three
+for d in 20170207 20171122 20180530; do
+    for f in "$d.json" "${d}_16K_mp3.tar.gz"; do
+        curl -fL --retry 3 -o ~/.cache/meetingai-eval/no/npsc/$f \
+            "https://huggingface.co/datasets/NbAiLab/NPSC/resolve/main/data/test/$f"
+    done
 done
 
 # 2. FLEURS nb_no test split (CC BY 4.0, ~233 MB)

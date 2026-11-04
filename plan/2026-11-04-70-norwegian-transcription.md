@@ -462,3 +462,28 @@ Check: the step check plus `bash shell/tests/ci.sh`.
   - The functional check (paced replay with Parakeet and turbo, the 3 s
     hold, RSS) runs in step 5, so it does not share the CPU with the
     NB-Whisper export.
+- Step 5, NB-Whisper (Claude; owner decided to drop it from this gate):
+  - Attempt 1: the pinned `model.bin` is a **CTranslate2** file (header
+    `WhisperSpec`), not a PyTorch checkpoint. Claude did not take PyTorch's
+    `weights_only=False` workaround, because it would let a downloaded file
+    run code.
+  - Attempt 2: `export.py` now reads the repo's **safetensors** shards at
+    the same pinned revision. safetensors cannot run code. They are mapped
+    to OpenAI names (the inverse of `convert_openai_to_hf.py`) and checked
+    for missing keys.
+  - The export produced `encoder.int8.onnx`, `decoder.int8.onnx` and
+    `tokens.txt`, but decoding fails at runtime: the decoder's `Reshape`
+    gets `{1,4,1280}` where it expects `{1280}`. The PyTorch in nixpkgs
+    defaults to its "dynamo" ONNX exporter, which ignores the `dynamic_axes`
+    that sherpa-onnx `v1.12.40` relies on, so shapes come out static.
+  - Per the plan's fallback, **NB-Whisper drops out of this gate**, and the
+    gate compares turbo against Parakeet. The tooling is kept for a later
+    try; forcing `dynamo=False` is the likely fix.
+- Step 5, NPSC loader (Claude):
+  - agy's `no_mix.py` and README assumed NPSC parquet shards
+    (`16K_mp3_bokmaal/test-*.parquet`), which do not exist.
+  - NPSC is published per sitting as `data/test/<date>.json` (JSONL) plus
+    `<date>_16K_mp3.tar.gz`.
+  - The loader now reads those, keeps the `nb-NO` sentences, and decodes
+    each MP3 once to 16 kHz WAV. The README download commands are fixed to
+    match.

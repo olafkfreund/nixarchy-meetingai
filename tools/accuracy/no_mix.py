@@ -2,7 +2,7 @@
 """Build Norwegian STT accuracy and #14 failure-case evaluation sets (#70 step 3).
 
 Sources (kept in ~/.cache/meetingai-eval/no/, never in git):
-- NPSC test split (NbAiLab/NPSC on Hugging Face, parquet, CC0): ~2 h selected by fixed seed.
+- NPSC test split (NbAiLab/NPSC on Hugging Face, CC0; per sitting `data/test/<date>.json` + `<date>_16K_mp3.tar.gz`): ~2 h selected by fixed seed.
 - FLEURS nb_no test (google/fleurs, CC BY 4.0): converted to 16 kHz s16le via ffmpeg -c:a pcm_s16le.
 - MUSAN noise/ subset (OpenSLR 17, CC BY 4.0).
 - Optional owner recordings folder (--owner-dir).
@@ -483,42 +483,51 @@ def get_samples(item: dict) -> array.array:
 
 
 def load_npsc(npsc_dir: pathlib.Path, seed: int, target_hours: float) -> list[dict]:
-    parquets = sorted(npsc_dir.glob("*.parquet")) if npsc_dir.is_dir() else []
-    if not parquets:
-        return []
-    import pyarrow.parquet as pq
+    """NPSC as published: one JSONL file and one `<date>_16K_mp3.tar.gz` per sitting
+    (`data/test/<date>.json`). Each sentence's MP3 is decoded once to 16 kHz s16 WAV."""
+    import json
+    import subprocess
+    import tarfile
 
+    sittings = sorted(npsc_dir.glob("*.json")) if npsc_dir.is_dir() else []
+    if not sittings:
+        return []
+    wav_dir = npsc_dir / "wav"
+    wav_dir.mkdir(exist_ok=True)
     rows = []
-    for pf in parquets:
-        table = pq.read_table(pf)
-        for idx, r in enumerate(table.to_pylist()):
-            text = norm_text(
-                str(
-                    r.get("normsentence_text")
-                    or r.get("sentence_text")
-                    or r.get("text")
-                    or ""
-                )
-            )
-            if not text:
+    for js in sittings:
+        archive = npsc_dir / f"{js.stem}_16K_mp3.tar.gz"
+        if not archive.is_file():
+            continue
+        lines = [json.loads(line) for line in js.read_text(encoding="utf-8").splitlines() if line.strip()]
+        wanted = {}
+        for r in lines:
+            if r.get("sentence_language_code") != "nb-NO":
                 continue
-            audio = r.get("audio")
-            audio_bytes = audio.get("bytes") if isinstance(audio, dict) else audio
-            if not audio_bytes:
-                continue
-            dur = float(r.get("duration") or 0.0)
-            if dur <= 0.0:
-                # Estimate ~5s if duration column is absent
-                dur = 5.0
-            spk = str(r.get("speaker_id") or r.get("speaker") or r.get("meeting_id") or "npsc")
-            uid = str(r.get("sentence_id") or f"{pf.stem}_{idx}")
-            rows.append({
-                "id": uid,
-                "speaker": f"npsc_{spk}",
-                "text": text,
-                "duration": dur,
-                "audio_bytes": audio_bytes,
-            })
+            text = norm_text(str(r.get("normsentence_text") or r.get("sentence_text") or ""))
+            if text:
+                wanted[pathlib.PurePosixPath(r["path"]).name] = (r, text)
+        with tarfile.open(archive) as tar:
+            for member in tar:
+                stem = pathlib.PurePosixPath(member.name).stem
+                if not member.isfile() or stem not in wanted:
+                    continue
+                r, text = wanted[stem]
+                wav = wav_dir / f"{stem}.wav"
+                if not wav.is_file():
+                    data = tar.extractfile(member).read()
+                    subprocess.run(
+                        ["ffmpeg", "-loglevel", "error", "-y", "-i", "pipe:0",
+                         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav)],
+                        input=data, check=True,
+                    )
+                rows.append({
+                    "id": str(r["sentence_id"]),
+                    "speaker": f"npsc_{r['meeting_date']}_{r['speaker_id']}",
+                    "text": text,
+                    "duration": (r["end_time"] - r["start_time"]) / 1000.0,
+                    "wav_path": wav,
+                })
     rng = random.Random(seed)
     indices = list(range(len(rows)))
     rng.shuffle(indices)
@@ -861,7 +870,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if not args.slice:
         if not npsc_items:
-            sys.exit(f"missing NPSC parquet files in {npsc_dir}; see tools/accuracy/README.md")
+            sys.exit(f"missing NPSC <date>.json + <date>_16K_mp3.tar.gz files in {npsc_dir}; see tools/accuracy/README.md")
         if not fleurs_items:
             sys.exit(f"missing FLEURS nb_no test.tsv in {fleurs_dir}; see tools/accuracy/README.md")
         if not musan_files:
