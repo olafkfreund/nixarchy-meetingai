@@ -1,0 +1,478 @@
+---
+status: draft
+issue: 60
+spec: spec/2026-11-04-60-grounded-answers-transcript-b.md
+coders:
+  1: coder   # schema, migration and repo functions: ordinary Rust with clear tests
+  2: codex   # transcript.edit and stale marking: small, touches live state under one lock
+  3: codex   # in-place chunk re-summary, read_at and no re-title: subtle, must not touch items
+  4: coder   # bookmarks, saved sources, notes chunks, agent allowlists: straightforward daemon work
+  5: codex   # ask about a line: privacy rule and citation labels, small and exact
+  6: coder   # shell UI across Transcript, Composer, Library and Client: needs care, not bulk
+  7: agy     # fake daemon and smoke checks: large, mechanical, self-contained
+reviewers:
+  - codex    # read-only `codex review --base origin/main` on the integrated branch
+  - agy      # read-only `agy --mode plan` review of the diff against this plan
+---
+
+# Plan: Line actions and the post-meeting view (phase B)
+
+This plan implements the approved spec for #60 phase B: intent outcomes 6
+(correct, bookmark or ask about a line) and 7 (one meeting view linked to
+moments). Work happens on `feat/60-line-actions-meeting-view`.
+
+## Decisions carried over from the approved spec
+
+**Lines and corrections**
+- `meeting_lines` gains `heard TEXT` and `edited_at TEXT` (milliseconds).
+  - `text` holds the correction, so readers do not change.
+  - `heard = COALESCE(heard, text)` on the first edit only.
+  - Reverting to the heard text clears `heard` but keeps `edited_at`.
+- `transcript.edit {id, text}` trims the text and refuses:
+  - empty text;
+  - more than 32 000 characters;
+  - unknown ids, with "That line no longer exists."
+- Under the same lock it patches the `g.transcript` entry and, when the line
+  belongs to the restored meeting, rebuilds the `restored-meeting:<id>`
+  source. It emits `transcript.edited {id, text, edited, heard}`.
+- Edits are allowed during a call. Nothing regenerates automatically.
+
+**Out of date and Regenerate**
+- `meeting_note_chunks.read_at` and `meeting_recaps.read_at` record, in
+  milliseconds, when the inputs were read, before any model call.
+- `meetings::changed_at` is the later of the speaker renames' `updated_at`
+  and the lines' `edited_at`. It replaces `renamed_at`.
+- `stale = changed_at >= read_at`. A NULL `read_at` falls back to
+  `created_at` / `updated_at`.
+- The caption reads "Names or lines changed after these notes were written".
+  Archived answers are marked `changedAfter` (renamed from `renamedAfter`)
+  on an edit as on a rename.
+- `notes.regenerate` first re-summarises **in place** each chunk that covers
+  a line edited after that chunk's `read_at`.
+  - A chunk covers the lines after the previous chunk's `last_line`, up to
+    its own.
+  - Only the body changes. Team chunks use the team prompt, and the items it
+    extracts are discarded; items are never touched.
+  - Body and `read_at` are written only on success. A failure keeps the old
+    chunk and reports the error.
+- After that the recap path runs unchanged.
+- Regenerate never re-titles the meeting. Regenerating a meeting that is
+  still recording stays refused.
+
+**Bookmarks**
+- New table `line_bookmarks(line_id PK → meeting_lines(id) ON DELETE
+  CASCADE, meeting_id → meetings(id) ON DELETE CASCADE, created_at)`. It is
+  keyed by the line UUID and has no label.
+- `bookmark.set {line, on}` is user-only.
+- `bookmarks.list {meeting}` returns `[{line, who, speaker, speaker_key,
+  text, t0}]` in time order, with names resolved.
+- Rows gain `bookmarked: bool`.
+
+**Ask about a line**
+- `chat.send` gains `line: Option<String>`. Allowed lines are those of the
+  open session's meeting (live, finishing or restored) or of a past meeting
+  with **no candidate**. Any other line is refused with "Open that interview
+  to ask about its lines."
+- The quoted line always gets cite label `[1]`, even when it is older than
+  the last 20 live lines or from a past meeting. It is never listed twice.
+- The prompt adds "The user is asking about line [1]." above the question.
+- From MCP, `chat.send` with `line` is refused.
+
+**Meeting view**
+The Library notes pane becomes the meeting view:
+- a header with the stale caption and **Regenerate**;
+- the recap;
+- a timeline: chunks as `m:ss–m:ss` plus body, each linked to the first line
+  at or after `t0`;
+  - a short meeting with no chunks gets one whole-meeting entry linked to its
+    first line;
+- items, with `line` = the UUID for `source_line`;
+- bookmarks;
+- "Open transcript".
+
+Every link restores the meeting, then jumps to the line, through the
+`openHit` / `pendingJump` path.
+
+**Saved sources.** `messages.sources TEXT` holds JSON
+`{sources, cite_max, cite_notes}`.
+- It is written with the assistant message.
+- `restore_chat` replays it in `history`, and the shell renders chips.
+
+**Agents**
+- `bookmarks.list` joins the `--agent` and MCP allowlists and the local-only
+  guard, and MCP gets a `meeting_bookmarks` tool.
+- `transcript.edit` and `bookmark.set` stay off both allowlists.
+
+**UI**
+- Each transcript row gets a "⋯" toggle (the `Library.qml` `menuFor`
+  pattern) with Correct, Bookmark and Ask.
+  - Correct is hidden on rows shown shortened.
+  - The toggle is hidden on answer cards, partial rows and rows without an
+    id.
+- An edited row shows a mark, with `heard` in its tooltip. A bookmarked row
+  shows a star.
+- Ask puts a quote chip in the composer, with an × to drop it. An empty
+  input sends "What does this mean, and what should I say?".
+
+## How it runs
+
+- Each step ends green on the **step check**:
+
+  ```bash
+  cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check
+  ```
+
+  Steps 6 and 7 add `bash shell/tests/ci.sh`.
+- Each step is one commit, `<type>(<area>): … (#60, plan step N)`. A
+  deviation is recorded under **Deviations** in the same commit.
+- Each new test fails before its change. The implementer says so in their
+  report.
+- Order:
+  - 1 comes first.
+  - 2, 3 and 4 follow, in that order; they share `session.rs`.
+  - 5 follows 2.
+  - 6 starts after 5.
+  - 7 runs in parallel with 6, against the protocol defined in steps 2–5.
+- Claude runs step 8, and commits and reviews every step.
+
+**Repo traps**
+- `session.rs` is about 8 700 lines; anchors are approximate (`~`).
+- `Inner` is a `parking_lot` mutex. Never hold it across `.await`.
+- `self.notes` is the async lock that serialises notes work. Regenerate
+  holds it, as `finish_meeting_artifacts` does today.
+- Migrations follow the `pragma_table_info` guard pattern (`src/db/mod.rs`
+  ~131–140). New tables also go in `schema.sql`.
+- Timestamps that are compared use `strftime('%Y-%m-%d %H:%M:%f','now')`.
+- The shell's `addRow` takes a trailing options object (`Client.qml` ~306).
+  Add fields there, not positional arguments.
+
+## Steps
+
+### 1. Schema and repositories (coder)
+
+1. `src/db/schema/schema.sql`:
+   - add `heard TEXT, edited_at TEXT` to `meeting_lines` (~83);
+   - add `read_at TEXT` to `meeting_note_chunks` (~227) and
+     `meeting_recaps` (~118);
+   - add `sources TEXT` to `messages` (~35);
+   - add the `line_bookmarks` table.
+2. `src/db/mod.rs` (~131): one guarded `ALTER TABLE … ADD COLUMN` per new
+   column, and `CREATE TABLE IF NOT EXISTS line_bookmarks`. Add a test like
+   `speaker_updated_at_column_is_added_to_an_old_database` (~196): an old
+   database gains every column and the table, and a fresh one opens.
+3. `src/db/repos/meetings.rs`:
+   - `edit_line(c, id, text) -> Result<Option<EditedLine>>`, where
+     `EditedLine` is `meeting_id, text, heard: Option<String>`. It implements
+     the COALESCE and revert rules above. `None` means an unknown id.
+   - `changed_at(c, meeting)` replaces `renamed_at` (~399). Update its
+     callers.
+   - `LineRecord` gains `heard: Option<String>`, and `lines`,
+     `recent_lines` and `lines_after` select it.
+   - `add_chunk` (~292) takes `read_at`.
+   - `NoteChunk` gains `id: i64` and `read_at: Option<String>`.
+   - `update_chunk_body(c, chunk_id, body, read_at)`.
+   - `begin_recap` (~31) sets `read_at` to the millisecond now.
+     `Recap` gains `read_at`.
+   - `set_bookmark(c, line, on) -> Result<bool>`. It looks up the meeting
+     from the line; `false` means an unknown line.
+   - `bookmarks(c, meeting) -> Vec<LineRecord>`, in time order.
+   - `bookmarked_ids(c, meeting) -> HashSet<String>`.
+4. `src/db/repos/items.rs` `COLUMNS` (~65): add
+   `(SELECT id FROM meeting_lines WHERE rowid = source_line) AS line`, and
+   `ItemRecord.line: Option<String>`.
+5. `src/db/repos/conversations.rs` (~80):
+   - the message insert takes `sources: Option<&str>`;
+   - the message read returns it;
+   - update the callers with `None` except `finish_turn`, which step 4
+     handles.
+
+Check: the step check. Repo tests cover:
+- the edit rules (second edit, revert, unknown id);
+- `changed_at` taking the max of both sources;
+- bookmark cascade on line, meeting and candidate delete
+  (`candidates::delete_all`);
+- `items.line`;
+- the migration.
+
+Traps: `meeting_lines.id` is the UUID; `rowid` is only the cursor. Keep
+`LineRecord`'s existing fields and order.
+
+### 2. Correct a line in the daemon (codex)
+
+1. `src/daemon/protocol.rs`: add `TranscriptEdit { id, text }`.
+2. `session.rs`:
+   - Factor the restored-source text in `session_restore` (~3407–3428) into
+     `fn restored_source(c, id, names) -> Attachment`.
+   - Add `fn transcript_edit` with the rules above.
+     - It calls `meetings::edit_line`.
+     - It patches `g.transcript` where `entry.id == Some(id)`.
+     - If `g.resume_meeting` is the line's meeting, it replaces that source
+       in `g.sources` (same key).
+     - It emits `transcript.edited`.
+   - Dispatch `"transcript.edit"`. Keep it off both agent allowlists.
+3. `transcript_get` (~4498) and the restore replay (~3383): rows gain
+   `heard` (when set) and `bookmarked` (from `bookmarked_ids`).
+   `push_transcript` (~2167) emits `bookmarked: false`.
+4. `notes_get` (~4436): use `changed_at`, plus `read_at` with the fallback.
+   `stale` keeps `>=`.
+
+Check: the step check. Daemon tests:
+- an edit reaches `g.transcript`, the restored source, `transcript.get` and
+  the next prompt's `cite_window`;
+- empty, over-limit and unknown ids are refused;
+- MCP and `--agent` are refused;
+- the existing `notes_get_stale_tracks_speaker_renames_for_recaps_and_chunks`
+  (~8528) still passes, and gains an edit case.
+
+Traps: patch state and the database under one `inner` lock. Do not emit
+while holding a borrow of `g.transcript`.
+
+### 3. Regenerate reaches the correction (codex)
+
+1. `src/ai/recap.rs` `chunk_pending` (~415):
+   - read the millisecond now in the same `db` closure that reads
+     `lines_after`, before the model call;
+   - pass it to `add_chunk` as `read_at`.
+2. Add `pub async fn refresh_chunks(path, id, config, language) ->
+   Result<usize, String>`:
+   - For each chunk where some covered line has `edited_at > read_at`
+     (NULL `read_at` → `created_at`), re-read that chunk's lines.
+   - Re-summarise them with `summarise_slice`, or for team meetings
+     `summarise_team` + `parse_team_chunk`, keeping only the body.
+   - Apply the interview guard exactly as `chunk_pending` does
+     (`WITHHELD_CHUNK`).
+   - Call `update_chunk_body` with the read time.
+   - On a model error, stop and return it; chunks already updated stay
+     updated.
+   - It never writes `meeting_items`.
+3. `session.rs`:
+   - `finish_meeting_artifacts` (~2881) takes a `retitle: bool`. Meeting end
+     passes `true`; `notes.regenerate` (~5042) passes `false`.
+   - When `retitle` is false, skip the `request_title` block.
+   - `notes.regenerate` calls `refresh_chunks` before `recap::generate`,
+     inside the same `self.notes` lock and with the same `local_for` chain.
+   - A refresh error is reported with `self.error(...)`, and the recap is
+     not regenerated.
+
+Check: the step check. Tests in `recap.rs` with a fake provider (follow the
+existing recap tests):
+- only the chunks covering an edit are re-summarised;
+- the item count and an item's edited text are unchanged;
+- a failing provider leaves the chunk body and `read_at` unchanged;
+- an edit made after `read_at` was taken but before the chunk is written
+  leaves the notes stale (the race test);
+- a regeneration in the same second as a rename ends not-stale;
+- Regenerate keeps a custom title.
+
+Traps: `chunk_pending` and the regenerate path both run under `self.notes`.
+Do not take it twice.
+
+### 4. Bookmarks, saved sources, timeline and agents (coder)
+
+1. `protocol.rs`:
+   - add `BookmarkSet { line, on }` and `MeetingArg` for `bookmarks.list`
+     (reuse it if it fits);
+   - `ChatSend` gains `line: Option<String>`. Step 5 implements it; here
+     only parse it.
+2. `session.rs`:
+   - `bookmark.set`:
+     - calls `meetings::set_bookmark`; an unknown line gets the step 2
+       error;
+     - emits `transcript.bookmarked {id, on}`.
+   - `bookmarks.list`: rows shaped like `transcript.get`, with names
+     resolved.
+   - `notes_get` adds `chunks: [{t0, t1, body, line}]`.
+     - `line` comes from the same query `cite_window` uses (~1260).
+     - With no chunks and some lines, it returns one entry spanning the
+       meeting, linked to its first line, with an empty body.
+3. Saved sources:
+   - `finish_turn` (~1793), on `Ok` with non-empty `answer_sources`: store
+     `{sources, cite_max, cite_notes}` as JSON with the assistant message
+     (`conversations` insert, step 1.5).
+   - `restore_chat` (~3486): add those fields to each `history` row when
+     present.
+4. Agents:
+   - add `bookmarks.list` to the `--agent` (~4671) and MCP (~4690)
+     allowlists, and to the local-only `matches!` (~4730), which resolves
+     `meeting`;
+   - in the MCP block, refuse `chat.send` when `line` is set, next to the
+     `attachments` check.
+5. `src/mcp/mod.rs`: add a `meeting_bookmarks` tool (`MeetingArgs`),
+   following `meeting_items`.
+
+Check: the step check. Tests:
+- bookmark set and unset, and the event;
+- `bookmarked` in `transcript.get`;
+- `bookmarks.list` order and names;
+- `notes.get` chunks carry `line`, and a short meeting gives one entry;
+- sources saved and restored, and absent for old messages;
+- MCP `bookmarks.list` is refused for a local-only interview;
+- MCP `chat.send` with `line` is refused;
+- `bookmark.set` is refused from both agent paths.
+
+Traps: `history` rows go only to the shell, never to agents. Keep JSON keys
+snake_case, as `now.get` uses (`cite_max`, `cite_notes`).
+
+### 5. Ask about a line (codex)
+
+`session.rs` `begin_send` (~1581) and `cite_window` (~1237):
+
+1. If `line` is set:
+   - resolve its meeting (`SELECT meeting_id FROM meeting_lines WHERE
+     id=?1`); an unknown id gets the step 2 error;
+   - refuse with "Open that interview to ask about its lines." unless the
+     meeting is the open session's (`meeting_id`, `finishing_meeting` or
+     `resume_meeting`) or `candidates::for_meeting` is `None`;
+   - do this before any state change of the turn.
+2. `cite_window` takes `quoted: Option<LineRecord>`.
+   - The quoted line is labelled `[1]` and the live lines follow from `[2]`.
+   - A live entry with the same id is skipped.
+   - `cite_max` counts it. Notes labels `[Nk]` are unchanged.
+3. The prompt adds "The user is asking about line [1]." just above the user
+   question. The chain, the guard and the conversation are the open
+   session's, unchanged.
+
+Check: the step check. Tests:
+- an old line and a past-meeting line (no candidate) are labelled `[1]` and
+  are citable;
+- no duplicate when the line is in the last 20;
+- another interview's line is refused, and nothing changes (`now.get`
+  before and after);
+- the open interview's own line is accepted, and the turn uses its guard and
+  chain;
+- an unknown id is refused.
+
+Traps: `begin_send` calls `cite_window` exactly once (phase A step 4). Keep
+it that way, and keep the label → source map in `g.cite`.
+
+### 6. Shell UI (coder)
+
+1. **`Client.qml`.**
+   - Handle `transcript.edited`: set `body` and `heard` on the row with that
+     `lineId`, and mark answers `changedAfter`, as `speakers.renamed` does
+     (~385).
+   - Handle `transcript.bookmarked`.
+   - Rename `renamedAfter` → `changedAfter` everywhere (Client,
+     Transcript).
+   - `addRow` options gain `heard`, `bookmarked`, `shortened`.
+   - `case "history"` (~320) passes `sources`, `citeMax` and `citeNotes`.
+   - `ask()` (~193) takes an optional `line` and sends it.
+   - Add `quote` state (`{line, label}`) used by the composer.
+2. **`Transcript.qml`** (delegate ~94).
+   - Add a "⋯" `IconButton` on rows with `lineId !== ""`, not partial and
+     not answers. It reveals inline Correct / Bookmark / Ask `IconButton`s.
+   - Correct reuses the rename `Input` (~150–174), pre-filled with `body`,
+     and sends `transcript.edit`. It is hidden when `shortened`.
+   - Bookmark toggles a ★ shown after the timestamp.
+   - Ask sets `client.quote`.
+   - An "edited" mark shows `heard` in its tooltip.
+   - Every new control needs `Accessible.name` and keyboard activation, like
+     the existing rename.
+3. **`Composer.qml`.** When `client.quote` is set:
+   - show the chip (speaker, m:ss, 80 characters) with an ×;
+   - Enter sends `ask(text || "What does this mean, and what should I
+     say?", …, line)` and clears the quote.
+4. **`Library.qml`** notes pane (~563–627) becomes the meeting view, with
+   these sections:
+   - the header, with the caption "Names or lines changed after these notes
+     were written" and a **Regenerate** button (`notes.regenerate`, then
+     reload on `notes.updated`);
+   - the recap;
+   - the timeline from `notes.get.chunks`;
+   - items from `items.list {meeting}`;
+   - bookmarks from `bookmarks.list {meeting}`;
+   - "Open transcript".
+
+   Each m:ss link calls `openHit({meeting, id: line})` (~175). Items without
+   `line` show plain time.
+5. **`ItemsPanel.qml`** is unchanged. Live items stay as they are.
+
+Check: the step check plus `bash shell/tests/ci.sh`
+(`qmllint`, the harnesses).
+
+Traps:
+- the `MouseArea` `clicked()` handler needs an argument in harnesses
+  (`clicked(null)`);
+- the session list loads only on a tab change;
+- use `Theme` colours, with no literals.
+
+### 7. Fake daemon and smoke checks (agy, in parallel with step 6)
+
+1. **`shell/tests/fake-daemon.py`.**
+   - Add a `--lines` scenario (follow `--grounded`, ~442 and ~658) that
+     answers:
+     - `transcript.edit`, emitting `transcript.edited`;
+     - `bookmark.set`, emitting `transcript.bookmarked`;
+     - `bookmarks.list`;
+     - `notes.get` with `chunks` and `stale`;
+     - `items.list` with `line`;
+     - `notes.regenerate`, emitting `notes.updated`, after which
+       `stale: false`;
+     - `chat.send` with `line`, recording it;
+     - `history` rows with `sources`.
+   - Rows carry `bookmarked`, plus `heard` when edited.
+2. **`smoke.sh`** gains checks, using the existing helpers, for:
+   - correcting a line shows the new text and the edited mark;
+   - a bookmark star survives a reload;
+   - Ask sends `line`, and the empty-input default text;
+   - each meeting-view link restores the right meeting and flashes the line;
+   - Regenerate shows only when stale, and clears it;
+   - a restored answer shows chips.
+
+Check: `bash shell/tests/ci.sh` and
+`nix build .#checks.x86_64-linux.shell -L`.
+
+Traps: phase A's step 7 found that harness timing needs about 12 s for the
+grounded run. Give `--lines` the same.
+
+### 8. Integrate, review, ship (Claude)
+
+1. Merge steps 6 and 7. Run the step check, `bash shell/tests/ci.sh`,
+   `nix flake check -L --no-build` and
+   `nix build .#checks.x86_64-linux.shell -L`.
+2. **Reviews, all read-only, in parallel:**
+   - a fresh Opus agent, given only this plan path and
+     `git diff origin/main`;
+   - `codex review --base origin/main -c sandbox_mode="read-only"`;
+   - `agy --mode plan`, given this plan and the diff of `src/` and `shell/`.
+
+   Claude verifies each finding, fixes the confirmed ones, records the
+   refuted ones in the PR, and re-runs the checks.
+3. **Manual run** against the real daemon:
+   - correct a misheard name mid-call; the next answer uses it, the notes
+     show as out of date, and Regenerate fixes them and keeps the title;
+   - bookmark two moments, then open last week's meeting from the Library;
+     its bookmarks, items and timeline land on their lines;
+   - Ask about a line from 20 minutes earlier; the answer cites `[1]` and
+     the chip jumps;
+   - restore that meeting; the answer keeps its chips.
+4. **PR.** Link the intent, the spec and this plan. List which steps Codex,
+   agy and coder did, and any fallbacks. Merge with a merge commit after CI.
+5. **Deploy** to p620:
+   - announce on the bus;
+   - bump the lock in a nixos worktree, with a PR;
+   - switch from committed main;
+   - **not while recording.**
+
+   Afterwards the daemon is active and the journal is clean since the
+   restart.
+
+## Tests
+
+- The step check is green after every step and after integration.
+- `bash shell/tests/ci.sh` and `nix flake check` are green.
+- Every new test failed before its change. Implementers report this, and
+  Claude spot-checks it.
+
+## Rollback
+
+- **Before merge:** drop the branch.
+- **After merge:** `git revert -m 1 <merge>`, revert the nixos lock bump,
+  and switch from committed main.
+- **The database is safe.** Every column is nullable and the table is new;
+  older builds ignore both. Corrected text stays corrected after a rollback,
+  because `text` holds it. Bookmarks and saved sources are simply unused.
+
+## Deviations
+
+(Recorded here during implementation, in the same commit as the code.)
