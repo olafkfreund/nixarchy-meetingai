@@ -168,6 +168,12 @@ pub struct TranscriptGet {
     pub around: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TranscriptEdit {
+    pub id: String,
+    pub text: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TranscriptSearch {

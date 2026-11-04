@@ -523,3 +523,11 @@ grounded run. Give `--lines` the same.
     open. The migration test drops the table and checks it comes back.
   - `cargo` must run inside `nix develop -c …`; `alsa-sys` fails outside
     it.
+- Step 2 (Codex): no code deviation. Codex's sandbox could not run the
+  full suite or `nix develop`, so Claude ran the step check.
+  - Build trap: `sherpa-onnx-sys`'s build script copies libraries into
+    `target/debug` as mode 0555, and fails with EACCES when it re-runs.
+  - It re-runs when the environment changes, for example cargo outside
+    `nix develop`.
+  - Fix: before a build, run
+    `find target/debug -maxdepth 2 -name 'lib*.so*' ! -perm -u+w -delete`.
