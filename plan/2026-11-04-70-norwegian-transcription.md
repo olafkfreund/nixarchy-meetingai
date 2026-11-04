@@ -416,3 +416,15 @@ Check: the step check plus `bash shell/tests/ci.sh`.
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+
+- Step 1 (Codex; build and decode by Claude):
+  - **sherpa-onnx 2.0.1 supports Whisper in-process**, via
+    `OfflineRecognizerConfig.model_config.whisper: OfflineWhisperModelConfig`
+    (`encoder`, `decoder`, `language`, `task`) plus `model_config.tokens` and
+    `num_threads`.
+  - Claude decoded FLEURS `nb_no` test clip `10009208613112238545` with the
+    official turbo int8 export. The result is correct Norwegian, with minor
+    spelling slips ("løveflok", "tilfelles"). The run took 12.2 s including
+    the model load, at 2.0 GB peak RSS on p620.
+  - FLEURS WAVs are not 16-bit PCM. The measurement converts with `ffmpeg
+    -c:a pcm_s16le`.
