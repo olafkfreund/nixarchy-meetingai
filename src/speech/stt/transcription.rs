@@ -2,9 +2,15 @@
 
 use crate::ai::providers::{ProviderConfig, SttProvider, SttWire};
 use crate::audio::{SAMPLE_RATE, encode_wav};
+use crate::speech::{
+    speakers::{SpeakerLabeller, embed_windows, label_line},
+    voice_check::Embedder,
+};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+use parking_lot::Mutex;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, error::SendTimeoutError};
 use tokio::sync::watch;
@@ -382,6 +388,22 @@ fn deepgram_batch_url(
 pub struct SttHints {
     /// Names and terms (profile and meeting context) that the engine should spell right (OpenAI-compatible prompt).
     pub glossary: String,
+    pub speakers: Option<SpeakerHints>,
+}
+
+#[derive(Clone)]
+pub struct SpeakerHints {
+    pub labeller: Arc<Mutex<SpeakerLabeller>>,
+    pub embedder: Arc<dyn Embedder + Send + Sync>,
+}
+
+impl std::fmt::Debug for SpeakerHints {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpeakerHints")
+            .field("labeller", &"…")
+            .field("embedder", &"…")
+            .finish()
+    }
 }
 /// Channel, start, end (seconds) and samples of one utterance.
 pub type BatchChunk = (u8, f64, f64, Vec<f32>);
@@ -1144,10 +1166,15 @@ async fn socket_task(
     }
 }
 
+type ChunkResult = (
+    u8,
+    f64,
+    f64,
+    Result<String, SttError>,
+    Option<Vec<Vec<f32>>>,
+);
 type Pending = futures_util::stream::FuturesOrdered<
-    std::pin::Pin<
-        Box<dyn std::future::Future<Output = (u8, f64, f64, Result<String, SttError>)> + Send>,
-    >,
+    std::pin::Pin<Box<dyn std::future::Future<Output = ChunkResult> + Send>>,
 >;
 /// Batch requests allowed to be outstanding at once.
 const MAX_IN_FLIGHT: usize = 4;
@@ -1193,7 +1220,7 @@ async fn queue_chunks(
     system_requests: &mut std::collections::VecDeque<f64>,
     config: &ProviderConfig,
     filter: &LineFilter,
-    glossary: &str,
+    hints: &SttHints,
     tx: &mpsc::Sender<LiveEvent>,
 ) {
     while pending.len() < MAX_IN_FLIGHT
@@ -1203,15 +1230,32 @@ async fn queue_chunks(
             system_requests.push_back(start);
         }
         let config = config.clone();
-        let prompt = filter.prompt(channel, glossary);
+        let prompt = filter.prompt(channel, &hints.glossary);
+        let embedder = (channel == 1)
+            .then(|| hints.speakers.as_ref().map(|h| h.embedder.clone()))
+            .flatten();
         pending.push_back(Box::pin(async move {
-            let first = transcribe_chunk(&config, &samples, &prompt).await;
-            let result = match first {
-                Err(SttError::NotConfigured | SttError::MissingKey) => first,
-                Err(_) => transcribe_chunk(&config, &samples, &prompt).await,
-                Ok(_) => first,
+            let transcribe = async {
+                let first = transcribe_chunk(&config, &samples, &prompt).await;
+                match first {
+                    Err(SttError::NotConfigured | SttError::MissingKey) => first,
+                    Err(_) => transcribe_chunk(&config, &samples, &prompt).await,
+                    Ok(_) => first,
+                }
             };
-            (channel, start, end, result)
+            if let Some(embedder) = embedder {
+                let embed_samples = samples.clone();
+                let (result, vectors) = tokio::join!(
+                    transcribe,
+                    tokio::task::spawn_blocking(move || embed_windows(
+                        embedder.as_ref(),
+                        &embed_samples
+                    ))
+                );
+                (channel, start, end, result, vectors.ok())
+            } else {
+                (channel, start, end, transcribe.await, None)
+            }
         }));
     }
     let mut queued: f64 = waiting.iter().map(|(_, s, e, _)| e - s).sum();
@@ -1230,12 +1274,13 @@ async fn emit_lines(tx: &mpsc::Sender<LiveEvent>, lines: Vec<TranscriptLine>) {
 }
 
 async fn handle_chunk_result(
-    (channel, start, end, result): (u8, f64, f64, Result<String, SttError>),
+    (channel, start, end, result, vectors): ChunkResult,
     system_requests: &mut std::collections::VecDeque<f64>,
     failing_since: &mut Option<(f64, Instant)>,
     filter: &mut LineFilter,
     tx: &mpsc::Sender<LiveEvent>,
     error: &mut Option<String>,
+    speakers: Option<&SpeakerHints>,
 ) -> bool {
     if channel == 1 {
         system_requests.pop_front();
@@ -1246,7 +1291,13 @@ async fn handle_chunk_result(
             if !text.is_empty() {
                 let line = TranscriptLine {
                     channel,
-                    speaker: None,
+                    speaker: if channel == 1 {
+                        speakers
+                            .zip(vectors.as_ref())
+                            .and_then(|(h, v)| label_line(&h.labeller, v))
+                    } else {
+                        None
+                    },
                     text,
                     is_final: true,
                     speech_final: true,
@@ -1298,10 +1349,10 @@ async fn batch_task(
             biased;
             result = pending.next(), if !pending.is_empty() => {
                 if let Some(done) = result {
-                    if !handle_chunk_result(done, &mut system_requests, &mut failing_since, &mut filter, &tx, &mut error).await {
+                    if !handle_chunk_result(done, &mut system_requests, &mut failing_since, &mut filter, &tx, &mut error, hints.speakers.as_ref()).await {
                         break;
                     }
-                    queue_chunks(&mut pending, &mut waiting, &mut system_requests, &config, &filter, &hints.glossary, &tx).await;
+                    queue_chunks(&mut pending, &mut waiting, &mut system_requests, &config, &filter, &hints, &tx).await;
                     let earliest = earliest_system(&system_requests, &waiting, &chunks);
                     emit_lines(&tx, filter.tick(chunks.now(), earliest, open_only_system_end(&system_requests, &waiting, &chunks))).await;
                 }
@@ -1311,7 +1362,7 @@ async fn batch_task(
                 let pcm: Vec<i16> = block.as_chunks::<2>().0.iter().map(|pair| i16::from_le_bytes(*pair)).collect();
                 waiting.extend(chunks.push(&pcm));
                 for channel in (0u8..).zip(chunks.take_opened()).filter_map(|(c, opened)| opened.then_some(c)) { let _ = tx.send(LiveEvent::SpeechStarted { channel }).await; }
-                queue_chunks(&mut pending, &mut waiting, &mut system_requests, &config, &filter, &hints.glossary, &tx).await;
+                queue_chunks(&mut pending, &mut waiting, &mut system_requests, &config, &filter, &hints, &tx).await;
                 let earliest = earliest_system(&system_requests, &waiting, &chunks);
                 emit_lines(&tx, filter.tick(chunks.now(), earliest, open_only_system_end(&system_requests, &waiting, &chunks))).await;
             } }
@@ -1325,7 +1376,7 @@ async fn batch_task(
             &mut system_requests,
             &config,
             &filter,
-            &hints.glossary,
+            &hints,
             &tx,
         )
         .await;
@@ -1337,6 +1388,7 @@ async fn batch_task(
                 &mut filter,
                 &tx,
                 &mut error,
+                hints.speakers.as_ref(),
             )
             .await
             {
@@ -1348,7 +1400,7 @@ async fn batch_task(
                 &mut system_requests,
                 &config,
                 &filter,
-                &hints.glossary,
+                &hints,
                 &tx,
             )
             .await;
@@ -1373,6 +1425,232 @@ async fn batch_task(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct FakeEmbedder {
+        calls: Arc<AtomicUsize>,
+        delay: Duration,
+    }
+
+    impl crate::speech::voice_check::Embedder for FakeEmbedder {
+        fn embed(&self, _: &[f32]) -> Option<Vec<f32>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            Some(vec![1.0, 0.0])
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_speaker_hints_label_only_system_and_embed_once_on_retry() {
+        let _one_at_a_time = DECODER_TESTS.lock().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let seen = attempts.clone();
+        crate::speech::stt::parakeet::set_decoder(Box::new(move |_, samples| {
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("retry");
+            }
+            if samples[0] > 0.3 {
+                "remote statement".into()
+            } else {
+                "local statement".into()
+            }
+        }));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hints = SttHints {
+            speakers: Some(SpeakerHints {
+                labeller: Arc::new(parking_lot::Mutex::new(
+                    crate::speech::speakers::SpeakerLabeller::new(7),
+                )),
+                embedder: Arc::new(FakeEmbedder {
+                    calls: calls.clone(),
+                    delay: Duration::ZERO,
+                }),
+            }),
+            ..Default::default()
+        };
+        let mut live =
+            LiveTranscriber::connect_batch(ProviderConfig::new("parakeet-local", "", ""), hints);
+        live.push(&(0..32_000).flat_map(|_| [0.2, 0.4]).collect::<Vec<_>>())
+            .await
+            .unwrap();
+        live.finish();
+        let mut lines = Vec::new();
+        while let Some(event) = live.next_event().await {
+            if let LiveEvent::Transcript(line) = event {
+                lines.push(line);
+            }
+        }
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines.iter().find(|l| l.channel == 0).unwrap().speaker, None);
+        assert_eq!(
+            lines.iter().find(|l| l.channel == 1).unwrap().speaker,
+            Some(7)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn empty_and_failed_system_results_do_not_advance_speaker() {
+        let hints = SpeakerHints {
+            labeller: Arc::new(Mutex::new(SpeakerLabeller::new(5))),
+            embedder: Arc::new(FakeEmbedder {
+                calls: Arc::new(AtomicUsize::new(0)),
+                delay: Duration::ZERO,
+            }),
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut requests = std::collections::VecDeque::from([0.0, 2.0, 4.0]);
+        let mut failing = None;
+        let mut filter = LineFilter::default();
+        let mut error = None;
+        for result in [
+            Ok(String::new()),
+            Err(SttError::Socket("temporary".into())),
+            Ok("remote statement".into()),
+        ] {
+            let start = 4.0 - requests.len() as f64 * 2.0 + 2.0;
+            let vectors = Some(vec![if start == 4.0 {
+                vec![0.0, 1.0]
+            } else {
+                vec![1.0, 0.0]
+            }]);
+            assert!(
+                handle_chunk_result(
+                    (1, start, start + 2.0, result, vectors.clone()),
+                    &mut requests,
+                    &mut failing,
+                    &mut filter,
+                    &tx,
+                    &mut error,
+                    Some(&hints)
+                )
+                .await
+            );
+        }
+        let lines: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|e| {
+                if let LiveEvent::Transcript(line) = e {
+                    Some(line)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].speaker, Some(5));
+    }
+
+    #[tokio::test]
+    async fn slow_embedding_overlaps_transcription_and_keeps_mic_order() {
+        let _one_at_a_time = DECODER_TESTS.lock().await;
+        crate::speech::stt::parakeet::set_decoder(Box::new(|_, _| {
+            std::thread::sleep(Duration::from_millis(200));
+            "spoken words".into()
+        }));
+        let hints = SpeakerHints {
+            labeller: Arc::new(Mutex::new(SpeakerLabeller::new(0))),
+            embedder: Arc::new(FakeEmbedder {
+                calls: Arc::new(AtomicUsize::new(0)),
+                delay: Duration::from_millis(200),
+            }),
+        };
+        let mut waiting = std::collections::VecDeque::from([
+            (1, 0.0, 2.0, vec![0.2; 32_000]),
+            (0, 2.0, 2.5, vec![0.2; 8_000]),
+        ]);
+        let mut pending = Pending::new();
+        let mut requests = std::collections::VecDeque::new();
+        let (tx, _) = mpsc::channel(8);
+        let config = ProviderConfig::new("parakeet-local", "", "");
+        queue_chunks(
+            &mut pending,
+            &mut waiting,
+            &mut requests,
+            &config,
+            &LineFilter::default(),
+            &SttHints {
+                speakers: Some(hints),
+                ..Default::default()
+            },
+            &tx,
+        )
+        .await;
+        let began = Instant::now();
+        let first = pending.next().await.unwrap();
+        let second = pending.next().await.unwrap();
+        assert_eq!((first.0, second.0), (1, 0));
+        assert!(
+            began.elapsed() < Duration::from_millis(550),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn speaker_labels_preserve_echo_hold_until_system_text_arrives() {
+        let hints = SpeakerHints {
+            labeller: Arc::new(Mutex::new(SpeakerLabeller::new(9))),
+            embedder: Arc::new(FakeEmbedder {
+                calls: Arc::new(AtomicUsize::new(0)),
+                delay: Duration::ZERO,
+            }),
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut requests = std::collections::VecDeque::from([0.0]);
+        let mut failing = None;
+        let mut filter = LineFilter::default();
+        let mut error = None;
+        let mic = TranscriptLine {
+            channel: 0,
+            speaker: None,
+            text: "the remote speaker said this".into(),
+            is_final: true,
+            speech_final: true,
+            start: 0.0,
+            end: 2.0,
+        };
+        assert!(filter.accept(&mic).is_empty());
+        let waiting = std::collections::VecDeque::new();
+        let chunks = BatchChunks::default();
+        assert_eq!(earliest_system(&requests, &waiting, &chunks), Some(0.0));
+        assert_eq!(open_only_system_end(&requests, &waiting, &chunks), None);
+        assert!(
+            filter
+                .tick(
+                    3.5,
+                    earliest_system(&requests, &waiting, &chunks),
+                    open_only_system_end(&requests, &waiting, &chunks)
+                )
+                .is_empty()
+        );
+        assert!(
+            handle_chunk_result(
+                (
+                    1,
+                    0.0,
+                    2.0,
+                    Ok("the remote speaker said this".into()),
+                    Some(vec![vec![1.0, 0.0]])
+                ),
+                &mut requests,
+                &mut failing,
+                &mut filter,
+                &tx,
+                &mut error,
+                Some(&hints)
+            )
+            .await
+        );
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(
+            matches!(&events[0], LiveEvent::Transcript(line) if line.channel == 1 && line.speaker == Some(9))
+        );
+    }
     #[test]
     fn speaker_runs_preserve_final_boundary() {
         let events = event_lines(

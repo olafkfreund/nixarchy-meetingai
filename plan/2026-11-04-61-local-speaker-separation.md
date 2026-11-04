@@ -454,3 +454,5 @@ Check: the step check plus `bash shell/tests/ci.sh`.
 
 - Step 1 (Codex): no deviation. Codex's sandbox could not run
   `nix develop`, so Claude ran the step check (431 lib tests).
+- Step 2 (Codex): no deviation. The daemon passes `speakers: None`, so the
+  plumbing stays dormant. Claude ran the step check (435 lib tests).

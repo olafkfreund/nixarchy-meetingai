@@ -2538,6 +2538,7 @@ impl Daemon {
                 let g = self.inner.lock();
                 SttHints {
                     glossary: glossary(&g.settings.personal_context, &g.settings.meeting_context),
+                    speakers: None,
                 }
             };
             match LiveTranscriber::connect_config_with(config, hints).await {
