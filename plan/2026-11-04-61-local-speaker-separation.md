@@ -474,3 +474,14 @@ Check: the step check plus `bash shell/tests/ci.sh`.
   - Slice check, on 2 LibriSpeech conversations per speaker count and half,
     plus ES2011a (dev, 4 speakers) and EN2002a (held out, 4 speakers): 14
     clean and 14 Opus "call" WAVs, with truth files.
+- Step 4 (coder):
+  - `SpeakerLabeller::with_limits(first, join, new, mixed)` serves the
+    sweep; `new()` keeps the constants.
+  - The fake transcriber's text is unique per line, because `LineFilter`
+    drops repeated text.
+  - Embeddings are computed once per chunk and reused for each sweep point.
+    That is equivalent, because the filter never reads labels.
+  - `--live` takes `MODEL --live AMI.wav OWNER.wav`, and the first 20 s of
+    the owner track enrol the owner.
+  - The first `--live` on the slice: system and mic latency unchanged, owner
+    check results identical, its median +11 ms.

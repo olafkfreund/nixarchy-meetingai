@@ -39,6 +39,8 @@ struct Speaker {
 pub struct SpeakerLabeller {
     speakers: Vec<Speaker>,
     next: i64,
+    /// `JOIN`, `NEW`, `MIXED`; only the sweep in `examples/diarize_eval.rs` changes them.
+    limits: (f32, f32, f32),
 }
 
 impl SpeakerLabeller {
@@ -46,6 +48,14 @@ impl SpeakerLabeller {
         Self {
             speakers: Vec::new(),
             next: first,
+            limits: (JOIN, NEW, MIXED),
+        }
+    }
+
+    pub fn with_limits(first: i64, join: f32, new: f32, mixed: f32) -> Self {
+        Self {
+            limits: (join, new, mixed),
+            ..Self::new(first)
         }
     }
 
@@ -54,6 +64,7 @@ impl SpeakerLabeller {
     }
 
     pub fn decide(&mut self, vectors: &[Vec<f32>]) -> Option<i64> {
+        let (join, new, mixed) = self.limits;
         let mut vector = vectors.first()?.clone();
         if !voice_check::normalise(&mut vector) {
             return None;
@@ -61,7 +72,7 @@ impl SpeakerLabeller {
         if vectors.len() > 1 {
             for (i, a) in vectors.iter().enumerate() {
                 for b in &vectors[i + 1..] {
-                    if voice_check::cosine(a, b)? < MIXED {
+                    if voice_check::cosine(a, b)? < mixed {
                         return None;
                     }
                 }
@@ -97,7 +108,7 @@ impl SpeakerLabeller {
             })
             .max_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((i, score)) = best {
-            if score >= JOIN {
+            if score >= join {
                 let speaker = &mut self.speakers[i];
                 if speaker.vectors.len() == HISTORY {
                     speaker.vectors.pop_front();
@@ -105,7 +116,7 @@ impl SpeakerLabeller {
                 speaker.vectors.push_back(vector);
                 return Some(speaker.number);
             }
-            if score >= NEW {
+            if score >= new {
                 return None;
             }
         }
