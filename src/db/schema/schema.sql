@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS messages (
 , content TEXT NOT NULL
 , timestamp INTEGER NOT NULL
 , attached_files TEXT
+, sources TEXT
 , PRIMARY KEY (id)
 , FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
 );
@@ -89,9 +90,20 @@ CREATE TABLE IF NOT EXISTS meeting_lines (
 , start_time REAL NOT NULL DEFAULT 0
 , end_time REAL NOT NULL DEFAULT 0
 , created_at TEXT NOT NULL DEFAULT (datetime('now'))
+, heard TEXT
+, edited_at TEXT
 , PRIMARY KEY (id)
 , FOREIGN KEY (meeting_id) REFERENCES meetings (id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS line_bookmarks (
+  line_id TEXT PRIMARY KEY
+, meeting_id TEXT NOT NULL
+, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+, FOREIGN KEY (line_id) REFERENCES meeting_lines (id) ON DELETE CASCADE
+, FOREIGN KEY (meeting_id) REFERENCES meetings (id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_line_bookmarks_meeting ON line_bookmarks (meeting_id);
 
 CREATE INDEX IF NOT EXISTS idx_meeting_lines_meeting ON meeting_lines (meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_lines_time ON meeting_lines (meeting_id, start_time);
@@ -121,6 +133,7 @@ CREATE TABLE IF NOT EXISTS meeting_recaps (
 , status TEXT NOT NULL DEFAULT 'pending'
 , error TEXT NOT NULL DEFAULT ''
 , updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+, read_at TEXT
 , PRIMARY KEY (meeting_id)
 , FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
 );
@@ -232,6 +245,7 @@ CREATE TABLE IF NOT EXISTS meeting_note_chunks (
 , body TEXT NOT NULL
 , last_line INTEGER NOT NULL DEFAULT 0
 , created_at TEXT NOT NULL DEFAULT (datetime('now'))
+, read_at TEXT
 , FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_note_chunks_meeting ON meeting_note_chunks (meeting_id);

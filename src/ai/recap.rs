@@ -469,6 +469,7 @@ async fn chunk_pending(
             last_line: ids[n - 1],
             body,
             created_at: String::new(),
+            ..Default::default()
         };
         // `source_line` counts the numbered slice; store the line's rowid.
         let spoken_text = slice
@@ -820,6 +821,8 @@ mod tests {
                 text: "Let's check the schedule".into(),
                 start_time: 0.0,
                 end_time: 2.0,
+                heard: None,
+                edited: false,
             },
             LineRecord {
                 id: "2".into(),
@@ -828,6 +831,8 @@ mod tests {
                 text: "I will take the trash out".into(),
                 start_time: 2.0,
                 end_time: 4.0,
+                heard: None,
+                edited: false,
             },
             LineRecord {
                 id: "3".into(),
@@ -836,6 +841,8 @@ mod tests {
                 text: "Ship on Monday".into(),
                 start_time: 4.0,
                 end_time: 6.0,
+                heard: None,
+                edited: false,
             },
         ];
         let (slice_sys, slice_user) = slice_prompts(&lines, "Auto", false, &BTreeMap::new());
@@ -869,6 +876,8 @@ mod tests {
             text: "x".into(),
             start_time: s,
             end_time: e,
+            heard: None,
+            edited: false,
         };
         // Arrived last but spoken first: the span is 0..400, not 350..360.
         assert!(due(&[at(350.0, 360.0), at(0.0, 5.0), at(390.0, 400.0)]));

@@ -18,6 +18,8 @@ pub struct MessageRecord {
     pub role: String,
     pub content: String,
     pub timestamp: i64,
+    /// JSON `{sources, cite_max, cite_notes}` saved with an answer.
+    pub sources: Option<String>,
 }
 
 pub fn create(c: &Connection, title: &str, now: i64) -> Result<String> {
@@ -89,14 +91,22 @@ pub fn update_message(c: &Connection, id: &str, content: &str) -> Result<()> {
     )?;
     Ok(())
 }
+pub fn set_message_sources(c: &Connection, id: &str, json: &str) -> Result<()> {
+    c.execute(
+        "UPDATE messages SET sources=?2 WHERE id=?1",
+        params![id, json],
+    )?;
+    Ok(())
+}
 pub fn messages(c: &Connection, conversation_id: &str) -> Result<Vec<MessageRecord>> {
-    let mut s=c.prepare("SELECT id,role,content,timestamp FROM messages WHERE conversation_id=?1 ORDER BY timestamp,rowid")?;
+    let mut s=c.prepare("SELECT id,role,content,timestamp,sources FROM messages WHERE conversation_id=?1 ORDER BY timestamp,rowid")?;
     Ok(s.query_map([conversation_id], |r| {
         Ok(MessageRecord {
             id: r.get(0)?,
             role: r.get(1)?,
             content: r.get(2)?,
             timestamp: r.get(3)?,
+            sources: r.get(4)?,
         })
     })?
     .collect::<std::result::Result<_, _>>()?)
@@ -110,8 +120,8 @@ pub fn recent_messages(
     let mut s=c.prepare(
         "SELECT id,role,
           CASE WHEN length(content)>32000 THEN substr(content,1,16000)||?3||substr(content,-(32000-16000-length(?3)))
-               ELSE content END,timestamp
-         FROM (SELECT rowid,id,role,content,timestamp FROM messages
+               ELSE content END,timestamp,sources
+         FROM (SELECT rowid,id,role,content,timestamp,sources FROM messages
                WHERE conversation_id=?1 AND content<>'' ORDER BY timestamp DESC,rowid DESC LIMIT ?2)
          ORDER BY timestamp,rowid")?;
     Ok(
@@ -121,6 +131,7 @@ pub fn recent_messages(
                 role: r.get(1)?,
                 content: r.get(2)?,
                 timestamp: r.get(3)?,
+                sources: r.get(4)?,
             })
         })?
         .collect::<std::result::Result<_, _>>()?,
@@ -186,6 +197,23 @@ mod tests {
         );
         assert_eq!(search(c, "Other", 10).unwrap()[0].preview, "other body");
         assert!(append_message(c, &old, "tool", "x", 304).is_err());
+    }
+    #[test]
+    fn message_sources_are_saved_and_read_back() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let id = create(c, "Thread", 0).unwrap();
+        let old = append_message(c, &id, "assistant", "old", 1).unwrap();
+        let new = append_message(c, &id, "assistant", "new", 2).unwrap();
+        super::set_message_sources(c, &new, r#"{"sources":[]}"#).unwrap();
+        let got = messages(c, &id).unwrap();
+        assert_eq!(got[0].id, old);
+        assert_eq!(got[0].sources, None);
+        assert_eq!(got[1].sources.as_deref(), Some(r#"{"sources":[]}"#));
+        assert_eq!(
+            recent_messages(c, &id, 5).unwrap()[1].sources,
+            got[1].sources
+        );
     }
     #[test]
     fn message_order_and_shortening() {

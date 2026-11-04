@@ -31,6 +31,8 @@ pub struct ItemRecord {
     pub t0: Option<f64>,
     /// Text of the item `origin_item` names.
     pub origin_text: Option<String>,
+    /// Id of the source line.
+    pub line: Option<String>,
 }
 
 /// An item to store; it starts open and as a draft.
@@ -64,7 +66,8 @@ pub enum Scope<'a> {
 
 const COLUMNS: &str = "id, meeting_id, series_id, kind, text, owner, due, status, source_line, origin_item, draft, created_at,
     (SELECT start_time FROM meeting_lines WHERE meeting_lines.rowid = source_line) AS t0,
-    (SELECT o.text FROM meeting_items o WHERE o.id = meeting_items.origin_item) AS origin_text";
+    (SELECT o.text FROM meeting_items o WHERE o.id = meeting_items.origin_item) AS origin_text,
+    (SELECT id FROM meeting_lines WHERE rowid = source_line) AS line";
 
 pub fn series_create(connection: &Connection, name: &str) -> Result<String> {
     let id = Uuid::new_v4().to_string();
@@ -136,6 +139,7 @@ fn item_row(row: &rusqlite::Row) -> rusqlite::Result<ItemRecord> {
         created_at: row.get(11)?,
         t0: row.get(12)?,
         origin_text: row.get(13)?,
+        line: row.get(14)?,
     })
 }
 
@@ -260,6 +264,33 @@ pub fn delete(connection: &Connection, id: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::db::{Database, meetings};
+
+    #[test]
+    fn item_line_is_the_source_line_uuid() {
+        let db = Database::in_memory().unwrap();
+        let c = db.connection();
+        let m = meetings::start(c, "One", "", "en", None, Default::default()).unwrap();
+        let line = meetings::add_line(c, &m, "them", None, "hi", 3.0, 4.0).unwrap();
+        let rowid: i64 = c
+            .query_row(
+                "SELECT rowid FROM meeting_lines WHERE id=?1",
+                [&line],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mk = |source_line| NewItem {
+            meeting_id: &m,
+            kind: "action",
+            text: "x",
+            source_line,
+            ..NewItem::default()
+        };
+        insert(c, &mk(Some(rowid))).unwrap();
+        insert(c, &mk(None)).unwrap();
+        let got = list(c, Scope::Meeting(&m), None).unwrap();
+        let lines: Vec<_> = got.iter().map(|i| i.line.clone()).collect();
+        assert!(lines.contains(&Some(line)) && lines.contains(&None));
+    }
 
     #[test]
     fn series_items_crud_and_status_check() {

@@ -138,6 +138,26 @@ impl Database {
                 connection
                     .execute_batch("ALTER TABLE meeting_speakers ADD COLUMN updated_at TEXT")?;
             }
+            // Line corrections, note read times and saved answer sources (line_bookmarks
+            // is a new table, so the schema above creates it).
+            for (table, column, decl) in [
+                ("meeting_lines", "heard", "TEXT"),
+                ("meeting_lines", "edited_at", "TEXT"),
+                ("meeting_note_chunks", "read_at", "TEXT"),
+                ("meeting_recaps", "read_at", "TEXT"),
+                ("messages", "sources", "TEXT"),
+            ] {
+                let present: bool = connection.query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
+                    [table, column],
+                    |r| r.get(0),
+                )?;
+                if !present {
+                    connection.execute_batch(&format!(
+                        "ALTER TABLE {table} ADD COLUMN {column} {decl}"
+                    ))?;
+                }
+            }
             // Recaps written before notes_fts existed become searchable, once.
             let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             if version < 1 {
@@ -232,6 +252,48 @@ mod tests {
             )
             .unwrap();
         assert!(updated.is_some());
+    }
+
+    #[test]
+    fn line_action_columns_are_added_to_an_old_database() {
+        let dir = std::env::temp_dir().join(format!("nm-lines-old-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("h.db");
+        drop(Database::open(&path).unwrap());
+        {
+            let db = Database::open(&path).unwrap();
+            db.connection()
+                .execute_batch(
+                    "ALTER TABLE meeting_lines DROP COLUMN heard;
+                     ALTER TABLE meeting_lines DROP COLUMN edited_at;
+                     ALTER TABLE meeting_note_chunks DROP COLUMN read_at;
+                     ALTER TABLE meeting_recaps DROP COLUMN read_at;
+                     ALTER TABLE messages DROP COLUMN sources;
+                     DROP TABLE line_bookmarks",
+                )
+                .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let c = db.connection();
+        for (table, column) in [
+            ("meeting_lines", "heard"),
+            ("meeting_lines", "edited_at"),
+            ("meeting_note_chunks", "read_at"),
+            ("meeting_recaps", "read_at"),
+            ("messages", "sources"),
+            ("line_bookmarks", "line_id"),
+        ] {
+            let found: bool = c
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
+                    [table, column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(found, "{table}.{column}");
+        }
+        drop(db);
+        Database::open(&path).unwrap();
     }
 
     #[test]

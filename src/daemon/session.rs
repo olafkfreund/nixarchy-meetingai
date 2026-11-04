@@ -4453,8 +4453,8 @@ impl Daemon {
                 (text, written_at)
             }
         };
-        let renamed_at = meetings::renamed_at(c, meeting).map_err(|e| e.to_string())?;
-        let stale = matches!((renamed_at, written_at), (Some(r), Some(w)) if r >= w);
+        let changed_at = meetings::changed_at(c, meeting).map_err(|e| e.to_string())?;
+        let stale = matches!((changed_at, written_at), (Some(r), Some(w)) if r >= w);
         Ok(json!({"text": text, "stale": stale}))
     }
 
@@ -8544,6 +8544,7 @@ mod command_tests {
                     last_line: 1,
                     body: "chunk body".into(),
                     created_at: String::new(),
+                    ..Default::default()
                 },
             )
             .unwrap();

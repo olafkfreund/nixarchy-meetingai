@@ -515,3 +515,11 @@ grounded run. Give `--lines` the same.
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+
+- Step 1 (coder):
+  - The five new columns use one guarded loop in `src/db/mod.rs`, not five
+    copies of the `pragma_table_info` block.
+  - `line_bookmarks` is created only by `schema.sql`, which runs on every
+    open. The migration test drops the table and checks it comes back.
+  - `cargo` must run inside `nix develop -c …`; `alsa-sys` fails outside
+    it.
