@@ -80,7 +80,7 @@ Item {
                 root.offer(e.replace("language_unsupported: ", "Recording was not started: "), "no", "Dismiss", calls.since || 1);
                 return;
             }
-            Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", e.replace(/^(consent_required|local_only): /, "") + (e.indexOf("consent_required: ") === 0 ? " Open the overlay and start recording." : "")]);
+            Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", e.replace(/^(consent_required|local_only|language_unsupported): /, "") + (e.indexOf("consent_required: ") === 0 ? " Open the overlay and start recording." : "")]);
         });
     }
 

@@ -512,3 +512,35 @@ Check: the step check plus `bash shell/tests/ci.sh`.
     without the model gives step 6's "model missing" hint.
   - Claude regenerated the README "Nix options" block (`nix build .#docs`),
     which `docs-match` requires; `nix flake check` passes.
+- Step 5, after the gate (Claude; owner decisions recorded in
+  `docs/eval/2026-11-norwegian-stt.md`):
+  - `dynamo=False` fixed the export. NB-Whisper **small** and medium then
+    decoded correctly, so the owner asked for them to be measured after
+    all, overriding the "drops out" entry above.
+  - The owner approved **NB-Whisper small, opt-in, with relaxed bars for
+    Norwegian**: 23.9% WER on NPSC calls, 2.4 / 7.8 s per chunk, 7 of 16
+    short words, 20 of 20 dictations, 2.1 GB. Latency and short words are
+    #74; the call pipeline's lost words for every engine are #73.
+  - It ships as a release asset (`nix/whisper-nb-model.nix`, with
+    `LICENSE`); `tools/whisper-export/README.md` pins small at `e9bb5cb`.
+  - The phantom filter also strips **subtitle credits** ("Teksting av
+    <name>"), which the fixed list could not catch. After review, a credit
+    must start a sentence and the cut stops at the sentence end or three
+    words; "oversatt av" was dropped as ordinary Norwegian.
+- Step 8 review fixes (Claude, from the Opus, Codex and agy reviews):
+  - Dictation rechecks Local-only at stop, as `main` did; the engine
+    snapshot from the start is kept otherwise.
+  - The guard lowercases language codes and splits on `-` and `_`.
+  - `speech_config` no longer re-applies `speech_model` to the routed
+    Norwegian engine.
+  - The guard refuses before the interview-consent prompt for every
+    engine.
+  - The picker hint for `nb` says to choose Auto for other languages (a
+    plan rule step 7 missed). "Take notes" strips the refusal's code.
+  - The Home Manager assertion accepts `whisperNb.enable` without Parakeet.
+  - `no_mix.py`: an empty pool after the duration filter stops; the
+    short-word fallback takes only sentences of 4 s or less.
+  - Not done here: the shell smoke for the auto-record refusal (the overlay
+    harness does not load `Service.qml`), a dictation unit test through the
+    real Whisper path (the eval ran 20 dictations), the dictation timeout
+    under decode contention (#74), and razer numbers.

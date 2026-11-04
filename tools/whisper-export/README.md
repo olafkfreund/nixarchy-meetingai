@@ -8,32 +8,29 @@ reads (`encoder.int8.onnx`, `decoder.int8.onnx`, `tokens.txt`). Plan: step 4 of
 
 | Input | Pin |
 |---|---|
-| `NbAiLab/nb-whisper-large` | revision `8c6249fdeeb4dcd05e5735a4c39640607eb6e4ac`, file `model.bin` (6174511117 bytes, sha256 `91a2575f6e703d0bf6d8ce228a490c40e2404e6275932c20ff137382f35f726d`) |
+| `NbAiLab/nb-whisper-small` (shipped) | revision `e9bb5cb83cb74c96239fd506163aa97cff2fce4c`, `model.safetensors` plus `config.json` |
 | sherpa-onnx export script | git tag `v1.12.40` (`d795ccd164bd2360ffda6c3431b1316e2c898be2`), `scripts/whisper/export-onnx.py` |
 | python deps | `openai-whisper`, `torch`, `onnx`, `onnxruntime` (the script's `requirements.txt`) |
 
-For the smaller `nb-whisper-medium`, pin its own revision the same way and pass `medium` below.
+Other sizes (`medium`, `large` → base `large-v3`) work the same way at their own pinned revision.
+`model.bin` in these repos is a CTranslate2 file and is never used: `export.py` reads the
+safetensors weights, which cannot run code when loaded, and forces the legacy ONNX exporter
+(`dynamo=False`) so the decoder keeps dynamic shapes.
 
 ## Command
 
 ```sh
 W=$(mktemp -d) && cd "$W"
 git clone --depth 1 --branch v1.12.40 https://github.com/k2-fsa/sherpa-onnx
-curl -L -o model.bin \
-  https://huggingface.co/NbAiLab/nb-whisper-large/resolve/8c6249fdeeb4dcd05e5735a4c39640607eb6e4ac/model.bin
-echo "91a2575f6e703d0bf6d8ce228a490c40e2404e6275932c20ff137382f35f726d  model.bin" | sha256sum -c
-nix shell nixpkgs#python3Packages.{torch,onnx,onnxruntime,openai-whisper} -c \
-  python3 <repo>/tools/whisper-export/export.py "$W/sherpa-onnx/scripts/whisper" "$W/model.bin" large-v3 "$W/out"
+R=https://huggingface.co/NbAiLab/nb-whisper-small/resolve/e9bb5cb83cb74c96239fd506163aa97cff2fce4c
+mkdir hf && for f in model.safetensors config.json; do curl -fL -o hf/$f $R/$f; done
+nix shell nixpkgs#python3Packages.{torch,onnx,onnxruntime,onnxscript,openai-whisper,safetensors} -c \
+  python3 <repo>/tools/whisper-export/export.py "$W/sherpa-onnx/scripts/whisper" "$W/hf" small "$W/out"
 ```
 
-(Or a venv with `pip install openai-whisper onnx onnxruntime torch`.) `large-v3` is the
-base size, which sets 128 mel bins: NB-Whisper large is fine-tuned from large-v3 (its
-`preprocessor_config.json` has `feature_size: 128`).
-
-**Unverified:** that `model.bin` is in OpenAI checkpoint format (what `whisper.load_model`
-reads). If loading fails with missing/unexpected keys it is the Hugging Face layout:
-convert it first (inverse of transformers' `convert_openai_to_hf.py`) or treat the export
-as failed (plan step 4: the gate then compares turbo against Parakeet only).
+The bundle `nix/whisper-nb-model.nix` fetches is `out/{encoder.int8.onnx,decoder.int8.onnx,tokens.txt}`
+plus the Apache-2.0 `LICENSE` and a `README.md`, published as the `models-nb-whisper-small-e9bb5cb`
+release asset.
 
 ## Licences
 

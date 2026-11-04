@@ -154,9 +154,9 @@ const PHANTOMS: &[&str] = &[
     "teksting av ai-media",
     "undertekster av ai-media",
 ];
-/// Subtitle credits Whisper learned from TV: the opener is followed by a varying name, so
-/// everything from the opener to the end of its sentence goes.
-const CREDIT_OPENERS: &[&str] = &["teksting av", "undertekster av", "tekst:", "oversatt av"];
+/// Subtitle credits Whisper learned from TV: the opener starts a sentence and is followed by a
+/// varying name, so the opener and up to its sentence end (at most three more words) go.
+const CREDIT_OPENERS: &[&str] = &["teksting av", "undertekster av", "tekst:"];
 fn filter_phantoms(text: &str) -> String {
     let mut clean = text.to_owned();
     for phrase in PHANTOMS {
@@ -175,16 +175,41 @@ fn filter_phantoms(text: &str) -> String {
     }
     for opener in CREDIT_OPENERS {
         // ASCII openers matched case-insensitively on the original bytes, so offsets stay valid.
-        while let Some(start) = clean
-            .as_bytes()
-            .windows(opener.len())
-            .position(|w| w.eq_ignore_ascii_case(opener.as_bytes()))
+        let at_sentence_start = |clean: &str, at: usize| {
+            clean[..at]
+                .trim_end()
+                .chars()
+                .last()
+                .is_none_or(|c| matches!(c, '.' | '!' | '?'))
+        };
+        while let Some(start) =
+            clean
+                .as_bytes()
+                .windows(opener.len())
+                .enumerate()
+                .position(|(at, w)| {
+                    w.eq_ignore_ascii_case(opener.as_bytes()) && at_sentence_start(&clean, at)
+                })
         {
-            let rest = &clean[start..];
-            let end = rest
+            let after = start + opener.len();
+            let sentence = clean[after..]
                 .find(['.', '!', '?'])
-                .map_or(clean.len(), |at| start + at + 1);
-            clean.replace_range(start..end, "");
+                .map_or(clean.len(), |at| after + at + 1);
+            // shortcut: a name is assumed to be at most three words; longer credits leave a tail.
+            let mut words = 0;
+            let mut cap = clean.len();
+            let mut gap = true;
+            for (at, c) in clean[after..].char_indices() {
+                if !c.is_whitespace() && gap {
+                    if words == 3 {
+                        cap = after + at;
+                        break;
+                    }
+                    words += 1;
+                }
+                gap = c.is_whitespace();
+            }
+            clean.replace_range(start..sentence.min(cap), "");
         }
     }
     clean
@@ -283,9 +308,23 @@ mod tests {
             "Vi går videre. Neste sak"
         );
         assert_eq!(
-            filter_phantoms("Ærlig talt, UNDERTEKSTER AV Øyvind Ås!"),
+            filter_phantoms("Ærlig talt. UNDERTEKSTER AV Øyvind Ås!"),
             "Ærlig talt"
         );
+        assert_eq!(
+            filter_phantoms("Vi trenger kontekst: kunden har ringt."),
+            "Vi trenger kontekst: kunden har ringt"
+        );
+        // Real speech: mid-sentence, or unpunctuated after a short credit.
+        assert_eq!(
+            filter_phantoms("Boka er oversatt av Kari og teksting av filmen tar tid"),
+            "Boka er oversatt av Kari og teksting av filmen tar tid"
+        );
+        assert_eq!(
+            filter_phantoms("Teksting av Nicolai Winther vi går videre til sak tre og fire"),
+            "går videre til sak tre og fire"
+        );
+        assert_eq!(filter_phantoms("Tekst: Øyvind. Hei"), "Hei");
     }
     #[test]
     fn speech_segments_skip_silence_and_keep_short_words() {

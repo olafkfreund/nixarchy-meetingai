@@ -574,11 +574,11 @@ def build_calls(
         by_spk = {"spk_a": pool[::2], "spk_b": pool[1::2]}
 
     manifest = []
-    if not pool:
-        return manifest
     # Cutting audio while keeping the full reference text scores every cut word as an error, so
     # over-long sentences are left out instead (turns up to 14 s; overlaps up to 10 s).
     pool = [u for u in pool if u.get("duration", 0.0) <= 14.0]
+    if not pool:
+        return manifest
     turns_per_call = min(6 if remote_only else 10, len(pool))
     cursor = 0
     call_idx = 0
@@ -699,7 +699,8 @@ def build_short_words(items: list[dict], out_dir: pathlib.Path, max_items: int =
     if not short_utts:
         for it in items:
             words = it["text"].split()
-            if any(w in SHORT_WORDS for w in words):
+            # Audio is cut at 4 s below, so a longer sentence would keep words that were never played.
+            if any(w in SHORT_WORDS for w in words) and it.get("duration", 99.0) <= 4.0:
                 short_utts.append(it)
             if len(short_utts) >= max_items:
                 break

@@ -706,12 +706,26 @@ fn resolve_speech(settings: &Settings) -> ResolvedSpeech {
     }
 }
 
+/// Engines that keep audio on this machine or a server the user runs.
+fn local_speech(id: &str) -> bool {
+    matches!(
+        id,
+        "parakeet-local" | "whisper-nb-local" | "openai-compatible-stt"
+    ) || id.starts_with("custom-")
+}
+
 fn speech_guard(speech: &ResolvedSpeech) -> Result<Option<String>, String> {
     let language = speech.language.as_str();
     if language.is_empty() {
         return Ok(None);
     }
-    let base = language.split('-').next().unwrap_or(language);
+    // "EN" and "en_US" are English: compare the lowercase base code.
+    let base = language
+        .split(['-', '_'])
+        .next()
+        .unwrap_or(language)
+        .to_ascii_lowercase();
+    let base = base.as_str();
     let supported = match speech.id.as_str() {
         // NVIDIA Parakeet TDT v3's 25 languages.
         "parakeet-local" => Some(matches!(
@@ -807,7 +821,7 @@ fn speech_guard(speech: &ResolvedSpeech) -> Result<Option<String>, String> {
     match supported {
         Some(true) => Ok(None),
         Some(false) => {
-            let alternative = if matches!(language, "nb" | "no" | "nn") {
+            let alternative = if matches!(base, "nb" | "no" | "nn") {
                 "Norwegian Whisper or Deepgram"
             } else {
                 "Deepgram or an OpenAI-compatible speech engine that supports it"
@@ -1376,13 +1390,7 @@ impl Daemon {
     fn speech_config(&self, s: &Settings, local: bool) -> Option<ProviderConfig> {
         let resolved = resolve_speech(s);
         let id = resolved.id.as_str();
-        if local
-            && !matches!(
-                id,
-                "parakeet-local" | "whisper-nb-local" | "openai-compatible-stt"
-            )
-            && !id.starts_with("custom-")
-        {
+        if local && !local_speech(id) {
             return None;
         }
         let mut config = match credentials::load(&self.vault, Kind::Speech, id) {
@@ -1407,10 +1415,11 @@ impl Daemon {
         if id == "openai-compatible-stt" {
             config.base_url.clone_from(&s.speech_base_url);
         }
-        config.language = resolved.language;
+        // resolve_speech applied speech_model only if this is the engine the user chose.
         if !s.speech_model.is_empty() && config.custom.is_none() {
-            config.model.clone_from(&s.speech_model);
+            config.model = resolved.config.model;
         }
+        config.language = resolved.language;
         // A streaming custom record sends audio to its stream_url, which stays_local does not
         // see: local-only sessions never use one.
         let streams = config.custom.as_ref().is_some_and(|c| c.streaming);
@@ -2589,9 +2598,8 @@ impl Daemon {
             }
             g.settings = Settings::load(&g.db).unwrap_or_default();
             let resolved = resolve_speech(&g.settings);
-            if matches!(resolved.id.as_str(), "parakeet-local" | "whisper-nb-local") {
-                speech_guard(&resolved)?;
-            }
+            // Refuse before the consent prompt; the notice for unknown support comes below.
+            speech_guard(&resolved)?;
             let local = self.local_now(g);
             if local && self.speech_config(&g.settings, true).is_none() {
                 return Err(
@@ -3583,6 +3591,10 @@ impl Daemon {
             if let Some(mic) = dictation.microphone.take() {
                 dictation.samples.extend(mic.take(32_000));
                 mic.stop();
+            }
+            // Local-only may have been switched on since dictation started.
+            if self.local_now(&g) && !local_speech(&dictation.speech.id) {
+                return Err("Your speech provider is unavailable.".into());
             }
             (dictation.samples, dictation.speech)
         };
@@ -6671,6 +6683,24 @@ mod command_tests {
         assert_eq!(speech.language, "nb");
     }
 
+    #[tokio::test]
+    async fn dictation_rechecks_local_only_before_sending() {
+        let d = daemon();
+        d.inner.lock().dictation = Some(Dictation {
+            id: 1,
+            microphone: None,
+            samples: vec![0.1; 16_000],
+            started: Instant::now(),
+            meeting: false,
+            speech: ProviderConfig::new("deepgram-stt", "", "nova-3"),
+        });
+        d.local_only.store(true, Ordering::Relaxed);
+        let error = d.dictate_stop().await.unwrap_err();
+        assert_eq!(error, "Your speech provider is unavailable.");
+        // Local-only admits the Norwegian engine and refuses cloud ones.
+        assert!(local_speech("whisper-nb-local") && !local_speech("deepgram-stt"));
+    }
+
     #[test]
     fn unsupported_language_is_refused_with_an_alternative() {
         let mut s = Settings {
@@ -6682,6 +6712,11 @@ mod command_tests {
         assert!(error.contains("Deepgram"));
         s.speech_provider = "openai-compatible-stt".into();
         assert!(speech_guard(&resolve_speech(&s)).unwrap().is_some());
+        s.speech_provider = Settings::default().speech_provider;
+        for language in ["EN", "en_US", "de-AT"] {
+            s.speech_language = language.into();
+            assert_eq!(speech_guard(&resolve_speech(&s)), Ok(None), "{language}");
+        }
     }
 
     #[tokio::test]

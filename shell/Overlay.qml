@@ -663,7 +663,7 @@ Item {
                         }
                     }
                 }
-                UiText { objectName: "speechLanguageHint"; visible: String(backend.settings.speech_language || "") === ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Auto uses Parakeet, which covers 25 European languages but not Norwegian. Pick Norwegian to use NB-Whisper (needs whisperNb.enable)."; color: Commons.Color.popups.text; opacity: metrics.dim; font.pixelSize: metrics.caption }
+                UiText { objectName: "speechLanguageHint"; visible: ["", "nb"].indexOf(String(backend.settings.speech_language || "")) >= 0; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(backend.settings.speech_language || "") === "nb" ? "Norwegian uses NB-Whisper (needs whisperNb.enable). For a call in English or another language, choose Auto." : "Auto uses Parakeet, which covers 25 European languages but not Norwegian. Pick Norwegian to use NB-Whisper (needs whisperNb.enable)."; color: Commons.Color.popups.text; opacity: metrics.dim; font.pixelSize: metrics.caption }
                 UiText { visible: root.modelsError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Error: could not list chat models. " + root.modelsError + root.fix(root.chatProvider); color: Commons.Color.popups.text; font.pixelSize: metrics.caption }
                 UiText { visible: root.liveModelsError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Error: could not list live answer models. " + root.liveModelsError + root.fix(root.liveProvider); color: Commons.Color.popups.text; font.pixelSize: metrics.caption }
                 Column {

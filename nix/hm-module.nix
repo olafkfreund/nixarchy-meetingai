@@ -373,8 +373,8 @@ in
         message = "programs.nixarchy-meetingai: settings.speechProvider = \"whisper-local\" was removed: whisper.cpp was replaced by Parakeet (in-process). Use \"parakeet-local\", \"deepgram-stt\" or \"openai-compatible-stt\".";
       }
       {
-        assertion = cfg.parakeet.enable || (cfg.settings.speechProvider != null && cfg.settings.speechProvider != "parakeet-local");
-        message = "programs.nixarchy-meetingai: parakeet.enable = false needs settings.speechProvider = \"deepgram-stt\" or \"openai-compatible-stt\" (the default provider is parakeet-local).";
+        assertion = cfg.parakeet.enable || cfg.whisperNb.enable || (cfg.settings.speechProvider != null && cfg.settings.speechProvider != "parakeet-local");
+        message = "programs.nixarchy-meetingai: parakeet.enable = false needs whisperNb.enable (Norwegian only) or settings.speechProvider = \"deepgram-stt\" or \"openai-compatible-stt\" (the default provider is parakeet-local).";
       }
       {
         assertion = !(cfg.settings.extra ? api_key);
