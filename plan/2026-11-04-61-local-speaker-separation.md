@@ -451,3 +451,6 @@ Check: the step check plus `bash shell/tests/ci.sh`.
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+
+- Step 1 (Codex): no deviation. Codex's sandbox could not run
+  `nix develop`, so Claude ran the step check (431 lib tests).

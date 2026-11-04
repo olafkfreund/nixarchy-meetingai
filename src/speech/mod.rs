@@ -1,6 +1,7 @@
 //! Speech: the listening session and speech-to-text.
 
 pub mod session;
+pub mod speakers;
 pub mod stt;
 pub mod voice_check;
 

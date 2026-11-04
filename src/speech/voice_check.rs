@@ -2,12 +2,13 @@
 
 use std::path::Path;
 
+use parking_lot::Mutex;
 use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig};
 
 use crate::audio::dsp::{SAMPLE_RATE, rms};
 
 const FRAME_MS: u32 = 30;
-const WINDOW_SAMPLES: usize = SAMPLE_RATE as usize * 3 / 2;
+pub(crate) const WINDOW_SAMPLES: usize = SAMPLE_RATE as usize * 3 / 2;
 const MIN_ENROLL_SPEECH: usize = SAMPLE_RATE as usize * 6;
 const MIN_CHECK_SPEECH: usize = WINDOW_SAMPLES;
 // Plan step 7, LibriSpeech test-clean, 40 speakers as owner (examples/voice_eval.rs):
@@ -76,7 +77,7 @@ pub trait Embedder {
     fn embed(&self, samples: &[f32]) -> Option<Vec<f32>>;
 }
 
-pub struct SherpaEmbedder(SpeakerEmbeddingExtractor);
+pub struct SherpaEmbedder(Mutex<SpeakerEmbeddingExtractor>);
 
 impl SherpaEmbedder {
     /// Load on a blocking worker, after audio is available for a check.
@@ -89,20 +90,23 @@ impl SherpaEmbedder {
             ..Default::default()
         };
         SpeakerEmbeddingExtractor::create(&config)
-            .map(Self)
+            .map(|extractor| Self(Mutex::new(extractor)))
             .ok_or_else(|| "speaker model could not be loaded".into())
     }
 }
 
 impl Embedder for SherpaEmbedder {
     fn embed(&self, samples: &[f32]) -> Option<Vec<f32>> {
-        let stream = self.0.create_stream()?;
+        let extractor = self.0.lock();
+        let stream = extractor.create_stream()?;
         stream.accept_waveform(SAMPLE_RATE as i32, samples);
-        self.0.is_ready(&stream).then(|| self.0.compute(&stream))?
+        extractor
+            .is_ready(&stream)
+            .then(|| extractor.compute(&stream))?
     }
 }
 
-fn normalise(values: &mut [f32]) -> bool {
+pub(crate) fn normalise(values: &mut [f32]) -> bool {
     let norm = values
         .iter()
         .map(|v| f64::from(*v) * f64::from(*v))
@@ -131,7 +135,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
 }
 
 /// Collect complete 30 ms frames above the provisional speech level.
-fn speech(samples: &[f32], rate: u32) -> Vec<f32> {
+pub(crate) fn speech(samples: &[f32], rate: u32) -> Vec<f32> {
     let frame = (rate as usize * FRAME_MS as usize) / 1_000;
     if frame == 0 {
         return Vec::new();
