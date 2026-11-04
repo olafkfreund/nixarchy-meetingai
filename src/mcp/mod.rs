@@ -215,6 +215,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn line_text_shows_the_rowid_agents_poll_with() {
+        // A transcript page: `line` is the rowid agents pass back as after_line.
+        let page = json!({"line": 42, "id": "uuid-a", "who": "them", "t0": 1.0, "text": "hi"});
+        assert!(line_text(&page).starts_with("[42] "));
+        // A bookmark: `line` is the UUID. A search hit: only `id`.
+        let mark = json!({"line": "uuid-b", "who": "me", "t0": 2.0, "text": "x"});
+        assert!(line_text(&mark).starts_with("[uuid-b] "));
+        let hit = json!({"line": null, "id": "uuid-c", "who": "me", "t0": 3.0, "text": "y"});
+        assert!(line_text(&hit).starts_with("[uuid-c] "));
+    }
+
+    #[test]
     fn suggestions_from_another_turn_are_ignored() {
         assert!(!matching_suggestion(&json!({"turn": 1}), Some(2), true));
         assert!(!matching_suggestion(&json!({}), Some(2), true));
@@ -248,11 +260,13 @@ fn line_text(l: &Value) -> String {
     let who = name.map_or_else(|| who.to_owned(), |n| format!("{who} ({n})"));
     format!(
         "[{}] {} {:.0}s: {}",
-        // Search hits and bookmarks use UUIDs; transcript pages use rowids.
-        l["line"]
-            .as_str()
-            .or_else(|| l["id"].as_str())
-            .map_or_else(|| l["line"].to_string(), str::to_owned),
+        // Transcript pages carry a rowid in `line` (agents poll with it as after_line);
+        // bookmarks carry a UUID there, and search hits only an `id`.
+        match &l["line"] {
+            Value::Number(n) => n.to_string(),
+            Value::String(s) => s.clone(),
+            _ => l["id"].as_str().unwrap_or_default().to_owned(),
+        },
         who,
         l["t0"].as_f64().unwrap_or(0.0),
         l["text"].as_str().unwrap_or_default()

@@ -418,7 +418,6 @@ async fn chunk_pending(
     config: &ProviderConfig,
     language: &str,
     force: bool,
-    write_items: bool,
 ) -> Result<(usize, Vec<Continuation>), String> {
     let owned = id.to_owned();
     let (team, series, open, interview, said) = db(path, move |db| {
@@ -486,10 +485,7 @@ async fn chunk_pending(
             .collect::<Vec<_>>()
             .join("\n");
         let mut stored = Vec::new();
-        for item in extracted
-            .into_iter()
-            .filter(|i| write_items && !i.text.trim().is_empty())
-        {
+        for item in extracted.into_iter().filter(|i| !i.text.trim().is_empty()) {
             let spoken_line = item
                 .source_line
                 .and_then(|k| usize::try_from(k - 1).ok())
@@ -575,7 +571,7 @@ pub async fn refresh_chunks(
         let mut previous = 0;
         for chunk in meetings::chunks(c, &owned)? {
             let changed: bool = c.query_row(
-                "SELECT EXISTS(SELECT 1 FROM meeting_lines WHERE meeting_id=?1 AND rowid>?2 AND rowid<=?3 AND edited_at> ?4)",
+                "SELECT EXISTS(SELECT 1 FROM meeting_lines WHERE meeting_id=?1 AND rowid>?2 AND rowid<=?3 AND edited_at>=?4)",
                 rusqlite::params![owned, previous, chunk.last_line, chunk.read_at.as_deref().unwrap_or(&chunk.created_at)],
                 |r| r.get(0),
             )?;
@@ -633,7 +629,7 @@ pub async fn maybe_chunk_items(
     config: &ProviderConfig,
     language: &str,
 ) -> Result<(bool, Vec<Continuation>), String> {
-    let (made, continued) = chunk_pending(path, id, config, language, false, true).await?;
+    let (made, continued) = chunk_pending(path, id, config, language, false).await?;
     Ok((made > 0, continued))
 }
 
@@ -772,7 +768,7 @@ async fn notes(
     }
     // Lines no chunk covers yet are summarised for the first time: keep their items, even on
     // Regenerate. Only re-summarised chunks (`refresh_chunks`) discard extracted items.
-    chunk_pending(path, id, config, language, true, true).await?;
+    chunk_pending(path, id, config, language, true).await?;
     let owned = id.to_owned();
     let bodies = db(path, move |db| {
         let mut bodies: Vec<String> = meetings::chunks(db.connection(), &owned)?

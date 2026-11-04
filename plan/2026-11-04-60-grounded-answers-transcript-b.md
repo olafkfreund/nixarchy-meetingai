@@ -581,3 +581,38 @@ grounded run. Give `--lines` the same.
   - Build trap: the `.#shell` dev shell sets a different
     `SHERPA_ONNX_LIB_DIR`. Clear the read-only libraries before
     `smoke-real`.
+- Step 8 (review fixes by Claude; Opus, Codex and agy reviews, read-only):
+  - **MCP `line_text`** printed the UUID instead of the rowid on transcript
+    pages, which broke `after_line` polling. It now prints the numeric
+    `line`, a UUID `line` (bookmarks), or `id` (search hits). Found by Opus
+    and agy.
+  - **Stale race.** A correction made while Regenerate re-summarised other
+    chunks, or one missed at meeting end, looked fresh. Notes are now also
+    stale when any line was corrected at or after the `read_at` of the chunk
+    covering it (`meetings::edited_after_chunk`). `refresh_chunks` uses
+    `>=` too. Found by Opus and Codex.
+  - **Drafts.** Regenerate skipped `items::finalize`, so items extracted for
+    the first time stayed drafts and never carried over. Regenerate now
+    finalizes; that only clears `draft` and never merges. Found by Opus and
+    agy.
+  - **Cut restored lines.** The restore replay cuts lines at 8 000
+    characters, and it now marks them `shortened` so Correct is not offered.
+    Found by Codex.
+  - **Meeting view.** The timeline, items, bookmarks and "Open transcript"
+    also show when the notes text is empty. Found by Codex and agy.
+  - **Smaller fixes:**
+    - the dead `write_items` parameter is removed;
+    - a failed restored-source rebuild after a saved edit no longer hides
+      the edit;
+    - renaming closes the row's "⋯" actions.
+  - **Left as is (nits):**
+    - every "⋯" is named "more" (the harness depends on it);
+    - `chat_send` stores a screenshot before the `line` check (the shell
+      never sends both);
+    - meeting-view links are silent while recording (same as search hits);
+    - "No context" is ignored when a line is quoted (the quote needs its
+      citation);
+    - the quoted line sits under the "recent speech" wording.
+  - `catalog::models::refresh_failure_preserves_the_saved_row` failed twice
+    under load average 38 (a deploy build was running). The branch does not
+    touch that module, and it passes when idle.

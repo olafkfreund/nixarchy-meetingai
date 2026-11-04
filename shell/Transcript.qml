@@ -165,7 +165,7 @@ Item {
                                     enabled: row.renamable
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: row.editing = true
+                                    onClicked: { row.more = false; row.editing = true; }
                                     ToolTip.visible: containsMouse && row.speakerKey === "them"
                                     ToolTip.text: "All remote speakers (this engine does not tell them apart)"
                                 }

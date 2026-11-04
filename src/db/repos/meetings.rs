@@ -381,6 +381,20 @@ pub fn add_chunk(c: &Connection, meeting_id: &str, chunk: &NoteChunk) -> Result<
     )?;
     Ok(())
 }
+/// Whether a line was corrected at or after the read time of the chunk that covers it.
+pub fn edited_after_chunk(c: &Connection, meeting_id: &str) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM (
+             SELECT last_line, COALESCE(read_at, created_at) AS r,
+                    LAG(last_line, 1, 0) OVER (ORDER BY id) AS prev
+             FROM meeting_note_chunks WHERE meeting_id=?1) ch
+           JOIN meeting_lines l ON l.meeting_id=?1 AND l.rowid>ch.prev AND l.rowid<=ch.last_line
+           WHERE l.edited_at>=ch.r)",
+        [meeting_id],
+        |r| r.get(0),
+    )?)
+}
 pub fn update_chunk_body(c: &Connection, chunk_id: i64, body: &str, read_at: &str) -> Result<()> {
     c.execute(
         "UPDATE meeting_note_chunks SET body=?2,read_at=?3 WHERE id=?1",
@@ -792,6 +806,52 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM line_bookmarks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn an_edit_after_its_chunk_was_read_is_detected() {
+        let database = Database::in_memory().unwrap();
+        let c = database.connection();
+        let m = start(c, "T", "", "en", None, Default::default()).unwrap();
+        let first = add_line(c, &m, "them", None, "one", 0.0, 1.0).unwrap();
+        let row = |id: &str| -> i64 {
+            c.query_row("SELECT rowid FROM meeting_lines WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let second = add_line(c, &m, "them", None, "two", 1.0, 2.0).unwrap();
+        for (line, read_at) in [
+            (&first, "2026-11-04 10:00:00.000"),
+            (&second, "2026-11-04 10:00:00.000"),
+        ] {
+            add_chunk(
+                c,
+                &m,
+                &NoteChunk {
+                    last_line: row(line),
+                    body: "b".into(),
+                    read_at: Some(read_at.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        assert!(!edited_after_chunk(c, &m).unwrap());
+        // A correction older than the chunk's read time is already in it.
+        c.execute(
+            "UPDATE meeting_lines SET edited_at='2026-11-04 09:59:59.999' WHERE id=?1",
+            [&second],
+        )
+        .unwrap();
+        assert!(!edited_after_chunk(c, &m).unwrap());
+        // One at or after the read time is not, whichever chunk covers it.
+        c.execute(
+            "UPDATE meeting_lines SET edited_at='2026-11-04 10:00:00.000' WHERE id=?1",
+            [&second],
+        )
+        .unwrap();
+        assert!(edited_after_chunk(c, &m).unwrap());
     }
 
     #[test]

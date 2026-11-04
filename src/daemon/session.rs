@@ -3003,13 +3003,13 @@ impl Daemon {
             {
                 let g = self.inner.lock();
                 let c = g.db.connection();
-                if !regenerate {
-                    let _ = if team_items(c, meeting) {
-                        recap::reconcile(c, meeting)
-                    } else {
-                        items::finalize(c, meeting)
-                    };
-                }
+                // Regenerate never merges items; it only clears `draft` on items it extracted
+                // for the first time, so they carry over like any other.
+                let _ = if team_items(c, meeting) && !regenerate {
+                    recap::reconcile(c, meeting)
+                } else {
+                    items::finalize(c, meeting)
+                };
             }
             self.emit("items.updated", json!({"meeting": meeting}));
             let (enabled, has_folder) = {
@@ -3510,7 +3510,8 @@ impl Daemon {
             meetings::bookmarked_ids(g.db.connection(), id).map_err(|e| e.to_string())?;
         for line in &lines {
             let (who, speaker, key) = Self::who(&g.speaker_names, &line.who, line.speaker);
-            let mut row = json!({"who": who, "speaker": speaker, "speaker_key": key, "text": line.text, "t0": line.start_time, "t1": line.end_time, "id": line.id, "edited": line.edited, "bookmarked": bookmarked.contains(&line.id)});
+            // recent_lines cuts each line at 8 000 characters: the shell must not offer Correct on it.
+            let mut row = json!({"who": who, "speaker": speaker, "speaker_key": key, "text": line.text, "t0": line.start_time, "t1": line.end_time, "id": line.id, "edited": line.edited, "bookmarked": bookmarked.contains(&line.id), "shortened": line.text.chars().count() >= 8_000});
             if let Some(heard) = &line.heard {
                 row["heard"] = json!(heard);
             }
@@ -4624,7 +4625,10 @@ impl Daemon {
             }
         };
         let changed_at = meetings::changed_at(c, meeting).map_err(|e| e.to_string())?;
-        let stale = matches!((changed_at, written_at), (Some(r), Some(w)) if r >= w);
+        // Also stale when a correction landed after the chunk covering it was read: that catches
+        // an edit made while Regenerate re-summarised other chunks (the recap's own read time is later).
+        let stale = matches!((changed_at, written_at), (Some(r), Some(w)) if r >= w)
+            || meetings::edited_after_chunk(c, meeting).map_err(|e| e.to_string())?;
         Ok(json!({"text": text, "stale": stale, "chunks": timeline}))
     }
 
@@ -4680,8 +4684,14 @@ impl Daemon {
         if g.resume_meeting.as_deref() == Some(&edited.meeting_id) {
             let source_id = format!("restored-meeting:{}", edited.meeting_id);
             if let Some(index) = g.sources.iter().position(|s| s.id == source_id) {
-                g.sources[index] =
-                    Self::restored_source(g.db.connection(), &edited.meeting_id, &g.speaker_names)?;
+                // The edit is already saved: a failed rebuild keeps the old source, never the event.
+                match Self::restored_source(g.db.connection(), &edited.meeting_id, &g.speaker_names)
+                {
+                    Ok(source) => g.sources[index] = source,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not refresh the restored meeting source")
+                    }
+                }
             }
         }
         self.emit(
@@ -8775,12 +8785,17 @@ mod command_tests {
             let g = d.inner.lock();
             items::list(g.db.connection(), items::Scope::Meeting(&meeting), None).unwrap()
         };
+        assert!(before.iter().all(|i| i.draft));
         d.finish_meeting_artifacts(&meeting, false, true).await;
         let g = d.inner.lock();
-        assert_eq!(
-            items::list(g.db.connection(), items::Scope::Meeting(&meeting), None).unwrap(),
-            before
-        );
+        // Nothing merged or rewritten: only `draft` is cleared, so the items carry over.
+        let after = items::list(g.db.connection(), items::Scope::Meeting(&meeting), None).unwrap();
+        assert!(after.iter().all(|i| !i.draft));
+        let undrafted: Vec<_> = before
+            .into_iter()
+            .map(|i| items::ItemRecord { draft: false, ..i })
+            .collect();
+        assert_eq!(after, undrafted);
         let title: String =
             g.db.connection()
                 .query_row("SELECT title FROM meetings WHERE id=?1", [&meeting], |r| {
@@ -9383,6 +9398,35 @@ mod command_tests {
                 true
             );
         }
+    }
+
+    #[tokio::test]
+    async fn restore_marks_lines_it_cut_so_they_cannot_be_corrected() {
+        let d = daemon();
+        let meeting = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let meeting = meetings::start(c, "Test", "", "en", None, Default::default()).unwrap();
+            meetings::add_line(c, &meeting, "them", None, &"a".repeat(9_000), 0.0, 1.0).unwrap();
+            meetings::add_line(c, &meeting, "them", None, "short", 1.0, 2.0).unwrap();
+            meeting
+        };
+        let mut events = d.subscribe();
+        d.handle("session.restore", json!({"id": meeting}), None)
+            .await
+            .unwrap();
+        let mut replayed = Vec::new();
+        while replayed.len() < 2 {
+            let ev = events.recv().await.unwrap();
+            if ev["event"] == "transcript.final" {
+                replayed.push(
+                    ev["data"]["shortened"]
+                        .as_bool()
+                        .or(ev["shortened"].as_bool()),
+                );
+            }
+        }
+        assert_eq!(replayed, [Some(true), Some(false)]);
     }
 
     #[tokio::test]

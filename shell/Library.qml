@@ -675,9 +675,9 @@ Item {
                     font.pixelSize: root.theme.caption
                     font.bold: true
                 }
-                Heading { visible: root.notesPhase === "ready" && root.notesChunks.length > 0; text: "Timeline" }
+                Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.notesChunks.length > 0; text: "Timeline" }
                 Repeater {
-                    model: root.notesPhase === "ready" ? root.notesChunks : []
+                    model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.notesChunks : []
                     Row {
                         id: crow
                         required property var modelData
@@ -689,9 +689,9 @@ Item {
                         UiText { width: parent.width - x - Style.spacing.xs; x: 0; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(crow.modelData.body || ""); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
                     }
                 }
-                Heading { visible: root.notesPhase === "ready" && root.meetingItems.length > 0; text: "Items" }
+                Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.meetingItems.length > 0; text: "Items" }
                 Repeater {
-                    model: root.notesPhase === "ready" ? root.meetingItems : []
+                    model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.meetingItems : []
                     Row {
                         id: irow
                         required property var modelData
@@ -703,9 +703,9 @@ Item {
                         UiText { width: parent.width - x - Style.spacing.xs; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: [irow.modelData.text, irow.modelData.owner, irow.modelData.due].filter(function(x) { return x; }).join(" \u00b7 "); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
                     }
                 }
-                Heading { visible: root.notesPhase === "ready" && root.meetingBookmarks.length > 0; text: "Bookmarks" }
+                Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.meetingBookmarks.length > 0; text: "Bookmarks" }
                 Repeater {
-                    model: root.notesPhase === "ready" ? root.meetingBookmarks : []
+                    model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.meetingBookmarks : []
                     Row {
                         id: brow
                         required property var modelData
@@ -719,7 +719,7 @@ Item {
                 }
                 IconButton {
                     objectName: "openTranscript"
-                    visible: root.notesPhase === "ready"
+                    visible: (root.notesPhase === "ready" || root.notesPhase === "empty")
                     ts: root.theme.ts
                     text: "Open transcript"
                     bordered: true
