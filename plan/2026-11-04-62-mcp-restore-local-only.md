@@ -186,3 +186,14 @@ agy ran without the `herdr-run` wrapper. Earlier runs through it hung.
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+
+- Step 1 (Codex): no deviation. Codex's sandbox could not run `nix develop`,
+  so Claude ran the step check.
+- Step 2 (Codex, finished by Claude): Codex could not compile or run tests
+  in its sandbox.
+  - Claude ran the step check. `mcp_cannot_switch_into_or_out_of_local_only_interviews`
+    opened an idle local-only session with a candidate that already had a
+    meeting, which `session.new` rightly refuses. Claude gave it a second
+    local-only candidate with no meeting.
+  - Fail-before was proven by setting the dispatch `agent` flag to `false`:
+    the test then fails at the first refusal.

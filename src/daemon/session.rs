@@ -3350,10 +3350,18 @@ impl Daemon {
         Ok(())
     }
 
-    fn session_restore(&self, id: &str) -> Result<Value, String> {
+    fn session_restore(&self, id: &str, agent: bool) -> Result<Value, String> {
         let mut guard = self.inner.lock();
         let g = &mut *guard;
         Self::require_idle(g)?;
+        if agent
+            && (candidates::local_only_ids(g.db.connection())
+                .map_err(|e| e.to_string())?
+                .contains(id)
+                || self.local_now(g))
+        {
+            return Err("This interview is local-only".into());
+        }
         if conversations::require_conversation(g.db.connection(), id).is_ok() {
             self.reset_session(g);
             self.emit("session.reset", json!({}));
@@ -4644,7 +4652,7 @@ impl Daemon {
         origin: Option<&str>,
     ) -> Result<Value, String> {
         if !matches!(origin, Some("mcp" | "agent")) {
-            return self.dispatch(cmd, args).await;
+            return self.dispatch(cmd, args, false).await;
         }
         if cmd.starts_with("voice.") || cmd == "meetings.export" {
             return Err("not allowed for agents".into());
@@ -4772,7 +4780,7 @@ impl Daemon {
             }
             _ => None,
         };
-        let mut result = self.dispatch(cmd, args).await;
+        let mut result = self.dispatch(cmd, args, origin == Some("mcp")).await;
         if let Ok(value) = &mut result {
             self.hide_interviews(cmd, value);
         }
@@ -4817,7 +4825,12 @@ impl Daemon {
         }
     }
 
-    async fn dispatch(self: &Arc<Self>, cmd: &str, args: Value) -> Result<Value, String> {
+    async fn dispatch(
+        self: &Arc<Self>,
+        cmd: &str,
+        args: Value,
+        agent: bool,
+    ) -> Result<Value, String> {
         match cmd {
             "state.get" => Ok(self.state_value(&self.inner.lock())),
             "calendar.refresh" => {
@@ -4833,6 +4846,9 @@ impl Daemon {
                 let series = a.series;
                 let mut g = self.inner.lock();
                 Self::require_idle(&g)?;
+                if agent && self.local_now(&g) {
+                    return Err("This interview is local-only".into());
+                }
                 if let Some(id) = &series {
                     Self::known_series(&g, id)?;
                 }
@@ -4901,7 +4917,7 @@ impl Daemon {
                 Ok(json!({}))
             }
             "last_time.get" => self.last_time(&parse::<protocol::SeriesArg>(args)?.series),
-            "session.restore" => self.session_restore(&parse::<protocol::IdArg>(args)?.id),
+            "session.restore" => self.session_restore(&parse::<protocol::IdArg>(args)?.id, agent),
             "session.list" => self.session_list(false),
             "meetings.search" => self.meetings_search(parse(args)?),
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
@@ -5031,6 +5047,13 @@ impl Daemon {
                 let meeting = parse::<protocol::MeetingArg>(args)?.meeting;
                 {
                     let g = self.inner.lock();
+                    if agent
+                        && candidates::for_meeting(g.db.connection(), &meeting)
+                            .map_err(|e| e.to_string())?
+                            .is_some_and(|c| c.local_only)
+                    {
+                        return Err("This interview is local-only".into());
+                    }
                     if g.recording.is_some() && g.meeting_id.as_deref() == Some(&meeting) {
                         return Err("That meeting is still recording.".into());
                     }
@@ -7730,6 +7753,159 @@ mod command_tests {
             chain.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
             ["ollama"]
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_cannot_switch_into_or_out_of_local_only_interviews() {
+        let d = daemon();
+        let (candidate, meeting, linked_chat, prep_chat, ordinary) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let candidate = candidates::create(c, "Ada").unwrap();
+            candidates::set_local_only(c, &candidate.id, true).unwrap();
+            let meeting = meetings::start(c, "Ada", "", "en", None, Default::default()).unwrap();
+            candidates::link_meeting(c, &candidate.id, &meeting).unwrap();
+            let linked_chat = conversations::create(c, "Interview", 1).unwrap();
+            c.execute(
+                "INSERT INTO meeting_conversations VALUES (?1, ?2)",
+                [&meeting, &linked_chat],
+            )
+            .unwrap();
+            let prep_chat = conversations::create(c, "Prep", 2).unwrap();
+            candidates::link_conversation(c, &candidate.id, &prep_chat).unwrap();
+            let ordinary = meetings::start(c, "Team", "", "en", None, Default::default()).unwrap();
+            // A second local-only candidate with no interview yet, to open an idle session for.
+            let candidate = candidates::create(c, "Bo").unwrap();
+            candidates::set_local_only(c, &candidate.id, true).unwrap();
+            (candidate.id, meeting, linked_chat, prep_chat, ordinary)
+        };
+        let before = d.handle("state.get", json!({}), None).await.unwrap();
+        for id in [&meeting, &linked_chat, &prep_chat] {
+            assert_eq!(
+                d.handle("session.restore", json!({"id": id}), Some("mcp"))
+                    .await
+                    .unwrap_err(),
+                "This interview is local-only"
+            );
+            assert_eq!(
+                d.handle("state.get", json!({}), None).await.unwrap(),
+                before
+            );
+        }
+        assert_eq!(
+            d.handle("notes.regenerate", json!({"meeting": meeting}), Some("mcp"))
+                .await
+                .unwrap_err(),
+            "This interview is local-only"
+        );
+        assert_eq!(
+            d.handle("state.get", json!({}), None).await.unwrap(),
+            before
+        );
+
+        d.handle("session.new", json!({"candidate": candidate}), None)
+            .await
+            .unwrap();
+        let before = d.handle("state.get", json!({}), None).await.unwrap();
+        for (cmd, args) in [
+            ("session.new", json!({})),
+            ("session.restore", json!({"id": ordinary})),
+            ("notes.regenerate", json!({"meeting": meeting})),
+        ] {
+            assert_eq!(
+                d.handle(cmd, args, Some("mcp")).await.unwrap_err(),
+                "This interview is local-only",
+                "{cmd}"
+            );
+            assert_eq!(
+                d.handle("state.get", json!({}), None).await.unwrap(),
+                before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_sessions_work_from_mcp_and_shell_and_shell_keeps_local_only() {
+        let d = daemon();
+        let (ordinary, chat, local) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            let ordinary = meetings::start(c, "Team", "", "en", None, Default::default()).unwrap();
+            let chat = conversations::create(c, "Team chat", 1).unwrap();
+            let candidate = candidates::create(c, "Ada").unwrap();
+            candidates::set_local_only(c, &candidate.id, true).unwrap();
+            let local = meetings::start(c, "Ada", "", "en", None, Default::default()).unwrap();
+            candidates::link_meeting(c, &candidate.id, &local).unwrap();
+            (ordinary, chat, local)
+        };
+        let mut events = d.subscribe();
+        for origin in [Some("mcp"), None] {
+            for id in [&ordinary, &chat] {
+                d.handle("session.restore", json!({"id": id}), origin)
+                    .await
+                    .unwrap();
+            }
+            d.handle("session.new", json!({}), origin).await.unwrap();
+            // A meeting with no lines completes regeneration without external providers.
+            d.handle("notes.regenerate", json!({"meeting": ordinary}), origin)
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while events.recv().await.unwrap()["event"] != "items.updated" {}
+            })
+            .await
+            .unwrap();
+            drop(d.notes.lock().await);
+        }
+
+        d.handle("session.restore", json!({"id": local}), None)
+            .await
+            .unwrap();
+        assert!(d.local_now(&d.inner.lock()));
+        d.handle("notes.regenerate", json!({"meeting": local}), None)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while events.recv().await.unwrap()["event"] != "items.updated" {}
+        })
+        .await
+        .unwrap();
+        drop(d.notes.lock().await);
+        d.handle("session.new", json!({}), None).await.unwrap();
+
+        let before = d.handle("state.get", json!({}), None).await.unwrap();
+        assert_eq!(
+            d.handle("session.restore", json!({"id": local}), Some("mcp"))
+                .await
+                .unwrap_err(),
+            "This interview is local-only"
+        );
+        assert_eq!(
+            d.handle("state.get", json!({}), None).await.unwrap(),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_regenerate_reports_local_only_even_while_recording() {
+        let d = daemon();
+        local_interview(&d).await;
+        d.handle("record.start", json!({"consent": true}), None)
+            .await
+            .unwrap();
+        let before = d.handle("state.get", json!({}), None).await.unwrap();
+        let meeting = before["meeting"].as_str().unwrap();
+        assert_eq!(
+            d.handle("notes.regenerate", json!({"meeting": meeting}), Some("mcp"))
+                .await
+                .unwrap_err(),
+            "This interview is local-only"
+        );
+        assert_eq!(
+            d.handle("state.get", json!({}), None).await.unwrap(),
+            before
+        );
+        d.handle("record.stop", json!({}), None).await.unwrap();
     }
 
     #[tokio::test]
