@@ -23,22 +23,29 @@ So in a local-only setup, which includes every local-only interview:
 - Phase A of #60 lets the user name speakers, but with Parakeet only "Them"
   as a whole can be named.
 
-The user has to choose between privacy (local) and knowing who spoke (cloud).
+The same is true of every engine on the batch path. A loopback
+OpenAI-compatible speech server, which local-only interviews allow
+(`session.rs` ~1008, ~1200), also yields `speaker: None`. The user has to
+choose between privacy (local) and knowing who spoke (cloud).
 
 #60's approved intent moved this out (open questions 1 and 2): its RAM,
 closure size and accuracy must be measured before committing to an approach.
 
 ## Proposed outcome
 
-1. With Parakeet, remote lines carry a speaker number ("Speaker 1",
+1. With Parakeet, and any other engine on the batch path that does not
+   separate speakers itself, remote lines carry a speaker number ("Speaker 1",
    "Speaker 2", …), so the transcript, answers, notes and exports separate
    the people on the other side, as they already do with Deepgram.
 2. Those speakers can be named with phase A's rename, and the names show
    everywhere, as for Deepgram speakers today.
    - Identity holds **within one recording**.
-   - When a meeting is resumed, new voices continue the numbering after the
-     highest stored number, as `session_restore` does today
-     (`speaker_offset`).
+   - Pause and resume within the same session keep the same people on the
+     same numbers. `speaker_offset` is added to every incoming number today
+     (`session.rs` ~2341, ~2070), so it must not shift them twice.
+   - When a meeting is restored after a restart, new voices continue the
+     numbering after the highest stored number, as `session_restore` does
+     today.
    - A returning voice is not matched to its old number, because no voice
      prints are stored (outcome 3). The user can rename it again.
 3. No audio or voice data leaves the machine. Nothing new is stored on disk
@@ -84,6 +91,15 @@ closure size and accuracy must be measured before committing to an approach.
   - Today's `transcript.relabel` carries only `who` and times, so it is not
     enough.
   - Never a silent rewrite of stored text.
+- **Answers see what they can.** Batch lines arrive final, and an automatic
+  answer can start at once (`session.rs` ~1969, ~2639). If labels come
+  later, an answer started earlier uses "Them" for that line. It is never
+  delayed waiting for a label.
+- **Independent of the owner voice check.** It works without an enrolled
+  owner voice and whether or not the owner check is paused. It shares the one
+  loaded embedder, so the model is in RAM once. Rolling notes and the recap
+  wait for pending labels, as they already wait for owner checks
+  (`settle_checks`).
 - **Budget.** Separation runs off the speech-to-text and answer threads, with
   bounded memory per recording, and must leave untouched:
   - answer latency;
@@ -132,4 +148,12 @@ closure size and accuracy must be measured before committing to an approach.
 | "Live" needs a limit; Parakeet chunks can run 15 s; mixed-speaker chunks | Codex | confirmed → latency measured from the chunk's end; mixed chunks stay unlabelled |
 | `transcript.relabel` cannot carry a numbered speaker | Codex | confirmed → the constraint requires line id, number and key |
 | Resource bar open-ended; the owner check shares the embedder | Codex | confirmed → owner-approved numbers on p620 and razer; the owner check is untouched |
+| Scope is the batch path (loopback OpenAI-compatible too), not only Parakeet | agy | confirmed → problem and outcome 1 |
+| `speaker_offset` on pause/resume would shift a persistent clusterer twice | agy | confirmed → outcome 2 |
+| Hand-offs under 0.6 s land in one chunk | agy | confirmed → mixed chunks stay "Them" and count against coverage; splitting is a spec option |
+| Auto answers can start before an async label | agy | confirmed → answers never wait; they use "Them" |
+| Must not depend on owner enrollment or the paused owner check; share the embedder; notes wait | agy | confirmed → constraint |
+| The coverage floor and the owner-check CAM++ figures | agy | duplicate of Codex, already folded |
+
+agy reviewed the first draft; its other findings duplicate Codex's.
 
