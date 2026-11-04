@@ -24,6 +24,7 @@ or from local models.
   ChatGPT subscription CLI, Antigravity, OpenCode, an Ollama Cloud key, or a
   local [Ollama](https://ollama.com).
 - About 1.1 GB of free RAM while Parakeet speech-to-text is loaded (CPU only, no GPU needed).
+  Norwegian needs about 2.1 GB more, see [Norwegian](#norwegian).
 
 ### 2. Add the flake
 
@@ -136,7 +137,7 @@ The copilot helps you ask; it never judges the candidate.
 - **Consent:** recording in this mode always asks you to confirm that the
   candidate has been told. Agents cannot give that consent.
 - **Local-only:** switch it on per candidate. Speech-to-text then stays on
-  Parakeet (or an OpenAI-compatible server on this machine) and every model call goes to a local Ollama on this machine;
+  Parakeet, Norwegian Whisper (or an OpenAI-compatible server on this machine) and every model call goes to a local Ollama on this machine;
   anything else is refused, and agents cannot read that interview.
 - **Deletion:** "Delete candidate…" removes the candidate, their documents,
   questions, the interview's transcript, notes and chats, in one step.
@@ -181,6 +182,7 @@ only as long as you need it, and make hiring decisions yourself.
 | Provider | Where it runs | Notes |
 | --- | --- | --- |
 | Parakeet (default, `parakeet-local`) | in the daemon, on the CPU | NVIDIA Parakeet TDT 0.6B v3; about 1.1 GB RAM while loaded; 25 European languages, detected automatically |
+| Norwegian Whisper (`whisper-nb-local`, opt-in) | in the daemon, on the CPU | NB-Whisper small from the National Library of Norway; about 2.1 GB RAM while loaded; Norwegian only, see [Norwegian](#norwegian) |
 | Deepgram (`deepgram-stt`) | cloud | a key in Providers, or an agenix file: `deepgram.keyFile = config.age.secrets.api-deepgram.path;` (a key in Providers wins); `deepgram.region = "eu"` uses `api.eu.deepgram.com` and opts out of model improvement |
 | OpenAI-compatible (`openai-compatible-stt`) | your server | any server with `/v1/audio/transcriptions` (a whisper server, vLLM, Groq, OpenAI): `settings.speechProvider = "openai-compatible-stt"`, `settings.speechBaseUrl` and `settings.speechModel` (required). whisper.cpp's `whisper-server` works when started with `--inference-path /v1/audio/transcriptions` |
 
@@ -189,9 +191,57 @@ fail with a message saying so. A saved `whisper-local` choice becomes
 `parakeet-local` once, with a notice. For Deepgram or OpenAI-compatible setups
 only, set `parakeet.enable = false` to leave the model out of the closure.
 
+### Norwegian
+
+Parakeet has no Norwegian: a Norwegian call comes out as Swedish-looking text.
+For Norwegian, turn on the local NB-Whisper engine and choose the language
+yourself. It is not detected automatically.
+
+1. Add the model (about 360 MB in the closure) and rebuild:
+
+   ```nix
+   programs.nixarchy-meetingai.whisperNb.enable = true;
+   ```
+
+2. Before a Norwegian call, set **Settings → Speech language** to **Norwegian**.
+   Set it back to **Auto** for a call in another language: while Norwegian is
+   set, everything is transcribed as Norwegian, including English.
+
+| Speech language | Provider setting | What transcribes |
+| --- | --- | --- |
+| Auto | Parakeet | Parakeet, in its 25 languages; no Norwegian |
+| Norwegian | Parakeet (default) | Norwegian Whisper, on this machine |
+| Norwegian | Deepgram or OpenAI-compatible | that provider, sent the code `no` |
+
+- **Language codes:** `nb`, `no` and `nn`, in any case or with a region such as
+  `nb-NO`, all mean Norwegian.
+- **Without the model:** with Norwegian set and `whisperNb.enable` off, recording
+  and dictation are refused as not ready, rather than writing the wrong language.
+- **Other languages:** a language the engine cannot do is refused before
+  recording starts, with an alternative named.
+- **Local-only:** Norwegian Whisper is allowed, and no audio leaves the machine.
+- **Setting the language in Nix:** `settings.speechLanguage` also works, but it
+  locks the picker, so you cannot switch back to Auto for one call.
+
+What to expect, measured on one workstation CPU using 16 threads
+([results](docs/eval/2026-11-norwegian-stt.md)):
+
+| | Parakeet on Norwegian | Norwegian Whisper |
+| --- | --- | --- |
+| Word errors on call audio | 85.1% | 23.9% (14.4% on single sentences) |
+| Time per chunk, median / p95 | 0.55 / 1.95 s | 2.4 / 7.8 s |
+| Short words such as "ja" and "nei" kept | | 7 of 16 |
+| Dictations transcribed | | 20 of 20 |
+
+Lines appear more slowly than with Parakeet and very short answers are often
+missed ([#74](https://github.com/olafkfreund/nixarchy-meetingai/issues/74)).
+The model loads the first time it is needed and then stays loaded until the
+daemon restarts, next to Parakeet if that has been used too. It has not been
+measured on smaller machines.
+
 ### Fully offline
 
-With Parakeet, transcription is local. Choose Ollama for answers and notes and
+With Parakeet or Norwegian Whisper, transcription is local. Choose Ollama for answers and notes and
 nothing leaves the machine. Large local models can take a while to load the
 first time; the answer card shows "Loading model…" meanwhile.
 
@@ -230,7 +280,8 @@ them locked with "Set in Nix". Profiles and prompts stay in the app.
   for live answers, separately.
 - **Pace:** how quickly the copilot answers what the other side asks.
 - **Smart follow-ups:** suggested next questions, on or off.
-- **Speech:** speech-to-text provider and model, microphone and output device.
+- **Speech:** speech-to-text provider and model, speech language, microphone
+  and output device.
 - **Text size** and **Reduce motion**.
 - **Auto-record calls:** start notes by itself when a call is detected
   (never in Interview someone mode).
@@ -1261,7 +1312,7 @@ pkgs.callPackage ./nix/speaker-model.nix { }
 
 
 
-Give the daemon the local Norwegian speech model (NB-Whisper small plus the Silero voice detector)\. Off by default: Parakeet does not transcribe Norwegian, so set ` settings.speechLanguage = "nb" ` and turn this on to record Norwegian meetings\.
+Give the daemon the local Norwegian speech model (NB-Whisper small plus the Silero voice detector)\. Off by default\. Parakeet does not transcribe Norwegian, so turn this on and choose Norwegian under Settings, Speech language, for Norwegian meetings\. It is about 2\.1 GB of RAM once used\.
 
 
 
