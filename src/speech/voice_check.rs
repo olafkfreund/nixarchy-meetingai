@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use parking_lot::Mutex;
 use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig};
 
 use crate::audio::dsp::{SAMPLE_RATE, rms};
@@ -76,7 +77,9 @@ pub trait Embedder {
     fn embed(&self, samples: &[f32]) -> Option<Vec<f32>>;
 }
 
-pub struct SherpaEmbedder(SpeakerEmbeddingExtractor);
+/// The extractor sits behind a lock taken per `embed()` call: owner checks run on concurrent
+/// blocking workers, and sherpa-onnx's thread safety for concurrent `compute` is not established.
+pub struct SherpaEmbedder(Mutex<SpeakerEmbeddingExtractor>);
 
 impl SherpaEmbedder {
     /// Load on a blocking worker, after audio is available for a check.
@@ -89,16 +92,19 @@ impl SherpaEmbedder {
             ..Default::default()
         };
         SpeakerEmbeddingExtractor::create(&config)
-            .map(Self)
+            .map(|extractor| Self(Mutex::new(extractor)))
             .ok_or_else(|| "speaker model could not be loaded".into())
     }
 }
 
 impl Embedder for SherpaEmbedder {
     fn embed(&self, samples: &[f32]) -> Option<Vec<f32>> {
-        let stream = self.0.create_stream()?;
+        let extractor = self.0.lock();
+        let stream = extractor.create_stream()?;
         stream.accept_waveform(SAMPLE_RATE as i32, samples);
-        self.0.is_ready(&stream).then(|| self.0.compute(&stream))?
+        extractor
+            .is_ready(&stream)
+            .then(|| extractor.compute(&stream))?
     }
 }
 
