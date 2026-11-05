@@ -173,6 +173,8 @@ pub fn response_instruction(length: ResponseLength, language: &str) -> String {
     }
 }
 
+pub const APP_REQUEST_LANGUAGE_RULE: &str = "This request is a button in the app, not the user's language. Reply in the language of the recent meeting speech.";
+
 /// Complete set of user preferences stored in the `app_settings` table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {

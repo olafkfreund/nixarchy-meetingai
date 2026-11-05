@@ -64,3 +64,5 @@ Check, by Claude: `bash shell/tests/ci.sh`.
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+- Step 1 (Codex; compile and clippy fixes by Claude): the rule also treats an empty language as Auto, as `response_instruction` does. `system_prompt` and `begin_send` take a further argument, under `allow(clippy::too_many_arguments)`.
+- Step 2 (coder): a small `quick()` on `Overlay`, so a harness can press the button. The shell sets no flag for a screenshot or attachment with nothing typed, as the daemon does.
