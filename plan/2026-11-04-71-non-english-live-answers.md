@@ -66,3 +66,7 @@ Check, by Claude: `bash shell/tests/ci.sh`.
 (Recorded here during implementation, in the same commit as the code.)
 - Step 1 (Codex; compile and clippy fixes by Claude): the rule also treats an empty language as Auto, as `response_instruction` does. `system_prompt` and `begin_send` take a further argument, under `allow(clippy::too_many_arguments)`.
 - Step 2 (coder): a small `quick()` on `Overlay`, so a harness can press the button. The shell sets no flag for a screenshot or attachment with nothing typed, as the daemon does.
+- Step 3 (Claude):
+  - Counts through `ctl --agent`, so Local-only stays hidden; remote lines are `who = "system"`. Results in `docs/eval/2026-11-question-marks.md`.
+  - The sample used a simplified prompt, through `claude -p` and Ollama directly, rather than the daemon, and added local models, because Sonnet did not show the bug.
+  - The approved rule's "too little Polish" row applies, so #71 closes with S1.
