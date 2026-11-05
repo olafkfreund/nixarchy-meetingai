@@ -87,3 +87,10 @@ Full checks, `nix flake check`; reviews by a fresh Opus agent, Codex and agy, re
   - A capture that fails, or a lock state that can't be read, warns once per switch-on. A locked screen stays silent.
   - Curly apostrophes match the phrase list.
   - Not tested: the 5-minute tick, since `tokio` has no `test-util` here.
+
+- **Review fixes to step 2 (coder):**
+  - The shell uses `screenshots.get` for a preview and shows delete and export errors in the Library's status line.
+  - `Client.plainError` is new, since no helper could be reached. `startRecording` keeps its inline copy.
+  - The fake daemon's `autoshots.stop` now behaves like the real one; a new `test.limit` drives the limit.
+  - Not tested: the first-use dialog at the limit, only the click path.
+- **Step 3:** size measured from real frames, not from a recorded 60-capture meeting: about 0.62 MB per 2560x1440 frame, about 1.48 MB across two monitors. No resolution limit added. Video-heavy frames were not measured.

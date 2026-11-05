@@ -750,11 +750,15 @@ line = next((l for l in open(sys.argv[1], errors="replace") if "AUTOSHOTS {" in 
 if line is None:
     sys.exit("FAIL (autoshots): no harness dump")
 d = json.loads(line[line.index("AUTOSHOTS ") + 10:])
-bad = [f"{k}: want True, got {d.get(k)!r}" for k in ("toggle", "confirm", "noSecondConfirm", "label", "limit", "rows", "preview", "deleteConfirm", "afterDelete") if d.get(k) is not True]
+bad = [f"{k}: want True, got {d.get(k)!r}" for k in ("toggle", "confirm", "noSecondConfirm", "label", "limit", "rows", "preview", "deleteWording", "deleteConfirm", "afterDelete") if d.get(k) is not True]
 if "slurp is not installed" not in d.get("refusal", ""):
     bad.append(f"the refusal must show as a notice: {d.get('refusal')!r}")
+if "reached its limit of 60 automatic screenshots" not in d.get("limitNotice", ""):
+    bad.append(f"a click at the limit must show the daemon's limit message: {d.get('limitNotice')!r}")
+if "Export folder is read-only." not in d.get("exportError", ""):
+    bad.append(f"a delete reply with export_error must show its text: {d.get('exportError')!r}")
 log = open(sys.argv[2]).read()
-for need in ("autoshots.start", "autoshots.stop", "screenshots.list", "screenshots.delete"):
+for need in ("autoshots.start", "autoshots.stop", "screenshots.list", "screenshots.get", "screenshots.delete", "test.limit"):
     if need not in log:
         bad.append(f"daemon never received {need!r}")
 if bad:

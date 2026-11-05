@@ -177,12 +177,11 @@ Item {
         root.client.send("screenshots.list", { meeting: meeting }, function(r) { if (r.ok && root.selectedId === id) root.meetingShots = r.data || []; });
     }
     function toggleShot(shot) {   // preview on click; the image is fetched only now
-        var id = String(shot.id), meeting = root.selectedId;
+        var id = String(shot.id);
         if (root.shotOpen === id) { root.shotOpen = ""; root.shotData = ""; return; }
         root.shotOpen = id; root.shotData = "";
-        root.client.send("screenshots.list", { meeting: meeting, data: true }, function(r) {
-            var hit = r.ok && root.shotOpen === id ? (r.data || []).find(function(x) { return String(x.id) === id; }) : null;
-            if (hit) root.shotData = "data:" + hit.mime + ";base64," + hit.data;
+        root.client.send("screenshots.get", { id: shot.id }, function(r) {
+            if (r.ok && r.data && root.shotOpen === id) root.shotData = "data:" + r.data.mime + ";base64," + r.data.data;
         });
     }
     function openMeeting(meeting) {   // "Open transcript": restore it, no jump
@@ -784,7 +783,7 @@ Item {
                                         ts: root.theme.ts
                                         text: "Delete"
                                         bordered: true
-                                        onClicked: root.confirmRequested("Delete this screenshot? It is removed from the meeting.", "Delete", function() { root.client.send("screenshots.delete", { id: srow2.modelData.id }, function() { if (root.shotOpen === String(srow2.modelData.id)) { root.shotOpen = ""; root.shotData = ""; } root.fetchShots(root.selectedId); }); })
+                                        onClicked: root.confirmRequested("Delete this screenshot? It is removed from the meeting and its export folder. Copies already synced elsewhere are not.", "Delete", function() { root.client.send("screenshots.delete", { id: srow2.modelData.id }, function(r) { if (root.shotOpen === String(srow2.modelData.id)) { root.shotOpen = ""; root.shotData = ""; } if (!r.ok) root.exportStatus = String(r.error || "Delete failed."); else if (r.data && r.data.export_error) root.exportStatus = String(r.data.export_error); root.fetchShots(root.selectedId); }); })
                                     }
                                 }
                                 Image {

@@ -154,7 +154,7 @@ Item {
         if (st.on) { backend.send("autoshots.stop", {}); return; }
         var go = function() {
             root.autoShotsAsked = true;
-            backend.send("autoshots.start", {}, function(r) { root.autoShotsNotice = r.ok ? "" : String(r.error || "request failed"); });
+            backend.send("autoshots.start", {}, function(r) { root.autoShotsNotice = r.ok ? "" : backend.plainError(r.error || "request failed"); });
         };
         if (root.autoShotsAsked) go();
         else root.ask("Automatic screenshots capture whatever is in the area you choose, including other windows. The export folder may sync elsewhere. Check that you may capture what others share.", "Start", go);
