@@ -170,3 +170,7 @@ The spec places the control "near the mode picker". Reviews showed the header ca
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+- Step 1 (agy; deletion and checks by Claude):
+  - agy's tools cannot delete files, so it emptied them; Claude removed them with `git rm`.
+  - `nix/hm-module.nix` and `flake.nix` still reference the deleted model files until step 4, so `nix flake check` fails between these commits.
+  - `speech_guard`'s refusal now always names Deepgram or an OpenAI-compatible engine, with no Norwegian branch.

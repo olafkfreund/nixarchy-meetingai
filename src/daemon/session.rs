@@ -646,9 +646,6 @@ fn speech_not_ready(provider: &str, other: &'static str) -> String {
     if provider == "parakeet-local" {
         let reason = crate::speech::stt::parakeet::not_ready_reason().unwrap_or_default();
         format!("Speech-to-text is not ready: {reason}.")
-    } else if provider == "whisper-nb-local" {
-        let reason = crate::speech::stt::whisper_nb::not_ready_reason().unwrap_or_default();
-        format!("Speech-to-text is not ready: {reason}.")
     } else {
         other.to_owned()
     }
@@ -662,7 +659,7 @@ struct ResolvedSpeech {
 
 fn resolve_speech(settings: &Settings) -> ResolvedSpeech {
     let chosen = settings.speech_provider.trim();
-    let chosen = if chosen.is_empty() {
+    let id = if chosen.is_empty() {
         "parakeet-local"
     } else {
         chosen
@@ -680,11 +677,6 @@ fn resolve_speech(settings: &Settings) -> ResolvedSpeech {
         .unwrap_or(raw)
         .to_ascii_lowercase();
     let norwegian = matches!(base.as_str(), "nb" | "no" | "nn");
-    let id = if chosen == "parakeet-local" && norwegian {
-        "whisper-nb-local"
-    } else {
-        chosen
-    };
     let language = if norwegian && !id.starts_with("custom-") {
         "no"
     } else {
@@ -695,8 +687,7 @@ fn resolve_speech(settings: &Settings) -> ResolvedSpeech {
         "",
         SttProvider::by_id(id).map_or("", |provider| provider.default_model),
     );
-    // The model setting belongs to the engine the user chose, not one routing picked for them.
-    if !settings.speech_model.is_empty() && id == chosen {
+    if !settings.speech_model.is_empty() {
         config.model.clone_from(&settings.speech_model);
     }
     ResolvedSpeech {
@@ -708,10 +699,7 @@ fn resolve_speech(settings: &Settings) -> ResolvedSpeech {
 
 /// Engines that keep audio on this machine or a server the user runs.
 fn local_speech(id: &str) -> bool {
-    matches!(
-        id,
-        "parakeet-local" | "whisper-nb-local" | "openai-compatible-stt"
-    ) || id.starts_with("custom-")
+    matches!(id, "parakeet-local" | "openai-compatible-stt") || id.starts_with("custom-")
 }
 
 fn speech_guard(speech: &ResolvedSpeech) -> Result<Option<String>, String> {
@@ -755,7 +743,6 @@ fn speech_guard(speech: &ResolvedSpeech) -> Result<Option<String>, String> {
                 | "ru"
                 | "uk"
         )),
-        "whisper-nb-local" => Some(language == "no"),
         // Deepgram Nova-3 general; other models have different support.
         "deepgram-stt"
             if speech.config.model == "nova-3" || speech.config.model == "nova-3-general" =>
@@ -821,14 +808,9 @@ fn speech_guard(speech: &ResolvedSpeech) -> Result<Option<String>, String> {
     match supported {
         Some(true) => Ok(None),
         Some(false) => {
-            let alternative = if matches!(base, "nb" | "no" | "nn") {
-                "Norwegian Whisper or Deepgram"
-            } else {
-                "Deepgram or an OpenAI-compatible speech engine that supports it"
-            };
             let engine = SttProvider::by_id(&speech.id).map_or(speech.id.as_str(), |p| p.name);
             Err(format!(
-                "language_unsupported: {engine} cannot transcribe {language}. Choose {alternative} before recording."
+                "language_unsupported: {engine} cannot transcribe {language}. Choose Deepgram or an OpenAI-compatible speech engine that supports it before recording."
             ))
         }
         None => Ok(Some(format!(
@@ -840,7 +822,6 @@ fn speech_guard(speech: &ResolvedSpeech) -> Result<Option<String>, String> {
 fn preload_speech(id: &str) -> Result<(), String> {
     match id {
         "parakeet-local" => crate::speech::stt::parakeet::preload(),
-        "whisper-nb-local" => crate::speech::stt::whisper_nb::preload(),
         _ => Ok(()),
     }
 }
@@ -1202,7 +1183,7 @@ impl Daemon {
                 "speech": (!speech).then(|| speech_not_ready(
                     &resolved.id,
                     if local {
-                        "Local-only is on: speech-to-text must run on this machine (Parakeet, Norwegian Whisper, or an OpenAI-compatible server on a loopback address)."
+                        "Local-only is on: speech-to-text must run on this machine (Parakeet, or an OpenAI-compatible server on a loopback address)."
                     } else {
                         "Speech-to-text is not ready. Check the Parakeet model, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
                     },
@@ -2619,7 +2600,7 @@ impl Daemon {
                     speech_not_ready(
                         &resolved.id,
                         if local {
-                            "local_only: speech-to-text must run on this machine (Parakeet, Norwegian Whisper, or an OpenAI-compatible server on a loopback address)."
+                            "local_only: speech-to-text must run on this machine (Parakeet, or an OpenAI-compatible server on a loopback address)."
                         } else {
                             "Speech-to-text is not ready. Check the Parakeet model, add a Deepgram key, or set an openai-compatible-stt base URL and check that it is reachable."
                         },
@@ -2688,7 +2669,7 @@ impl Daemon {
         if let Some(id) = speech
             .as_ref()
             .map(|c| c.id.as_str())
-            .filter(|id| matches!(*id, "parakeet-local" | "whisper-nb-local"))
+            .filter(|id| *id == "parakeet-local")
         {
             let id = id.to_owned();
             let loaded = tokio::task::spawn_blocking(move || preload_speech(&id))
@@ -3494,7 +3475,7 @@ impl Daemon {
                 return Err("Wait for the previous meeting transcript to finish.".into());
             }
             let resolved = resolve_speech(&g.settings);
-            if !meeting && matches!(resolved.id.as_str(), "parakeet-local" | "whisper-nb-local") {
+            if !meeting && resolved.id == "parakeet-local" {
                 speech_guard(&resolved)?;
             }
             let Some(speech) = g
@@ -3516,7 +3497,7 @@ impl Daemon {
             if let Some(notice) = speech_guard(&guard_speech)? {
                 self.emit("notice", json!({"text": notice}));
             }
-            if matches!(speech.id.as_str(), "parakeet-local" | "whisper-nb-local") {
+            if speech.id == "parakeet-local" {
                 // Warm the model while the user speaks; a failure shows when the text is transcribed.
                 let id = speech.id.clone();
                 tokio::task::spawn_blocking(move || preload_speech(&id));
@@ -6654,17 +6635,12 @@ mod command_tests {
         for language in ["nb", "no", "nn", "NB", "nb-NO", "nn_NO"] {
             s.speech_language = language.into();
             let speech = resolve_speech(&s);
-            assert_eq!(speech.id, "whisper-nb-local", "{language}");
+            assert_eq!(speech.id, "parakeet-local", "{language}");
             assert_eq!(speech.language, "no", "{language}");
+            assert!(speech_guard(&speech).is_err(), "{language}");
         }
-        // A model chosen for Parakeet never follows the route to the Norwegian engine.
-        s.speech_language = "nb".into();
         s.speech_model = "parakeet-custom".into();
-        assert_ne!(resolve_speech(&s).config.model, "parakeet-custom");
-        // ...but a model chosen for the Norwegian engine itself does apply.
-        s.speech_provider = "whisper-nb-local".into();
         assert_eq!(resolve_speech(&s).config.model, "parakeet-custom");
-        s.speech_provider = Settings::default().speech_provider;
         s.speech_model = String::new();
         for language in ["", "Auto", "aUtO", "fr"] {
             s.speech_language = language.into();
@@ -6697,19 +6673,19 @@ mod command_tests {
         d.local_only.store(true, Ordering::Relaxed);
         let error = d.dictate_stop().await.unwrap_err();
         assert_eq!(error, "Your speech provider is unavailable.");
-        // Local-only admits the Norwegian engine and refuses cloud ones.
-        assert!(local_speech("whisper-nb-local") && !local_speech("deepgram-stt"));
+        // Local-only admits Parakeet and refuses cloud ones.
+        assert!(local_speech("parakeet-local") && !local_speech("deepgram-stt"));
     }
 
     #[test]
     fn unsupported_language_is_refused_with_an_alternative() {
-        let mut s = Settings {
-            speech_language: "ja".into(),
-            ..Default::default()
-        };
-        let error = speech_guard(&resolve_speech(&s)).unwrap_err();
-        assert!(error.contains("Parakeet"));
-        assert!(error.contains("Deepgram"));
+        let mut s = Settings::default();
+        for language in ["ja", "nb"] {
+            s.speech_language = language.into();
+            let error = speech_guard(&resolve_speech(&s)).unwrap_err();
+            assert!(error.contains("Parakeet"), "{error}");
+            assert!(error.contains("Deepgram"), "{error}");
+        }
         s.speech_provider = "openai-compatible-stt".into();
         assert!(speech_guard(&resolve_speech(&s)).unwrap().is_some());
         s.speech_provider = Settings::default().speech_provider;
@@ -6757,28 +6733,6 @@ mod command_tests {
             .count();
         assert_eq!(notices, 1);
         d.handle("record.stop", json!({}), None).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn missing_norwegian_model_has_its_own_state_hint() {
-        let Some(reason) = crate::speech::stt::whisper_nb::not_ready_reason() else {
-            return; // The test host has the optional model installed.
-        };
-        let d = daemon();
-        d.handle(
-            "settings.set",
-            json!({"key":"speech_language", "value":"nb"}),
-            None,
-        )
-        .await
-        .unwrap();
-        let state = d.handle("state.get", json!({}), None).await.unwrap();
-        assert_eq!(state["ready"]["speech"], false);
-        assert!(state["hints"]["speech"].as_str().unwrap().contains(&reason));
-        assert_eq!(
-            resolve_speech(&d.inner.lock().settings).id,
-            "whisper-nb-local"
-        );
     }
 
     #[tokio::test]

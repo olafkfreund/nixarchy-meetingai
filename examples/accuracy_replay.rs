@@ -2,20 +2,19 @@
 //! wall-clock (or `transcription::transcribe` with `--dictation`). Prints one JSON line per
 //! inference request `{"kind":"request","latency","at"}`, one per line the filter releases
 //! `{"kind":"line","channel","start","end","released_at","text"}`, and a final summary with
-//! `VmHWM` peak RSS `{"kind":"summary","duration","vm_hwm_kb","vm_rss_kb","load_mode"}`.
+//! `VmHWM` peak RSS `{"kind":"summary","duration","vm_hwm_kb","vm_rss_kb"}`.
 //! Driven by `tools/accuracy/score.py`.
-//! Usage: accuracy_replay FILE.wav (--engine parakeet|whisper-nb|turbo | --parakeet | --url URL | --fake TEXT)
-//!        [--model-dir DIR] [--parakeet-dir DIR] [--vad PATH] [--speaker-model PATH]
-//!        [--load-mode resident|unload] [--dictation] [--model M] [--language L] [--glossary G]
+//! Usage: accuracy_replay FILE.wav (--engine parakeet | --parakeet | --url URL | --fake TEXT)
+//!        [--parakeet-dir DIR] [--speaker-model PATH]
+//!        [--dictation] [--model M] [--language L] [--glossary G]
 
 use nixarchy_meetingai::ai::providers::ProviderConfig;
 use nixarchy_meetingai::audio::encode_wav;
 use nixarchy_meetingai::speech::stt::{
-    LoadMode, parakeet, record_chunk_latencies, set_load_mode, take_chunk_latencies,
+    parakeet, record_chunk_latencies, take_chunk_latencies,
     transcription::{
         BatchChunks, LiveEvent, LiveTranscriber, SttHints, TranscriptLine, transcribe,
     },
-    whisper_nb,
 };
 use nixarchy_meetingai::speech::voice_check::SherpaEmbedder;
 use std::collections::HashMap;
@@ -26,7 +25,6 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Engine {
     Parakeet,
-    WhisperNb,
     Url(String),
     Fake(String),
 }
@@ -42,9 +40,7 @@ fn resolve_engine(
         + usize::from(url.is_some())
         + usize::from(fake.is_some());
     if count != 1 {
-        return Err(
-            "give exactly one of --engine parakeet|whisper-nb|turbo, --parakeet, --url URL, or --fake TEXT",
-        );
+        return Err("give exactly one of --engine parakeet, --parakeet, --url URL, or --fake TEXT");
     }
     if parakeet_flag {
         return Ok(Engine::Parakeet);
@@ -57,16 +53,7 @@ fn resolve_engine(
     }
     match engine.unwrap_or_default() {
         "parakeet" => Ok(Engine::Parakeet),
-        "whisper-nb" | "turbo" => Ok(Engine::WhisperNb),
-        _ => Err("--engine must be parakeet, whisper-nb, or turbo"),
-    }
-}
-
-fn parse_load_mode(value: Option<&str>) -> Result<(LoadMode, &'static str), &'static str> {
-    match value.unwrap_or("resident") {
-        "resident" => Ok((LoadMode::Resident, "resident")),
-        "unload" => Ok((LoadMode::UnloadInactive, "unload")),
-        _ => Err("--load-mode must be resident or unload"),
+        _ => Err("--engine must be parakeet"),
     }
 }
 
@@ -91,29 +78,6 @@ fn default_eval_models_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(cache).join("no/models"));
     }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/meetingai-eval/no/models"))
-}
-
-fn find_vad_path(explicit: Option<&str>, model_dir: Option<&str>) -> Option<PathBuf> {
-    if let Some(p) = explicit {
-        return Some(PathBuf::from(p));
-    }
-    if let Some(env) = std::env::var_os("NIXARCHY_MEETINGAI_SILERO_VAD").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(env));
-    }
-    let mut candidates = Vec::new();
-    if let Some(dir) = model_dir {
-        let d = PathBuf::from(dir);
-        candidates.push(d.join("silero_vad.onnx"));
-        if let Some(parent) = d.parent() {
-            candidates.push(parent.join("silero_vad.onnx"));
-            candidates.push(parent.join("silero-vad/silero_vad.onnx"));
-        }
-    }
-    if let Some(models) = default_eval_models_dir() {
-        candidates.push(models.join("silero_vad.onnx"));
-        candidates.push(models.join("silero-vad/silero_vad.onnx"));
-    }
-    candidates.into_iter().find(|p| p.is_file())
 }
 
 fn print_line(line: &TranscriptLine, released_at: f64) {
@@ -215,33 +179,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         value("--url"),
         value("--fake"),
     )?;
-    let (load_mode, load_mode_name) = parse_load_mode(value("--load-mode"))?;
 
     if let Some(dir) = value("--parakeet-dir") {
         // Set before Tokio starts workers; the daemon's loader reads this variable.
         unsafe { std::env::set_var("NIXARCHY_MEETINGAI_PARAKEET_DIR", dir) };
     }
-    match &engine {
-        Engine::Parakeet => {
-            if let Some(dir) = value("--model-dir") {
-                unsafe { std::env::set_var("NIXARCHY_MEETINGAI_PARAKEET_DIR", dir) };
-            }
-        }
-        Engine::WhisperNb => {
-            if let Some(dir) = value("--model-dir") {
-                unsafe { std::env::set_var("NIXARCHY_MEETINGAI_WHISPER_NB_DIR", dir) };
-            }
-            if let Some(vad) = find_vad_path(value("--vad"), value("--model-dir")) {
-                unsafe { std::env::set_var("NIXARCHY_MEETINGAI_SILERO_VAD", vad) };
-            }
-        }
-        Engine::Url(_) | Engine::Fake(_) => {}
-    }
     if let Some(speaker) = value("--speaker-model") {
         unsafe { std::env::set_var("MEETINGAI_SPEAKER_MODEL", speaker) };
     }
-
-    set_load_mode(load_mode);
 
     let _speaker = std::env::var_os("MEETINGAI_SPEAKER_MODEL")
         .filter(|v| !v.is_empty())
@@ -257,9 +202,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if parakeet::model_dir().is_some() {
         parakeet::preload()?;
     }
-    if engine == Engine::WhisperNb {
-        whisper_nb::preload()?;
-    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -269,7 +211,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         flags,
         engine,
         dictation,
-        load_mode_name,
     ))
 }
 
@@ -278,13 +219,11 @@ async fn replay(
     flags: HashMap<String, String>,
     engine: Engine,
     dictation: bool,
-    load_mode_name: &'static str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let value = |flag: &str| flags.get(flag).cloned();
     let glossary = value("--glossary").unwrap_or_default();
     let mut config = match &engine {
         Engine::Parakeet => ProviderConfig::new("parakeet-local", "", ""),
-        Engine::WhisperNb => ProviderConfig::new("whisper-nb-local", "", ""),
         Engine::Url(url) => {
             let mut c = ProviderConfig::new(
                 "openai-compatible-stt",
@@ -353,7 +292,6 @@ async fn replay(
                 "duration": duration,
                 "vm_hwm_kb": proc_status_kb("VmHWM:"),
                 "vm_rss_kb": proc_status_kb("VmRSS:"),
-                "load_mode": load_mode_name,
             })
         );
         return Ok(());
@@ -450,7 +388,6 @@ async fn replay(
             "duration": duration,
             "vm_hwm_kb": proc_status_kb("VmHWM:"),
             "vm_rss_kb": proc_status_kb("VmRSS:"),
-            "load_mode": load_mode_name,
         })
     );
     Ok(())
@@ -458,11 +395,11 @@ async fn replay(
 
 #[cfg(test)]
 mod tests {
-    use super::{Engine, LoadMode, parse_load_mode, resolve_engine};
+    use super::{Engine, resolve_engine};
 
     #[test]
     fn requires_exactly_one_engine() {
-        for engine in [None, Some("parakeet"), Some("whisper-nb"), Some("turbo")] {
+        for engine in [None, Some("parakeet")] {
             for parakeet in [false, true] {
                 for url in [None, Some("http://127.0.0.1:8000")] {
                     for fake in [None, Some("ok")] {
@@ -479,23 +416,9 @@ mod tests {
             }
         }
         assert_eq!(
-            resolve_engine(Some("turbo"), false, None, None),
-            Ok(Engine::WhisperNb)
+            resolve_engine(Some("parakeet"), false, None, None),
+            Ok(Engine::Parakeet)
         );
         assert!(resolve_engine(Some("unknown"), false, None, None).is_err());
-    }
-
-    #[test]
-    fn parses_load_modes() {
-        assert_eq!(parse_load_mode(None), Ok((LoadMode::Resident, "resident")));
-        assert_eq!(
-            parse_load_mode(Some("resident")),
-            Ok((LoadMode::Resident, "resident"))
-        );
-        assert_eq!(
-            parse_load_mode(Some("unload")),
-            Ok((LoadMode::UnloadInactive, "unload"))
-        );
-        assert!(parse_load_mode(Some("other")).is_err());
     }
 }
