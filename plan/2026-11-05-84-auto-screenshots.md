@@ -76,3 +76,14 @@ Full checks, `nix flake check`; reviews by a fresh Opus agent, Codex and agy, re
 - Step 2 (coder):
   - The "ask once" flag is in memory, so the first-use confirmation shows again after a shell restart. Persisting it would need a daemon setting.
   - The Library's `fetchMeetingView` also loads `screenshots.list`; images are fetched on click.
+
+- **Review fixes to step 1 (Codex, lead corrections):**
+  - Export ownership: `.auto-files` became `.owned-files`, listing a hash and name for every image the app wrote, manual ones too. A name holding anything else is never overwritten or removed; the shot takes the next free name. The same bytes count as ours, so a partial export recovers. This replaces the refusal when a name was taken.
+  - `screenshots.delete` also refreshes an existing export: the images at once, and for a meeting that is not live the whole export, so `notes.md` loses the caption and its links stay right. It returns `export_error` if that fails, or if an export outside the current folder was left alone. The row is deleted regardless.
+  - `screenshots.list` returns metadata only; new `screenshots.get {id}` returns one image, encoded off the lock, refused to agents.
+  - `autoshots.start` runs concurrently with other requests, and `slurp` is limited to 120 seconds.
+  - An agent's `record.start` clears a retained area when nothing is recording.
+  - The 60 limit counts the meeting's stored automatic rows, so off and on, restore and Play can't reset it. Deleting a shot frees a place.
+  - A capture that fails, or a lock state that can't be read, warns once per switch-on. A locked screen stays silent.
+  - Curly apostrophes match the phrase list.
+  - Not tested: the 5-minute tick, since `tokio` has no `test-util` here.

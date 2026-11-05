@@ -294,7 +294,7 @@ const AUTO_PHRASES: [&str; 9] = [
 ];
 
 #[cfg(test)]
-type AutoCapture = Box<dyn Fn(&str) -> (Vec<u8>, Vec<u8>) + Send + Sync>;
+type AutoCapture = Box<dyn Fn(&str) -> Result<(Vec<u8>, Vec<u8>), String> + Send + Sync>;
 
 struct AutoShots {
     meeting: String,
@@ -304,6 +304,22 @@ struct AutoShots {
     last_fingerprint: Vec<u8>,
     last_capture: Option<Instant>,
     at_limit: bool,
+    warned: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LockState {
+    Unlocked,
+    Locked,
+    Unknown,
+}
+
+fn lock_state(success: bool, stdout: &str) -> LockState {
+    match (success, stdout.trim()) {
+        (true, "false") => LockState::Unlocked,
+        (true, "true") => LockState::Locked,
+        _ => LockState::Unknown,
+    }
 }
 
 struct Recording {
@@ -2529,10 +2545,9 @@ impl Daemon {
                         {
                             self.cover_question(g);
                         }
-                        if AUTO_PHRASES
-                            .iter()
-                            .any(|phrase| line.text.to_lowercase().contains(phrase))
-                        {
+                        if AUTO_PHRASES.iter().any(|phrase| {
+                            line.text.to_lowercase().replace('’', "'").contains(phrase)
+                        }) {
                             self.schedule_auto(g, Duration::from_secs(4));
                             self.schedule_auto(g, Duration::from_secs(10));
                         }
@@ -2780,9 +2795,13 @@ impl Daemon {
         });
     }
 
-    async fn auto_unlocked(&self) -> bool {
+    async fn auto_lock_state(&self) -> LockState {
         #[cfg(test)]
-        return self.auto_unlocked.lock().as_ref().is_some_and(|f| f());
+        return match self.auto_unlocked.lock().as_ref().map(|f| f()) {
+            Some(true) => LockState::Unlocked,
+            Some(false) => LockState::Locked,
+            None => LockState::Unknown,
+        };
         #[cfg(not(test))]
         {
             let Ok(output) = tokio::process::Command::new("hyprctl")
@@ -2790,9 +2809,28 @@ impl Daemon {
                 .output()
                 .await
             else {
-                return false;
+                return LockState::Unknown;
             };
-            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "false"
+            lock_state(
+                output.status.success(),
+                &String::from_utf8_lossy(&output.stdout),
+            )
+        }
+    }
+
+    fn auto_capture_failed(&self, meeting: &str, generation: u64, reason: &str) {
+        tracing::warn!(%reason, "automatic screenshot capture failed");
+        let mut g = self.inner.lock();
+        if let Some(a) = g.autoshots.as_mut()
+            && a.meeting == meeting
+            && a.generation == generation
+            && !a.warned
+        {
+            a.warned = true;
+            self.emit(
+                "notice",
+                json!({"text": "Automatic screenshots could not capture; none are being saved."}),
+            );
         }
     }
 
@@ -2803,7 +2841,7 @@ impl Daemon {
             .lock()
             .as_ref()
             .map(|f| f(area))
-            .ok_or("test capture not injected".into());
+            .unwrap_or_else(|| Err("test capture not injected".into()));
         #[cfg(not(test))]
         {
             let fingerprint = screen_area(area, true).await?;
@@ -2827,20 +2865,34 @@ impl Daemon {
             a.last_capture = Some(Instant::now());
             (a.area.clone(), a.last_fingerprint.clone())
         };
-        if !self.auto_unlocked().await {
-            return;
+        match self.auto_lock_state().await {
+            LockState::Unlocked => {}
+            LockState::Locked => return,
+            LockState::Unknown => {
+                self.auto_capture_failed(meeting, generation, "lock state unknown");
+                return;
+            }
         }
         if !self.auto_allowed(&self.inner.lock(), meeting, generation) {
             return;
         }
-        let Ok((image, fingerprint)) = self.auto_image(&area).await else {
-            return;
+        let (image, fingerprint) = match self.auto_image(&area).await {
+            Ok(image) => image,
+            Err(error) => {
+                self.auto_capture_failed(meeting, generation, &error);
+                return;
+            }
         };
         if same_frame(&previous, &fingerprint) {
             return;
         }
-        if !self.auto_unlocked().await {
-            return;
+        match self.auto_lock_state().await {
+            LockState::Unlocked => {}
+            LockState::Locked => return,
+            LockState::Unknown => {
+                self.auto_capture_failed(meeting, generation, "lock state unknown");
+                return;
+            }
         }
         let mut g = self.inner.lock();
         if !self.auto_allowed(&g, meeting, generation) {
@@ -2880,12 +2932,17 @@ impl Daemon {
     async fn auto_start(self: &Arc<Self>) -> Result<Value, String> {
         let (meeting, epoch) = {
             let g = self.inner.lock();
+            if let Some(a) = &g.autoshots {
+                return Err(if a.at_limit {
+                    "This meeting has reached its limit of 60 automatic screenshots."
+                } else {
+                    "Automatic screenshots are already on."
+                }
+                .into());
+            }
             let Some(r) = &g.recording else {
                 return Err("Start recording first.".into());
             };
-            if g.autoshots.is_some() {
-                return Err("Automatic screenshots are already on.".into());
-            }
             if r.stop.load(Ordering::Relaxed) {
                 return Err("Start recording first.".into());
             }
@@ -2897,10 +2954,15 @@ impl Daemon {
                     "consent_required: Tell the candidate screenshots may be captured.".into(),
                 );
             }
-            (
-                g.meeting_id.clone().ok_or("Start recording first.")?,
-                self.autoshots_epoch.load(Ordering::Acquire),
-            )
+            let meeting = g.meeting_id.clone().ok_or("Start recording first.")?;
+            let count =
+                screenshots::count_auto(g.db.connection(), &meeting).map_err(|e| e.to_string())?;
+            if count >= 60 {
+                return Err(
+                    "This meeting has reached its limit of 60 automatic screenshots.".into(),
+                );
+            }
+            (meeting, self.autoshots_epoch.load(Ordering::Acquire))
         };
         #[cfg(test)]
         let area = self
@@ -2910,10 +2972,15 @@ impl Daemon {
             .ok_or("test area not injected")?;
         #[cfg(not(test))]
         let area = {
-            let output = tokio::process::Command::new("slurp")
-                .output()
-                .await
-                .map_err(|e| e.to_string())?;
+            let output = tokio::time::timeout(
+                Duration::from_secs(120),
+                tokio::process::Command::new("slurp")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .map_err(|_| "Area selection cancelled.".to_owned())?
+            .map_err(|e| e.to_string())?;
             if !output.status.success() {
                 return Err("Area selection cancelled.".into());
             }
@@ -2937,15 +3004,21 @@ impl Daemon {
         {
             return Err("Recording changed while choosing the area.".into());
         }
+        let count =
+            screenshots::count_auto(g.db.connection(), &meeting).map_err(|e| e.to_string())?;
+        if count >= 60 {
+            return Err("This meeting has reached its limit of 60 automatic screenshots.".into());
+        }
         let generation = self.autoshots_epoch.fetch_add(1, Ordering::AcqRel) + 1;
         g.autoshots = Some(AutoShots {
             meeting,
             area,
             generation,
-            count: 0,
+            count,
             last_fingerprint: Vec::new(),
             last_capture: None,
             at_limit: false,
+            warned: false,
         });
         self.emit_state(&g);
         drop(g);
@@ -3457,6 +3530,81 @@ impl Daemon {
         let mut g = self.inner.lock();
         g.finishing_meeting = None;
         self.emit_state(&g); // the shell shows "Finishing" until it hears this
+    }
+
+    async fn delete_screenshot(&self, id: i64) -> Result<Value, String> {
+        let (db_path, root) = {
+            let g = self.inner.lock();
+            (
+                self.db_path.clone(),
+                PathBuf::from(g.settings.export_folder.trim()),
+            )
+        };
+        let (meeting, exported, mut export_error) = tokio::task::spawn_blocking(move || {
+            let db = Database::open(&db_path).map_err(|e| e.to_string())?;
+            let c = db.connection();
+            let shot = screenshots::get(c, id)
+                .map_err(|e| e.to_string())?
+                .ok_or("Screenshot not found.")?;
+            let (previous, mut export_error) = match exports::get(c, &shot.meeting_id) {
+                Ok(path) => (path, None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            let previous = previous.map(PathBuf::from);
+            let folder = previous.clone().filter(|path| {
+                root.is_absolute()
+                    && path.parent() == Some(root.as_path())
+                    && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+            });
+            if let Some(path) = previous.filter(|_| folder.is_none())
+                && path.exists()
+            {
+                export_error = Some(format!("The export in {} was not changed.", path.display()));
+            }
+            let refresh = || -> Result<(), String> {
+                let Some(folder) = &folder else {
+                    return Ok(());
+                };
+                let rows = screenshots::list(c, &shot.meeting_id).map_err(|e| e.to_string())?;
+                let shots: Vec<_> = rows
+                    .into_iter()
+                    .map(|row| Shot {
+                        automatic: row.question == "[auto]",
+                        taken_at: row.taken_at,
+                        question: row.question,
+                        mime: row.mime,
+                        data: row.data,
+                    })
+                    .collect();
+                export::sync_shots(folder, &shots).map_err(|e| e.to_string())?;
+                Ok(())
+            };
+            if export_error.is_none() {
+                export_error = refresh().err();
+            }
+            screenshots::delete(c, id).map_err(|e| e.to_string())?;
+            if let Err(error) = refresh() {
+                export_error.get_or_insert(error);
+            }
+            Ok::<_, String>((shot.meeting_id, folder.is_some(), export_error))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        // The notes link and caption each image; a live meeting is rewritten when it stops.
+        let live = {
+            let g = self.inner.lock();
+            g.recording.is_some() && g.meeting_id.as_deref() == Some(meeting.as_str())
+        };
+        if exported
+            && !live
+            && let Err(error) = self.export_meeting(&meeting).await
+        {
+            export_error.get_or_insert(error);
+        }
+        Ok(match export_error {
+            Some(error) => json!({"export_error": error}),
+            None => json!({}),
+        })
     }
 
     async fn export_meeting(&self, meeting: &str) -> Result<PathBuf, String> {
@@ -5731,6 +5879,10 @@ impl Daemon {
         if cmd == "record.start" && !self.inner.lock().settings.mcp_allow_record {
             return Err("Recording by agents is disabled (setting mcp_allow_record)".into());
         }
+        // Nobody is watching to confirm a retained area; a live meeting's choice stays.
+        if cmd == "record.start" && origin.is_some() && self.inner.lock().recording.is_none() {
+            self.auto_stop();
+        }
         let notice = match cmd {
             "record.start" => Some("An agent started recording".to_owned()),
             "record.stop" => Some("An agent stopped recording".to_owned()),
@@ -5943,24 +6095,37 @@ impl Daemon {
             "autoshots.start" => self.auto_start().await,
             "autoshots.stop" => Ok(self.auto_stop()),
             "screenshots.list" => {
-                use base64::Engine;
                 let a: protocol::ScreenshotsList = parse(args)?;
                 let g = self.inner.lock();
-                let shots =
-                    screenshots::list(g.db.connection(), &a.meeting).map_err(|e| e.to_string())?;
-                Ok(Value::Array(shots.into_iter().map(|s| json!({
-                    "id": s.id, "time": s.taken_at, "mime": s.mime,
-                    "automatic": s.question == "[auto]",
-                    "data": a.data.then(|| base64::engine::general_purpose::STANDARD.encode(s.data)),
-                })).collect()))
+                let shots = screenshots::metadata(g.db.connection(), &a.meeting)
+                    .map_err(|e| e.to_string())?;
+                Ok(Value::Array(
+                    shots
+                        .into_iter()
+                        .map(|s| {
+                            json!({
+                                "id": s.id, "time": s.taken_at, "mime": s.mime,
+                                "automatic": s.automatic,
+                            })
+                        })
+                        .collect(),
+                ))
+            }
+            "screenshots.get" => {
+                use base64::Engine;
+                let a: protocol::ScreenshotDelete = parse(args)?;
+                let shot = {
+                    let g = self.inner.lock();
+                    screenshots::get(g.db.connection(), a.id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or("Screenshot not found.")?
+                };
+                Ok(json!({"id": shot.id, "mime": shot.mime,
+                    "data": base64::engine::general_purpose::STANDARD.encode(shot.data)}))
             }
             "screenshots.delete" => {
                 let a: protocol::ScreenshotDelete = parse(args)?;
-                let g = self.inner.lock();
-                if !screenshots::delete(g.db.connection(), a.id).map_err(|e| e.to_string())? {
-                    return Err("Screenshot not found.".into());
-                }
-                Ok(json!({}))
+                self.delete_screenshot(a.id).await
             }
             "record.tap" => self.record_tap(&args),
             "record.toggle_mic" | "record.toggle_system" => {
@@ -11376,7 +11541,7 @@ mod autoshots_tests {
         .unwrap();
         *d.auto_area.lock() = Some("0,0 100x100".into());
         *d.auto_unlocked.lock() = Some(Box::new(|| true));
-        *d.auto_capture.lock() = Some(Box::new(|_| (vec![1, 2, 3], vec![4; 100])));
+        *d.auto_capture.lock() = Some(Box::new(|_| Ok((vec![1, 2, 3], vec![4; 100]))));
         d
     }
 
@@ -11397,6 +11562,7 @@ mod autoshots_tests {
             "autoshots.start",
             "autoshots.stop",
             "screenshots.list",
+            "screenshots.get",
             "screenshots.delete",
         ] {
             for origin in ["mcp", "agent"] {
@@ -11430,10 +11596,17 @@ mod autoshots_tests {
     #[tokio::test]
     async fn stores_only_rows_and_respects_duplicates_rate_limit_and_lock() {
         let d = daemon();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        *d.auto_capture.lock() = Some(Box::new(move |_| {
+            let n = seen.fetch_add(1, Ordering::Relaxed) as u8;
+            Ok((vec![n], vec![n.wrapping_mul(100); 100]))
+        }));
         let meeting = started(&d).await;
         d.handle("autoshots.start", json!({}), None).await.unwrap();
         let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
         d.auto_capture_once(&meeting, generation).await;
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
         d.auto_capture_once(&meeting, generation).await;
         assert_eq!(
             d.handle("screenshots.list", json!({"meeting": meeting}), None)
@@ -11450,29 +11623,29 @@ mod autoshots_tests {
                 Some(Instant::now() - Duration::from_secs(4));
         }
         d.auto_capture_once(&meeting, generation).await;
-        assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().count, 1);
+        assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().count, 2);
         assert!(d.inner.lock().pending_capture.is_none());
         assert!(d.inner.lock().sources.is_empty());
         *d.auto_unlocked.lock() = Some(Box::new(|| false));
         d.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
         d.auto_capture_once(&meeting, generation).await;
-        assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().count, 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
         *d.auto_unlocked.lock() = None; // unknown is locked
         d.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
         d.auto_capture_once(&meeting, generation).await;
-        assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().count, 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
         *d.auto_unlocked.lock() = Some(Box::new(|| true));
         let n = Arc::new(AtomicUsize::new(0));
         let counter = n.clone();
         *d.auto_capture.lock() = Some(Box::new(move |_| {
-            (
+            Ok((
                 vec![7],
                 vec![counter.fetch_add(1, Ordering::Relaxed) as u8 * 100 + 50; 100],
-            )
+            ))
         }));
         d.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
         d.auto_capture_once(&meeting, generation).await;
-        assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().count, 2);
+        assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().count, 3);
         {
             let mut g = d.inner.lock();
             let a = g.autoshots.as_mut().unwrap();
@@ -11483,16 +11656,18 @@ mod autoshots_tests {
         assert!(d.inner.lock().autoshots.as_ref().unwrap().at_limit);
         assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().count, 60);
         let rows = d
-            .handle(
-                "screenshots.list",
-                json!({"meeting": meeting, "data": true}),
-                None,
-            )
+            .handle("screenshots.list", json!({"meeting": meeting}), None)
             .await
             .unwrap();
         assert_eq!(rows[0]["automatic"], true);
-        assert_eq!(rows[0]["data"], "AQID");
+        assert!(rows[0].get("data").is_none());
         let id = rows[0]["id"].as_i64().unwrap();
+        assert_eq!(
+            d.handle("screenshots.get", json!({"id": id}), None)
+                .await
+                .unwrap()["data"],
+            "AA=="
+        );
         d.handle("screenshots.delete", json!({"id": id}), None)
             .await
             .unwrap();
@@ -11503,7 +11678,7 @@ mod autoshots_tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            3
         );
     }
 
@@ -11516,7 +11691,7 @@ mod autoshots_tests {
         let weak = Arc::downgrade(&d);
         *d.auto_capture.lock() = Some(Box::new(move |_| {
             weak.upgrade().unwrap().record_stop().unwrap();
-            (vec![1], vec![2; 100])
+            Ok((vec![1], vec![2; 100]))
         }));
         d.auto_capture_once(&meeting, generation).await;
         assert!(
@@ -11524,12 +11699,21 @@ mod autoshots_tests {
                 .unwrap()
                 .is_empty()
         );
-        {
-            let mut g = d.inner.lock();
-            g.recording = None;
-            g.finishing_meeting = None;
-            d.reset_session(&mut g);
+        for _ in 0..200 {
+            let done = {
+                let g = d.inner.lock();
+                g.recording.is_none() && g.finishing_meeting.is_none()
+            };
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
+        d.handle("session.new", json!({}), None).await.unwrap();
+        d.handle("record.start", json!({"new": true}), None)
+            .await
+            .unwrap();
+        assert_ne!(d.inner.lock().meeting_id.as_deref(), Some(meeting.as_str()));
         assert!(d.inner.lock().autoshots.is_none());
         d.auto_capture_once(&meeting, generation).await;
         assert!(
@@ -11540,12 +11724,300 @@ mod autoshots_tests {
     }
 
     #[test]
-    fn consent_notice_and_similarity() {
+    fn similarity() {
         assert!(same_frame(&[0; 100], &[1; 100]));
         assert!(!same_frame(&[0; 100], &[255; 100]));
         assert!(!same_frame(&[], &[]));
+    }
+
+    #[test]
+    fn lock_output_is_exact() {
+        assert_eq!(lock_state(true, "false\n"), LockState::Unlocked);
+        assert_eq!(lock_state(true, "true\n"), LockState::Locked);
+        assert_eq!(lock_state(true, ""), LockState::Unknown);
+        assert_eq!(lock_state(false, "false"), LockState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn capture_failure_warns_once_and_locked_screen_is_silent() {
         let d = daemon();
+        let meeting = started(&d).await;
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        let mut events = d.subscribe();
+        *d.auto_unlocked.lock() = Some(Box::new(|| false));
+        d.auto_capture_once(&meeting, generation).await;
+        assert!(events.try_recv().is_err());
+        *d.auto_unlocked.lock() = None;
+        d.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
+        d.auto_capture_once(&meeting, generation).await;
+        d.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
+        d.auto_capture_once(&meeting, generation).await;
+        let notices: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event["event"] == "notice")
+            .collect();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(
+            notices[0]["text"],
+            "Automatic screenshots could not capture; none are being saved."
+        );
+        d.handle("autoshots.stop", json!({}), None).await.unwrap();
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        *d.auto_unlocked.lock() = Some(Box::new(|| true));
+        *d.auto_capture.lock() = Some(Box::new(|_| Err("grim failed".into())));
+        d.auto_capture_once(&meeting, generation).await;
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| event["event"] == "notice"
+                && event["text"]
+                    == "Automatic screenshots could not capture; none are being saved.")
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_and_restore_keep_the_meeting_limit() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        {
+            let g = d.inner.lock();
+            for n in 0..59 {
+                screenshots::add(
+                    g.db.connection(),
+                    &meeting,
+                    n as f64,
+                    "[auto]",
+                    "image/png",
+                    &[n],
+                )
+                .unwrap();
+            }
+        }
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().count, 59);
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        d.auto_capture_once(&meeting, generation).await;
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            60
+        );
+        assert!(
+            d.handle("autoshots.start", json!({}), None)
+                .await
+                .unwrap_err()
+                .contains("limit of 60")
+        );
+        d.handle("autoshots.stop", json!({}), None).await.unwrap();
+        assert!(
+            d.handle("autoshots.start", json!({}), None)
+                .await
+                .unwrap_err()
+                .contains("limit of 60")
+        );
+        d.handle("record.stop", json!({}), None).await.unwrap();
+        for _ in 0..200 {
+            let done = {
+                let g = d.inner.lock();
+                g.recording.is_none() && g.finishing_meeting.is_none()
+            };
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        d.session_restore(&meeting, false).unwrap();
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            60
+        );
+        d.handle("record.start", json!({}), None).await.unwrap();
+        assert!(
+            d.handle("autoshots.start", json!({}), None)
+                .await
+                .unwrap_err()
+                .contains("limit of 60")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_only_and_lost_consent_block_storage_and_prompt_is_clean() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        d.local_only.store(true, Ordering::Relaxed);
+        d.auto_capture_once(&meeting, generation).await;
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            0
+        );
+        d.local_only.store(false, Ordering::Relaxed);
+        {
+            let mut g = d.inner.lock();
+            g.settings.meeting_mode = MeetingMode::Interviewer;
+            g.consent = false;
+        }
+        d.auto_capture_once(&meeting, generation).await;
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            0
+        );
+        d.inner.lock().consent = true;
+        d.auto_capture_once(&meeting, generation).await;
+        let g = d.inner.lock();
+        assert_eq!(
+            screenshots::count_auto(g.db.connection(), &meeting).unwrap(),
+            1
+        );
+        assert!(g.pending_capture.is_none() && g.sources.is_empty());
+        let prompt = d.system_prompt(&g, false, false, "", "", false, false);
+        assert!(!prompt.contains("[auto]") && !prompt.contains("data:image"));
+    }
+
+    #[tokio::test]
+    async fn agent_start_clears_retained_area() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        d.handle("record.stop", json!({}), None).await.unwrap();
+        for _ in 0..200 {
+            let done = {
+                let g = d.inner.lock();
+                g.recording.is_none() && g.finishing_meeting.is_none()
+            };
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        d.inner.lock().settings.mcp_allow_record = true;
+        d.handle("record.start", json!({}), Some("mcp"))
+            .await
+            .unwrap();
         assert!(d.inner.lock().autoshots.is_none());
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_from_a_stopped_meeting_rewrites_its_notes() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        let (first, second) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            (
+                screenshots::add(c, &meeting, 1.0, "first caption", "image/png", b"one").unwrap(),
+                screenshots::add(c, &meeting, 2.0, "second caption", "image/png", b"two").unwrap(),
+            )
+        };
+        let _ = second;
+        d.handle("record.stop", json!({}), None).await.unwrap();
+        for _ in 0..200 {
+            if d.inner.lock().recording.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let root = d.db_path.parent().unwrap().join("exports");
+        d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
+        let folder = d.export_meeting(&meeting).await.unwrap();
+        let reply = d
+            .handle("screenshots.delete", json!({"id": first}), None)
+            .await
+            .unwrap();
+        assert!(reply.get("export_error").is_none(), "{reply}");
+        let notes = std::fs::read_to_string(folder.join("notes.md")).unwrap();
+        assert!(!notes.contains("first caption"), "{notes}");
+        assert!(notes.contains("second caption"), "{notes}");
+        assert_eq!(
+            std::fs::read(folder.join("screenshots/shot-01.png")).unwrap(),
+            b"two"
+        );
+        assert!(!folder.join("screenshots/shot-02.png").exists());
+    }
+
+    #[tokio::test]
+    async fn deleting_rows_removes_only_owned_exported_images() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        let (manual, untouched) = {
+            let g = d.inner.lock();
+            let manual = screenshots::add(
+                g.db.connection(),
+                &meeting,
+                1.0,
+                "question",
+                "image/png",
+                b"manual",
+            )
+            .unwrap();
+            let untouched = screenshots::add(
+                g.db.connection(),
+                &meeting,
+                2.0,
+                "another question",
+                "image/png",
+                b"untouched",
+            )
+            .unwrap();
+            (manual, untouched)
+        };
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        d.auto_capture_once(&meeting, generation).await;
+        let automatic = screenshots::list(d.inner.lock().db.connection(), &meeting).unwrap()[2].id;
+        let root = d.db_path.parent().unwrap().join("exports");
+        d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
+        let folder = d.export_meeting(&meeting).await.unwrap();
+        std::fs::write(folder.join("screenshots/shot-01.png"), "user edit").unwrap();
+        d.handle("screenshots.delete", json!({"id": untouched}), None)
+            .await
+            .unwrap();
+        assert!(!folder.join("screenshots/shot-02.png").exists());
+        d.handle("screenshots.delete", json!({"id": manual}), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(folder.join("screenshots/shot-01.png")).unwrap(),
+            b"user edit"
+        );
+        d.handle("screenshots.delete", json!({"id": automatic}), None)
+            .await
+            .unwrap();
+        assert!(!folder.join("screenshots/auto-01.png").exists());
+        assert!(folder.join("screenshots/shot-01.png").exists());
+    }
+
+    #[tokio::test]
+    async fn screenshot_row_delete_survives_export_failure() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        let id = screenshots::add(
+            d.inner.lock().db.connection(),
+            &meeting,
+            1.0,
+            "question",
+            "image/png",
+            b"manual",
+        )
+        .unwrap();
+        let root = d.db_path.parent().unwrap().join("exports");
+        d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
+        let folder = d.export_meeting(&meeting).await.unwrap();
+        std::fs::remove_dir_all(folder.join("screenshots")).unwrap();
+        std::fs::write(folder.join("screenshots"), "occupied").unwrap();
+        let result = d
+            .handle("screenshots.delete", json!({"id": id}), None)
+            .await
+            .unwrap();
+        assert!(result["export_error"].is_string());
+        assert!(
+            screenshots::get(d.inner.lock().db.connection(), id)
+                .unwrap()
+                .is_none()
+        );
     }
     #[tokio::test]
     async fn phrases_on_both_channels_schedule_four_and_ten_seconds() {
@@ -11572,6 +12044,64 @@ mod autoshots_tests {
                 Duration::from_secs(4),
                 Duration::from_secs(10)
             ]
+        );
+        let phrases = [
+            "share my screen",
+            "share my desktop",
+            "sharing my screen",
+            "can you see my screen",
+            "here is the document",
+            "here's the document",
+            "here is the presentation",
+            "here's the presentation",
+            "next slide",
+            "here’s the document",
+        ];
+        for phrase in phrases {
+            d.inject_live(LiveEvent::Transcript(TranscriptLine {
+                channel: 0,
+                speaker: None,
+                text: phrase.into(),
+                is_final: true,
+                speech_final: true,
+                start: 1.0,
+                end: 2.0,
+            }));
+        }
+        assert_eq!(d.auto_schedules.lock().len(), 24);
+        for (text, is_final) in [("unrelated words", true), ("next slide", false)] {
+            d.inject_live(LiveEvent::Transcript(TranscriptLine {
+                channel: 0,
+                speaker: None,
+                text: text.into(),
+                is_final,
+                speech_final: is_final,
+                start: 1.0,
+                end: 2.0,
+            }));
+        }
+        assert_eq!(d.auto_schedules.lock().len(), 24);
+    }
+
+    #[tokio::test]
+    async fn scheduled_phrase_captures_after_delay() {
+        use crate::speech::transcription::TranscriptLine;
+        let d = daemon();
+        let meeting = started(&d).await;
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        d.inject_live(LiveEvent::Transcript(TranscriptLine {
+            channel: 0,
+            speaker: None,
+            text: "next slide".into(),
+            is_final: true,
+            speech_final: true,
+            start: 1.0,
+            end: 2.0,
+        }));
+        tokio::time::sleep(Duration::from_millis(4200)).await;
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            1
         );
     }
 
@@ -11608,20 +12138,34 @@ mod autoshots_tests {
         let old = d.inner.lock().autoshots.as_ref().unwrap().generation;
         d.record_stop().unwrap();
         assert!(!d.auto_allowed(&d.inner.lock(), &meeting, old));
-        {
-            let mut g = d.inner.lock();
-            g.recording = Some(Recording {
-                started: Instant::now(),
-                since_ms: now_ms(),
-                stop: Arc::new(AtomicBool::new(false)),
-                speech: None,
-            });
-            g.autoshots.as_mut().unwrap().generation =
-                d.autoshots_epoch.fetch_add(1, Ordering::AcqRel) + 1;
-            assert_eq!(g.autoshots.as_ref().unwrap().area, "0,0 100x100");
-            d.reset_session(&mut g);
-            assert!(g.autoshots.is_none());
+        for _ in 0..200 {
+            let done = {
+                let g = d.inner.lock();
+                g.recording.is_none() && g.finishing_meeting.is_none()
+            };
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
+        d.handle("record.start", json!({}), None).await.unwrap();
+        assert_eq!(
+            d.inner.lock().autoshots.as_ref().unwrap().area,
+            "0,0 100x100"
+        );
+        d.record_stop().unwrap();
+        for _ in 0..200 {
+            let done = {
+                let g = d.inner.lock();
+                g.recording.is_none() && g.finishing_meeting.is_none()
+            };
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        d.handle("session.new", json!({}), None).await.unwrap();
+        assert!(d.inner.lock().autoshots.is_none());
     }
     #[test]
     fn restore_and_delete_clear_the_area() {
@@ -11646,6 +12190,7 @@ mod autoshots_tests {
             last_fingerprint: Vec::new(),
             last_capture: None,
             at_limit: false,
+            warned: false,
         };
         d.inner.lock().autoshots = Some(seed());
         d.session_restore(&meeting, false).unwrap();

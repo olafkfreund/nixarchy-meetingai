@@ -94,6 +94,7 @@ async fn client(stream: UnixStream, daemon: Arc<Daemon>) {
         if matches!(
             request.cmd.as_str(),
             "chat.send"
+                | "autoshots.start"
                 | "voice.enroll"
                 | "questions.generate"
                 | "providers.test"

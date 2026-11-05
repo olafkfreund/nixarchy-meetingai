@@ -1,6 +1,6 @@
 //! Screenshots attached to a meeting's chat turns.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::Result;
 
@@ -12,6 +12,47 @@ pub struct Screenshot {
     pub question: String,
     pub mime: String,
     pub data: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct ScreenshotMeta {
+    pub id: i64,
+    pub taken_at: f64,
+    pub mime: String,
+    pub automatic: bool,
+}
+
+pub fn metadata(connection: &Connection, meeting_id: &str) -> Result<Vec<ScreenshotMeta>> {
+    let mut statement = connection.prepare(
+        "SELECT id, taken_at, mime, question = '[auto]' FROM meeting_screenshots WHERE meeting_id = ?1 ORDER BY id",
+    )?;
+    Ok(statement
+        .query_map([meeting_id], |row| {
+            Ok(ScreenshotMeta {
+                id: row.get(0)?,
+                taken_at: row.get(1)?,
+                mime: row.get(2)?,
+                automatic: row.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?)
+}
+
+pub fn get(connection: &Connection, id: i64) -> Result<Option<Screenshot>> {
+    Ok(connection.query_row(
+        "SELECT id, meeting_id, taken_at, question, mime, data FROM meeting_screenshots WHERE id = ?1",
+        [id], |row| Ok(Screenshot { id: row.get(0)?, meeting_id: row.get(1)?, taken_at: row.get(2)?,
+            question: row.get(3)?, mime: row.get(4)?, data: row.get(5)? }),
+    ).optional()?)
+}
+
+pub fn count_auto(connection: &Connection, meeting_id: &str) -> Result<usize> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM meeting_screenshots WHERE meeting_id = ?1 AND question = '[auto]'",
+        [meeting_id],
+        |row| row.get(0),
+    )?;
+    Ok(count as usize)
 }
 
 pub fn add(
@@ -77,9 +118,14 @@ mod tests {
         assert_eq!(shots[0].question, "later?");
         assert_eq!(shots[1].data, [2, 3]);
         assert_eq!(shots[1].mime, "image/png");
+        assert_eq!(metadata(connection, &meeting).unwrap().len(), 2);
+        assert_eq!(get(connection, earlier).unwrap().unwrap().data, [2, 3]);
+        assert_eq!(count_auto(connection, &meeting).unwrap(), 0);
+        add(connection, &meeting, 9.0, "[auto]", "image/png", &[5]).unwrap();
+        assert_eq!(count_auto(connection, &meeting).unwrap(), 1);
         assert!(delete(connection, later).unwrap());
         assert!(!delete(connection, later).unwrap());
-        assert_eq!(list(connection, &meeting).unwrap().len(), 1);
+        assert_eq!(list(connection, &meeting).unwrap().len(), 2);
         meetings::delete(connection, &meeting).unwrap();
         assert!(list(connection, &meeting).unwrap().is_empty());
         assert_eq!(list(connection, &other).unwrap().len(), 1);

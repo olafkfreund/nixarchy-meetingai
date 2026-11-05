@@ -159,8 +159,6 @@ pub struct ItemsUpdate {
 #[derive(Debug, Deserialize)]
 pub struct ScreenshotsList {
     pub meeting: String,
-    #[serde(default)]
-    pub data: bool,
 }
 
 #[derive(Debug, Deserialize)]
