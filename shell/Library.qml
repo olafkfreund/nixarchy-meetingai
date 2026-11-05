@@ -36,21 +36,13 @@ Item {
     property var lineHits: []         // transcript.search rows for the query
     property string linesDoneFor: ""
     signal closeRequested()
-    readonly property real notesDefault: Style.space(160) * theme.ts
-    property real notesHeight: notesDefault
+    readonly property bool wideNotes: root.width >= Style.space(760) * theme.ts
+    property bool narrowNotes: false
     // Unix ms for sorting and showing: a chat's last activity, a meeting's start (SQLite UTC text). 0 if unknown.
     function when(s) {
         if (s.kind === "chat") return Number(s.updated_at) || 0;
         return s.started_at ? (Date.parse(String(s.started_at).replace(" ", "T") + "Z") || 0) : 0;
     }
-    readonly property real notesMin: Style.space(48) * theme.ts
-    TextMetrics { id: captionLine; font.family: Style.font.family; font.pixelSize: root.theme.caption; text: "42 min · 412 lines" }
-    readonly property real rowH: theme.ctl + captionLine.height + Style.spacing.xs   // a two-line meeting row as drawn
-    // The notes pane keeps three lines at least and leaves the list two rows; on a card too short for both, the list wins.
-    // A binding, so the default on open, a window resize and a late export status line are clamped too. Never reads notesBox.height.
-    readonly property real notesMax: restoreList.parent.height - restoreList.y - 2 * root.rowH
-        - notesGrip.height - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - 2 * Style.spacing.md
-    function setNotesHeight(h) { root.notesHeight = Math.max(0, Math.min(Math.max(h, root.notesMin), root.notesMax)); }
     property var notesMeeting: null
     property string exportStatus: ""
     property var exportAfterPick: null
@@ -136,15 +128,28 @@ Item {
     function select(s) {
         var id = String(s.id);
         root.selectedId = id;
+        root.narrowNotes = s.kind === "meeting" && !root.wideNotes;
         root.menuFor = "";
         root.notes = "";
         root.notesStale = false;
         root.notesChunks = []; root.meetingItems = []; root.meetingBookmarks = [];
         if (s.kind !== "meeting") { root.notesPhase = ""; return; }
+        if (!root.wideNotes) notesBack.forceActiveFocus();
         root.notesMeeting = s.id;   // an export.done for the meeting being read shows its status line
         root.notesPhase = "loading";
         root.fetchNotes(s.id);
         root.fetchMeetingView(s.id);
+    }
+    function back() {
+        if (!root.narrowNotes || root.wideNotes) return false;
+        root.narrowNotes = false;
+        var index = restoreList.currentIndex;
+        if (index >= 0 && index < restoreList.count) {
+            restoreList.positionViewAtIndex(index, ListView.Contain);
+            if (restoreList.currentItem && restoreList.currentItem.rowId === root.selectedId) restoreList.currentItem.forceActiveFocus();
+            else restoreList.forceActiveFocus();
+        } else restoreList.forceActiveFocus();
+        return true;
     }
     // The reply lands only while that meeting is still selected; a live refresh keeps the old text until it does.
     function fetchNotes(meeting) {
@@ -306,8 +311,8 @@ Item {
 
     property string error: ""   // the last failed request made from here, shown under the search field
     onProvModeChanged: { root.formEpoch++; if (root.provMode !== "form") { provKey.text = ""; root.testMessage = ""; root.testingProvider = false; } }
-    onTabChanged: { root.error = ""; root.provMode = ""; root.load(); }
-    onVisibleChanged: { if (!visible) root.provMode = ""; else root.notesHeight = root.notesDefault; }   // closing drops a typed key; opening resets the notes height
+    onTabChanged: { root.error = ""; root.provMode = ""; root.narrowNotes = false; root.load(); }
+    onVisibleChanged: { if (!visible) { root.provMode = ""; root.narrowNotes = false; } }   // closing drops a typed key
     onPromptModeChanged: root.loadPrompt()
     onPromptKindChanged: root.loadPrompt()
     Component.onCompleted: root.load()
@@ -355,7 +360,7 @@ Item {
         }
         UiText {
             objectName: "noResults"
-            visible: root.tab === "restore" && root.query.trim().length >= 2 && restoreList.count === 0 && root.linesDoneFor === root.query.trim() && root.lineHits.length === 0
+            visible: root.tab === "restore" && (root.wideNotes || !root.narrowNotes) && root.query.trim().length >= 2 && restoreList.count === 0 && root.linesDoneFor === root.query.trim() && root.lineHits.length === 0
             width: parent.width
             textFormat: Text.PlainText
             text: "No results"
@@ -374,357 +379,370 @@ Item {
         }
 
         // Restore: chats and meetings with their notes.
-        ListView {
-            id: restoreList
-            objectName: "restoreList"
+        Item {
             visible: root.tab === "restore"
-            width: parent.width; height: Math.max(0, parent.height - y - (linesBox.visible ? linesBox.height + Style.spacing.md : 0) - (exportStatusText.visible ? exportStatusText.height + Style.spacing.md : 0) - (notesGrip.visible ? notesGrip.height + Style.spacing.md : 0) - (notesBox.visible ? notesBox.height + Style.spacing.md : 0))
-            clip: true
-            model: root.sessions.filter(function(s) { return root.match(s.title); }).sort(function(a, b) { return root.when(b) - root.when(a); })
-            delegate: Item {
-                id: rrow
-                required property var modelData
-                readonly property string rowId: String(modelData.id)
-                readonly property string dateText: { var t = root.when(modelData); return t ? Qt.formatDateTime(new Date(t), Qt.locale().dateTimeFormat(Locale.ShortFormat)) : ""; }
-                readonly property string accName: Accessible.name
-                objectName: modelData.kind === "meeting" ? "openNotes" : "openChat"
-                width: ListView.view.width
-                height: rowColumn.implicitHeight
-                activeFocusOnTab: true
-                Accessible.role: Accessible.Button
-                Accessible.name: (modelData.kind === "meeting" ? "Meeting: " : "Chat: ") + modelData.title + ", " + dateText
-                signal clicked()
-                onClicked: root.select(modelData)
-                Keys.onReturnPressed: clicked()
-                Keys.onEnterPressed: clicked()
-                Keys.onSpacePressed: clicked()
-                Accessible.onPressAction: clicked()
-                Rectangle {
-                    anchors.fill: parent
-                    radius: root.theme.radius
-                    color: root.selectedId === rrow.rowId ? Qt.alpha(Commons.Color.accent, 0.18) : "transparent"
-                    visible: root.selectedId === rrow.rowId || rrow.activeFocus
-                    border.width: rrow.activeFocus ? 2 : 0
-                    border.color: Commons.Color.accent
-                }
-                Rectangle {
-                    objectName: "selectedBar"
-                    visible: root.selectedId === rrow.rowId
-                    x: 0; y: 0; width: 3; height: rrow.height
-                    color: Commons.Color.accent
-                }
-                TextMetrics { id: kindMetrics; font.family: Style.font.family; font.pixelSize: root.theme.caption; text: "Meeting" }
-                TextMetrics { id: dateMetrics; font.family: Style.font.family; font.pixelSize: root.theme.caption; text: Qt.formatDateTime(new Date(2026, 11, 28, 23, 59), Qt.locale().dateTimeFormat(Locale.ShortFormat)) }
-                Column {
-                    id: rowColumn
-                    width: parent.width
-                    spacing: Style.spacing.xs
-                    RowLayout {
-                        id: rowFirst
-                        width: parent.width
-                        height: root.theme.ctl
-                        spacing: root.theme.gap
-                        UiText {
-                            Layout.preferredWidth: kindMetrics.width
-                            Layout.alignment: Qt.AlignVCenter
-                            textFormat: Text.PlainText
-                            text: rrow.modelData.kind === "meeting" ? "Meeting" : "Chat"
-                            color: Commons.Color.popups.text
-                            opacity: root.theme.dim
-                            font.pixelSize: root.theme.caption
-                        }
-                        UiText {
-                            id: rowTitle
-                            Layout.fillWidth: true
-                            Layout.alignment: Qt.AlignVCenter
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            mayCut: true
-                            text: rrow.modelData.title
-                            color: Commons.Color.popups.text
-                            font.pixelSize: root.theme.body
-                        }
-                        UiText {
-                            objectName: "sessionWhen"
-                            Layout.preferredWidth: dateMetrics.width
-                            Layout.minimumWidth: dateMetrics.width
-                            Layout.alignment: Qt.AlignVCenter
-                            textFormat: Text.PlainText
-                            text: rrow.dateText
-                            color: Commons.Color.popups.text
-                            opacity: root.theme.dim
-                            font.pixelSize: root.theme.caption
-                        }
-                        IconButton { objectName: "restore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Restore"; onClicked: root.client.send("session.restore", { id: rrow.modelData.id }) }
-                        IconButton { objectName: "rowMore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "⋯"; Accessible.name: "More actions"; onClicked: root.menuFor = root.menuFor === rrow.rowId ? "" : rrow.rowId }
-                    }
-                    UiText {
-                        visible: rrow.modelData.kind === "meeting" && (Number(rrow.modelData.duration_seconds) > 0 || Number(rrow.modelData.line_count) > 0)
-                        textFormat: Text.PlainText
-                        text: (Number(rrow.modelData.duration_seconds) > 0 ? (Number(rrow.modelData.duration_seconds) < 60 ? "< 1 min" : Math.floor(Number(rrow.modelData.duration_seconds) / 60) + " min") : "") + (Number(rrow.modelData.duration_seconds) > 0 && Number(rrow.modelData.line_count) > 0 ? " · " : "") + (Number(rrow.modelData.line_count) > 0 ? Number(rrow.modelData.line_count) + " lines" : "")
-                        color: Commons.Color.popups.text
-                        opacity: root.theme.dim
-                        font.pixelSize: root.theme.caption
-                    }
-                    Row {
-                        visible: root.menuFor === rrow.rowId
-                        width: parent.width
-                        height: visible ? root.theme.ctl : 0
-                        spacing: root.theme.gap
-                        layoutDirection: Qt.RightToLeft
-                        IconButton { objectName: "deleteSession"; ts: root.theme.ts; text: "Delete"; onClicked: { var id = rrow.modelData.id, rid = rrow.rowId, kind = rrow.modelData.kind;   // the row may be rebuilt while the dialog is open
-                            root.confirmRequested("Delete \"" + rrow.modelData.title + "\"? " + (kind === "meeting" ? "The transcript, notes and items of this meeting are removed." : "This chat is removed."), "Delete", function() { root.client.send("session.delete", { id: id }); if (root.selectedId === rid) { root.selectedId = ""; root.notes = ""; root.notesStale = false; root.notesPhase = ""; } root.menuFor = ""; root.load(); }); } }
-                        IconButton { objectName: "exportNow"; ts: root.theme.ts; text: "Export now"; visible: rrow.modelData.kind === "meeting"; onClicked: root.exportMeeting(rrow.modelData.id) }
-                    }
-                }
-                MouseArea {
-                    x: 0; y: 0; width: rowTitle.x + rowTitle.width; height: rowFirst.height
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: rrow.clicked()
-                }
-            }
-        }
-        Item {   // transcript lines that match the search
-            id: linesBox
-            objectName: "linesBox"
-            visible: root.tab === "restore" && root.lineHits.length > 0
             width: parent.width
-            height: visible ? Math.min(linesHead.height + linesList.contentHeight + Style.spacing.xs, Math.max(root.theme.ctl * 3, parent.height * 0.4)) : 0
-            UiText { id: linesHead; textFormat: Text.PlainText; text: "Lines"; color: Commons.Color.popups.text; opacity: root.theme.dim; font.pixelSize: root.theme.caption; font.bold: true }
-            ListView {
-                id: linesList
-                objectName: "lineHits"
-                anchors { top: linesHead.bottom; topMargin: Style.spacing.xs; left: parent.left; right: parent.right; bottom: parent.bottom }
-                clip: true
-                spacing: Style.spacing.xs
-                model: root.lineHits
-                delegate: Item {
-                    id: hit
-                    objectName: "lineHit" + index
-                    required property var modelData
-                    required property int index
-                    readonly property bool canOpen: String(modelData.meeting) === root.client.currentMeeting || !root.client.recording
-                    width: ListView.view.width
-                    height: hcol.implicitHeight
-                    opacity: canOpen ? 1 : 0.6
-                    Accessible.role: Accessible.Button
-                    Accessible.name: String(modelData.text)
-                    Accessible.onPressAction: { if (hit.canOpen) root.openHit(hit.modelData); }
-                    Column {
-                        id: hcol
-                        width: parent.width
-                        UiText {
-                            width: parent.width
-                            textFormat: Text.StyledText
-                            wrapMode: Text.Wrap
-                            maximumLineCount: 2
-                            elide: Text.ElideRight
-                            mayCut: true
-                            text: root.esc(root.client.fmtTime(hit.modelData.t0)) + " \u00b7 " + root.esc(hit.modelData.speaker || (hit.modelData.who === "mic" ? "You" : hit.modelData.who === "room" ? "Room" : "Them")) + ": " + root.marked(hit.modelData.text, root.query.trim())
-                            color: Commons.Color.popups.text
-                            font.pixelSize: root.theme.body
-                        }
-                        UiText {
-                            width: parent.width
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            mayCut: true
-                            text: String(hit.modelData.title || "") + (hit.canOpen ? "" : "  \u00b7  Stop recording to open")
-                            color: Commons.Color.popups.text
-                            opacity: root.theme.dim
-                            font.pixelSize: root.theme.caption
-                        }
-                    }
-                    MouseArea { anchors.fill: parent; enabled: hit.canOpen; cursorShape: Qt.PointingHandCursor; onClicked: root.openHit(hit.modelData) }
-                }
-            }
-        }
-        UiText {
-            id: exportStatusText
-            objectName: "exportStatus"
-            visible: root.tab === "restore" && root.exportStatus !== ""
-            width: parent.width
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            text: root.exportStatus
-            color: Commons.Color.popups.text
-            font.pixelSize: root.theme.caption
-        }
-        Item {   // drag up or down to resize the notes pane
-            id: notesGrip
-            objectName: "notesGrip"
-            visible: notesBox.visible
-            width: parent.width; height: 6
-            activeFocusOnTab: true
-            Accessible.role: Accessible.Slider
-            Accessible.name: "Notes pane height"
-            Accessible.description: "Up makes the notes pane taller, Down makes it shorter"
-            // keyboard and assistive tech: one step is a line of body text
-            function step(dir) { root.setNotesHeight(notesBox.height + dir * root.theme.body * 1.5); }
-            Keys.onUpPressed: step(1)
-            Keys.onDownPressed: step(-1)
-            Accessible.onIncreaseAction: step(1)
-            Accessible.onDecreaseAction: step(-1)
-            Rectangle { anchors.centerIn: parent; width: Style.space(40); height: notesGrip.activeFocus ? 4 : 2; radius: height / 2; color: notesGrip.activeFocus ? Commons.Color.accent : Commons.Color.foreground; opacity: notesGrip.activeFocus ? 1 : root.theme.dim }
-            MouseArea {
-                anchors.fill: parent
-                objectName: "notesDrag"
-                cursorShape: Qt.SizeVerCursor
-                property real pressY: 0
-                property real startH: 0
-                // window y, so the grip moving with the pane does not feed back into the drag
-                function begin(y) { pressY = y; startH = notesBox.height; }
-                function moveTo(y) { root.setNotesHeight(startH - (y - pressY)); }
-                onPressed: function(m) { begin(mapToItem(null, m.x, m.y).y); }
-                onPositionChanged: function(m) { if (pressed) moveTo(mapToItem(null, m.x, m.y).y); }
-            }
-        }
-        ScrollView {   // long notes scroll
-            id: notesBox
-            objectName: "notesBox"
-            visible: root.tab === "restore" && root.notesPhase !== ""
-            width: parent.width
-            height: visible ? Math.round(Math.max(0, Math.min(root.notesHeight, root.notesMax))) : 0
-            contentWidth: availableWidth
-            clip: true
+            height: Math.max(0, parent.height - y)
             Column {
-                width: notesBox.availableWidth
-                spacing: Style.spacing.xs
-                Column {
-                    objectName: "notesTitle"
-                    width: parent.width
-                    UiText {
-                        width: parent.width
-                        textFormat: Text.PlainText
-                        text: { var s = root.sessions.find(function(row) { return row.kind === "meeting" && String(row.id) === root.selectedId; }); return s ? String(s.title) : ""; }
-                        wrapMode: Text.Wrap   // a long title grows the header instead of being cut
-                        color: Commons.Color.popups.text
-                        font.pixelSize: root.theme.body
-                        font.bold: true
-                    }
-                    UiText {
-                        width: parent.width
-                        textFormat: Text.PlainText
-                        text: { var s = root.sessions.find(function(row) { return row.kind === "meeting" && String(row.id) === root.selectedId; }); var t = s ? root.when(s) : 0; return t ? Qt.formatDateTime(new Date(t), Qt.locale().dateTimeFormat(Locale.ShortFormat)) : ""; }
-                        color: Commons.Color.popups.text
-                        opacity: root.theme.dim
-                        font.pixelSize: root.theme.caption
-                    }
-                }
-                Flow {   // header: out of date, and Regenerate
-                    visible: root.notesStale
-                    width: parent.width
-                    spacing: Style.spacing.xs
-                    UiText {
-                        objectName: "notesStale"
-                        height: root.theme.ctl
-                        verticalAlignment: Text.AlignVCenter
-                        textFormat: Text.PlainText
-                        text: "Names or lines changed after these notes were written"
-                        color: Commons.Color.popups.text
-                        opacity: root.theme.dim
-                        font.italic: true
-                        font.pixelSize: root.theme.caption
-                    }
-                    IconButton {
-                        objectName: "regenerateNotes"
-                        ts: root.theme.ts
-                        text: "Regenerate"
-                        bordered: true
-                        tooltipText: "Write the notes again from the corrected transcript"
-                        onClicked: root.client.send("notes.regenerate", { meeting: root.selectedId }, function(r) { if (!r.ok) root.error = String(r.error || "request failed"); })
-                    }
-                }
-                UiText {
-                    objectName: "notesStateText"
-                    visible: root.notesPhase !== "ready"
-                    width: parent.width
-                    textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
-                    text: root.notesPhase === "loading" ? "Loading notes…" : (root.notesPhase === "empty" ? "No notes yet for this meeting." : "Notes failed: " + root.notes)
-                    color: Commons.Color.popups.text
-                    opacity: root.theme.dim
-                    font.pixelSize: root.theme.body
-                }
-                UiText {
-                    visible: root.notesPhase === "ready"
-                    width: parent.width
-                    textFormat: Text.MarkdownText
-                    wrapMode: Text.Wrap
-                    text: root.capHeadings(root.notes)
-                    color: Commons.Color.popups.text
-                    font.pixelSize: root.theme.body
-                }
-                component Link: IconButton {   // m:ss that jumps to the line; plain time when there is none
-                    id: lnk
-                    required property var meeting
-                    property string line: ""
-                    property real at: 0
-                    ts: root.theme.ts
-                    text: root.client.fmtTime(at)
-                    bordered: true
-                    enabled: line !== ""
-                    tooltipText: "Open the transcript at this moment"
-                    onClicked: root.openHit({ meeting: lnk.meeting, id: lnk.line })
-                }
-                component Heading: UiText {
-                    width: parent.width
-                    textFormat: Text.PlainText
-                    color: Commons.Color.popups.text
-                    opacity: root.theme.dim
-                    font.pixelSize: root.theme.caption
-                    font.bold: true
-                }
-                Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.notesChunks.length > 0; text: "Timeline" }
-                Repeater {
-                    model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.notesChunks : []
-                    Row {
-                        id: crow
+                id: restoreColumn
+                visible: root.wideNotes || !root.narrowNotes
+                width: root.wideNotes ? parent.width * 0.45 : parent.width
+                height: parent.height
+                spacing: Style.spacing.md
+                ListView {
+                    id: restoreList
+                    objectName: "restoreList"
+                    width: parent.width; height: Math.max(0, parent.height - (linesBox.visible ? linesBox.height + Style.spacing.md : 0))
+                    clip: true
+                    model: root.sessions.filter(function(s) { return root.match(s.title); }).sort(function(a, b) { return root.when(b) - root.when(a); })
+                    delegate: Item {
+                        id: rrow
                         required property var modelData
                         required property int index
-                        objectName: "chunk" + index
-                        width: notesBox.availableWidth
-                        spacing: Style.spacing.xs
-                        Link { objectName: "chunkLink" + crow.index; meeting: root.selectedId; line: String(crow.modelData.line || ""); at: crow.modelData.t0; text: root.client.fmtTime(crow.modelData.t0) + "\u2013" + root.client.fmtTime(crow.modelData.t1) }
-                        UiText { width: parent.width - x - Style.spacing.xs; x: 0; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(crow.modelData.body || ""); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                        readonly property string rowId: String(modelData.id)
+                        readonly property string dateText: { var t = root.when(modelData); return t ? Qt.formatDateTime(new Date(t), Qt.locale().dateTimeFormat(Locale.ShortFormat)) : ""; }
+                        readonly property string accName: Accessible.name
+                        objectName: modelData.kind === "meeting" ? "openNotes" : "openChat"
+                        width: ListView.view.width
+                        height: rowColumn.implicitHeight
+                        activeFocusOnTab: true
+                        Accessible.role: Accessible.Button
+                        Accessible.name: (modelData.kind === "meeting" ? "Meeting: " : "Chat: ") + modelData.title + ", " + dateText
+                        signal clicked()
+                        onClicked: { restoreList.currentIndex = index; root.select(modelData); }
+                        Keys.onReturnPressed: clicked()
+                        Keys.onEnterPressed: clicked()
+                        Keys.onSpacePressed: clicked()
+                        Accessible.onPressAction: clicked()
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: root.theme.radius
+                            color: root.selectedId === rrow.rowId ? Qt.alpha(Commons.Color.accent, 0.18) : "transparent"
+                            visible: root.selectedId === rrow.rowId || rrow.activeFocus
+                            border.width: rrow.activeFocus ? 2 : 0
+                            border.color: Commons.Color.accent
+                        }
+                        Rectangle {
+                            objectName: "selectedBar"
+                            visible: root.selectedId === rrow.rowId
+                            x: 0; y: 0; width: 3; height: rrow.height
+                            color: Commons.Color.accent
+                        }
+                        TextMetrics { id: kindMetrics; font.family: Style.font.family; font.pixelSize: root.theme.caption; text: "Meeting" }
+                        TextMetrics { id: dateMetrics; font.family: Style.font.family; font.pixelSize: root.theme.caption; text: Qt.formatDateTime(new Date(2026, 11, 28, 23, 59), Qt.locale().dateTimeFormat(Locale.ShortFormat)) }
+                        Column {
+                            id: rowColumn
+                            width: parent.width
+                            spacing: Style.spacing.xs
+                            RowLayout {
+                                id: rowFirst
+                                width: parent.width
+                                height: root.theme.ctl
+                                spacing: root.theme.gap
+                                UiText {
+                                    Layout.preferredWidth: kindMetrics.width
+                                    Layout.alignment: Qt.AlignVCenter
+                                    textFormat: Text.PlainText
+                                    text: rrow.modelData.kind === "meeting" ? "Meeting" : "Chat"
+                                    color: Commons.Color.popups.text
+                                    opacity: root.theme.dim
+                                    font.pixelSize: root.theme.caption
+                                }
+                                UiText {
+                                    id: rowTitle
+                                    Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignVCenter
+                                    textFormat: Text.PlainText
+                                    elide: Text.ElideRight
+                                    mayCut: true
+                                    text: rrow.modelData.title
+                                    color: Commons.Color.popups.text
+                                    font.pixelSize: root.theme.body
+                                }
+                                UiText {
+                                    objectName: "sessionWhen"
+                                    Layout.preferredWidth: dateMetrics.width
+                                    Layout.minimumWidth: dateMetrics.width
+                                    Layout.alignment: Qt.AlignVCenter
+                                    textFormat: Text.PlainText
+                                    text: rrow.dateText
+                                    color: Commons.Color.popups.text
+                                    opacity: root.theme.dim
+                                    font.pixelSize: root.theme.caption
+                                }
+                                IconButton { objectName: "restore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Restore"; onClicked: root.client.send("session.restore", { id: rrow.modelData.id }) }
+                                IconButton { objectName: "rowMore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "⋯"; Accessible.name: "More actions"; onClicked: root.menuFor = root.menuFor === rrow.rowId ? "" : rrow.rowId }
+                            }
+                            UiText {
+                                visible: rrow.modelData.kind === "meeting" && (Number(rrow.modelData.duration_seconds) > 0 || Number(rrow.modelData.line_count) > 0)
+                                textFormat: Text.PlainText
+                                text: (Number(rrow.modelData.duration_seconds) > 0 ? (Number(rrow.modelData.duration_seconds) < 60 ? "< 1 min" : Math.floor(Number(rrow.modelData.duration_seconds) / 60) + " min") : "") + (Number(rrow.modelData.duration_seconds) > 0 && Number(rrow.modelData.line_count) > 0 ? " · " : "") + (Number(rrow.modelData.line_count) > 0 ? Number(rrow.modelData.line_count) + " lines" : "")
+                                color: Commons.Color.popups.text
+                                opacity: root.theme.dim
+                                font.pixelSize: root.theme.caption
+                            }
+                            Row {
+                                visible: root.menuFor === rrow.rowId
+                                width: parent.width
+                                height: visible ? root.theme.ctl : 0
+                                spacing: root.theme.gap
+                                layoutDirection: Qt.RightToLeft
+                                IconButton { objectName: "deleteSession"; ts: root.theme.ts; text: "Delete"; onClicked: { var id = rrow.modelData.id, rid = rrow.rowId, kind = rrow.modelData.kind;   // the row may be rebuilt while the dialog is open
+                                    root.confirmRequested("Delete \"" + rrow.modelData.title + "\"? " + (kind === "meeting" ? "The transcript, notes and items of this meeting are removed." : "This chat is removed."), "Delete", function() { root.client.send("session.delete", { id: id }); if (root.selectedId === rid) { root.selectedId = ""; root.narrowNotes = false; root.notes = ""; root.notesStale = false; root.notesPhase = ""; } root.menuFor = ""; root.load(); }); } }
+                                IconButton { objectName: "exportNow"; ts: root.theme.ts; text: "Export now"; visible: rrow.modelData.kind === "meeting"; onClicked: root.exportMeeting(rrow.modelData.id) }
+                            }
+                        }
+                        MouseArea {
+                            x: 0; y: 0; width: rowTitle.x + rowTitle.width; height: rowFirst.height
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: rrow.clicked()
+                        }
                     }
                 }
-                Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.meetingItems.length > 0; text: "Items" }
-                Repeater {
-                    model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.meetingItems : []
-                    Row {
-                        id: irow
-                        required property var modelData
-                        required property int index
-                        objectName: "item" + index
-                        width: notesBox.availableWidth
+                Item {   // transcript lines that match the search
+                    id: linesBox
+                    objectName: "linesBox"
+                    visible: root.lineHits.length > 0
+                    width: parent.width
+                    height: visible ? Math.min(linesHead.height + linesList.contentHeight + Style.spacing.xs, Math.max(root.theme.ctl * 3, parent.height * 0.4)) : 0
+                    UiText { id: linesHead; textFormat: Text.PlainText; text: "Lines"; color: Commons.Color.popups.text; opacity: root.theme.dim; font.pixelSize: root.theme.caption; font.bold: true }
+                    ListView {
+                        id: linesList
+                        objectName: "lineHits"
+                        anchors { top: linesHead.bottom; topMargin: Style.spacing.xs; left: parent.left; right: parent.right; bottom: parent.bottom }
+                        clip: true
                         spacing: Style.spacing.xs
-                        Link { objectName: "itemLink" + irow.index; visible: irow.modelData.t0 !== null && irow.modelData.t0 !== undefined; meeting: root.selectedId; line: String(irow.modelData.line || ""); at: Number(irow.modelData.t0) || 0 }
-                        UiText { width: parent.width - x - Style.spacing.xs; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: [irow.modelData.text, irow.modelData.owner, irow.modelData.due].filter(function(x) { return x; }).join(" \u00b7 "); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                        model: root.lineHits
+                        delegate: Item {
+                            id: hit
+                            objectName: "lineHit" + index
+                            required property var modelData
+                            required property int index
+                            readonly property bool canOpen: String(modelData.meeting) === root.client.currentMeeting || !root.client.recording
+                            width: ListView.view.width
+                            height: hcol.implicitHeight
+                            opacity: canOpen ? 1 : 0.6
+                            Accessible.role: Accessible.Button
+                            Accessible.name: String(modelData.text)
+                            Accessible.onPressAction: { if (hit.canOpen) root.openHit(hit.modelData); }
+                            Column {
+                                id: hcol
+                                width: parent.width
+                                UiText {
+                                    width: parent.width
+                                    textFormat: Text.StyledText
+                                    wrapMode: Text.Wrap
+                                    maximumLineCount: 2
+                                    elide: Text.ElideRight
+                                    mayCut: true
+                                    text: root.esc(root.client.fmtTime(hit.modelData.t0)) + " \u00b7 " + root.esc(hit.modelData.speaker || (hit.modelData.who === "mic" ? "You" : hit.modelData.who === "room" ? "Room" : "Them")) + ": " + root.marked(hit.modelData.text, root.query.trim())
+                                    color: Commons.Color.popups.text
+                                    font.pixelSize: root.theme.body
+                                }
+                                UiText {
+                                    width: parent.width
+                                    textFormat: Text.PlainText
+                                    elide: Text.ElideRight
+                                    mayCut: true
+                                    text: String(hit.modelData.title || "") + (hit.canOpen ? "" : "  \u00b7  Stop recording to open")
+                                    color: Commons.Color.popups.text
+                                    opacity: root.theme.dim
+                                    font.pixelSize: root.theme.caption
+                                }
+                            }
+                            MouseArea { anchors.fill: parent; enabled: hit.canOpen; cursorShape: Qt.PointingHandCursor; onClicked: root.openHit(hit.modelData) }
+                        }
                     }
                 }
-                Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.meetingBookmarks.length > 0; text: "Bookmarks" }
-                Repeater {
-                    model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.meetingBookmarks : []
-                    Row {
-                        id: brow
-                        required property var modelData
-                        required property int index
-                        objectName: "bookmark" + index
-                        width: notesBox.availableWidth
-                        spacing: Style.spacing.xs
-                        Link { objectName: "bookmarkLink" + brow.index; meeting: root.selectedId; line: String(brow.modelData.line || ""); at: brow.modelData.t0 }
-                        UiText { width: parent.width - x - Style.spacing.xs; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: (String(brow.modelData.speaker || "") !== "" ? brow.modelData.speaker + ": " : "") + brow.modelData.text; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
-                    }
-                }
+            }
+            Column {
+                id: notesColumn
+                visible: root.wideNotes || root.narrowNotes
+                x: root.wideNotes ? restoreColumn.width + Style.spacing.md : 0
+                width: parent.width - x
+                height: parent.height
+                spacing: Style.spacing.md
+                Accessible.role: Accessible.Pane
+                Accessible.name: "Meeting notes"
                 IconButton {
-                    objectName: "openTranscript"
-                    visible: (root.notesPhase === "ready" || root.notesPhase === "empty")
+                    id: notesBack
+                    objectName: "notesBack"
+                    visible: !root.wideNotes && root.narrowNotes
                     ts: root.theme.ts
-                    text: "Open transcript"
-                    bordered: true
-                    tooltipText: "Restore this meeting and show its transcript"
-                    onClicked: root.openMeeting(root.selectedId)
+                    text: "Back to sessions"
+                    onClicked: root.back()
+                }
+                UiText {
+                    id: exportStatusText
+                    objectName: "exportStatus"
+                    visible: root.exportStatus !== ""
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    text: root.exportStatus
+                    color: Commons.Color.popups.text
+                    font.pixelSize: root.theme.caption
+                }
+                UiText {
+                    objectName: "notesEmpty"
+                    visible: root.notesPhase === ""
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    text: root.selectedId === "" ? "Select a meeting to read its notes" : "Chats have no notes. Use Restore to open this one."
+                    color: Commons.Color.popups.text
+                    font.pixelSize: root.theme.body
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: text
+                }
+                ScrollView {   // long notes scroll
+                    id: notesBox
+                    objectName: "notesBox"
+                    visible: root.notesPhase !== ""
+                    width: parent.width
+                    height: visible ? Math.max(0, parent.height - y) : 0
+                    contentWidth: availableWidth
+                    clip: true
+                    Column {
+                        width: notesBox.availableWidth
+                        spacing: Style.spacing.xs
+                        Column {
+                            objectName: "notesTitle"
+                            width: parent.width
+                            UiText {
+                                width: parent.width
+                                textFormat: Text.PlainText
+                                text: { var s = root.sessions.find(function(row) { return row.kind === "meeting" && String(row.id) === root.selectedId; }); return s ? String(s.title) : ""; }
+                                wrapMode: Text.Wrap   // a long title grows the header instead of being cut
+                                color: Commons.Color.popups.text
+                                font.pixelSize: root.theme.body
+                                font.bold: true
+                            }
+                            UiText {
+                                width: parent.width
+                                textFormat: Text.PlainText
+                                text: { var s = root.sessions.find(function(row) { return row.kind === "meeting" && String(row.id) === root.selectedId; }); var t = s ? root.when(s) : 0; return t ? Qt.formatDateTime(new Date(t), Qt.locale().dateTimeFormat(Locale.ShortFormat)) : ""; }
+                                color: Commons.Color.popups.text
+                                opacity: root.theme.dim
+                                font.pixelSize: root.theme.caption
+                            }
+                        }
+                        Flow {   // header: out of date, and Regenerate
+                            visible: root.notesStale
+                            width: parent.width
+                            spacing: Style.spacing.xs
+                            UiText {
+                                objectName: "notesStale"
+                                height: root.theme.ctl
+                                verticalAlignment: Text.AlignVCenter
+                                textFormat: Text.PlainText
+                                text: "Names or lines changed after these notes were written"
+                                color: Commons.Color.popups.text
+                                opacity: root.theme.dim
+                                font.italic: true
+                                font.pixelSize: root.theme.caption
+                            }
+                            IconButton {
+                                objectName: "regenerateNotes"
+                                ts: root.theme.ts
+                                text: "Regenerate"
+                                bordered: true
+                                tooltipText: "Write the notes again from the corrected transcript"
+                                onClicked: root.client.send("notes.regenerate", { meeting: root.selectedId }, function(r) { if (!r.ok) root.error = String(r.error || "request failed"); })
+                            }
+                        }
+                        UiText {
+                            objectName: "notesStateText"
+                            visible: root.notesPhase !== "ready"
+                            width: parent.width
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            text: root.notesPhase === "loading" ? "Loading notes…" : (root.notesPhase === "empty" ? "No notes yet for this meeting." : "Notes failed: " + root.notes)
+                            color: Commons.Color.popups.text
+                            opacity: root.theme.dim
+                            font.pixelSize: root.theme.body
+                        }
+                        UiText {
+                            visible: root.notesPhase === "ready"
+                            width: parent.width
+                            textFormat: Text.MarkdownText
+                            wrapMode: Text.Wrap
+                            text: root.capHeadings(root.notes)
+                            color: Commons.Color.popups.text
+                            font.pixelSize: root.theme.body
+                        }
+                        component Link: IconButton {   // m:ss that jumps to the line; plain time when there is none
+                            id: lnk
+                            required property var meeting
+                            property string line: ""
+                            property real at: 0
+                            ts: root.theme.ts
+                            text: root.client.fmtTime(at)
+                            bordered: true
+                            enabled: line !== ""
+                            tooltipText: "Open the transcript at this moment"
+                            onClicked: root.openHit({ meeting: lnk.meeting, id: lnk.line })
+                        }
+                        component Heading: UiText {
+                            width: parent.width
+                            textFormat: Text.PlainText
+                            color: Commons.Color.popups.text
+                            opacity: root.theme.dim
+                            font.pixelSize: root.theme.caption
+                            font.bold: true
+                        }
+                        Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.notesChunks.length > 0; text: "Timeline" }
+                        Repeater {
+                            model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.notesChunks : []
+                            Row {
+                                id: crow
+                                required property var modelData
+                                required property int index
+                                objectName: "chunk" + index
+                                width: notesBox.availableWidth
+                                spacing: Style.spacing.xs
+                                Link { objectName: "chunkLink" + crow.index; meeting: root.selectedId; line: String(crow.modelData.line || ""); at: crow.modelData.t0; text: root.client.fmtTime(crow.modelData.t0) + "\u2013" + root.client.fmtTime(crow.modelData.t1) }
+                                UiText { width: parent.width - x - Style.spacing.xs; x: 0; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(crow.modelData.body || ""); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                            }
+                        }
+                        Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.meetingItems.length > 0; text: "Items" }
+                        Repeater {
+                            model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.meetingItems : []
+                            Row {
+                                id: irow
+                                required property var modelData
+                                required property int index
+                                objectName: "item" + index
+                                width: notesBox.availableWidth
+                                spacing: Style.spacing.xs
+                                Link { objectName: "itemLink" + irow.index; visible: irow.modelData.t0 !== null && irow.modelData.t0 !== undefined; meeting: root.selectedId; line: String(irow.modelData.line || ""); at: Number(irow.modelData.t0) || 0 }
+                                UiText { width: parent.width - x - Style.spacing.xs; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: [irow.modelData.text, irow.modelData.owner, irow.modelData.due].filter(function(x) { return x; }).join(" \u00b7 "); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                            }
+                        }
+                        Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.meetingBookmarks.length > 0; text: "Bookmarks" }
+                        Repeater {
+                            model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.meetingBookmarks : []
+                            Row {
+                                id: brow
+                                required property var modelData
+                                required property int index
+                                objectName: "bookmark" + index
+                                width: notesBox.availableWidth
+                                spacing: Style.spacing.xs
+                                Link { objectName: "bookmarkLink" + brow.index; meeting: root.selectedId; line: String(brow.modelData.line || ""); at: brow.modelData.t0 }
+                                UiText { width: parent.width - x - Style.spacing.xs; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: (String(brow.modelData.speaker || "") !== "" ? brow.modelData.speaker + ": " : "") + brow.modelData.text; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                            }
+                        }
+                        IconButton {
+                            objectName: "openTranscript"
+                            visible: (root.notesPhase === "ready" || root.notesPhase === "empty")
+                            ts: root.theme.ts
+                            text: "Open transcript"
+                            bordered: true
+                            tooltipText: "Restore this meeting and show its transcript"
+                            onClicked: root.openMeeting(root.selectedId)
+                        }
+                    }
                 }
             }
         }

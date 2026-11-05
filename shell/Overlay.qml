@@ -279,7 +279,7 @@ Item {
             borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
             focus: true
             // Escape closes one thing: a dialog or list (they take it themselves), the preview, Settings, the Last time drawer, then the overlay
-            Keys.onEscapePressed: { if (root.previewText !== "") root.previewText = ""; else if (root.library) root.library = false; else if (root.lastOpen) root.lastOpen = false; else root.close(); }
+            Keys.onEscapePressed: { if (root.previewText !== "") root.previewText = ""; else if (root.library) { if (!lib.back()) root.library = false; } else if (root.lastOpen) root.lastOpen = false; else root.close(); }
             Keys.onPressed: function(e) {
                 if (e.modifiers & Qt.ControlModifier) {   // Ctrl+= / Ctrl+- / Ctrl+0: text size
                     if (e.key === Qt.Key_Equal || e.key === Qt.Key_Plus) { root.bumpScale(10); e.accepted = true; }
