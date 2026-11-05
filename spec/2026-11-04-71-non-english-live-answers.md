@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 71
 intent: intent/2026-11-04-71-non-english-live-answers.md
 ---
