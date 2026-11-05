@@ -30,6 +30,9 @@ Item {
     property var notesChunks: []      // notes.get chunks: the timeline
     property var meetingItems: []     // items.list of the selected meeting
     property var meetingBookmarks: [] // bookmarks.list of the selected meeting
+    property var meetingShots: []     // screenshots.list of the selected meeting (no image data)
+    property string shotOpen: ""      // the screenshot being previewed
+    property string shotData: ""      // its base64 image
     property string selectedId: ""
     property string notesPhase: ""
     property string menuFor: ""
@@ -133,7 +136,7 @@ Item {
         root.menuFor = "";
         root.notes = "";
         root.notesStale = false;
-        root.notesChunks = []; root.meetingItems = []; root.meetingBookmarks = [];
+        root.notesChunks = []; root.meetingItems = []; root.meetingBookmarks = []; root.meetingShots = []; root.shotOpen = ""; root.shotData = "";
         if (s.kind !== "meeting") { root.notesPhase = ""; return; }
         if (!root.wideNotes) notesBack.forceActiveFocus();
         root.notesMeeting = s.id;   // an export.done for the meeting being read shows its status line
@@ -167,6 +170,19 @@ Item {
         var id = String(meeting);
         root.client.send("items.list", { meeting: meeting }, function(r) { if (r.ok && root.selectedId === id) root.meetingItems = r.data || []; });
         root.client.send("bookmarks.list", { meeting: meeting }, function(r) { if (r.ok && root.selectedId === id) root.meetingBookmarks = r.data || []; });
+        root.fetchShots(meeting);
+    }
+    function fetchShots(meeting) {
+        var id = String(meeting);
+        root.client.send("screenshots.list", { meeting: meeting }, function(r) { if (r.ok && root.selectedId === id) root.meetingShots = r.data || []; });
+    }
+    function toggleShot(shot) {   // preview on click; the image is fetched only now
+        var id = String(shot.id);
+        if (root.shotOpen === id) { root.shotOpen = ""; root.shotData = ""; return; }
+        root.shotOpen = id; root.shotData = "";
+        root.client.send("screenshots.get", { id: shot.id }, function(r) {
+            if (r.ok && r.data && root.shotOpen === id) root.shotData = "data:" + r.data.mime + ";base64," + r.data.data;
+        });
     }
     function openMeeting(meeting) {   // "Open transcript": restore it, no jump
         if (String(meeting) === root.client.currentMeeting) { root.closeRequested(); return; }
@@ -739,6 +755,47 @@ Item {
                                 spacing: Style.spacing.xs
                                 Link { objectName: "bookmarkLink" + brow.index; meeting: root.selectedId; line: String(brow.modelData.line || ""); at: brow.modelData.t0 }
                                 UiText { width: parent.width - x - Style.spacing.xs; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: (String(brow.modelData.speaker || "") !== "" ? brow.modelData.speaker + ": " : "") + brow.modelData.text; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
+                            }
+                        }
+                        Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.meetingShots.length > 0; text: "Screenshots" }
+                        Repeater {
+                            model: (root.notesPhase === "ready" || root.notesPhase === "empty") ? root.meetingShots : []
+                            Column {
+                                id: srow2
+                                required property var modelData
+                                required property int index
+                                objectName: "shot" + index
+                                width: notesText.width
+                                spacing: Style.spacing.xs
+                                Flow {
+                                    width: parent.width
+                                    spacing: Style.spacing.xs
+                                    IconButton {
+                                        objectName: "shotOpen" + srow2.index
+                                        ts: root.theme.ts
+                                        text: root.client.fmtTime(Number(srow2.modelData.time)) + (srow2.modelData.automatic ? " \u00b7 automatic" : " \u00b7 manual")
+                                        bordered: true
+                                        tooltipText: "Show or hide this screenshot"
+                                        onClicked: root.toggleShot(srow2.modelData)
+                                    }
+                                    IconButton {
+                                        objectName: "shotDelete" + srow2.index
+                                        ts: root.theme.ts
+                                        text: "Delete"
+                                        bordered: true
+                                        onClicked: root.confirmRequested("Delete this screenshot? It is removed from the meeting and its export folder. Copies already synced elsewhere are not.", "Delete", function() { var id = srow2.modelData.id; root.client.send("screenshots.delete", { id: id }, function(r) { if (root.shotOpen === String(id)) { root.shotOpen = ""; root.shotData = ""; } if (!r.ok) root.exportStatus = String(r.error || "Delete failed."); else if (r.data && r.data.export_error) root.exportStatus = String(r.data.export_error); root.fetchShots(root.selectedId); }); })
+                                    }
+                                }
+                                Image {
+                                    objectName: "shotImage" + srow2.index
+                                    visible: root.shotOpen === String(srow2.modelData.id) && root.shotData !== ""
+                                    width: parent.width
+                                    height: visible ? width * implicitHeight / Math.max(1, implicitWidth) : 0
+                                    fillMode: Image.PreserveAspectFit
+                                    source: visible ? root.shotData : ""
+                                    Accessible.role: Accessible.Graphic
+                                    Accessible.name: "Screenshot preview"
+                                }
                             }
                         }
                         IconButton {

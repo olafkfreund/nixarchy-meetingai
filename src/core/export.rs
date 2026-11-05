@@ -24,6 +24,7 @@ pub struct Line {
 }
 
 pub struct Shot {
+    pub automatic: bool,
     pub taken_at: f64,
     pub question: String,
     pub mime: String,
@@ -60,9 +61,13 @@ fn clock(secs: f64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }
 
-fn shot_name(i: usize, mime: &str) -> String {
+fn shot_name(i: usize, mime: &str, automatic: bool) -> String {
     let ext = if mime.contains("jpeg") { "jpg" } else { "png" };
-    format!("shot-{:02}.{ext}", i + 1)
+    format!(
+        "{}-{:02}.{ext}",
+        if automatic { "auto" } else { "shot" },
+        i + 1
+    )
 }
 
 /// Safe, unique names: a repeated name gets " (2)", " (3)" … before its extension.
@@ -140,6 +145,20 @@ fn q(s: &str) -> String {
 }
 
 pub fn render(e: &Export) -> String {
+    let names: Vec<_> = e
+        .shots
+        .iter()
+        .scan((0, 0), |(manual, auto), s| {
+            let i = if s.automatic { auto } else { manual };
+            let name = shot_name(*i, &s.mime, s.automatic);
+            *i += 1;
+            Some(name)
+        })
+        .collect();
+    render_with_shots(e, &names)
+}
+
+fn render_with_shots(e: &Export, names: &[String]) -> String {
     let mut o = format!(
         "---\ntitle: {}\ndate: {}\nstart: {}\nend: {}\nduration: {}\nmode: {}\n",
         q(&e.title),
@@ -196,11 +215,11 @@ pub fn render(e: &Export) -> String {
     }
     if !e.shots.is_empty() {
         o += "\n## Screenshots\n\n";
-        for (i, s) in e.shots.iter().enumerate() {
+        for (s, name) in e.shots.iter().zip(names) {
             let t = clock(s.taken_at);
             o += &format!(
                 "![{t}](screenshots/{})\n\n{t} {}\n\n",
-                shot_name(i, &s.mime),
+                encode(name),
                 s.question.trim()
             );
         }
@@ -302,6 +321,159 @@ fn write_dir(folder: &Path, name: &str, files: &[(String, &[u8])]) -> io::Result
     Ok(())
 }
 
+/// Refresh only exporter-owned screenshot files, preserving user changes and other entries.
+pub fn sync_shots(folder: &Path, shots: &[Shot]) -> io::Result<Vec<String>> {
+    let dir = folder.join("screenshots");
+    if shots.is_empty() && !dir.exists() {
+        return Ok(Vec::new());
+    }
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => fs::remove_file(&dir)?,
+        Ok(meta) if !meta.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "screenshots is not a directory",
+            ));
+        }
+        _ => {}
+    }
+    mkdir(&dir)?;
+    let manifest = dir.join(".owned-files");
+    let previous = fs::read_to_string(&manifest).unwrap_or_default();
+    let owned: Vec<_> = previous
+        .lines()
+        .filter_map(|line| {
+            let (hash, name) = line.split_once("  ")?;
+            (hash.len() == 64 && !name.contains(['/', '\\']) && !name.is_empty())
+                .then_some((hash, name))
+        })
+        .collect();
+    let (mut manual, mut auto) = (0, 0);
+    let mut current = Vec::new();
+    for shot in shots {
+        let i = if shot.automatic {
+            &mut auto
+        } else {
+            &mut manual
+        };
+        let base = shot_name(*i, &shot.mime, shot.automatic);
+        *i += 1;
+        let hash = sha256(&shot.data);
+        let (stem, ext) = base.rsplit_once('.').unwrap();
+        let mut chosen = None;
+        for suffix in 0..1000 {
+            let name = if suffix == 0 {
+                base.clone()
+            } else {
+                format!("{stem}-{suffix}.{ext}")
+            };
+            if current.iter().any(|(n, _): &(String, String)| n == &name) {
+                continue;
+            }
+            let path = dir.join(&name);
+            let ours = match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+                Err(error) => return Err(error),
+                Ok(meta) if meta.is_file() => fs::read(&path).is_ok_and(|bytes| {
+                    bytes == shot.data
+                        || owned.iter().any(|(old_hash, old_name)| {
+                            *old_name == name && *old_hash == sha256(&bytes)
+                        })
+                }),
+                Ok(_) => false,
+            };
+            if ours {
+                chosen = Some(name);
+                break;
+            }
+        }
+        let name = chosen.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::AlreadyExists, "no free screenshot name")
+        })?;
+        let tmp = format!(".{name}.tmp");
+        rm(&dir.join(&tmp))?;
+        put(&dir, Path::new(&tmp), &shot.data)?;
+        if let Err(error) = fs::rename(dir.join(&tmp), dir.join(&name)) {
+            let _ = rm(&dir.join(&tmp));
+            return Err(error);
+        }
+        current.push((name, hash));
+    }
+    for (hash, name) in owned {
+        if current.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        let path = dir.join(name);
+        if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+            && fs::read(&path).is_ok_and(|bytes| sha256(&bytes) == hash)
+        {
+            fs::remove_file(path)?;
+        }
+    }
+    let text = current
+        .iter()
+        .map(|(name, hash)| format!("{hash}  {name}\n"))
+        .collect::<String>();
+    rm(&dir.join(".owned-files.tmp"))?;
+    put(&dir, Path::new(".owned-files.tmp"), text.as_bytes())?;
+    fs::rename(dir.join(".owned-files.tmp"), manifest)?;
+    Ok(current.into_iter().map(|(name, _)| name).collect())
+}
+
+/// Remove only regular screenshot files whose contents still match this row.
+pub fn remove_shot(folder: &Path, data: &[u8]) -> io::Result<()> {
+    let dir = folder.join("screenshots");
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "screenshots is not a directory",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    // Without a manifest the export predates it, and only the app's own names can be ours.
+    let manifest = match fs::read_to_string(dir.join(".owned-files")) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let listed = format!("{}  ", sha256(data));
+    for entry in entries {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let ours = match &manifest {
+            Some(text) => text
+                .lines()
+                .any(|line| line.strip_prefix(&listed) == Some(name)),
+            None => app_named(name),
+        };
+        if ours && fs::symlink_metadata(&path)?.file_type().is_file() && fs::read(&path)? == data {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+fn app_named(name: &str) -> bool {
+    name.strip_prefix("auto-")
+        .or_else(|| name.strip_prefix("shot-"))
+        .and_then(|rest| rest.split_once('.'))
+        .is_some_and(|(number, _)| {
+            number.starts_with(|c: char| c.is_ascii_digit())
+                && number.chars().all(|c| c.is_ascii_digit() || c == '-')
+        })
+}
+
 /// Choose, rename or create the meeting folder under `root`. Returns it; writes no contents.
 pub fn place(root: &Path, previous: Option<&Path>, e: &Export) -> io::Result<PathBuf> {
     mkdir(root)?;
@@ -351,17 +523,11 @@ pub fn fill_tracked(folder: &Path, e: &Export, stored: Option<&str>) -> io::Resu
     ] {
         rm(&folder.join(n))?; // leftovers of a crash
     }
-    let shots: Vec<_> = e
-        .shots
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (shot_name(i, &s.mime), s.data.as_slice()))
-        .collect();
     let docs: Vec<_> = doc_names(&e.docs)
         .into_iter()
         .zip(e.docs.iter().map(|d| d.data.as_slice()))
         .collect();
-    write_dir(folder, "screenshots", &shots)?;
+    let shot_names = sync_shots(folder, &e.shots)?;
     write_dir(folder, "documents", &docs)?;
     // The first name that is free or still holds exactly what we last wrote; never one the user changed.
     let ours = |name: &String| match fs::symlink_metadata(folder.join(name)) {
@@ -377,7 +543,7 @@ pub fn fill_tracked(folder: &Path, e: &Export, stored: Option<&str>) -> io::Resu
         .chain((2..).map(|n| format!("notes (updated {n}).md")))
         .find(ours)
         .expect("an unbounded list of names");
-    let rendered = render(e);
+    let rendered = render_with_shots(e, &shot_names);
     let tmp = ".notes.md.tmp";
     put(folder, Path::new(tmp), rendered.as_bytes())?;
     if let Err(err) = fs::rename(folder.join(tmp), folder.join(&target)) {
@@ -462,6 +628,7 @@ mod tests {
                 text: "Hello".into(),
             }],
             shots: vec![Shot {
+                automatic: false,
                 taken_at: 61.0,
                 question: "What is this?".into(),
                 mime: "image/png".into(),
@@ -574,19 +741,21 @@ mod tests {
     }
 
     #[test]
-    fn failed_write_keeps_previous_and_symlinks_are_not_followed() {
+    fn collisions_keep_previous_and_symlinks_are_not_followed() {
         let t = Tmp::new();
         let f = write(&t.0, None, &fixture("Safe")).unwrap();
-        // a non-empty directory in the way of shot-02.png makes the write fail
+        // A directory in the way gets a numbered alternative.
         let mut bad = fixture("Safe");
         bad.shots.push(Shot {
+            automatic: false,
             taken_at: 1.0,
             question: String::new(),
             mime: "image/png".into(),
             data: vec![9],
         });
         fs::create_dir_all(f.join("screenshots/shot-02.png/x")).unwrap();
-        assert!(fill_tracked(&f, &bad, None).is_err());
+        fill_tracked(&f, &bad, None).unwrap();
+        assert!(f.join("screenshots/shot-02-1.png").is_file());
         assert!(f.join("screenshots/shot-01.png").is_file());
         assert_eq!(
             fs::read_dir(f.join("screenshots"))
@@ -610,7 +779,7 @@ mod tests {
         fill_tracked(&f, &bad, None).unwrap();
         assert!(target.join("keep").is_file() && f.join("screenshots/shot-02.png").is_file());
         assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
-        // a planted symlink at a file name is replaced, not followed
+        // A planted symlink at a file name is preserved and gets a numbered alternative.
         fs::remove_file(f.join("screenshots/shot-01.png")).unwrap();
         std::os::unix::fs::symlink(target.join("keep"), f.join("screenshots/shot-01.png")).unwrap();
         std::os::unix::fs::symlink(&target, f.join(".notes.md.tmp")).unwrap();
@@ -618,10 +787,11 @@ mod tests {
         assert_eq!(fs::read_to_string(target.join("keep")).unwrap(), "k");
         assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
         assert!(
-            !fs::symlink_metadata(f.join("screenshots/shot-01.png"))
+            fs::symlink_metadata(f.join("screenshots/shot-01.png"))
                 .unwrap()
                 .is_symlink()
         );
+        assert!(f.join("screenshots/shot-01-1.png").is_file());
     }
 
     #[test]
@@ -668,11 +838,11 @@ mod tests {
         let mut bare = fixture("Sync");
         bare.shots.clear();
         bare.docs.clear();
-        // our earlier files are never deleted, so their folders stay; an empty one goes
+        // Owned screenshots are removed; other files in their folder still stay.
         fs::remove_file(first.join("documents/cv.pdf")).unwrap();
         let again = write(&t.0, Some(&first), &bare).unwrap();
         assert_eq!(again, first);
-        assert!(again.join("screenshots/shot-01.png").is_file());
+        assert!(!again.join("screenshots/shot-01.png").exists());
         assert!(!again.join("documents").exists());
     }
 
@@ -748,5 +918,184 @@ mod tests {
             fs::read(f.join("screenshots/shot-01.png")).unwrap(),
             [1, 2, 3]
         );
+    }
+    #[test]
+    fn automatic_files_are_named_and_only_owned_stale_files_are_removed() {
+        let t = Tmp::new();
+        let mut e = fixture("Auto");
+        e.shots.push(Shot {
+            automatic: true,
+            taken_at: 70.0,
+            question: "[auto]".into(),
+            mime: "image/png".into(),
+            data: vec![4, 5],
+        });
+        let f = write(&t.0, None, &e).unwrap();
+        assert!(f.join("screenshots/auto-01.png").is_file());
+        assert!(
+            fs::read_to_string(f.join("notes.md"))
+                .unwrap()
+                .contains("screenshots/auto-01.png")
+        );
+        fs::write(f.join("screenshots/auto-99.png"), "user").unwrap();
+        e.shots.pop();
+        fill_tracked(&f, &e, None).unwrap();
+        assert!(!f.join("screenshots/auto-01.png").exists());
+        assert_eq!(
+            fs::read(f.join("screenshots/auto-99.png")).unwrap(),
+            b"user"
+        );
+        fs::write(f.join("screenshots/auto-01.png"), "also user").unwrap();
+        e.shots.push(Shot {
+            automatic: true,
+            taken_at: 70.0,
+            question: "[auto]".into(),
+            mime: "image/png".into(),
+            data: vec![9],
+        });
+        fill_tracked(&f, &e, None).unwrap();
+        assert_eq!(
+            fs::read(f.join("screenshots/auto-01.png")).unwrap(),
+            b"also user"
+        );
+        assert_eq!(fs::read(f.join("screenshots/auto-01-1.png")).unwrap(), [9]);
+    }
+
+    #[test]
+    fn screenshot_ownership_survives_edits_missing_rows_and_partial_exports() {
+        let t = Tmp::new();
+        let folder = t.0.join("meeting");
+        fs::create_dir(&folder).unwrap();
+        let shot = |automatic, data: &[u8]| Shot {
+            automatic,
+            taken_at: 1.0,
+            question: String::new(),
+            mime: "image/png".into(),
+            data: data.to_vec(),
+        };
+        let shots = [shot(false, b"manual"), shot(true, b"auto")];
+        sync_shots(&folder, &shots).unwrap();
+        assert_eq!(
+            fs::read_to_string(folder.join("screenshots/.owned-files"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        fs::write(folder.join("screenshots/auto-01.png"), "user edit").unwrap();
+        let names = sync_shots(&folder, &shots).unwrap();
+        assert_eq!(names, ["shot-01.png", "auto-01-1.png"]);
+        fs::remove_file(folder.join("screenshots/.owned-files")).unwrap();
+        let names = sync_shots(&folder, &shots).unwrap();
+        assert_eq!(names, ["shot-01.png", "auto-01-1.png"]);
+        assert_eq!(
+            fs::read(folder.join("screenshots/auto-01.png")).unwrap(),
+            b"user edit"
+        );
+        sync_shots(&folder, &[]).unwrap();
+        assert!(!folder.join("screenshots/shot-01.png").exists());
+        assert!(!folder.join("screenshots/auto-01-1.png").exists());
+        assert_eq!(
+            fs::read(folder.join("screenshots/auto-01.png")).unwrap(),
+            b"user edit"
+        );
+        fs::create_dir(folder.join("screenshots/auto-01-1.png")).unwrap();
+        fs::write(folder.join("screenshots/auto-99.png"), "user").unwrap();
+        let names = sync_shots(&folder, &[shot(true, b"new")]).unwrap();
+        assert_eq!(names, ["auto-01-2.png"]);
+        assert!(folder.join("screenshots/auto-01-1.png").is_dir());
+        assert_eq!(
+            fs::read(folder.join("screenshots/auto-99.png")).unwrap(),
+            b"user"
+        );
+        let two = [shot(true, b"first"), shot(true, b"second")];
+        fs::create_dir(folder.join("screenshots/auto-02.png")).unwrap();
+        let names = sync_shots(&folder, &two).unwrap();
+        assert_eq!(names, ["auto-01-2.png", "auto-02-1.png"]);
+        assert!(folder.join("screenshots/auto-02.png").is_dir());
+    }
+
+    #[test]
+    fn screenshot_name_search_is_bounded() {
+        let t = Tmp::new();
+        let dir = t.0.join("screenshots");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("auto-01.png"), b"user").unwrap();
+        for suffix in 1..1000 {
+            fs::write(dir.join(format!("auto-01-{suffix}.png")), b"user").unwrap();
+        }
+        let error = sync_shots(
+            &t.0,
+            &[Shot {
+                automatic: true,
+                taken_at: 0.0,
+                question: String::new(),
+                mime: "image/png".into(),
+                data: b"capture".to_vec(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn an_unreadable_folder_is_an_error_not_an_endless_search() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new();
+        let dir = t.0.join("screenshots");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("auto-01.png"), b"user").unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o600)).unwrap();
+        // root ignores the mode, so there is nothing to test.
+        let denied = fs::symlink_metadata(dir.join("auto-01.png")).is_err();
+        let result = sync_shots(
+            &t.0,
+            &[Shot {
+                automatic: true,
+                taken_at: 0.0,
+                question: String::new(),
+                mime: "image/png".into(),
+                data: b"capture".to_vec(),
+            }],
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        if denied {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+
+    #[test]
+    fn remove_shot_takes_only_the_apps_own_file() {
+        use std::os::unix::fs::symlink;
+        let t = Tmp::new();
+        remove_shot(&t.0, b"image").unwrap();
+        let dir = t.0.join("screenshots");
+        fs::create_dir(&dir).unwrap();
+        let hash = sha256(b"image");
+        let manifest = format!(
+            "{hash}  auto-01.png\n{hash}  changed.png\n{hash}  link.png\n{hash}  nested.png\n"
+        );
+        fs::write(dir.join(".owned-files"), manifest).unwrap();
+        fs::write(dir.join("auto-01.png"), b"image").unwrap();
+        fs::write(dir.join("keep-for-legal.png"), b"image").unwrap();
+        fs::write(dir.join("changed.png"), b"changed").unwrap();
+        fs::write(t.0.join("target"), b"image").unwrap();
+        symlink(t.0.join("target"), dir.join("link.png")).unwrap();
+        fs::create_dir(dir.join("nested.png")).unwrap();
+        remove_shot(&t.0, b"image").unwrap();
+        assert!(!dir.join("auto-01.png").exists());
+        assert!(dir.join("keep-for-legal.png").exists());
+        assert_eq!(fs::read(dir.join("changed.png")).unwrap(), b"changed");
+        assert!(fs::symlink_metadata(dir.join("link.png")).is_ok());
+        assert!(dir.join("nested.png").is_dir());
+        assert!(t.0.join("target").exists());
+        // An export from before the manifest: only the app's names can be ours.
+        fs::remove_file(dir.join(".owned-files")).unwrap();
+        fs::write(dir.join("shot-02.png"), b"image").unwrap();
+        fs::write(dir.join("shot-of-mine.png"), b"image").unwrap();
+        remove_shot(&t.0, b"image").unwrap();
+        assert!(!dir.join("shot-02.png").exists());
+        assert!(dir.join("shot-of-mine.png").exists());
+        assert!(dir.join("keep-for-legal.png").exists());
     }
 }

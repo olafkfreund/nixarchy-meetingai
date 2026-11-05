@@ -733,6 +733,41 @@ if bad:
 print("export: first-time card, Settings row, and Export now ok")
 PY
 
+# --autoshots: the toggle while recording (confirmation once, a refusal, count, limit) and the Library's Screenshots section.
+ln -sf "$here/tests/harness-autoshots.qml" "$work/cfg/shell.qml"
+export XDG_RUNTIME_DIR="$work/run-autoshots"
+mkdir -m 700 "$XDG_RUNTIME_DIR"
+python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/autoshots.log" --live --library &
+fake=$!
+sleep 0.5
+timeout 20 quickshell -p "$work/cfg" > "$work/autoshots.out" 2> "$work/autoshots.err" || true
+kill "$fake" 2>/dev/null || true
+if grep -aE "$qml_bad" "$work/autoshots.err" "$work/autoshots.out" | grep -av 'GEO {'; then echo "FAIL (autoshots): QML errors above" >&2; exit 1; fi
+python3 "$here/tests/check-geometry.py" "$work/autoshots.out"
+python3 - "$work/autoshots.out" "$work/autoshots.log" <<'PY'
+import json, sys
+line = next((l for l in open(sys.argv[1], errors="replace") if "AUTOSHOTS {" in l), None)
+if line is None:
+    sys.exit("FAIL (autoshots): no harness dump")
+d = json.loads(line[line.index("AUTOSHOTS ") + 10:])
+bad = [f"{k}: want True, got {d.get(k)!r}" for k in ("toggle", "confirm", "noSecondConfirm", "label", "limit", "rows", "preview", "deleteWording", "deleteConfirm", "afterDelete") if d.get(k) is not True]
+if "slurp is not installed" not in d.get("refusal", ""):
+    bad.append(f"the refusal must show as a notice: {d.get('refusal')!r}")
+if "reached its limit of 60 automatic screenshots" not in d.get("limitNotice", ""):
+    bad.append(f"a click at the limit must show the daemon's limit message: {d.get('limitNotice')!r}")
+if "Export folder is read-only." not in d.get("exportError", ""):
+    bad.append(f"a delete reply with export_error must show its text: {d.get('exportError')!r}")
+log = open(sys.argv[2]).read()
+for need in ("autoshots.start", "autoshots.stop", "screenshots.list", "screenshots.get", "screenshots.delete", "test.limit"):
+    if need not in log:
+        bad.append(f"daemon never received {need!r}")
+if bad:
+    for b in bad:
+        print("FAIL (autoshots):", b, file=sys.stderr)
+    sys.exit(1)
+print("autoshots: toggle, confirmation, refusal, count, limit, Screenshots section and delete ok")
+PY
+
 # Line actions (correct, bookmark, ask), meeting view (timeline, items, bookmarks, regenerate) and saved sources.
 ln -sf "$here/tests/harness-lines.qml" "$work/cfg/shell.qml"
 export XDG_RUNTIME_DIR="$work/run-lines"
