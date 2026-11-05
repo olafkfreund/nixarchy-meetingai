@@ -10,7 +10,7 @@ intent: intent/2026-11-05-81-notes-side-panel.md
 
 ## Design
 
-All in `shell/Library.qml` and its tests. No daemon change.
+`shell/Library.qml`, one small change in `shell/Overlay.qml` for Escape, and their tests. No daemon change.
 
 ### S1. Layout
 
@@ -19,8 +19,8 @@ Below the search box, the Restore tab becomes one `Item` with two parts:
 - **Left:** `restoreList`, then `linesBox` (transcript search hits), as now.
 - **Right:** a `notesColumn` holding `exportStatusText`, then `notesBox`, at full height.
 
-`readonly property bool wideNotes: width >= minimum`, where the minimum comes from what the columns need. Rows need about 420 units, and notes at least 320, so about 760 × `theme.ts`; the plan measures it.
-The default window (`Style.space(900)`, `shell/Overlay.qml:79`) clears it. The list takes about 45% of the width, and notes the rest.
+`readonly property bool wideNotes: width >= minimum`, where the minimum comes from what the columns need. Rows need about 420 units, and notes at least 320, so about 760 × `theme.ts`; the plan measures it against the **Library's own content width**, which is inset from the card (`shell/Overlay.qml:299`).
+The default card (`Style.space(900)`, :79) should clear it at 100%, and may not at 150% text scale, where the narrow view applies. The list takes about 45% of the width, and notes the rest.
 
 **`notesGrip`, `notesHeight`, `notesMax`, `notesDefault` and `setNotesHeight` go**, along with their reset at :310, because a full-height column has nothing to drag. Tests that use them change (`shell/tests/smoke.sh:660–686`).
 
@@ -35,30 +35,36 @@ This is what makes the preview findable. Selection works as today: clicking a ro
 
 ### S3. Rows in a narrower column
 
-Today one row holds type, title, date, Restore and the menu (:422). Below a width where that fits, the date moves to the row's second line, beside the duration. The title keeps at least enough width to read, and elides. Restore and the menu stay on the first line.
+Today one row holds type, title, date, Restore and the menu (:422). In the left column, the date always moves to the row's second line, beside the duration, so every row has one shape and `rowH` (:48) stays right. A chat row, which has no second line today, gains one for the date. The title keeps at least enough width to read, and elides. Restore and the menu stay on the first line.
 
 ### S4. Narrow windows
 
-When `wideNotes` is false:
+When `wideNotes` is false, a new `property bool narrowNotes` controls the swap:
 
-- Selecting a meeting shows the notes in place of the list and search hits, at full height, with a `Back to sessions` button at the top. The search text and scroll position are kept.
-- `Back` and `Escape` clear the view. `Escape` returns to the list first, and closes the Library only from the list.
-- Widening the window with notes open shows both columns.
+- **Selecting a meeting** sets `narrowNotes` true: the notes replace the list and search hits, at full height, with a `Back to sessions` button at the top. The search text and list position are kept. `noResults` is hidden in this view.
+- **Selecting a chat** leaves the list showing, because a chat has no notes. Restore is on its row.
+- **`Back`** sets `narrowNotes` false. The selection stays, so the row is still highlighted, and focus returns to it.
+- **Escape** does the same, then closes the Library on the next press. The overlay handles Escape itself (`shell/Overlay.qml:282`), so it asks the Library first: `if (library && libraryView.back()) ...`.
+- **Resizing:** `narrowNotes` only applies while narrow. Widening shows both columns. Narrowing with a meeting selected keeps the list until a meeting is chosen.
 
 ### S5. Reading comfort
 
 Within the theme:
 
 - **Line length:** the notes text is capped at about 80 characters' width, and the pane is padded. On a very wide window, the column simply has spare space on the right.
-- **Hierarchy:** a larger, bold meeting title (`theme.title` if one exists, otherwise the largest size in use); the Markdown headings keep their bold, with more space above; Timeline, Items and Bookmarks use the same heading style, not dim caption text (:670).
+- **Hierarchy:** a larger, bold meeting title (`theme.subtitle`, `shell/Theme.qml:25`); the Markdown headings keep their bold, with more space above; Timeline, Items and Bookmarks use the same heading style, not dim caption text (:670).
 - **Font:** unchanged.
 
 ### S6. Keyboard and screen readers
 
 - Tab order: search, list rows, then the notes column, whose links stay reachable.
-- Up and Down in the list move between rows as today, and the notes follow the selected row.
+- Rows keep Return, Enter and Space (:393). There is no Up or Down between rows today, and this does not add it; moving by Tab and selecting with Return works.
 - The right column gets an accessible name, "Meeting notes", and the empty message is readable by a screen reader.
 - The narrow view moves focus to `Back to sessions`, and returning puts focus on the row it came from.
+
+### S7. Nothing is lost
+
+`notesBox` moves whole, so it keeps the title and date, loading, empty and error states, the stale notice and Regenerate, the timeline, items, bookmarks, Open transcript, and links through `openHit` (:194).
 
 ## Alternatives rejected
 
@@ -70,7 +76,7 @@ Within the theme:
 ## Risks
 
 - **The list gets narrower:** long titles are cut more often. They elide, and the full title shows in the notes column.
-- **Tests rely on today's structure.** `harness-library.qml`, `harness-lines.qml` and `smoke.sh` find `notesBox` and the grip; they change with it. Keeping the `notesBox` object name limits this.
+- **Tests rely on today's structure.** `harness-library.qml`, `harness-lines.qml` and `smoke.sh` use `notesBox` and the grip, and some reverse: they expect a chat to **hide** `notesBox` (`harness-library.qml:82`, `smoke.sh:180`), and check the date's position (`smoke.sh:190`). `notesBox` itself stays hidden for a chat, with the message in a sibling, so most hold. The late-reply check stays. Keeping the `notesBox` object name limits the rest.
 - **The hit list on the left can be short.** With many search hits, `linesBox` and the list share the left column, as they share the window today.
 - **Not run on a real screen reader.** Accessible names are checked in code, and an actual reader test is the owner's or a later step.
 
