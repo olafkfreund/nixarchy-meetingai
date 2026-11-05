@@ -428,7 +428,15 @@ Item {
                             accessibleName: "Meeting language"
                             theme: metrics; width: Math.min(parent.width, 220)
                             value: String(backend.state.meeting_language || "")
-                            options: (backend.state.languages || []).map(function(l) { return { value: l.code === "en" ? "" : l.code, label: l.name }; })
+                            options: {
+                                var chosen = backend.state.meeting_language || "";
+                                var shown = String(backend.state.meeting_language_label || "English");
+                                // English means "no choice", so it shows what actually applies, such as a global language.
+                                var list = (backend.state.languages || []).map(function(l) { return { value: l.code === "en" ? "" : l.code, label: l.code === "en" && chosen === "" ? shown : l.name }; });
+                                // A restored meeting's language may not be one this engine offers.
+                                if (chosen !== "" && !list.some(function(o) { return o.value === chosen; })) list.push({ value: chosen, label: shown });
+                                return list;
+                            }
                             triggerLabel: String(backend.state.meeting_language_label || "English")
                             onChanged: function(v) { backend.send("meeting.language.set", { language: v }); }
                         }

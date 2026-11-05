@@ -203,7 +203,13 @@ set `deepgram.region = "eu"`: only that region opts out of model improvement.
 
 The local Norwegian engine (NB-Whisper) was removed. A saved `whisper-nb-local`
 choice becomes `parakeet-local` once, with a notice, and a saved Norwegian speech
-language is cleared. The `whisperNb.*` options now fail with a message saying so.
+language is cleared on Parakeet; it stays on Deepgram and other engines that accept
+it. The `whisperNb.*` options now fail with a message saying so.
+
+The global `speech_language` setting still exists, in Nix and in the settings search,
+mainly for cloud engines. Choosing English in a meeting means "no override", so a global
+language still applies, and the picker shows it. A language the engine cannot do, such
+as `settings.speechLanguage = "nb"` on Parakeet, is refused when recording starts.
 The measurements that led to its removal are in
 [docs/eval/2026-11-norwegian-stt.md](docs/eval/2026-11-norwegian-stt.md).
 
@@ -248,8 +254,8 @@ them locked with "Set in Nix". Profiles and prompts stay in the app.
   for live answers, separately.
 - **Pace:** how quickly the copilot answers what the other side asks.
 - **Smart follow-ups:** suggested next questions, on or off.
-- **Speech:** speech-to-text provider and model, speech language, microphone
-  and output device.
+- **Speech:** speech-to-text provider and model, microphone and output device.
+  The language is chosen in the meeting view.
 - **Text size** and **Reduce motion**.
 - **Auto-record calls:** start notes by itself when a call is detected
   (never in Interview someone mode).

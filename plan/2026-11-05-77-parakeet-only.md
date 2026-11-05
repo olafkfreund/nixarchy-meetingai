@@ -186,3 +186,14 @@ The spec places the control "near the mode picker". Reviews showed the header ca
 - Step 3 (coder; a first coder stalled with no edits and was replaced):
   - The picker is a `Column` holding the `Select` and the hint, above `Composer`; `convo.below` accounts for its height.
   - `smoke.sh`'s export-flow timeout goes from 16 s to 20 s, for the new phases.
+- Step 5 review fixes (Claude, from the Opus, Codex and agy reviews):
+  - Local-only redaction also nulls `meeting_language_label`, which named the same choice.
+  - The picker's English entry shows `meeting_language_label`, so a global language is not displayed as English, and a restored language
+    the engine lacks shows its name, not its code.
+  - The "next recording start" notice now fires on any engine except Parakeet, including when clearing a choice. It had fired on Parakeet instead.
+  - `meeting.language.set` is refused during a New start, which would have rewritten the old meeting and then been discarded.
+  - It also accepts `nb`, `nn` and region forms as `no`; the migration clears a `speech_model` left by the removed engine; the refusal also points at
+    the setting; the README corrects what the migration does, and explains the global setting.
+  - **Not done:** tests that run the new notice and the refusal during a New start, and that run `spawn_chunk` end to end with another meeting active; the smoke test's "no Norwegian" check reads the fake
+    daemon's list, so the real list is covered by Rust tests only. Choosing a language with a finished meeting open relabels that meeting, as the approved table says; this may surprise, and is for the owner to judge.
+  - **`grounded` smoke:** fails on clean `main` too, so it is not from this work: 3 of 3 on `main`, 2 of 3 on this branch, on a loaded machine.

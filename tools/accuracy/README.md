@@ -49,7 +49,7 @@ All raw datasets and generated sets stay in `~/.cache/meetingai-eval/no/` (overr
 ### Download commands
 
 ```bash
-mkdir -p ~/.cache/meetingai-eval/no/{npsc,clips,musan,models}
+mkdir -p ~/.cache/meetingai-eval/no/{npsc,clips,musan}
 
 # 1. NPSC test sittings (CC0): one JSONL + one 16 kHz MP3 archive per sitting, ~70 MB for three
 for d in 20170207 20171122 20180530; do

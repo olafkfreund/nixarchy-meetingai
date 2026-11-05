@@ -815,7 +815,7 @@ fn speech_guard(speech: &ResolvedSpeech) -> Result<Option<String>, String> {
         Some(false) => {
             let engine = SttProvider::by_id(&speech.id).map_or(speech.id.as_str(), |p| p.name);
             Err(format!(
-                "language_unsupported: {engine} cannot transcribe {language}. Choose Deepgram or an OpenAI-compatible speech engine that supports it before recording."
+                "language_unsupported: {engine} cannot transcribe {language}. Choose another language, or Deepgram or an OpenAI-compatible speech engine that supports it, before recording. If it comes from the speech language setting, change that."
             ))
         }
         None => Ok(Some(format!(
@@ -973,6 +973,8 @@ fn migrate_norwegian_engine(db: &Database) -> Option<String> {
     let old_engine = provider == "whisper-nb-local";
     if old_engine {
         store::set(c, "speech_provider", "parakeet-local").ok()?;
+        // A model saved for the removed engine would otherwise follow a later switch to Deepgram.
+        store::set(c, "speech_model", "").ok()?;
     }
     let language = store::get(c, "speech_language")
         .ok()
@@ -1468,7 +1470,6 @@ impl Daemon {
         if id == "openai-compatible-stt" {
             config.base_url.clone_from(&s.speech_base_url);
         }
-        // resolve_speech applied speech_model only if this is the engine the user chose.
         if !s.speech_model.is_empty() && config.custom.is_none() {
             config.model = resolved.config.model;
         }
@@ -4094,8 +4095,25 @@ impl Daemon {
     }
 
     fn meeting_language_set(&self, language: String) -> Result<Value, String> {
-        let choice = meetings::chosen_language(&language).map(str::to_ascii_lowercase);
+        // "nb", "NN" and "nb-NO" all mean Norwegian, as in resolve_speech.
+        let choice = meetings::chosen_language(&language).map(|code| {
+            let base = code
+                .split(['-', '_'])
+                .next()
+                .unwrap_or(code)
+                .to_ascii_lowercase();
+            if matches!(base.as_str(), "nb" | "nn") {
+                "no".to_owned()
+            } else {
+                base
+            }
+        });
         let mut g = self.inner.lock();
+        // During a New start the open meeting is about to be replaced: a choice now would
+        // rewrite that old meeting and then be discarded.
+        if g.recording.is_some() && g.meeting_id.is_none() {
+            return Err("Wait for recording to start before changing the language.".into());
+        }
         let resolved = resolve_speech(&g.settings);
         let model = self
             .speech_config(&g.settings, self.local_now(&g))
@@ -4120,7 +4138,7 @@ impl Daemon {
         }
         let changed = g.meeting_language != choice;
         g.meeting_language = choice;
-        if changed && g.recording.is_some() && support == Some(true) {
+        if changed && g.recording.is_some() && resolved.id != "parakeet-local" {
             self.emit("notice", json!({"text": "Speech engine and language changes apply at the next recording start."}));
         }
         self.emit_state(&g);
@@ -5402,6 +5420,7 @@ impl Daemon {
                 value["candidate"] = Value::Null;
                 value["consent"] = Value::Null;
                 value["meeting_language"] = Value::Null;
+                value["meeting_language_label"] = Value::Null;
             }
             "items.list" => {
                 if let Some(list) = value.as_array_mut() {
@@ -8450,6 +8469,7 @@ mod command_tests {
             .unwrap();
         let local_state = d.handle("state.get", json!({}), Some("mcp")).await.unwrap();
         assert_eq!(local_state["meeting_language"], Value::Null);
+        assert_eq!(local_state["meeting_language_label"], Value::Null);
         assert_eq!(
             call("state.get", json!({})).await.unwrap()["meeting_language"],
             "pl"
@@ -8610,6 +8630,39 @@ mod command_tests {
                 "not allowed for agents"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn meeting_language_codes_normalise_and_unknown_ones_are_refused() {
+        let d = daemon();
+        let set = |language: &'static str| {
+            let d = &d;
+            async move {
+                d.handle("meeting.language.set", json!({"language": language}), None)
+                    .await
+            }
+        };
+        assert!(set("xx").await.unwrap_err().contains("Unknown language"));
+        // Parakeet cannot do Norwegian, however it is written.
+        for code in ["nb", "NN", "nb-NO"] {
+            assert!(
+                set(code)
+                    .await
+                    .unwrap_err()
+                    .contains("language_unsupported")
+            );
+        }
+        d.handle(
+            "settings.set",
+            json!({"key":"speech_provider", "value":"deepgram-stt"}),
+            None,
+        )
+        .await
+        .unwrap();
+        set("nb-NO").await.unwrap();
+        assert_eq!(d.inner.lock().meeting_language.as_deref(), Some("no"));
+        set("EN").await.unwrap();
+        assert_eq!(d.inner.lock().meeting_language, None);
     }
 
     #[test]
