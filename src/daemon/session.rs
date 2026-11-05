@@ -11901,6 +11901,22 @@ mod autoshots_tests {
     }
 
     #[tokio::test]
+    async fn a_capture_from_before_a_switch_off_and_on_is_not_stored() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        let stale = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        d.handle("autoshots.stop", json!({}), None).await.unwrap();
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        d.auto_capture_once(&meeting, stale).await;
+        assert!(
+            screenshots::list(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn deleting_from_a_stopped_meeting_rewrites_its_notes() {
         let d = daemon();
         let meeting = started(&d).await;
