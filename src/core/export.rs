@@ -1013,6 +1013,32 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_folder_is_an_error_not_an_endless_search() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = Tmp::new();
+        let dir = t.0.join("screenshots");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("auto-01.png"), b"user").unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o600)).unwrap();
+        // root ignores the mode, so there is nothing to test.
+        let denied = fs::symlink_metadata(dir.join("auto-01.png")).is_err();
+        let result = sync_shots(
+            &t.0,
+            &[Shot {
+                automatic: true,
+                taken_at: 0.0,
+                question: String::new(),
+                mime: "image/png".into(),
+                data: b"capture".to_vec(),
+            }],
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        if denied {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+
+    #[test]
     fn remove_shot_keeps_changed_files_symlinks_and_directories() {
         use std::os::unix::fs::symlink;
         let t = Tmp::new();

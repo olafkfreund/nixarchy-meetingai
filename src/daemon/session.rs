@@ -12079,7 +12079,8 @@ mod autoshots_tests {
             let d = d.clone();
             async move { d.delete_screenshot(id).await.unwrap() }
         });
-        tokio::task::yield_now().await;
+        // Long enough for the blocking delete to finish if it weren't waiting for the lock.
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
             screenshots::get(d.inner.lock().db.connection(), id)
                 .unwrap()
