@@ -189,6 +189,30 @@ fail with a message saying so. A saved `whisper-local` choice becomes
 `parakeet-local` once, with a notice. For Deepgram or OpenAI-compatible setups
 only, set `parakeet.enable = false` to leave the model out of the closure.
 
+### Languages
+
+Parakeet detects the language itself and takes no language input. A meeting's
+language (the picker above the composer in the meeting view) sets the language of
+answers and notes, over the answer language setting, and steers engines that
+accept a language. Choosing English clears the choice.
+
+Parakeet has no Norwegian: a Norwegian call on Parakeet comes out wrong, as
+Swedish-looking text, and Norwegian is not offered while Parakeet is the engine.
+Deepgram can do Norwegian, but it sends the audio to the cloud. If you use it,
+set `deepgram.region = "eu"`: only that region opts out of model improvement.
+
+The local Norwegian engine (NB-Whisper) was removed. A saved `whisper-nb-local`
+choice becomes `parakeet-local` once, with a notice, and a saved Norwegian speech
+language is cleared on Parakeet; it stays on Deepgram and other engines that accept
+it. The `whisperNb.*` options now fail with a message saying so.
+
+The global `speech_language` setting still exists, in Nix and in the settings search,
+mainly for cloud engines. Choosing English in a meeting means "no override", so a global
+language still applies, and the picker shows it. A language the engine cannot do, such
+as `settings.speechLanguage = "nb"` on Parakeet, is refused when recording starts.
+The measurements that led to its removal are in
+[docs/eval/2026-11-norwegian-stt.md](docs/eval/2026-11-norwegian-stt.md).
+
 ### Fully offline
 
 With Parakeet, transcription is local. Choose Ollama for answers and notes and
@@ -231,6 +255,7 @@ them locked with "Set in Nix". Profiles and prompts stay in the app.
 - **Pace:** how quickly the copilot answers what the other side asks.
 - **Smart follow-ups:** suggested next questions, on or off.
 - **Speech:** speech-to-text provider and model, microphone and output device.
+  The language is chosen in the meeting view.
 - **Text size** and **Reduce motion**.
 - **Auto-record calls:** start notes by itself when a call is detected
   (never in Interview someone mode).
@@ -1253,69 +1278,6 @@ package
 
 ```nix
 pkgs.callPackage ./nix/speaker-model.nix { }
-```
-
-
-
-## programs\.nixarchy-meetingai\.whisperNb\.enable
-
-
-
-Give the daemon the local Norwegian speech model (NB-Whisper small plus the Silero voice detector)\. Off by default: Parakeet does not transcribe Norwegian, so set ` settings.speechLanguage = "nb" ` and turn this on to record Norwegian meetings\.
-
-
-
-*Type:*
-boolean
-
-
-
-*Default:*
-
-```nix
-false
-```
-
-
-
-## programs\.nixarchy-meetingai\.whisperNb\.model
-
-
-
-The NB-Whisper model for Norwegian (` speechLanguage ` nb, no or nn)\. The daemon gets it as ` NIXARCHY_MEETINGAI_WHISPER_NB_DIR `\.
-
-
-
-*Type:*
-package
-
-
-
-*Default:*
-
-```nix
-pkgs.callPackage ./nix/whisper-nb-model.nix { }
-```
-
-
-
-## programs\.nixarchy-meetingai\.whisperNb\.vad
-
-
-
-The Silero voice-activity model (` silero_vad.onnx `) the Norwegian engine uses to cut speech into segments\. The daemon gets it as ` NIXARCHY_MEETINGAI_SILERO_VAD `\.
-
-
-
-*Type:*
-package
-
-
-
-*Default:*
-
-```nix
-pkgs.callPackage ./nix/silero-vad.nix { }
 ```
 
 

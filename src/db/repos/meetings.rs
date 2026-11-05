@@ -64,11 +64,15 @@ pub struct MeetingRecord {
     pub id: String,
     pub title: String,
     pub context: String,
-    pub language: String,
+    pub language: Option<String>,
     pub started_at: String,
     pub ended_at: Option<String>,
     pub duration_seconds: i64,
     pub line_count: i64,
+}
+pub fn chosen_language(language: &str) -> Option<&str> {
+    let language = language.trim();
+    (!language.is_empty() && !language.eq_ignore_ascii_case("en")).then_some(language)
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineRecord {
@@ -94,7 +98,14 @@ pub fn start(
     let id = uuid::Uuid::new_v4().to_string();
     c.execute(
         "INSERT INTO meetings(id,title,context,language,series_id,mode) VALUES(?1,?2,?3,?4,?5,?6)",
-        params![id, title, context, language, series_id, mode.as_str()],
+        params![
+            id,
+            title,
+            context,
+            chosen_language(language).unwrap_or(""),
+            series_id,
+            mode.as_str()
+        ],
     )?;
     Ok(id)
 }
@@ -174,6 +185,13 @@ pub fn reopen(c: &Connection, id: &str) -> Result<()> {
     .optional()?
     .ok_or(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
 }
+pub fn set_language(c: &Connection, id: &str, language: &str) -> Result<()> {
+    c.execute(
+        "UPDATE meetings SET language=?2 WHERE id=?1",
+        params![id, chosen_language(language).unwrap_or("")],
+    )?;
+    Ok(())
+}
 pub fn rename(c: &Connection, meeting_id: &str, title: &str) -> Result<()> {
     c.execute(
         "UPDATE meetings SET title=?2 WHERE id=?1",
@@ -216,7 +234,7 @@ pub fn get(c: &Connection, id: &str) -> Result<Option<MeetingRecord>> {
                 id: r.get(0)?,
                 title: r.get(1)?,
                 context: r.get(2)?,
-                language: r.get(3)?,
+                language: chosen_language(&r.get::<_, String>(3)?).map(str::to_owned),
                 started_at: r.get(4)?,
                 ended_at: r.get(5)?,
                 duration_seconds: r.get(6)?,
@@ -242,7 +260,7 @@ pub fn search(c: &Connection, query: &str, limit: usize) -> Result<Vec<MeetingRe
             id: r.get(0)?,
             title: r.get(1)?,
             context: r.get(2)?,
-            language: r.get(3)?,
+            language: chosen_language(&r.get::<_, String>(3)?).map(str::to_owned),
             started_at: r.get(4)?,
             ended_at: r.get(5)?,
             duration_seconds: r.get(6)?,
@@ -521,6 +539,31 @@ pub fn format_duration(seconds: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_english_rows_and_cleared_choices_read_as_no_choice() {
+        let db = crate::db::Database::in_memory().unwrap();
+        let c = db.connection();
+        let id = start(c, "Old", "", "en", None, MeetingMode::General).unwrap();
+        assert_eq!(get(c, &id).unwrap().unwrap().language, None);
+        c.execute("UPDATE meetings SET language='en' WHERE id=?1", [&id])
+            .unwrap();
+        assert_eq!(get(c, &id).unwrap().unwrap().language, None);
+        assert_eq!(search(c, "", 10).unwrap()[0].language, None);
+        set_language(c, &id, "pl").unwrap();
+        assert_eq!(
+            get(c, &id).unwrap().unwrap().language.as_deref(),
+            Some("pl")
+        );
+        set_language(c, &id, "en").unwrap();
+        assert_eq!(
+            c.query_row("SELECT language FROM meetings WHERE id=?1", [&id], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            ""
+        );
+    }
     use crate::db::Database;
 
     #[test]

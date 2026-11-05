@@ -325,6 +325,8 @@
               evaluates = extra: (builtins.tryEval (evalHm extra).home.username).success;
               wrong = [
                 { programs.nixarchy-meetingai.whisper.enable = false; }
+                { programs.nixarchy-meetingai.whisperNb.enable = false; }
+                { programs.nixarchy-meetingai.settings.speechProvider = "whisper-nb-local"; }
                 { programs.nixarchy-meetingai.settings.speechProvider = "whisper-local"; }
                 { programs.nixarchy-meetingai.parakeet.enable = false; }
                 {
