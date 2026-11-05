@@ -783,7 +783,7 @@ Item {
                                         ts: root.theme.ts
                                         text: "Delete"
                                         bordered: true
-                                        onClicked: root.confirmRequested("Delete this screenshot? It is removed from the meeting and its export folder. Copies already synced elsewhere are not.", "Delete", function() { root.client.send("screenshots.delete", { id: srow2.modelData.id }, function(r) { if (root.shotOpen === String(srow2.modelData.id)) { root.shotOpen = ""; root.shotData = ""; } if (!r.ok) root.exportStatus = String(r.error || "Delete failed."); else if (r.data && r.data.export_error) root.exportStatus = String(r.data.export_error); root.fetchShots(root.selectedId); }); })
+                                        onClicked: root.confirmRequested("Delete this screenshot? It is removed from the meeting and its export folder. Copies already synced elsewhere are not.", "Delete", function() { var id = srow2.modelData.id; root.client.send("screenshots.delete", { id: id }, function(r) { if (root.shotOpen === String(id)) { root.shotOpen = ""; root.shotData = ""; } if (!r.ok) root.exportStatus = String(r.error || "Delete failed."); else if (r.data && r.data.export_error) root.exportStatus = String(r.data.export_error); root.fetchShots(root.selectedId); }); })
                                     }
                                 }
                                 Image {

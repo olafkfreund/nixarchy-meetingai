@@ -94,3 +94,13 @@ Full checks, `nix flake check`; reviews by a fresh Opus agent, Codex and agy, re
   - The fake daemon's `autoshots.stop` now behaves like the real one; a new `test.limit` drives the limit.
   - Not tested: the first-use dialog at the limit, only the click path.
 - **Step 3:** size measured from real frames, not from a recorded 60-capture meeting: about 0.62 MB per 2560x1440 frame, about 1.48 MB across two monitors. No resolution limit added. Video-heavy frames were not measured.
+
+- **Second review round (Codex, lead corrections):** this replaces the delete behaviour recorded above.
+  - `screenshots.delete` holds the export lock and runs concurrently. It removes files whose bytes match the row, writing nothing, then deletes the row. With automatic export on it re-exports the meeting, live or not; with it off it writes nothing and says the notes keep the caption until the next export.
+  - The export folder's parent is no longer checked, because the database records where the export is.
+  - A delete recalculates the count. At the limit, falling below 60 switches it off, so the user can start again and choose an area.
+  - A meeting that turns Local-only or no longer has consent stops capture with a notice, on the next capture attempt.
+  - The duplicate limit is 0.2%, not 1%, so one new line of text on a slide counts as a change. Not checked on real slides.
+  - `sync_shots` returns real errors and tries at most 1000 names.
+  - A failed store warns once.
+  - Each `autoshots.start` records the epoch when the request is read, so a stop that follows it wins. The server reaches it through `auto_start_at`, which refuses agents itself.

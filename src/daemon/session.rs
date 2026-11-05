@@ -1163,10 +1163,14 @@ fn same_frame(a: &[u8], b: &[u8]) -> bool {
             .zip(b)
             .map(|(x, y)| x.abs_diff(*y) as usize)
             .sum::<usize>()
-            < a.len() * 255 / 100
+            < a.len() * 255 / 500
 }
 
 impl Daemon {
+    pub fn auto_start_received(&self) -> u64 {
+        self.autoshots_epoch.load(Ordering::Acquire)
+    }
+
     pub fn new(options: Options) -> Result<Arc<Self>, String> {
         crate::core::install_tls_provider();
         let vault = Vault::open(&options.vault_dir).map_err(|e| e.to_string())?;
@@ -2761,6 +2765,26 @@ impl Daemon {
                 .is_some_and(|a| a.meeting == meeting && a.generation == generation && !a.at_limit)
     }
 
+    fn auto_stop_if_disallowed(&self, meeting: &str, generation: u64) -> bool {
+        let mut g = self.inner.lock();
+        if g.autoshots
+            .as_ref()
+            .is_some_and(|a| a.meeting == meeting && a.generation == generation)
+            && g.meeting_id.as_deref() == Some(meeting)
+            && g.recording
+                .as_ref()
+                .is_some_and(|r| !r.stop.load(Ordering::Relaxed))
+            && (self.local_now(&g) || (Self::guarded(&g) && !g.consent))
+        {
+            self.autoshots_epoch.fetch_add(1, Ordering::AcqRel);
+            g.autoshots = None;
+            self.emit_state(&g);
+            self.emit("notice", json!({"text": "Automatic screenshots stopped: this meeting no longer allows them."}));
+            return true;
+        }
+        false
+    }
+
     fn schedule_auto(self: &Arc<Self>, g: &Inner, delay: Duration) {
         let Some(a) = &g.autoshots else { return };
         if !self.auto_allowed(g, &a.meeting, a.generation) {
@@ -2787,7 +2811,9 @@ impl Daemon {
             tick.tick().await;
             loop {
                 tick.tick().await;
-                if !me.auto_allowed(&me.inner.lock(), &meeting, generation) {
+                if me.auto_stop_if_disallowed(&meeting, generation)
+                    || !me.auto_allowed(&me.inner.lock(), &meeting, generation)
+                {
                     break;
                 }
                 me.auto_capture_once(&meeting, generation).await;
@@ -2851,6 +2877,9 @@ impl Daemon {
     }
 
     async fn auto_capture_once(&self, meeting: &str, generation: u64) {
+        if self.auto_stop_if_disallowed(meeting, generation) {
+            return;
+        }
         let (area, previous) = {
             let mut g = self.inner.lock();
             if !self.auto_allowed(&g, meeting, generation) {
@@ -2913,7 +2942,8 @@ impl Daemon {
             "image/png",
             &image,
         ) {
-            tracing::warn!(%error, "could not store automatic screenshot");
+            drop(g);
+            self.auto_capture_failed(meeting, generation, &error.to_string());
             return;
         }
         let a = g.autoshots.as_mut().unwrap();
@@ -2930,6 +2960,20 @@ impl Daemon {
     }
 
     async fn auto_start(self: &Arc<Self>) -> Result<Value, String> {
+        self.auto_start_at(self.auto_start_received(), None).await
+    }
+
+    pub async fn auto_start_at(
+        self: &Arc<Self>,
+        epoch: u64,
+        origin: Option<&str>,
+    ) -> Result<Value, String> {
+        if matches!(origin, Some("mcp" | "agent")) {
+            return Err("not allowed for agents".into());
+        }
+        if epoch != self.autoshots_epoch.load(Ordering::Acquire) {
+            return Err("Recording changed while choosing the area.".into());
+        }
         let (meeting, epoch) = {
             let g = self.inner.lock();
             if let Some(a) = &g.autoshots {
@@ -2962,7 +3006,7 @@ impl Daemon {
                     "This meeting has reached its limit of 60 automatic screenshots.".into(),
                 );
             }
-            (meeting, self.autoshots_epoch.load(Ordering::Acquire))
+            (meeting, epoch)
         };
         #[cfg(test)]
         let area = self
@@ -3533,73 +3577,51 @@ impl Daemon {
     }
 
     async fn delete_screenshot(&self, id: i64) -> Result<Value, String> {
-        let (db_path, root) = {
-            let g = self.inner.lock();
-            (
-                self.db_path.clone(),
-                PathBuf::from(g.settings.export_folder.trim()),
-            )
-        };
+        let _serial = self.notes.lock().await;
+        let db_path = self.db_path.clone();
         let (meeting, exported, mut export_error) = tokio::task::spawn_blocking(move || {
             let db = Database::open(&db_path).map_err(|e| e.to_string())?;
             let c = db.connection();
             let shot = screenshots::get(c, id)
                 .map_err(|e| e.to_string())?
                 .ok_or("Screenshot not found.")?;
-            let (previous, mut export_error) = match exports::get(c, &shot.meeting_id) {
-                Ok(path) => (path, None),
-                Err(error) => (None, Some(error.to_string())),
-            };
-            let previous = previous.map(PathBuf::from);
-            let folder = previous.clone().filter(|path| {
-                root.is_absolute()
-                    && path.parent() == Some(root.as_path())
-                    && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
-            });
-            if let Some(path) = previous.filter(|_| folder.is_none())
-                && path.exists()
-            {
-                export_error = Some(format!("The export in {} was not changed.", path.display()));
-            }
-            let refresh = || -> Result<(), String> {
-                let Some(folder) = &folder else {
-                    return Ok(());
-                };
-                let rows = screenshots::list(c, &shot.meeting_id).map_err(|e| e.to_string())?;
-                let shots: Vec<_> = rows
-                    .into_iter()
-                    .map(|row| Shot {
-                        automatic: row.question == "[auto]",
-                        taken_at: row.taken_at,
-                        question: row.question,
-                        mime: row.mime,
-                        data: row.data,
-                    })
-                    .collect();
-                export::sync_shots(folder, &shots).map_err(|e| e.to_string())?;
-                Ok(())
-            };
-            if export_error.is_none() {
-                export_error = refresh().err();
-            }
+            let folder = exports::get(c, &shot.meeting_id)
+                .map_err(|e| e.to_string())?
+                .map(PathBuf::from)
+                .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()));
+            let export_error = folder
+                .as_ref()
+                .and_then(|folder| export::remove_shot(folder, &shot.data).err())
+                .map(|error| error.to_string());
             screenshots::delete(c, id).map_err(|e| e.to_string())?;
-            if let Err(error) = refresh() {
-                export_error.get_or_insert(error);
-            }
             Ok::<_, String>((shot.meeting_id, folder.is_some(), export_error))
         })
         .await
         .map_err(|e| e.to_string())??;
-        // The notes link and caption each image; a live meeting is rewritten when it stops.
-        let live = {
-            let g = self.inner.lock();
-            g.recording.is_some() && g.meeting_id.as_deref() == Some(meeting.as_str())
-        };
-        if exported
-            && !live
-            && let Err(error) = self.export_meeting(&meeting).await
+        if exported {
+            let auto_export = self.inner.lock().settings.export_meetings;
+            if auto_export {
+                if let Err(error) = self.export_meeting(&meeting).await {
+                    export_error.get_or_insert(error);
+                }
+            } else {
+                export_error.get_or_insert("The exported notes still mention this screenshot until you export the meeting again.".into());
+            }
+        }
         {
-            export_error.get_or_insert(error);
+            let mut g = self.inner.lock();
+            if g.autoshots.as_ref().is_some_and(|a| a.meeting == meeting) {
+                let count = screenshots::count_auto(g.db.connection(), &meeting)
+                    .map_err(|e| e.to_string())?;
+                let a = g.autoshots.as_mut().unwrap();
+                if a.at_limit && count < 60 {
+                    self.autoshots_epoch.fetch_add(1, Ordering::AcqRel);
+                    g.autoshots = None;
+                } else {
+                    a.count = count;
+                }
+                self.emit_state(&g);
+            }
         }
         Ok(match export_error {
             Some(error) => json!({"export_error": error}),
@@ -5140,7 +5162,10 @@ impl Daemon {
         self.local_only.store(local, Ordering::Relaxed);
         if local {
             self.autoshots_epoch.fetch_add(1, Ordering::AcqRel);
-            g.autoshots = None;
+            if g.autoshots.take().is_some() {
+                self.emit_state(g);
+                self.emit("notice", json!({"text": "Automatic screenshots stopped: this meeting no longer allows them."}));
+            }
         }
     }
 
@@ -6077,8 +6102,6 @@ impl Daemon {
                 let current = g.candidate.clone();
                 self.set_candidate(&mut g, current);
                 if a.on && self.local_now(&g) {
-                    self.autoshots_epoch.fetch_add(1, Ordering::AcqRel);
-                    g.autoshots = None;
                     self.emit_state(&g);
                 }
                 json_of(Ok(row))
@@ -11600,7 +11623,7 @@ mod autoshots_tests {
         let seen = calls.clone();
         *d.auto_capture.lock() = Some(Box::new(move |_| {
             let n = seen.fetch_add(1, Ordering::Relaxed) as u8;
-            Ok((vec![n], vec![n.wrapping_mul(100); 100]))
+            Ok((vec![n], vec![n.saturating_sub(1).wrapping_mul(100); 100]))
         }));
         let meeting = started(&d).await;
         d.handle("autoshots.start", json!({}), None).await.unwrap();
@@ -11623,17 +11646,20 @@ mod autoshots_tests {
                 Some(Instant::now() - Duration::from_secs(4));
         }
         d.auto_capture_once(&meeting, generation).await;
+        assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().count, 1);
+        d.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
+        d.auto_capture_once(&meeting, generation).await;
         assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().count, 2);
         assert!(d.inner.lock().pending_capture.is_none());
         assert!(d.inner.lock().sources.is_empty());
         *d.auto_unlocked.lock() = Some(Box::new(|| false));
         d.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
         d.auto_capture_once(&meeting, generation).await;
-        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
         *d.auto_unlocked.lock() = None; // unknown is locked
         d.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
         d.auto_capture_once(&meeting, generation).await;
-        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
         *d.auto_unlocked.lock() = Some(Box::new(|| true));
         let n = Arc::new(AtomicUsize::new(0));
         let counter = n.clone();
@@ -11715,9 +11741,15 @@ mod autoshots_tests {
             .unwrap();
         assert_ne!(d.inner.lock().meeting_id.as_deref(), Some(meeting.as_str()));
         assert!(d.inner.lock().autoshots.is_none());
+        let new_meeting = d.inner.lock().meeting_id.clone().unwrap();
         d.auto_capture_once(&meeting, generation).await;
         assert!(
             screenshots::list(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            screenshots::list(d.inner.lock().db.connection(), &new_meeting)
                 .unwrap()
                 .is_empty()
         );
@@ -11725,9 +11757,20 @@ mod autoshots_tests {
 
     #[test]
     fn similarity() {
-        assert!(same_frame(&[0; 100], &[1; 100]));
+        let mut tiny = [0; 1000];
+        tiny[0] = 1;
+        assert!(same_frame(&[0; 1000], &tiny));
         assert!(!same_frame(&[0; 100], &[255; 100]));
         assert!(!same_frame(&[], &[]));
+        let white = vec![255; 128 * 72 * 3];
+        let mut line = white.clone();
+        for pixel in 0..30 {
+            line[pixel * 3..pixel * 3 + 3].fill(0);
+        }
+        assert!(!same_frame(&white, &line));
+        let mut cursor = white.clone();
+        cursor[0..9].fill(0);
+        assert!(same_frame(&white, &cursor));
     }
 
     #[test]
@@ -11839,44 +11882,121 @@ mod autoshots_tests {
     }
 
     #[tokio::test]
-    async fn local_only_and_lost_consent_block_storage_and_prompt_is_clean() {
+    async fn deleting_automatic_rows_frees_the_limit_and_updates_count() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        let mut ids = Vec::new();
+        for n in 0..59 {
+            ids.push(
+                screenshots::add(
+                    d.inner.lock().db.connection(),
+                    &meeting,
+                    n as f64,
+                    "[auto]",
+                    "image/png",
+                    &[n],
+                )
+                .unwrap(),
+            );
+        }
+        d.auto_start().await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        d.auto_capture_once(&meeting, generation).await;
+        assert!(d.inner.lock().autoshots.as_ref().unwrap().at_limit);
+        ids.push(
+            screenshots::list(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .last()
+                .unwrap()
+                .id,
+        );
+        for id in ids.iter().take(5) {
+            d.delete_screenshot(*id).await.unwrap();
+        }
+        assert!(d.inner.lock().autoshots.is_none());
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            55
+        );
+        d.auto_start().await.unwrap();
+
+        let other = daemon();
+        let meeting = started(&other).await;
+        other.auto_start().await.unwrap();
+        for n in 0..3 {
+            *other.auto_capture.lock() = Some(Box::new(move |_| Ok((vec![n], vec![n; 100]))));
+            other.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
+            let generation = other.inner.lock().autoshots.as_ref().unwrap().generation;
+            other.auto_capture_once(&meeting, generation).await;
+        }
+        assert_eq!(
+            screenshots::count_auto(other.inner.lock().db.connection(), &meeting).unwrap(),
+            3
+        );
+        let id = screenshots::list(other.inner.lock().db.connection(), &meeting).unwrap()[0].id;
+        other.delete_screenshot(id).await.unwrap();
+        assert_eq!(other.inner.lock().autoshots.as_ref().unwrap().count, 2);
+    }
+
+    #[tokio::test]
+    async fn local_only_and_lost_consent_stop_captures_until_reenabled() {
         let d = daemon();
         let meeting = started(&d).await;
         d.handle("autoshots.start", json!({}), None).await.unwrap();
         let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
-        d.local_only.store(true, Ordering::Relaxed);
+        let mut events = d.subscribe();
+        {
+            let mut g = d.inner.lock();
+            let id = candidates::create(g.db.connection(), "Private").unwrap().id;
+            candidates::set_local_only(g.db.connection(), &id, true).unwrap();
+            d.set_candidate(&mut g, Some(id));
+        }
         d.auto_capture_once(&meeting, generation).await;
+        assert!(d.inner.lock().autoshots.is_none());
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| event["event"] == "notice"
+                && event["text"]
+                    == "Automatic screenshots stopped: this meeting no longer allows them.")
+        );
         assert_eq!(
             screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
             0
         );
-        d.local_only.store(false, Ordering::Relaxed);
         {
             let mut g = d.inner.lock();
+            d.set_candidate(&mut g, None);
             g.settings.meeting_mode = MeetingMode::Interviewer;
+            g.consent = true;
+        }
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        {
+            let mut g = d.inner.lock();
             g.consent = false;
         }
         d.auto_capture_once(&meeting, generation).await;
+        assert!(d.inner.lock().autoshots.is_none());
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| event["event"] == "notice"
+                && event["text"]
+                    == "Automatic screenshots stopped: this meeting no longer allows them.")
+        );
         assert_eq!(
             screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
             0
         );
         d.inner.lock().consent = true;
         d.auto_capture_once(&meeting, generation).await;
-        let g = d.inner.lock();
         assert_eq!(
-            screenshots::count_auto(g.db.connection(), &meeting).unwrap(),
-            1
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            0
         );
-        assert!(g.pending_capture.is_none() && g.sources.is_empty());
-        let prompt = d.system_prompt(&g, false, false, "", "", false, false);
-        assert!(!prompt.contains("[auto]") && !prompt.contains("data:image"));
     }
 
     #[tokio::test]
     async fn agent_start_clears_retained_area() {
         let d = daemon();
-        let meeting = started(&d).await;
+        started(&d).await;
         d.handle("autoshots.start", json!({}), None).await.unwrap();
         d.handle("record.stop", json!({}), None).await.unwrap();
         for _ in 0..200 {
@@ -11894,10 +12014,19 @@ mod autoshots_tests {
             .await
             .unwrap();
         assert!(d.inner.lock().autoshots.is_none());
-        assert_eq!(
-            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
-            0
-        );
+    }
+
+    #[tokio::test]
+    async fn the_servers_start_path_refuses_agents() {
+        let d = daemon();
+        started(&d).await;
+        for origin in ["mcp", "agent"] {
+            assert_eq!(
+                d.auto_start_at(d.auto_start_received(), Some(origin)).await,
+                Err("not allowed for agents".to_owned())
+            );
+        }
+        assert!(d.inner.lock().autoshots.is_none());
     }
 
     #[tokio::test]
@@ -11914,6 +12043,131 @@ mod autoshots_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn a_stop_after_a_received_start_prevents_area_selection() {
+        let d = daemon();
+        started(&d).await;
+        let received = d.auto_start_received();
+        d.auto_stop();
+        assert_eq!(
+            d.auto_start_at(received, None).await.unwrap_err(),
+            "Recording changed while choosing the area."
+        );
+        assert!(d.inner.lock().autoshots.is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_waits_for_notes_export_lock() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        let id = screenshots::add(
+            d.inner.lock().db.connection(),
+            &meeting,
+            1.0,
+            "caption",
+            "image/png",
+            b"image",
+        )
+        .unwrap();
+        let root = d.db_path.parent().unwrap().join("exports");
+        d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
+        let folder = d.export_meeting(&meeting).await.unwrap();
+        let held = d.notes.lock().await;
+        let task = tokio::spawn({
+            let d = d.clone();
+            async move { d.delete_screenshot(id).await.unwrap() }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            screenshots::get(d.inner.lock().db.connection(), id)
+                .unwrap()
+                .is_some()
+        );
+        assert!(!task.is_finished());
+        d.export_meeting(&meeting).await.unwrap();
+        drop(held);
+        assert!(task.await.unwrap().get("export_error").is_none());
+        assert!(
+            screenshots::get(d.inner.lock().db.connection(), id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!folder.join("screenshots/shot-01.png").exists());
+    }
+
+    #[tokio::test]
+    async fn deleting_live_screenshot_rewrites_its_notes() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        let id = screenshots::add(
+            d.inner.lock().db.connection(),
+            &meeting,
+            1.0,
+            "live caption",
+            "image/png",
+            b"image",
+        )
+        .unwrap();
+        let root = d.db_path.parent().unwrap().join("exports");
+        d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
+        let folder = d.export_meeting(&meeting).await.unwrap();
+        assert!(
+            std::fs::read_to_string(folder.join("notes.md"))
+                .unwrap()
+                .contains("live caption")
+        );
+        let reply = d.delete_screenshot(id).await.unwrap();
+        assert!(reply.get("export_error").is_none(), "{reply}");
+        assert!(
+            !std::fs::read_to_string(folder.join("notes.md"))
+                .unwrap()
+                .contains("live caption")
+        );
+        assert!(!folder.join("screenshots/shot-01.png").exists());
+    }
+
+    #[tokio::test]
+    async fn deleting_with_auto_export_off_writes_no_new_files() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        let id = screenshots::add(
+            d.inner.lock().db.connection(),
+            &meeting,
+            1.0,
+            "old caption",
+            "image/png",
+            b"old",
+        )
+        .unwrap();
+        let root = d.db_path.parent().unwrap().join("exports");
+        d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
+        let folder = d.export_meeting(&meeting).await.unwrap();
+        let notes = std::fs::read(folder.join("notes.md")).unwrap();
+        let manifest = std::fs::read(folder.join("screenshots/.owned-files")).unwrap();
+        screenshots::add(
+            d.inner.lock().db.connection(),
+            &meeting,
+            2.0,
+            "new caption",
+            "image/png",
+            b"new",
+        )
+        .unwrap();
+        d.inner.lock().settings.export_meetings = false;
+        let reply = d.delete_screenshot(id).await.unwrap();
+        assert_eq!(
+            reply["export_error"],
+            "The exported notes still mention this screenshot until you export the meeting again."
+        );
+        assert_eq!(std::fs::read(folder.join("notes.md")).unwrap(), notes);
+        assert_eq!(
+            std::fs::read(folder.join("screenshots/.owned-files")).unwrap(),
+            manifest
+        );
+        assert!(!folder.join("screenshots/shot-01.png").exists());
+        assert!(!folder.join("screenshots/shot-02.png").exists());
     }
 
     #[tokio::test]

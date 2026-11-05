@@ -361,7 +361,7 @@ pub fn sync_shots(folder: &Path, shots: &[Shot]) -> io::Result<Vec<String>> {
         let hash = sha256(&shot.data);
         let (stem, ext) = base.rsplit_once('.').unwrap();
         let mut chosen = None;
-        for suffix in 0.. {
+        for suffix in 0..1000 {
             let name = if suffix == 0 {
                 base.clone()
             } else {
@@ -373,7 +373,7 @@ pub fn sync_shots(folder: &Path, shots: &[Shot]) -> io::Result<Vec<String>> {
             let path = dir.join(&name);
             let ours = match fs::symlink_metadata(&path) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => true,
-                Err(_) => false,
+                Err(error) => return Err(error),
                 Ok(meta) if meta.is_file() => fs::read(&path).is_ok_and(|bytes| {
                     bytes == shot.data
                         || owned.iter().any(|(old_hash, old_name)| {
@@ -387,7 +387,9 @@ pub fn sync_shots(folder: &Path, shots: &[Shot]) -> io::Result<Vec<String>> {
                 break;
             }
         }
-        let name = chosen.expect("a free screenshot name exists");
+        let name = chosen.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::AlreadyExists, "no free screenshot name")
+        })?;
         let tmp = format!(".{name}.tmp");
         rm(&dir.join(&tmp))?;
         put(&dir, Path::new(&tmp), &shot.data)?;
@@ -416,6 +418,34 @@ pub fn sync_shots(folder: &Path, shots: &[Shot]) -> io::Result<Vec<String>> {
     put(&dir, Path::new(".owned-files.tmp"), text.as_bytes())?;
     fs::rename(dir.join(".owned-files.tmp"), manifest)?;
     Ok(current.into_iter().map(|(name, _)| name).collect())
+}
+
+/// Remove only regular screenshot files whose contents still match this row.
+pub fn remove_shot(folder: &Path, data: &[u8]) -> io::Result<()> {
+    let dir = folder.join("screenshots");
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "screenshots is not a directory",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if fs::symlink_metadata(&path)?.file_type().is_file() && fs::read(&path)? == data {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Choose, rename or create the meeting folder under `root`. Returns it; writes no contents.
@@ -957,5 +987,55 @@ mod tests {
         let names = sync_shots(&folder, &two).unwrap();
         assert_eq!(names, ["auto-01-2.png", "auto-02-1.png"]);
         assert!(folder.join("screenshots/auto-02.png").is_dir());
+    }
+
+    #[test]
+    fn screenshot_name_search_is_bounded() {
+        let t = Tmp::new();
+        let dir = t.0.join("screenshots");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("auto-01.png"), b"user").unwrap();
+        for suffix in 1..1000 {
+            fs::write(dir.join(format!("auto-01-{suffix}.png")), b"user").unwrap();
+        }
+        let error = sync_shots(
+            &t.0,
+            &[Shot {
+                automatic: true,
+                taken_at: 0.0,
+                question: String::new(),
+                mime: "image/png".into(),
+                data: b"capture".to_vec(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn remove_shot_keeps_changed_files_symlinks_and_directories() {
+        use std::os::unix::fs::symlink;
+        let t = Tmp::new();
+        remove_shot(&t.0, b"image").unwrap();
+        let dir = t.0.join("screenshots");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("one.png"), b"image").unwrap();
+        fs::write(dir.join("two.png"), b"image").unwrap();
+        fs::write(dir.join("changed.png"), b"changed").unwrap();
+        fs::write(t.0.join("target"), b"image").unwrap();
+        symlink(t.0.join("target"), dir.join("link.png")).unwrap();
+        fs::create_dir(dir.join("nested.png")).unwrap();
+        remove_shot(&t.0, b"image").unwrap();
+        assert!(!dir.join("one.png").exists());
+        assert!(!dir.join("two.png").exists());
+        assert_eq!(fs::read(dir.join("changed.png")).unwrap(), b"changed");
+        assert!(
+            fs::symlink_metadata(dir.join("link.png"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(dir.join("nested.png").is_dir());
+        assert_eq!(fs::read(t.0.join("target")).unwrap(), b"image");
     }
 }
