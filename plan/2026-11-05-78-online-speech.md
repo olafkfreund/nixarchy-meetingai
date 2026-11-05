@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 78
 spec: spec/2026-11-05-78-online-speech.md
 coders:
