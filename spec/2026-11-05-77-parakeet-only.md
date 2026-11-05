@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 77
 intent: intent/2026-11-05-77-parakeet-only.md
 ---
