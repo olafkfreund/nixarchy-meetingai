@@ -42,9 +42,9 @@ use crate::{
         domain::{Message, Role},
         export::{self, Doc, Export, Item, Line, Shot},
         settings::{
-            AutoResponse, FOLLOW_UP_PROMPT, MeetingMode, RECAP_PROMPT_GENERAL,
-            RECAP_PROMPT_INTERVIEW, RECAP_PROMPT_INTERVIEWER, RECAP_PROMPT_TEAM, ResponseLength,
-            Settings, response_instruction,
+            APP_REQUEST_LANGUAGE_RULE, AUTO_LANGUAGE_RULE, AutoResponse, FOLLOW_UP_PROMPT,
+            MeetingMode, RECAP_PROMPT_GENERAL, RECAP_PROMPT_INTERVIEW, RECAP_PROMPT_INTERVIEWER,
+            RECAP_PROMPT_TEAM, ResponseLength, Settings, response_instruction,
         },
         vault::Vault,
     },
@@ -1714,6 +1714,7 @@ impl Daemon {
     }
 
     /// `live` builds the glanceable automatic-answer prompt: the `live_answer` text and Short length.
+    #[allow(clippy::too_many_arguments)]
     fn system_prompt(
         &self,
         g: &Inner,
@@ -1722,6 +1723,7 @@ impl Daemon {
         notes: &str,
         transcript: &str,
         citations: bool,
+        app_request: bool,
     ) -> String {
         let want = g.settings.meeting_mode.listen_name();
         let modes = store::listen_modes(g.db.connection()).unwrap_or_default();
@@ -1790,7 +1792,13 @@ impl Daemon {
             length = ResponseLength::Short;
         }
         prompt.push_str("\n\n");
-        prompt.push_str(&response_instruction(length, &language));
+        let instruction = response_instruction(length, &language);
+        // The rule replaces the Auto sentence: side by side they contradict each other.
+        if app_request && !transcript.trim().is_empty() {
+            prompt.push_str(&instruction.replace(AUTO_LANGUAGE_RULE, APP_REQUEST_LANGUAGE_RULE));
+        } else {
+            prompt.push_str(&instruction);
+        }
         context::append_prompt(&mut prompt, &g.sources);
         prompt
     }
@@ -1845,6 +1853,7 @@ impl Daemon {
         let epoch = self.send_epoch.load(Ordering::Relaxed);
         let cancelled = || Ok(json!({"turn": null, "cancelled": true}));
         let mut question = args.text.trim().to_owned();
+        let mut app_request = args.app_request;
         if question.chars().nth(256_000).is_some() {
             return Err(SendError::TooLarge.message());
         }
@@ -1862,6 +1871,7 @@ impl Daemon {
             return Err(SendError::Empty.message());
         }
         if question.is_empty() {
+            app_request = true;
             question = if image_only {
                 "Describe what this screenshot shows and how it relates to the meeting.".into()
             } else {
@@ -1940,6 +1950,7 @@ impl Daemon {
             args.no_context,
             args.line,
             Some(epoch),
+            app_request,
         )? {
             Some(turn) => Ok(json!({"turn": turn})),
             None => cancelled(),
@@ -1947,6 +1958,7 @@ impl Daemon {
     }
 
     /// Start one chat turn. Returns its turn number.
+    #[allow(clippy::too_many_arguments)]
     fn begin_send(
         self: &Arc<Self>,
         question: String,
@@ -1955,6 +1967,7 @@ impl Daemon {
         no_context: bool,
         line: Option<String>,
         epoch: Option<u64>,
+        app_request: bool,
     ) -> Result<Option<u64>, String> {
         let mut guard = self.inner.lock();
         let g = &mut *guard;
@@ -2089,6 +2102,7 @@ impl Daemon {
                 &notes,
                 &transcript,
                 cite_max + cite_notes > 0,
+                app_request,
             )),
             images,
         };
@@ -2291,7 +2305,15 @@ impl Daemon {
         let context = TurnContext {
             system: Some({
                 let (_, notes, _) = self.cite_window(g, None);
-                self.system_prompt(g, false, false, &notes, &Self::plain_transcript(g), false)
+                self.system_prompt(
+                    g,
+                    false,
+                    false,
+                    &notes,
+                    &Self::plain_transcript(g),
+                    false,
+                    true,
+                )
             }),
             images: Vec::new(),
         };
@@ -2459,7 +2481,7 @@ impl Daemon {
             g.pending_question.take()
         };
         if let Some(question) = question
-            && let Err(error) = self.begin_send(question, None, true, false, None, None)
+            && let Err(error) = self.begin_send(question, None, true, false, None, None, false)
         {
             self.error(error);
         }
@@ -6453,11 +6475,11 @@ mod routing_tests {
             (
                 {
                     let (_, n, t) = d.cite_window(&g, None);
-                    d.system_prompt(&g, false, false, &n, &t, false)
+                    d.system_prompt(&g, false, false, &n, &t, false, false)
                 },
                 {
                     let (_, n, t) = d.cite_window(&g, None);
-                    d.system_prompt(&g, false, true, &n, &t, false)
+                    d.system_prompt(&g, false, true, &n, &t, false, false)
                 },
             )
         };
@@ -6470,7 +6492,7 @@ mod routing_tests {
         assert!(!typed.contains(ResponseLength::Short.instruction()));
         assert!(typed.contains(db::seed::DEFAULT_SYSTEM_PROMPT));
         assert!(
-            !d.system_prompt(&d.inner.lock(), true, false, "", "", false)
+            !d.system_prompt(&d.inner.lock(), true, false, "", "", false, false)
                 .contains("jd.md")
         );
 
@@ -7374,7 +7396,7 @@ mod command_tests {
         let d = daemon();
         let default = {
             let g = d.inner.lock();
-            d.system_prompt(&g, false, false, "", "", false)
+            d.system_prompt(&g, false, false, "", "", false, false)
         };
         d.handle("meeting.language.set", json!({"language":"pl"}), None)
             .await
@@ -7382,7 +7404,7 @@ mod command_tests {
         {
             let mut g = d.inner.lock();
             g.conversation_response = Some((ResponseLength::Medium, "French".into()));
-            let prompt = d.system_prompt(&g, false, false, "", "", false);
+            let prompt = d.system_prompt(&g, false, false, "", "", false, false);
             assert!(prompt.contains("Write in Polish"));
             assert_eq!(g.conversation_response.as_ref().unwrap().1, "French");
         }
@@ -7392,7 +7414,7 @@ mod command_tests {
         {
             let g = d.inner.lock();
             assert!(
-                d.system_prompt(&g, false, false, "", "", false)
+                d.system_prompt(&g, false, false, "", "", false, false)
                     .contains("Write in French")
             );
             assert_eq!(g.settings.response_language, "Auto");
@@ -7401,7 +7423,118 @@ mod command_tests {
         let g = other.inner.lock();
         assert_eq!(
             default,
-            other.system_prompt(&g, false, false, "", "", false)
+            other.system_prompt(&g, false, false, "", "", false, false)
+        );
+    }
+
+    #[test]
+    fn app_request_language_rule_respects_context_and_language_precedence() {
+        let d = daemon();
+        let mut g = d.inner.lock();
+        let transcript = "Speaker: Czy możemy to omówić?\n";
+        let prompt = |g: &Inner, transcript: &str, app_request| {
+            d.system_prompt(g, false, false, "", transcript, false, app_request)
+        };
+
+        let typed = prompt(&g, transcript, false);
+        let app = prompt(&g, transcript, true);
+        assert_eq!(
+            typed.replace(AUTO_LANGUAGE_RULE, APP_REQUEST_LANGUAGE_RULE),
+            app
+        );
+        assert!(typed.contains(AUTO_LANGUAGE_RULE) && !app.contains(AUTO_LANGUAGE_RULE));
+        assert!(!prompt(&g, "", true).contains(APP_REQUEST_LANGUAGE_RULE));
+        assert!(
+            !d.system_prompt(&g, false, true, "", transcript, false, false)
+                .contains(APP_REQUEST_LANGUAGE_RULE)
+        );
+
+        g.meeting_language = Some("pl".into());
+        let chosen = prompt(&g, transcript, true);
+        assert!(chosen.contains("Write in Polish"));
+        assert!(!chosen.contains(APP_REQUEST_LANGUAGE_RULE));
+
+        g.meeting_language = None;
+        g.conversation_response = Some((ResponseLength::Medium, "French".into()));
+        let preferred = prompt(&g, transcript, true);
+        assert!(preferred.contains("Write in French"));
+        assert!(!preferred.contains(APP_REQUEST_LANGUAGE_RULE));
+
+        g.conversation_response = None;
+        g.settings.response_language = "French".into();
+        assert!(!prompt(&g, transcript, true).contains(APP_REQUEST_LANGUAGE_RULE));
+    }
+
+    /// The flag through the real send paths: what the provider actually receives.
+    #[tokio::test]
+    async fn app_request_reaches_the_provider_only_from_the_real_paths() {
+        let file = std::env::temp_dir().join(format!("meetingai-71-{}.txt", std::process::id()));
+        std::fs::write(&file, "attached").unwrap();
+        let cases = [
+            (
+                json!({"text":"What should I say?", "app_request":true}),
+                true,
+            ),
+            (json!({"text":"What should I say?"}), false),
+            (
+                json!({"text":"", "attachments":[file.to_str().unwrap()]}),
+                true,
+            ),
+        ];
+        for (args, expected) in cases {
+            let d = daemon();
+            let (url, request) =
+                provider_server(200, r#"{"choices":[{"message":{"content":"Ok"}}]}"#);
+            let id = local_custom(&d, "lm-studio", &url).await;
+            {
+                let mut g = d.inner.lock();
+                g.settings.chat_provider = id;
+                g.transcript.push(Entry {
+                    text: "Czy możemy to omówić?".into(),
+                    who: "them",
+                    speaker: None,
+                    id: None,
+                    t0: 0.0,
+                });
+            }
+            d.handle("chat.send", args.clone(), None).await.unwrap();
+            let request = tokio::task::spawn_blocking(move || request.join().unwrap())
+                .await
+                .unwrap();
+            let body = String::from_utf8_lossy(&request);
+            assert_eq!(body.contains(APP_REQUEST_LANGUAGE_RULE), expected, "{args}");
+            assert_eq!(body.contains(AUTO_LANGUAGE_RULE), !expected, "{args}");
+        }
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[tokio::test]
+    async fn follow_ups_use_app_request_language_rule() {
+        let d = daemon();
+        let (url, request) =
+            provider_server(200, r#"{"choices":[{"message":{"content":"What next?"}}]}"#);
+        let id = local_custom(&d, "lm-studio", &url).await;
+        {
+            let mut g = d.inner.lock();
+            g.settings.chat_provider = id;
+            g.settings.smart_follow_ups = true;
+            g.conversation
+                .push(Message::user("What should I say?".to_owned()));
+            g.transcript.push(Entry {
+                text: "Czy możemy to omówić?".into(),
+                who: "them",
+                speaker: None,
+                id: None,
+                t0: 0.0,
+            });
+        }
+        d.spawn_follow_ups();
+        let request = tokio::task::spawn_blocking(move || request.join().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&request).contains(APP_REQUEST_LANGUAGE_RULE),
+            "follow-up prompt lacks app request language rule"
         );
     }
 
@@ -10103,7 +10236,15 @@ mod command_tests {
             let epoch = d.send_epoch.load(Ordering::Relaxed);
             d.handle(cmd, json!({}), None).await.unwrap();
             // The send that started before it must not start a turn afterwards.
-            let turn = d.begin_send("old question".into(), None, false, false, None, Some(epoch));
+            let turn = d.begin_send(
+                "old question".into(),
+                None,
+                false,
+                false,
+                None,
+                Some(epoch),
+                false,
+            );
             assert_eq!(turn, Ok(None), "{cmd}");
         }
     }
@@ -10352,7 +10493,7 @@ mod command_tests {
         let prompt = {
             let g = d.inner.lock();
             let (_, n, t) = d.cite_window(&g, None);
-            d.system_prompt(&g, false, false, &n, &t, false)
+            d.system_prompt(&g, false, false, &n, &t, false, false)
         };
         assert!(prompt.contains("Ada: final words\n"), "{prompt}");
         assert!(prompt.contains("Panel: from panel\n"), "{prompt}");

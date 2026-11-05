@@ -246,12 +246,15 @@ Item {
         return JSON.stringify({ chat: root.chatProvider, models: root.models, error: root.modelsError, fix: root.fix(root.chatProvider), model: String(backend.settings.chat_model || ""), live: root.liveProvider, liveModels: root.liveModels, liveError: root.liveModelsError, liveModel: String(backend.settings.live_model || "") });
     }
 
-    function submit(text, chips, quote) {
+    function submit(text, chips, quote, app) {   // app: the app's own request, not typed text
         var files = chips.filter(function(c) { return c.kind === "file"; }).map(function(c) { return c.path; });
         var inline = chips.filter(function(c) { return c.kind === "text"; }).map(function(c) { return c.text; });
-        backend.ask([text !== "" || !quote ? text : "What does this mean, and what should I say?"].concat(inline).join("\n\n"), files, false, root.noContext, quote ? quote.line : "");
+        var substituted = text === "" && !!quote;
+        backend.ask([substituted ? "What does this mean, and what should I say?" : text].concat(inline).join("\n\n"), files, false, root.noContext, quote ? quote.line : "", substituted || app === true);
         if (quote) backend.quote = null;
     }
+
+    function quick() { root.submit("What should I say?", [], null, true); }   // the button; tests/harness-lines.qml
 
     function pickSuggestion(n) {
         var t = backend.suggestions[n - 1];
@@ -432,7 +435,7 @@ Item {
                         onSubmit: function(text, chips) { root.submit(text, chips, backend.quote); }
                         onPreview: function(text) { root.previewText = text; }
                         onScreenshot: backend.send("screenshot.capture", { region: true })
-                        onQuick: root.submit("What should I say?", [])
+                        onQuick: root.quick()
                         onPick: function(n) { root.pickSuggestion(n); }
                     }
 

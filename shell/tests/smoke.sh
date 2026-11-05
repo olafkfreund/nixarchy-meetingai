@@ -786,9 +786,14 @@ for key in ("regenerateHiddenWhenFresh", "shortenedHidesCorrect", "correctedText
     if d.get(key) is not True:
         bad.append(f"{key}: want True, got {d.get(key)!r}")
 cmds = open(sys.argv[2]).read()
-for cmd in ("transcript.edit", "bookmark.set", "bookmarks.list", "notes.get", "items.list", "notes.regenerate", "chat.send line=line-1 text=What does this mean, and what should I say?"):
+for cmd in ("transcript.edit", "bookmark.set", "bookmarks.list", "notes.get", "items.list", "notes.regenerate", "chat.send line=line-1 text=What does this mean, and what should I say? app_request"):
     if cmd not in cmds:
         bad.append(f"daemon never received {cmd!r}")
+sends = [l for l in cmds.splitlines() if l.startswith("chat.send")]
+if [l.endswith(" app_request") for l in sends if "text=typed q" in l] != [False]:
+    bad.append(f"typed text must not send app_request: {sends}")
+if [l for l in sends if l == "chat.send text=What should I say? app_request"] != ["chat.send text=What should I say? app_request"] * 2:
+    bad.append(f"the button and its retry must both send app_request: {sends}")
 if bad:
     for b in bad:
         print("FAIL (lines):", b, file=sys.stderr)
