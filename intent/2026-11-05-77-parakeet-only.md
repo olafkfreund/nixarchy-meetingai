@@ -36,26 +36,37 @@ ways.
 
 ## Proposed outcome
 
-- A fresh install offers one local engine, Parakeet, and no local Whisper engine: no model
-  in the closure, no `whisperNb` options, no routing to it.
-- The language shows English by default, and can be changed for one meeting from the
-  meeting itself, without going to Settings and without changing the next meeting.
+These hold whichever way the open questions go:
+
+- A fresh install has one local engine, Parakeet, and no local Whisper engine: no model in
+  the closure, no `whisperNb` options, no routing to it.
+- The meeting shows English as its language, and another can be chosen from the meeting
+  itself, without going to Settings and without changing the next meeting.
 - A language the engine in use cannot do is refused with a clear reason, never written as a
   neighbouring language. On Parakeet, that includes Norwegian.
 - English calls work as they do today, at today's speed.
 
-What the chosen language does on Parakeet is open question 2.
+**"English" here means nothing was chosen, not "force English".** Saving `en` as the global
+setting would change behaviour for other engines: Deepgram's batch path and OpenAI-compatible
+servers would start receiving `language=en` on every call, where today they get none. On
+Parakeet, a Polish call under "English" still transcribes as Polish, since it detects by itself.
 
 ## Affected users and systems
 
 - **Removed:** `src/speech/stt/whisper_nb.rs`, `whisper-nb-local` in
   `src/ai/catalog/providers.rs`, routing in `resolve_speech`
   (`src/daemon/session.rs:663`), `nix/whisper-nb-model.nix`, `nix/silero-vad.nix`,
-  `nix/whisper-turbo-model.nix`, `tools/whisper-export/`, the `whisperNb.*` options, and the
-  README's Norwegian section.
-- **Changed:** the picker (`shell/Overlay.qml`), and the language's storage. `meetings.language`
-  exists but is always written as `"en"` (`src/daemon/session.rs:2776`), and nothing found so far
-  uses it.
+  `nix/whisper-turbo-model.nix`, `tools/whisper-export/`, and the `whisperNb.*` options.
+- **Also reached by the removal:** `LoadMode` and the unload path in `parakeet.rs`, which only
+  exist for two engines; the dispatch and tests in `transcription.rs`; readiness in
+  `providers.rs`, and its catalogue test; `speech_not_ready`, `local_speech`, `speech_guard`,
+  `preload_speech` and Local-only messages in `session.rs`; the environment and assertion in
+  `nix/hm-module.nix`; `examples/accuracy_replay.rs`; and several README places: requirements,
+  Local-only, the provider table, Fully offline, the Norwegian section and the generated options.
+- **Changed:** the picker, which sits in Settings (`shell/Overlay.qml:590`), not the meeting, and offers
+  only Auto, English and Norwegian today. `meetings.language` is read back into `MeetingRecord`
+  and always written as `"en"` (`src/daemon/session.rs:2776`); nothing found uses it for speech or
+  answers, so it can hold the choice if it needs storing.
 - **p620:** `hosts/common/nixos/omarchy-meetingai.nix` in nixos sets `whisperNb.enable`, so it must
   come off in step with the bump, or that build fails. p620 is the only host importing it.
 - **Other issues:** #74 (NB-Whisper delay) would have no subject. #73's plan measures NB-Whisper on
@@ -64,36 +75,50 @@ What the chosen language does on Parakeet is open question 2.
 
 ## Constraints
 
-- **Saved settings must keep working.** A saved `whisper-nb-local` or `nb` must not break the daemon.
-  There is a pattern for this: `whisper-local` became `parakeet-local` once, with a notice.
+- **Saved settings must keep working.** A saved `speech_language` of `nb`, `no` or `nn` would otherwise
+  refuse every recording and dictation once routing is gone, and a saved `whisper-nb-local` would have no
+  engine. Both need a one-time migration with a notice, like `whisper-local` (`migrate_whisper`,
+  `src/daemon/session.rs:949`), but with their own marker, since `whisper_notice_shown` is already set
+  on existing databases.
 - **Removed Nix options fail with a message saying why,** as the `whisper.*` options do today.
 - **Local-only stays intact.** No choice here may send audio off the machine without the user having
   chosen a cloud engine. Choosing "Norwegian" must never quietly route to the cloud.
 - **#14's guarantees hold:** no new bleed or invented lines. Removing an engine should not affect them.
-- **A meeting's language can't change the audio already transcribed.** A mid-meeting change applies
-  from then on. Speech settings today wait for the next start
-  (`speech_setting_change_waits_for_next_start`), so the spec must settle this.
+- **A language can't change audio already transcribed.** Speech settings are read once at recording start;
+  a change during recording applies at the next start (`settings_set`, `src/daemon/session.rs:4015`).
+- **Two sources of truth are not acceptable.** `response_language` already sets the answer language,
+  and it is stored per conversation and used for live answers, rolling notes and recaps. If the
+  meeting's language affects answers, which one wins must be stated.
+- **Standalone dictation and resumed meetings need a defined language,** since neither starts a new meeting.
 - **Old transcripts and exports are untouched.**
 - **No measurements are needed** unless the owner picks an option that changes an engine.
 
 ## Open questions
 
-1. **What does "everything else" cover?** Recommended: the local Whisper engines only (NB-Whisper,
-   turbo, the export tools). Keep Deepgram and OpenAI-compatible servers. They are already opt-in,
-   have tests, p620 already has a Deepgram key, and Deepgram's Nova-3 accepts Norwegian, so they are
-   the only remaining route to Norwegian. The alternative, Parakeet alone, is simplest and removes
-   more code, but makes Norwegian calls impossible, and removes cloud speaker separation too.
-2. **What should the language do on Parakeet, given it cannot steer the engine?** Recommended: use it
-   for what it can affect. It sets the language answers are written in during that meeting, and it
-   refuses a language Parakeet cannot do. This also settles #71's wrong-language answers without
-   detection. The alternative is a language control that visibly does nothing on Parakeet, which
-   would be misleading.
-3. **What happens when someone picks Norwegian?** Recommended: on Parakeet, refuse with a reason that
-   names the option ("Parakeet can't transcribe Norwegian. Choose Deepgram in Settings."). The user
-   switches on purpose, which keeps Local-only and privacy intact. The alternative of leaving Norwegian
-   out of the list hides the reason from the user.
-4. **Remove or switch off?** Recommended: remove, as the owner asked. Git history and the release asset
-   keep it recoverable, and it is days old. Switching it off in nixos alone (one line) would keep every
-   option open at no cost, so it is the cheap alternative if Norwegian might be needed again soon.
-5. **Keep #70's measurement?** Recommended: keep `docs/eval/2026-11-norwegian-stt.md`, with a note that
-   the engine was later removed, since it is the evidence for any later attempt.
+1. **What does "everything else" cover?** The title and outcome assume this answer, and change with it.
+   Recommended: the local Whisper engines only (NB-Whisper, turbo, the export tools). Keep Deepgram and
+   OpenAI-compatible servers. They are already opt-in, have tests, p620 already has a Deepgram key, and
+   Deepgram's Nova-3 accepts Norwegian and separates speakers, so they are the only remaining route to both.
+   The alternative, Parakeet alone, is simplest and removes more code, but makes Norwegian calls
+   impossible and loses speaker separation.
+2. **What should the meeting's language change, given Parakeet ignores it?** This goes beyond what the owner
+   literally asked, and it is the owner's call:
+   - **A (recommended): answers and notes for that meeting, plus the refusal.** A chosen language overrides
+     `response_language` for that meeting's answers, notes and recap; nothing chosen leaves
+     `response_language` in charge. It does something real on Parakeet and settles #71's wrong-language
+     answers, without detection. It costs some extra code.
+   - **B: only engines that accept a language, plus the refusal.** Smallest, and most literal. On Parakeet it
+     would do almost nothing, so its label has to say Parakeet detects by itself.
+   - **C: no per-meeting control yet.** Only remove the engine, and leave the Settings picker with honest
+     wording, then design the control with the "other ways" of improving this.
+3. **When can it be chosen?** Recommended: before recording starts, in the meeting. This fits how speech
+   settings work today. Under 2A, answers can follow a later change from the next answer on. Restarting
+   transcription mid-recording is more work, and has no effect on Parakeet.
+4. **Which languages are offered?** Recommended: English plus what the engine in use can do, which is
+   Parakeet's 25 on Parakeet. Norwegian then appears only with an engine that can do it, and otherwise a
+   hint says Norwegian needs Deepgram. Nothing switches to the cloud by itself.
+5. **Remove or switch off?** Recommended: remove, as the owner asked. Git history and the release asset keep it
+   recoverable. Switching it off in nixos alone is one line, but simplifies nothing else, so it only suits
+   keeping Norwegian an easy option for a while.
+6. **Keep #70's measurement?** Recommended: keep `docs/eval/2026-11-norwegian-stt.md`, with a note that the engine
+   was later removed, since it is the evidence for any later attempt.
