@@ -177,6 +177,10 @@ ShellRoot {
                 if (comp) comp.send();
             } else if (root.phase === 11) {
                 root.out.quoteCleared = !c || !c.quote || !c.quote.line;
+                // typed text is never an app request; the button is, and so is its retry
+                overlay.submit("typed q", []);
+                overlay.quick();
+                if (c) c.retry();
                 // Open Library -> Restore -> select Fake standup ("1"): notes are now stale after the edit
                 overlay.showLibrary("restore");
                 noteBtn = root.find(card, "openNotes");

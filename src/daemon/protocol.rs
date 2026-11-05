@@ -60,6 +60,8 @@ pub struct ChatSend {
     pub attachments: Vec<String>,
     pub screenshot: bool,
     pub no_context: bool,
+    #[serde(default)]
+    pub app_request: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,9 +330,13 @@ mod tests {
     #[test]
     fn missing_args_parse_as_defaults() {
         let args: ChatSend = parse(Value::Null).unwrap();
-        assert!(args.text.is_empty() && !args.no_context);
+        assert!(args.text.is_empty() && !args.no_context && !args.app_request);
         assert!(args.line.is_none());
         let args: ChatSend = parse(json!({"text":"why", "line":"line-id"})).unwrap();
         assert_eq!(args.line.as_deref(), Some("line-id"));
+        assert!(!args.app_request);
+        let args: ChatSend =
+            parse(json!({"text":"What should I say?", "app_request":true})).unwrap();
+        assert!(args.app_request);
     }
 }

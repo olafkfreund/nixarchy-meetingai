@@ -664,7 +664,7 @@ class Handler(socketserver.StreamRequestHandler):
         for raw in self.rfile:
             req = json.loads(raw)
             cmd = req["cmd"]
-            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else " " + str(req.get("args", {}).get("language")) if cmd == "meeting.language.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") if cmd == "record.start" else "") + (" line=" + str(req.get("args", {}).get("line")) + " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" and req.get("args", {}).get("line") else ""))
+            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else " " + str(req.get("args", {}).get("language")) if cmd == "meeting.language.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") if cmd == "record.start" else "") + (" line=" + str(req.get("args", {}).get("line")) + " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" and req.get("args", {}).get("line") else " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" else "") + (" app_request" if cmd == "chat.send" and req.get("args", {}).get("app_request") else ""))
             if cmd == "meeting.language.set":
                 code = req.get("args", {}).get("language") or None
                 names = {l["code"]: l["name"] for l in state["languages"]}
