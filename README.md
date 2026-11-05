@@ -295,6 +295,23 @@ written again whenever its notes are regenerated:
   Interviews are exported too (`local_only: true` in the frontmatter marks
   a local-only one). Voice data, keys and settings are never exported.
 
+### Automatic screenshots
+
+While recording, turn on **Auto screenshots** in the meeting view and drag over the area to capture. It's off by default and has no global setting, so you choose it for each meeting. Auto-record never turns it on.
+
+It captures once every 5 minutes, and twice (after 4 and 10 seconds) when either side says a phrase such as "share my screen", "here's the document" or "next slide". Frames that look almost the same as the last one aren't stored. It stops at 60 per meeting, and switching it off and on doesn't reset that.
+
+The Library lists a meeting's screenshots beside its notes, where you can preview or delete each one.
+
+**What to know before using it:**
+
+- **It captures whatever is in the area,** including other windows, notifications and anything private that appears there. You also need to be allowed to capture what others share.
+- **Screenshots never go to a model,** and agents can't read or start them through the app. A tool that can read your files can still read the export folder. Only the screenshot you attach yourself to a question goes to a model.
+- **A locked screen is never captured.** This relies on `hyprctl locked`, so it needs Hyprland. If the lock state can't be read, nothing is captured and the app warns you once.
+- **Local-only interviews refuse it,** and interview mode needs recording consent. If a meeting turns Local-only or consent is lost, capture stops. Screenshots already taken stay in that meeting and are still included if you export it.
+- **Images are full resolution.** On a 2560×1440 screen we measured about 0.6 MB each, so a full 60 is about 40 MB in the database. Busy or video-heavy frames may be larger.
+- **Exports are plain files** named `auto-NN`, and the export folder may sync elsewhere. Deleting a screenshot also removes the app's copy from the meeting's export folder, unless you've changed that file. Copies already synced elsewhere are not removed.
+
 ### Keybindings
 
 | Action | Key |
