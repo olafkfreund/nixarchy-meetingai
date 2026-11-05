@@ -191,8 +191,8 @@ Item {
         root.send("settings.set", { key: key, value: value });
     }
 
-    function ask(text, attachments, screenshot, noContext, line) {
-        root.lastAsk = { text: text, attachments: attachments || [], screenshot: screenshot === true, noContext: noContext === true, line: String(line || "") };
+    function ask(text, attachments, screenshot, noContext, line, app) {
+        root.lastAsk = { text: text, attachments: attachments || [], screenshot: screenshot === true, noContext: noContext === true, line: String(line || ""), app: app === true };
         root.archiveNow();
         root.staleTurn = root.now.turn;
         root.awaitingStart = true;
@@ -200,9 +200,9 @@ Item {
         root.suggestions = [];
         // NOW shows the question and the waiting bar at once; answer.started fills in the rest
         root.now = { turn: -1, question: text, automatic: false, asker: "You", provider: "", model: "", body: "", error: "" };
-        root.send("chat.send", { text: text, attachments: root.lastAsk.attachments, screenshot: root.lastAsk.screenshot, no_context: root.lastAsk.noContext, line: root.lastAsk.line !== "" ? root.lastAsk.line : undefined }, function(r) { if (!r.ok) root.answerFailed(String(r.error || "request failed")); });
+        root.send("chat.send", { text: text, attachments: root.lastAsk.attachments, screenshot: root.lastAsk.screenshot, no_context: root.lastAsk.noContext, line: root.lastAsk.line !== "" ? root.lastAsk.line : undefined, app_request: root.lastAsk.app ? true : undefined }, function(r) { if (!r.ok) root.answerFailed(String(r.error || "request failed")); });
     }
-    function retry() { if (root.lastAsk) root.ask(root.lastAsk.text, root.lastAsk.attachments, root.lastAsk.screenshot, root.lastAsk.noContext, root.lastAsk.line); }
+    function retry() { if (root.lastAsk) root.ask(root.lastAsk.text, root.lastAsk.attachments, root.lastAsk.screenshot, root.lastAsk.noContext, root.lastAsk.line, root.lastAsk.app); }
     // A failed answer stays in NOW, with Retry, instead of becoming a line in the transcript.
     function answerFailed(message) {
         root.awaitingStart = false;
