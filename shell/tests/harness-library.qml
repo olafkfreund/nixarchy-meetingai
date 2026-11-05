@@ -62,8 +62,8 @@ ShellRoot {
     }
     function emptyText(card) { var t = root.find(card, "notesEmpty"); return t ? String(t.text) : ""; }
     function listShown(card) { return !!root.find(card, "restoreList"); }
-    // the Escape handler of the overlay card: the Library's back() first, then close it
-    function pressEscape(lib) { if (!lib.back()) overlay.library = false; }
+    // the overlay's own Escape handler, so changing it is caught
+    function pressEscape(lib) { overlay.escapePressed(); }
     // card geometry sets, then dumps one tick later (layout needs a pass): wide (100%/150%) and narrow, units around the wide threshold
     property var queue: []
     property bool queueRun: false
@@ -125,7 +125,8 @@ ShellRoot {
                 r = root.row(card, "openChat", "Fake chat");
                 root.out.whenBefore = root.whenX(r);
                 root.out.whenYBefore = root.whenY(r);
-                root.out.whenBelowTitle = root.whenY(r) > root.titleY(r, "Fake chat");
+                var titleAt = root.titleY(r, "Fake chat");   // -1 means not found, which must not pass
+                root.out.whenBelowTitle = titleAt >= 0 && root.whenY(r) > titleAt;
                 more = root.find(r, "rowMore");
                 if (more) more.clicked();
             } else if (root.phase === 17) {
@@ -194,9 +195,13 @@ ShellRoot {
                 root.out.backFromSearch = lib ? lib.back() === true : false;
             } else if (root.phase === 38) {
                 root.out.noResultsAfterBack = !!root.find(card, "noResults");
+                // Export now is on a row: its status must show on the narrow list too
+                lib.exportStatus = "Choose an export folder first.";
+                root.out.exportShownNarrow = !!root.find(card, "exportStatus");
+                lib.exportStatus = "";
                 input = root.find(card, "search");
                 if (input) input.text = "";
-                var units = [{ tag: "w1200x800", w: 0 }, { tag: "w760u", units: 760, h: 700 }, { tag: "w759u", units: 759, h: 700 }, { tag: "n520x420", w: 520, h: 420 }];
+                var units = [{ tag: "w1200x800", w: 1200, h: 800 }, { tag: "w760u", units: 760, h: 700 }, { tag: "w759u", units: 759, h: 700 }, { tag: "n520x420", w: 520, h: 420 }, { tag: "l520x420", w: 520, h: 420 }];
                 root.queue = [];
                 [0, 50].forEach(function(sc) {
                     units.forEach(function(u) { root.queue.push({ tag: u.tag + "@" + (100 + sc), w: u.w, units: u.units, h: u.h, scale: sc }); });
@@ -234,6 +239,7 @@ ShellRoot {
             e = root.queue.shift();
             root.applyEntry(e, lib);   // "restore" runs at the default wide card, 100%
             if (e.tag !== "restore") {
+                if (e.tag.indexOf("l520") === 0) lib.back();   // the narrow list, not the notes view
                 if (e.tag.indexOf("w1200") === 0 || e.tag.indexOf("n520") === 0) { var s = root.row(card, "openNotes", "Fake standup"); if (s) s.clicked(); }
             }
             qtimer.cur = e;

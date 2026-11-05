@@ -82,3 +82,10 @@ Full checks, `nix flake check`; reviews by a fresh Opus agent, Codex and agy, re
   - Rows use `advanceWidth` of "n" for the 80-character cap, as `TextMetrics` has no average width.
   - `harness-library.qml` replays the Escape handler's logic, as a harness cannot send a real key, so a change to the handler in `Overlay.qml` would not be caught.
   - The Library smoke timeout goes from 20 s to 45 s, for the added phases.
+- Step 4 review fixes (Claude, from the fresh Opus and Codex reviews; agy was over quota):
+  - **Export status moved out of `notesColumn`,** above both columns, because it was invisible on the narrow list, including export errors. This changes step 1.1's placement.
+  - `onWideNotesChanged` clears `narrowNotes`, so narrowing again keeps the list, as step 1.2 says.
+  - The overlay's Escape logic is now `escapePressed()`, called by the handler and the harness, so the harness tests the real logic. Only the key binding itself stays untested.
+  - Geometry dumps now really use a 1200 × 800 card, and add the narrow list. At 150% that card is wide, not narrow as the earlier test assumed.
+  - `whenBelowTitle` fails if the title is not found.
+  - **Not done:** typing a search while in the narrow notes view gives no feedback until Back; after Back the list may be scrolled to the top if the search filtered it. Tests still do not cover: closing or changing tab with the narrow view open, deleting the selected meeting, focus moves, the 80-character cap, or heading styles. `rowH` was removed, unused.

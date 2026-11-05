@@ -38,6 +38,7 @@ Item {
     signal closeRequested()
     readonly property bool wideNotes: root.width >= Style.space(760) * theme.ts
     property bool narrowNotes: false
+    onWideNotesChanged: { if (wideNotes) narrowNotes = false; }   // narrowing again keeps the list until a meeting is chosen
     // Unix ms for sorting and showing: a chat's last activity, a meeting's start (SQLite UTC text). 0 if unknown.
     function when(s) {
         if (s.kind === "chat") return Number(s.updated_at) || 0;
@@ -379,6 +380,17 @@ Item {
         }
 
         // Restore: chats and meetings with their notes.
+        UiText {   // outside the columns: Export now is on a row, so this must show whichever is on screen
+            id: exportStatusText
+            objectName: "exportStatus"
+            visible: root.tab === "restore" && root.exportStatus !== ""
+            width: parent.width
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: root.exportStatus
+            color: Commons.Color.popups.text
+            font.pixelSize: root.theme.caption
+        }
         Item {
             visible: root.tab === "restore"
             width: parent.width
@@ -574,17 +586,6 @@ Item {
                     onClicked: root.back()
                 }
                 UiText {
-                    id: exportStatusText
-                    objectName: "exportStatus"
-                    visible: root.exportStatus !== ""
-                    width: parent.width
-                    textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
-                    text: root.exportStatus
-                    color: Commons.Color.popups.text
-                    font.pixelSize: root.theme.caption
-                }
-                UiText {
                     objectName: "notesEmpty"
                     visible: root.notesPhase === ""
                     width: parent.width
@@ -607,7 +608,7 @@ Item {
                     TextMetrics { id: notesMetrics; font.family: Style.font.family; font.pixelSize: root.theme.body; text: "n" }
                     Column {
                         id: notesText
-                        readonly property real textW: Math.min(notesBox.availableWidth - 2 * Style.spacing.md, 80 * notesMetrics.advanceWidth)   // 80 characters a line
+                        readonly property real textW: Math.min(Math.max(0, notesBox.availableWidth - 2 * Style.spacing.md), 80 * notesMetrics.advanceWidth)   // 80 characters a line
                         x: Style.spacing.md
                         width: textW
                         spacing: Style.spacing.xs

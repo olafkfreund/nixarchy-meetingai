@@ -156,7 +156,7 @@ if cmds.count("transcript.get") < 3:
 print("grounded: citations, search/jump, rename, stale state and geometry ok")
 PY
 
-# Library: selection, notes pane states, late-reply guard, row menu, metadata, capHeadings and "no results".
+# Library: selection, notes column states, late-reply guard, row menu, metadata, capHeadings and "no results".
 ln -sf "$here/tests/harness-library.qml" "$work/cfg/shell.qml"
 export XDG_RUNTIME_DIR="$work/run-library"
 mkdir -m 700 "$XDG_RUNTIME_DIR"
@@ -179,9 +179,9 @@ def want(key, val):
         bad.append(f"{key}: want {val!r}, got {d.get(key)!r}")
 for key in ("rows", "recapShown", "recapNoHash", "selectedBar", "beforeBump", "reloaded", "chatHidesPane", "lateReplyHidden", "chatDelete", "chatNoExport", "noResults", "noBoxBefore", "sideBySide", "whenBelowTitle",
             "narrowListShown", "swapListHidden", "swapBack", "swapBoxShown", "backClosed", "backListShown", "backNothingToClose", "chatKeepsList", "chatNarrowEmpty", "escSwap", "escList", "escClose",
-            "swapNoResultsHidden", "backFromSearch", "noResultsAfterBack", "restoreBtn", "wide@w1200x800@100", "wide@w760u@100", "wide@w760u@150"):
+            "swapNoResultsHidden", "backFromSearch", "noResultsAfterBack", "restoreBtn", "wide@w1200x800@100", "wide@w1200x800@150", "wide@w760u@100", "wide@w760u@150", "exportShownNarrow"):
     want(key, True)
-for key in ("wide@w759u@100", "wide@w1200x800@150", "wide@n520x420@100", "wide@w759u@150", "wide@n520x420@150"):
+for key in ("wide@w759u@100", "wide@n520x420@100", "wide@l520x420@100", "wide@w759u@150", "wide@n520x420@150", "wide@l520x420@150"):
     want(key, False)   # the wide threshold is 760 units of content width, times the text size
 want("noResultsEarly", False)
 want("emptyBefore", "Select a meeting to read its notes")
