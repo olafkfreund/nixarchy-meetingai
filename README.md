@@ -280,6 +280,10 @@ written again whenever its notes are regenerated:
   or **Not now**). Change it later in Settings, or fix it with
   `settings.exportFolder`. Any folder works, including an Obsidian vault:
   the links are standard Markdown.
+- In the Library's Restore tab, select a meeting to read its notes. On a wide
+  card they appear in a column to the right of the list; on a narrow one they
+  replace the list, with **Back to sessions** (or Escape) to return. Restore
+  is still one click on the row.
 - **Export now** in the Library exports any meeting on demand. Screenshots
   and original documents are only kept from this version on, so older
   meetings export without them (a document's text is exported as `.md`).
