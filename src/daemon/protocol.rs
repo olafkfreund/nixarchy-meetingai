@@ -85,6 +85,11 @@ pub struct RecordStart {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct MeetingLanguageSet {
+    pub language: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CandidateAttach {
     pub id: String,
     pub kind: String,

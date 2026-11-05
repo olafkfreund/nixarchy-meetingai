@@ -303,6 +303,7 @@ struct Inner {
     follow_up_task: Option<JoinHandle<()>>,
     named_conversations: Vec<String>,
     conversation_response: Option<(ResponseLength, String)>,
+    meeting_language: Option<String>,
     active_profile_id: Option<String>,
     sources: Vec<Attachment>,
     pending_capture: Option<CapturedImage>,
@@ -657,6 +658,108 @@ struct ResolvedSpeech {
     language: String,
 }
 
+const LANGUAGES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("af", "Afrikaans"),
+    ("ar", "Arabic"),
+    ("be", "Belarusian"),
+    ("bn", "Bengali"),
+    ("bs", "Bosnian"),
+    ("bg", "Bulgarian"),
+    ("ca", "Catalan"),
+    ("zh", "Chinese"),
+    ("hr", "Croatian"),
+    ("cs", "Czech"),
+    ("da", "Danish"),
+    ("nl", "Dutch"),
+    ("et", "Estonian"),
+    ("fi", "Finnish"),
+    ("fr", "French"),
+    ("gl", "Galician"),
+    ("de", "German"),
+    ("el", "Greek"),
+    ("gu", "Gujarati"),
+    ("he", "Hebrew"),
+    ("hi", "Hindi"),
+    ("hu", "Hungarian"),
+    ("id", "Indonesian"),
+    ("it", "Italian"),
+    ("ja", "Japanese"),
+    ("kn", "Kannada"),
+    ("ko", "Korean"),
+    ("lv", "Latvian"),
+    ("lt", "Lithuanian"),
+    ("mk", "Macedonian"),
+    ("ms", "Malay"),
+    ("mt", "Maltese"),
+    ("mr", "Marathi"),
+    ("no", "Norwegian"),
+    ("fa", "Persian"),
+    ("pl", "Polish"),
+    ("pt", "Portuguese"),
+    ("ro", "Romanian"),
+    ("ru", "Russian"),
+    ("sr", "Serbian"),
+    ("sk", "Slovak"),
+    ("sl", "Slovenian"),
+    ("es", "Spanish"),
+    ("sv", "Swedish"),
+    ("tl", "Tagalog"),
+    ("ta", "Tamil"),
+    ("te", "Telugu"),
+    ("th", "Thai"),
+    ("tr", "Turkish"),
+    ("uk", "Ukrainian"),
+    ("vi", "Vietnamese"),
+    ("xh", "Xhosa"),
+    ("zu", "Zulu"),
+];
+const PARAKEET_LANGUAGES: &str =
+    "bg hr cs da nl en et fi fr de el hu it lv lt mt pl pt ro sk sl es sv ru uk";
+const DEEPGRAM_LANGUAGES: &str = "af ar be bn bs bg ca zh hr cs da nl en et fi fr gl de el gu he hi hu id it ja kn ko lv lt mk ms mr no fa pl pt ro ru sr sk sl es sv tl ta te th tr uk vi xh zu";
+
+fn language_name(code: &str) -> Option<&'static str> {
+    let base = code.split(['-', '_']).next().unwrap_or(code);
+    if base.eq_ignore_ascii_case("nb") || base.eq_ignore_ascii_case("nn") {
+        return Some("Norwegian");
+    }
+    LANGUAGES
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(base))
+        .map(|(_, name)| *name)
+}
+
+fn language_support(engine: &str, model: &str, code: &str) -> Option<bool> {
+    let base = code
+        .split(['-', '_'])
+        .next()
+        .unwrap_or(code)
+        .to_ascii_lowercase();
+    let codes = match engine {
+        "parakeet-local" => PARAKEET_LANGUAGES,
+        "deepgram-stt" if model == "nova-3" || model == "nova-3-general" => DEEPGRAM_LANGUAGES,
+        _ => return None,
+    };
+    Some(codes.split_whitespace().any(|id| id == base.as_str()))
+}
+
+fn meeting_speech_settings(settings: &Settings, language: Option<&str>) -> Settings {
+    let mut effective = settings.clone();
+    if let Some(language) = language {
+        effective.speech_language = language.to_owned();
+    }
+    effective
+}
+
+fn meeting_answer_language(c: &rusqlite::Connection, meeting: &str, fallback: &str) -> String {
+    meetings::get(c, meeting)
+        .ok()
+        .flatten()
+        .and_then(|m| m.language)
+        .and_then(|code| language_name(&code).map(str::to_owned))
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
 fn resolve_speech(settings: &Settings) -> ResolvedSpeech {
     let chosen = settings.speech_provider.trim();
     let id = if chosen.is_empty() {
@@ -707,105 +810,7 @@ fn speech_guard(speech: &ResolvedSpeech) -> Result<Option<String>, String> {
     if language.is_empty() {
         return Ok(None);
     }
-    // "EN" and "en_US" are English: compare the lowercase base code.
-    let base = language
-        .split(['-', '_'])
-        .next()
-        .unwrap_or(language)
-        .to_ascii_lowercase();
-    let base = base.as_str();
-    let supported = match speech.id.as_str() {
-        // NVIDIA Parakeet TDT v3's 25 languages.
-        "parakeet-local" => Some(matches!(
-            base,
-            "bg" | "hr"
-                | "cs"
-                | "da"
-                | "nl"
-                | "en"
-                | "et"
-                | "fi"
-                | "fr"
-                | "de"
-                | "el"
-                | "hu"
-                | "it"
-                | "lv"
-                | "lt"
-                | "mt"
-                | "pl"
-                | "pt"
-                | "ro"
-                | "sk"
-                | "sl"
-                | "es"
-                | "sv"
-                | "ru"
-                | "uk"
-        )),
-        // Deepgram Nova-3 general; other models have different support.
-        "deepgram-stt"
-            if speech.config.model == "nova-3" || speech.config.model == "nova-3-general" =>
-        {
-            Some(matches!(
-                base,
-                "af" | "ar"
-                    | "be"
-                    | "bn"
-                    | "bs"
-                    | "bg"
-                    | "ca"
-                    | "zh"
-                    | "hr"
-                    | "cs"
-                    | "da"
-                    | "nl"
-                    | "en"
-                    | "et"
-                    | "fi"
-                    | "fr"
-                    | "gl"
-                    | "de"
-                    | "el"
-                    | "gu"
-                    | "he"
-                    | "hi"
-                    | "hu"
-                    | "id"
-                    | "it"
-                    | "ja"
-                    | "kn"
-                    | "ko"
-                    | "lv"
-                    | "lt"
-                    | "mk"
-                    | "ms"
-                    | "mr"
-                    | "no"
-                    | "fa"
-                    | "pl"
-                    | "pt"
-                    | "ro"
-                    | "ru"
-                    | "sr"
-                    | "sk"
-                    | "sl"
-                    | "es"
-                    | "sv"
-                    | "tl"
-                    | "ta"
-                    | "te"
-                    | "th"
-                    | "tr"
-                    | "uk"
-                    | "vi"
-                    | "xh"
-                    | "zu"
-            ))
-        }
-        _ => None,
-    };
-    match supported {
+    match language_support(&speech.id, &speech.config.model, language) {
         Some(true) => Ok(None),
         Some(false) => {
             let engine = SttProvider::by_id(&speech.id).map_or(speech.id.as_str(), |p| p.name);
@@ -955,6 +960,41 @@ fn migrate_whisper(db: &Database) -> Option<String> {
     Some("Speech now uses Parakeet locally; whisper was removed.".to_owned())
 }
 
+fn migrate_norwegian_engine(db: &Database) -> Option<String> {
+    const MARKER: &str = "norwegian_engine_notice_shown";
+    let c = db.connection();
+    if store::get(c, MARKER).ok().flatten().is_some() {
+        return None;
+    }
+    let provider = store::get(c, "speech_provider")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let old_engine = provider == "whisper-nb-local";
+    if old_engine {
+        store::set(c, "speech_provider", "parakeet-local").ok()?;
+    }
+    let language = store::get(c, "speech_language")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let norwegian = matches!(
+        language
+            .split(['-', '_'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "nb" | "no" | "nn"
+    );
+    let clear = norwegian && (old_engine || provider.is_empty() || provider == "parakeet-local");
+    if clear {
+        store::set(c, "speech_language", "").ok()?;
+    }
+    store::set(c, MARKER, "1").ok()?;
+    (old_engine || clear).then(|| "The local Norwegian engine was removed. Parakeet does not transcribe Norwegian; Deepgram can.".to_owned())
+}
+
 /// Lowercase with whitespace runs as one space; a soft hyphen (and the line break after it) vanishes.
 fn normalize(text: &str) -> String {
     let mut out = String::new();
@@ -1050,10 +1090,14 @@ impl Daemon {
         crate::core::install_tls_provider();
         let vault = Vault::open(&options.vault_dir).map_err(|e| e.to_string())?;
         let db = Database::open(&options.db_path).map_err(|e| e.to_string())?;
-        let startup_notice = [migrate_gemini(&db, &vault), migrate_whisper(&db)]
-            .into_iter()
-            .flatten()
-            .reduce(|a, b| format!("{a} {b}"));
+        let startup_notice = [
+            migrate_gemini(&db, &vault),
+            migrate_whisper(&db),
+            migrate_norwegian_engine(&db),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|a, b| format!("{a} {b}"));
         let settings = Settings::load(&db).unwrap_or_default();
         let active_profile_id = profiles::selected(db.connection())
             .ok()
@@ -1099,6 +1143,7 @@ impl Daemon {
                 follow_up_task: None,
                 named_conversations: Vec::new(),
                 conversation_response: None,
+                meeting_language: None,
                 active_profile_id,
                 sources: Vec::new(),
                 pending_capture: None,
@@ -1159,9 +1204,36 @@ impl Daemon {
     fn state_value(&self, g: &Inner) -> Value {
         let local = self.local_now(g);
         let chat = self.chat_config(&g.settings, local).is_some();
-        let speech = self.speech_config(&g.settings, local).is_some();
-        let resolved = resolve_speech(&g.settings);
+        let settings = meeting_speech_settings(&g.settings, g.meeting_language.as_deref());
+        let speech_config = self.speech_config(&settings, local);
+        let speech = speech_config.is_some();
+        let resolved = resolve_speech(&settings);
+        let model = speech_config
+            .as_ref()
+            .map_or(resolved.config.model.as_str(), |c| c.model.as_str());
+        let languages: Vec<_> = LANGUAGES
+            .iter()
+            .filter(|(code, _)| language_support(&resolved.id, model, code) != Some(false))
+            .map(|(code, name)| json!({"code": code, "name": name}))
+            .collect();
+        let meeting_language_label = g
+            .meeting_language
+            .as_deref()
+            .or_else(|| meetings::chosen_language(&g.settings.speech_language))
+            .and_then(language_name)
+            .unwrap_or("English");
+        let language_hint = if resolved.id == "parakeet-local" {
+            "Parakeet detects the language itself. This sets the language of answers and notes, over the answer language setting. Norwegian needs Deepgram."
+        } else if language_support(&resolved.id, model, "en").is_none() {
+            "This sets the speech language, and the language of answers and notes, over the answer language setting. This engine's language support cannot be checked."
+        } else {
+            "This sets the speech language, and the language of answers and notes, over the answer language setting."
+        };
         json!({
+            "meeting_language": g.meeting_language,
+            "meeting_language_label": meeting_language_label,
+            "languages": languages,
+            "language_hint": language_hint,
             "recording": g.recording.as_ref().is_some_and(|r| !r.stop.load(Ordering::Relaxed)),
             "since": g.recording.as_ref().map_or(0, |r| r.since_ms),
             "mic": g.mic,
@@ -1631,10 +1703,13 @@ impl Daemon {
         if citations {
             prompt.push_str("\n\nWhen a sentence relies on the meeting, end it with the number in brackets: [3] for a transcript line, [N2] for the earlier notes. Do not cite general knowledge or documents.");
         }
-        let (mut length, language) = g.conversation_response.clone().unwrap_or((
+        let (mut length, mut language) = g.conversation_response.clone().unwrap_or((
             g.settings.response_length,
             g.settings.response_language.clone(),
         ));
+        if let Some(name) = g.meeting_language.as_deref().and_then(language_name) {
+            language = name.to_owned();
+        }
         if live {
             length = ResponseLength::Short;
         }
@@ -2504,7 +2579,11 @@ impl Daemon {
                 let g = me.inner.lock();
                 (
                     me.chat_config(&g.settings, me.local_for(g.db.connection(), Some(&meeting))),
-                    g.settings.response_language.clone(),
+                    meeting_answer_language(
+                        g.db.connection(),
+                        &meeting,
+                        &g.settings.response_language,
+                    ),
                 )
             };
             if let Some(config) = config {
@@ -2578,11 +2657,17 @@ impl Daemon {
                 return Err("Wait for your voice sample to finish recording.".into());
             }
             g.settings = Settings::load(&g.db).unwrap_or_default();
-            let resolved = resolve_speech(&g.settings);
+            let chosen = if new && g.resume_meeting.is_some() {
+                None
+            } else {
+                g.meeting_language.clone()
+            };
+            let effective_settings = meeting_speech_settings(&g.settings, chosen.as_deref());
+            let resolved = resolve_speech(&effective_settings);
             // Refuse before the consent prompt; the notice for unknown support comes below.
             speech_guard(&resolved)?;
             let local = self.local_now(g);
-            if local && self.speech_config(&g.settings, true).is_none() {
+            if local && self.speech_config(&effective_settings, true).is_none() {
                 return Err(
                     "local_only: this interview needs a ready loopback speech-to-text provider."
                         .into(),
@@ -2596,7 +2681,7 @@ impl Daemon {
                 g.consent = true;
             }
             let speech = if self.capture {
-                Some(self.speech_config(&g.settings, local).ok_or_else(|| {
+                Some(self.speech_config(&effective_settings, local).ok_or_else(|| {
                     speech_not_ready(
                         &resolved.id,
                         if local {
@@ -2719,14 +2804,16 @@ impl Daemon {
                         g.candidate.take(),
                         std::mem::take(&mut g.consent),
                         self.local_only.load(Ordering::Relaxed),
+                        g.meeting_language.clone(),
                     )
                 });
                 self.reset_session(g);
                 self.emit("session.reset", json!({}));
-                if let Some((candidate, consent, local_only)) = keep {
+                if let Some((candidate, consent, local_only, language)) = keep {
                     g.candidate = candidate;
                     g.consent = consent;
                     self.local_only.store(local_only, Ordering::Relaxed);
+                    g.meeting_language = language;
                 }
             }
             let outcome = if self.capture && session.is_none() {
@@ -2754,7 +2841,7 @@ impl Daemon {
                     g.db.connection(),
                     &name,
                     "meeting",
-                    "en",
+                    g.meeting_language.as_deref().unwrap_or(""),
                     g.series.as_deref().filter(|_| g.candidate.is_none()),
                     g.settings.meeting_mode,
                 )
@@ -3180,7 +3267,7 @@ impl Daemon {
             let names = meetings::speaker_names(c, meeting).unwrap_or_default();
             (
                 self.chat_config(&g.settings, local),
-                g.settings.response_language.clone(),
+                meeting_answer_language(c, meeting, &g.settings.response_language),
                 meetings::transcript_excerpt(c, meeting, 6000, &names).unwrap_or_default(),
                 local,
                 candidates::for_meeting(c, meeting).ok().flatten().is_some(),
@@ -3616,6 +3703,7 @@ impl Daemon {
         g.speaker_offset = 0;
         g.last_elapsed = 0.0;
         g.conversation_response = None;
+        g.meeting_language = None;
         g.live_turns = LiveTurns::default();
         g.live_interim = Default::default();
         g.last_question.clear();
@@ -3691,6 +3779,7 @@ impl Daemon {
             .ok_or("This session no longer exists.")?;
         self.reset_session(g);
         self.emit("session.reset", json!({}));
+        g.meeting_language = record.language;
         if let Some(chat) =
             sessions::meeting_chat(g.db.connection(), id).map_err(|e| e.to_string())?
         {
@@ -4001,6 +4090,40 @@ impl Daemon {
         let all = self.settings_reply(g)?;
         self.emit("settings", json!({"settings": all}));
         self.emit_state(g); // a provider or Local-only change flips state.ready
+        Ok(json!({}))
+    }
+
+    fn meeting_language_set(&self, language: String) -> Result<Value, String> {
+        let choice = meetings::chosen_language(&language).map(str::to_ascii_lowercase);
+        let mut g = self.inner.lock();
+        let resolved = resolve_speech(&g.settings);
+        let model = self
+            .speech_config(&g.settings, self.local_now(&g))
+            .map_or(resolved.config.model.clone(), |config| config.model);
+        let support = choice
+            .as_deref()
+            .and_then(|code| language_support(&resolved.id, &model, code));
+        if let Some(code) = &choice {
+            if !LANGUAGES.iter().any(|(known, _)| *known == code.as_str()) {
+                return Err(format!("Unknown language: {language}"));
+            }
+            if support == Some(false) {
+                return Err(format!(
+                    "language_unsupported: {} cannot transcribe {code}.",
+                    resolved.id
+                ));
+            }
+        }
+        if let Some(meeting) = g.meeting_id.as_deref().or(g.resume_meeting.as_deref()) {
+            meetings::set_language(g.db.connection(), meeting, choice.as_deref().unwrap_or(""))
+                .map_err(|e| e.to_string())?;
+        }
+        let changed = g.meeting_language != choice;
+        g.meeting_language = choice;
+        if changed && g.recording.is_some() && support == Some(true) {
+            self.emit("notice", json!({"text": "Speech engine and language changes apply at the next recording start."}));
+        }
+        self.emit_state(&g);
         Ok(json!({}))
     }
 
@@ -5278,6 +5401,7 @@ impl Daemon {
                 value["meeting"] = Value::Null;
                 value["candidate"] = Value::Null;
                 value["consent"] = Value::Null;
+                value["meeting_language"] = Value::Null;
             }
             "items.list" => {
                 if let Some(list) = value.as_array_mut() {
@@ -5307,6 +5431,9 @@ impl Daemon {
     ) -> Result<Value, String> {
         match cmd {
             "state.get" => Ok(self.state_value(&self.inner.lock())),
+            "meeting.language.set" => {
+                self.meeting_language_set(parse::<protocol::MeetingLanguageSet>(args)?.language)
+            }
             "calendar.refresh" => {
                 self.calendar_refresh(false).await;
                 Ok(json!({}))
@@ -5320,6 +5447,11 @@ impl Daemon {
                 let series = a.series;
                 let mut g = self.inner.lock();
                 Self::require_idle(&g)?;
+                let keep_language = if g.meeting_id.is_none() && g.resume_meeting.is_none() {
+                    g.meeting_language.clone()
+                } else {
+                    None
+                };
                 if agent && self.local_now(&g) {
                     return Err("This interview is local-only".into());
                 }
@@ -5338,6 +5470,7 @@ impl Daemon {
                     }
                 }
                 self.reset_session(&mut g);
+                g.meeting_language = keep_language;
                 g.series = series;
                 self.set_candidate(&mut g, a.candidate);
                 self.emit("session.reset", json!({}));
@@ -6693,6 +6826,246 @@ mod command_tests {
             s.speech_language = language.into();
             assert_eq!(speech_guard(&resolve_speech(&s)), Ok(None), "{language}");
         }
+    }
+
+    #[test]
+    fn every_supported_language_has_a_name() {
+        for codes in [PARAKEET_LANGUAGES, DEEPGRAM_LANGUAGES] {
+            for code in codes.split_whitespace() {
+                assert!(language_name(code).is_some(), "{code}");
+            }
+        }
+        assert_eq!(LANGUAGES[0], ("en", "English"));
+    }
+
+    #[test]
+    fn meeting_speech_uses_choice_or_global_and_deepgram_receives_it() {
+        let mut settings = Settings::default();
+        assert_eq!(
+            resolve_speech(&meeting_speech_settings(&settings, None)).language,
+            ""
+        );
+        settings.speech_language = "fr".into();
+        assert_eq!(
+            resolve_speech(&meeting_speech_settings(&settings, None)).language,
+            "fr"
+        );
+        settings.speech_provider = "deepgram-stt".into();
+        let chosen = resolve_speech(&meeting_speech_settings(&settings, Some("pl")));
+        assert_eq!(chosen.language, "pl");
+        assert_eq!(speech_guard(&chosen), Ok(None));
+        assert_eq!(settings.speech_language, "fr");
+    }
+
+    #[tokio::test]
+    async fn meeting_language_lifecycle_and_speech_guard() {
+        let d = daemon();
+        let set = |language: &'static str| {
+            let d = &d;
+            async move {
+                d.handle("meeting.language.set", json!({"language": language}), None)
+                    .await
+            }
+        };
+        assert!(
+            set("no")
+                .await
+                .unwrap_err()
+                .contains("language_unsupported")
+        );
+        assert_eq!(
+            d.handle("state.get", json!({}), None).await.unwrap()["meeting_language"],
+            Value::Null
+        );
+        set("pl").await.unwrap();
+        d.handle("session.new", json!({}), None).await.unwrap();
+        assert_eq!(d.inner.lock().meeting_language.as_deref(), Some("pl"));
+        d.handle("record.start", json!({"new": true}), None)
+            .await
+            .unwrap();
+        let first = d.inner.lock().meeting_id.clone().unwrap();
+        {
+            let g = d.inner.lock();
+            assert_eq!(
+                meetings::get(g.db.connection(), &first)
+                    .unwrap()
+                    .unwrap()
+                    .language
+                    .as_deref(),
+                Some("pl")
+            );
+            assert!(g.recording.as_ref().unwrap().speech.is_none());
+        }
+        set("fr").await.unwrap();
+        d.handle("record.stop", json!({}), None).await.unwrap();
+        for _ in 0..200 {
+            let finished = {
+                let g = d.inner.lock();
+                g.recording.is_none()
+                    && g.resume_meeting.as_deref() == Some(first.as_str())
+                    && g.finishing_meeting.is_none()
+            };
+            if finished {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(d.inner.lock().meeting_language.as_deref(), Some("fr"));
+        assert_eq!(
+            d.inner
+                .lock()
+                .db
+                .connection()
+                .query_row("SELECT language FROM meetings WHERE id=?1", [&first], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "fr"
+        );
+        d.handle("record.start", json!({}), None).await.unwrap();
+        assert_eq!(d.inner.lock().meeting_id.as_deref(), Some(first.as_str()));
+        assert_eq!(d.inner.lock().meeting_language.as_deref(), Some("fr"));
+        d.handle("record.stop", json!({}), None).await.unwrap();
+        for _ in 0..200 {
+            let finished = {
+                let g = d.inner.lock();
+                g.recording.is_none()
+                    && g.resume_meeting.as_deref() == Some(first.as_str())
+                    && g.finishing_meeting.is_none()
+            };
+            if finished {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        d.handle("session.restore", json!({"id": first}), None)
+            .await
+            .unwrap();
+        assert_eq!(d.inner.lock().meeting_language.as_deref(), Some("fr"));
+        d.handle("record.start", json!({"new": true}), None)
+            .await
+            .unwrap();
+        let second = d.inner.lock().meeting_id.clone().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(d.inner.lock().meeting_language, None);
+        assert_eq!(
+            meetings::get(d.inner.lock().db.connection(), &second)
+                .unwrap()
+                .unwrap()
+                .language,
+            None
+        );
+        set("en").await.unwrap();
+        set("").await.unwrap();
+        assert_eq!(d.inner.lock().meeting_language, None);
+    }
+
+    #[tokio::test]
+    async fn refused_new_keeps_the_open_meeting_and_language() {
+        let d = daemon();
+        d.handle("meeting.language.set", json!({"language":"pl"}), None)
+            .await
+            .unwrap();
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let first = d.inner.lock().meeting_id.clone().unwrap();
+        d.handle("record.stop", json!({}), None).await.unwrap();
+        for _ in 0..200 {
+            let finished = {
+                let g = d.inner.lock();
+                g.recording.is_none()
+                    && g.resume_meeting.as_deref() == Some(first.as_str())
+                    && g.finishing_meeting.is_none()
+            };
+            if finished {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        d.handle(
+            "settings.set",
+            json!({"key":"speech_language", "value":"ja"}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            d.handle("record.start", json!({"new":true}), None)
+                .await
+                .is_err()
+        );
+        let g = d.inner.lock();
+        assert_eq!(g.resume_meeting.as_deref(), Some(first.as_str()));
+        assert_eq!(g.meeting_language.as_deref(), Some("pl"));
+    }
+
+    #[tokio::test]
+    async fn meeting_language_overrides_prompts_without_changing_conversation_preference() {
+        let d = daemon();
+        let default = {
+            let g = d.inner.lock();
+            d.system_prompt(&g, false, false, "", "", false)
+        };
+        d.handle("meeting.language.set", json!({"language":"pl"}), None)
+            .await
+            .unwrap();
+        {
+            let mut g = d.inner.lock();
+            g.conversation_response = Some((ResponseLength::Medium, "French".into()));
+            let prompt = d.system_prompt(&g, false, false, "", "", false);
+            assert!(prompt.contains("Write in Polish"));
+            assert_eq!(g.conversation_response.as_ref().unwrap().1, "French");
+        }
+        d.handle("meeting.language.set", json!({"language":"en"}), None)
+            .await
+            .unwrap();
+        {
+            let g = d.inner.lock();
+            assert!(
+                d.system_prompt(&g, false, false, "", "", false)
+                    .contains("Write in French")
+            );
+            assert_eq!(g.settings.response_language, "Auto");
+        }
+        let other = daemon();
+        let g = other.inner.lock();
+        assert_eq!(
+            default,
+            other.system_prompt(&g, false, false, "", "", false)
+        );
+    }
+
+    #[test]
+    fn older_meeting_notes_use_their_own_language() {
+        let d = daemon();
+        let g = d.inner.lock();
+        let pl = meetings::start(
+            g.db.connection(),
+            "Polish",
+            "",
+            "pl",
+            None,
+            MeetingMode::General,
+        )
+        .unwrap();
+        let old = meetings::start(
+            g.db.connection(),
+            "Old",
+            "",
+            "en",
+            None,
+            MeetingMode::General,
+        )
+        .unwrap();
+        assert_eq!(
+            meeting_answer_language(g.db.connection(), &pl, "French"),
+            "Polish"
+        );
+        assert_eq!(
+            meeting_answer_language(g.db.connection(), &old, "French"),
+            "French"
+        );
+        drop(g);
+        d.session_restore(&old, false).unwrap();
+        assert_eq!(d.inner.lock().meeting_language, None);
     }
 
     #[tokio::test]
@@ -8072,6 +8445,15 @@ mod command_tests {
         call("candidate.local_only", json!({"id": id, "on": true}))
             .await
             .unwrap();
+        call("meeting.language.set", json!({"language":"pl"}))
+            .await
+            .unwrap();
+        let local_state = d.handle("state.get", json!({}), Some("mcp")).await.unwrap();
+        assert_eq!(local_state["meeting_language"], Value::Null);
+        assert_eq!(
+            call("state.get", json!({})).await.unwrap()["meeting_language"],
+            "pl"
+        );
         call(
             "settings.set",
             json!({"key": "speech_provider", "value": "deepgram-stt"}),
@@ -8136,15 +8518,98 @@ mod command_tests {
     }
 
     #[test]
-    fn norwegian_whisper_is_not_migrated() {
+    fn norwegian_engine_migration_respects_provider_and_runs_once() {
         use crate::db::settings::{get, set};
-        let db = Database::open_in_memory().unwrap();
-        set(db.connection(), "speech_provider", "whisper-nb-local").unwrap();
-        assert_eq!(migrate_whisper(&db), None);
+        for (provider, language, expected_provider, expected_language, notice) in [
+            ("whisper-nb-local", "nb-NO", "parakeet-local", "", true),
+            ("", "NO", "", "", true),
+            ("parakeet-local", "nn_NO", "parakeet-local", "", true),
+            ("deepgram-stt", "nb", "deepgram-stt", "nb", false),
+            (
+                "openai-compatible-stt",
+                "nn",
+                "openai-compatible-stt",
+                "nn",
+                false,
+            ),
+        ] {
+            let db = Database::open_in_memory().unwrap();
+            set(db.connection(), "speech_provider", provider).unwrap();
+            set(db.connection(), "speech_language", language).unwrap();
+            assert_eq!(migrate_norwegian_engine(&db).is_some(), notice);
+            assert_eq!(
+                get(db.connection(), "speech_provider").unwrap().as_deref(),
+                Some(expected_provider)
+            );
+            assert_eq!(
+                get(db.connection(), "speech_language").unwrap().as_deref(),
+                Some(expected_language)
+            );
+            assert_eq!(migrate_norwegian_engine(&db), None);
+        }
+        let fresh = Database::open_in_memory().unwrap();
+        assert_eq!(migrate_norwegian_engine(&fresh), None);
         assert_eq!(
-            get(db.connection(), "speech_provider").unwrap().as_deref(),
-            Some("whisper-nb-local")
+            get(fresh.connection(), "norwegian_engine_notice_shown")
+                .unwrap()
+                .as_deref(),
+            Some("1")
         );
+
+        let combined = Database::open_in_memory().unwrap();
+        set(combined.connection(), "speech_provider", "whisper-nb-local").unwrap();
+        set(combined.connection(), "speech_language", "nb-NO").unwrap();
+        assert_eq!(migrate_whisper(&combined), None);
+        assert!(migrate_norwegian_engine(&combined).is_some());
+        let migrated = Settings::load(&combined).unwrap();
+        assert_eq!(migrated.speech_provider, "parakeet-local");
+        assert_eq!(migrated.speech_language, "");
+    }
+
+    #[tokio::test]
+    async fn norwegian_global_setting_after_migration_is_refused() {
+        let d = daemon();
+        d.handle(
+            "settings.set",
+            json!({"key":"speech_language", "value":"nb"}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            d.handle("record.start", json!({}), None)
+                .await
+                .unwrap_err()
+                .contains("language_unsupported")
+        );
+    }
+
+    #[tokio::test]
+    async fn speech_language_remains_searchable_and_meeting_choice_is_not_agent_writable() {
+        let d = daemon();
+        let results = d
+            .handle("settings.search", json!({"query":"speech_language"}), None)
+            .await
+            .unwrap();
+        assert!(
+            results
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["key"] == "speech_language")
+        );
+        for origin in ["agent", "mcp"] {
+            assert_eq!(
+                d.handle(
+                    "meeting.language.set",
+                    json!({"language":"pl"}),
+                    Some(origin)
+                )
+                .await
+                .unwrap_err(),
+                "not allowed for agents"
+            );
+        }
     }
 
     #[test]
