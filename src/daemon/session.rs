@@ -294,6 +294,8 @@ const AUTO_PHRASES: [&str; 9] = [
 ];
 
 #[cfg(test)]
+type ChatCapture = Box<dyn Fn() -> Result<CapturedImage, String> + Send + Sync>;
+#[cfg(test)]
 type AutoCapture = Box<dyn Fn(&str) -> Result<(Vec<u8>, Vec<u8>), String> + Send + Sync>;
 
 struct AutoShots {
@@ -335,6 +337,7 @@ struct Inner {
     conversation: Conversation,
     chat: ChatSession,
     turn: u64,
+    turn_from_agent: bool,
     /// Provider and model answering the current turn.
     effective: (String, String),
     /// Effective provider is loopback ollama, so a silent start means "loading".
@@ -432,6 +435,8 @@ pub struct Daemon {
     autoshots_epoch: AtomicU64,
     #[cfg(test)]
     auto_capture: Mutex<Option<AutoCapture>>,
+    #[cfg(test)]
+    chat_capture: Mutex<Option<ChatCapture>>,
     #[cfg(test)]
     auto_unlocked: Mutex<Option<Box<dyn Fn() -> bool + Send + Sync>>>,
     #[cfg(test)]
@@ -1201,6 +1206,8 @@ impl Daemon {
             #[cfg(test)]
             auto_capture: Mutex::new(None),
             #[cfg(test)]
+            chat_capture: Mutex::new(None),
+            #[cfg(test)]
             auto_unlocked: Mutex::new(None),
             #[cfg(test)]
             auto_area: Mutex::new(None),
@@ -1232,6 +1239,7 @@ impl Daemon {
                 conversation: Conversation::new(),
                 chat: ChatSession::new(),
                 turn: 0,
+                turn_from_agent: false,
                 cancel: None,
                 request: None,
                 follow_up_task: None,
@@ -1819,7 +1827,18 @@ impl Daemon {
         } else {
             prompt.push_str(&instruction);
         }
-        context::append_prompt(&mut prompt, &g.sources);
+        if g.turn_from_agent {
+            context::append_prompt(
+                &mut prompt,
+                &g.sources
+                    .iter()
+                    .filter(|s| s.image.is_none())
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+        } else {
+            context::append_prompt(&mut prompt, &g.sources);
+        }
         prompt
     }
 
@@ -1869,7 +1888,11 @@ impl Daemon {
         g.pending_created = None;
     }
 
-    async fn chat_send(self: &Arc<Self>, args: protocol::ChatSend) -> Result<Value, String> {
+    async fn chat_send(
+        self: &Arc<Self>,
+        args: protocol::ChatSend,
+        agent: bool,
+    ) -> Result<Value, String> {
         let epoch = self.send_epoch.load(Ordering::Relaxed);
         let cancelled = || Ok(json!({"turn": null, "cancelled": true}));
         let mut question = args.text.trim().to_owned();
@@ -1885,8 +1908,9 @@ impl Daemon {
             imported.push(item);
         }
         // A screenshot (waiting, or asked for now) is something to send on its own.
-        let image_only =
-            imported.is_empty() && (args.screenshot || self.inner.lock().pending_capture.is_some());
+        let image_only = imported.is_empty()
+            && !agent
+            && (args.screenshot || self.inner.lock().pending_capture.is_some());
         if question.is_empty() && imported.is_empty() && !image_only {
             return Err(SendError::Empty.message());
         }
@@ -1907,7 +1931,7 @@ impl Daemon {
                 context::add(&mut g.sources, item)?;
             }
             let s = &g.settings;
-            let fresh = args.screenshot || s.use_image_on_send;
+            let fresh = !agent && (args.screenshot || s.use_image_on_send);
             (
                 fresh && g.pending_capture.is_none(),
                 s.capture_delay_seconds.min(60),
@@ -1915,6 +1939,12 @@ impl Daemon {
         };
         if want_capture {
             tokio::time::sleep(Duration::from_secs(u64::from(delay))).await;
+            #[cfg(test)]
+            let grabbed = self.chat_capture.lock().as_ref().map_or_else(
+                || Err("Test chat capture is not configured.".into()),
+                |capture| capture(),
+            );
+            #[cfg(not(test))]
             let grabbed = grab_screen(false).await;
             if self.send_epoch.load(Ordering::Relaxed) != epoch {
                 return cancelled();
@@ -1930,7 +1960,11 @@ impl Daemon {
             if self.send_epoch.load(Ordering::Relaxed) != epoch {
                 return cancelled();
             }
-            let image = g.pending_capture.take();
+            let image = if agent {
+                None
+            } else {
+                g.pending_capture.take()
+            };
             if image.is_some() {
                 self.emit_state(&g);
             }
@@ -1971,6 +2005,7 @@ impl Daemon {
             args.line,
             Some(epoch),
             app_request,
+            agent,
         )? {
             Some(turn) => Ok(json!({"turn": turn})),
             None => cancelled(),
@@ -1988,6 +2023,7 @@ impl Daemon {
         line: Option<String>,
         epoch: Option<u64>,
         app_request: bool,
+        agent: bool,
     ) -> Result<Option<u64>, String> {
         let mut guard = self.inner.lock();
         let g = &mut *guard;
@@ -2037,7 +2073,8 @@ impl Daemon {
             return Err(no_model(local));
         }
         let config = chain[0].clone();
-        if g.sources.iter().any(|s| s.image.is_some())
+        if !agent
+            && g.sources.iter().any(|s| s.image.is_some())
             && !config.chat_definition().is_some_and(|p| p.supports_images)
         {
             return Err(
@@ -2046,6 +2083,7 @@ impl Daemon {
             );
         }
         self.interrupt(g);
+        g.turn_from_agent = agent;
         if g.conversation_response.is_none() {
             g.conversation_response = Some((
                 g.settings.response_length,
@@ -2098,7 +2136,9 @@ impl Daemon {
         g.suggestions.clear();
         g.conversation.push(Message::user(question));
         let mut images: Vec<String> = image.map(|i| vec![i.base64]).unwrap_or_default();
-        images.extend(g.sources.iter().filter_map(|s| s.image.clone()));
+        if !agent {
+            images.extend(g.sources.iter().filter_map(|s| s.image.clone()));
+        }
         let (cite, notes, transcript) = if no_context && quoted.is_none() {
             (Vec::new(), String::new(), Self::plain_transcript(g))
         } else {
@@ -2501,7 +2541,8 @@ impl Daemon {
             g.pending_question.take()
         };
         if let Some(question) = question
-            && let Err(error) = self.begin_send(question, None, true, false, None, None, false)
+            && let Err(error) =
+                self.begin_send(question, None, true, false, None, None, false, false)
         {
             self.error(error);
         }
@@ -6189,7 +6230,7 @@ impl Daemon {
                 self.emit_state(&g);
                 Ok(self.state_value(&g))
             }
-            "chat.send" => self.chat_send(parse(args)?).await,
+            "chat.send" => self.chat_send(parse(args)?, agent).await,
             "chat.cancel" => {
                 let mut g = self.inner.lock();
                 self.send_epoch.fetch_add(1, Ordering::Relaxed);
@@ -7267,6 +7308,211 @@ mod command_tests {
         c.custom.as_mut().unwrap().streaming = false;
         credentials::save(&d.vault, &c).unwrap();
         id
+    }
+
+    async fn image_test_provider(d: &Arc<Daemon>) -> std::thread::JoinHandle<Vec<u8>> {
+        let (url, request) = provider_server(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#);
+        let id = local_custom(d, "openai", &url).await;
+        d.inner.lock().settings.chat_provider = id;
+        request
+    }
+
+    async fn sent_request(request: std::thread::JoinHandle<Vec<u8>>) -> String {
+        String::from_utf8(
+            tokio::task::spawn_blocking(move || request.join().unwrap())
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn agent_send_skips_fresh_capture_and_owner_uses_it() {
+        let d = daemon();
+        let calls = Arc::new(AtomicU64::new(0));
+        let count = calls.clone();
+        *d.chat_capture.lock() = Some(Box::new(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+            Ok(CapturedImage {
+                base64: "AA==".into(),
+                mime: "image/png",
+            })
+        }));
+        d.inner.lock().settings.use_image_on_send = true;
+        d.inner.lock().settings.capture_delay_seconds = 30;
+        let request = image_test_provider(&d).await;
+        d.handle("chat.send", json!({"text":"agent question"}), Some("mcp"))
+            .await
+            .unwrap();
+        let sent = sent_request(request).await;
+        assert!(sent.contains("agent question"));
+        assert!(!sent.contains("data:image") && !sent.contains("AA=="));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        d.inner.lock().settings.capture_delay_seconds = 0;
+        let request = image_test_provider(&d).await;
+        d.handle("chat.send", json!({"text":"owner question"}), None)
+            .await
+            .unwrap();
+        assert!(
+            sent_request(request)
+                .await
+                .contains("data:image/png;base64,AA==")
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_leaves_waiting_image_and_its_meeting_row_for_owner() {
+        let d = daemon();
+        let meeting = {
+            let mut g = d.inner.lock();
+            let meeting = meetings::start(
+                g.db.connection(),
+                "Open",
+                "",
+                "en",
+                None,
+                MeetingMode::General,
+            )
+            .unwrap();
+            g.meeting_id = Some(meeting.clone());
+            g.pending_capture = Some(CapturedImage {
+                base64: "AA==".into(),
+                mime: "image/png",
+            });
+            meeting
+        };
+        let request = image_test_provider(&d).await;
+        d.handle("chat.send", json!({"text":"agent question"}), Some("mcp"))
+            .await
+            .unwrap();
+        assert!(!sent_request(request).await.contains("data:image"));
+        assert_eq!(d.state_value(&d.inner.lock())["capture"], true);
+        assert!(
+            screenshots::list(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .is_empty()
+        );
+
+        let request = image_test_provider(&d).await;
+        d.handle("chat.send", json!({"text":"owner question"}), None)
+            .await
+            .unwrap();
+        assert!(
+            sent_request(request)
+                .await
+                .contains("data:image/png;base64,AA==")
+        );
+        assert_eq!(d.state_value(&d.inner.lock())["capture"], false);
+        assert_eq!(
+            screenshots::list(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_send_keeps_text_but_hides_attached_image_and_empty_is_empty() {
+        let d = daemon();
+        d.inner.lock().pending_capture = Some(CapturedImage {
+            base64: "AA==".into(),
+            mime: "image/png",
+        });
+        for args in [json!({"text":""}), json!({"text":"", "screenshot":true})] {
+            assert!(
+                d.chat_send(parse(args).unwrap(), true)
+                    .await
+                    .unwrap_err()
+                    .contains("nothing to send")
+            );
+        }
+        let request = image_test_provider(&d).await;
+        let image = d.db_path.parent().unwrap().join("private-image.png");
+        let text = d.db_path.parent().unwrap().join("notes.txt");
+        image::GrayImage::from_pixel(1, 1, image::Luma([77]))
+            .save(&image)
+            .unwrap();
+        std::fs::write(&text, "document words").unwrap();
+        {
+            let id = d.inner.lock().settings.chat_provider.clone();
+            let mut credential = credentials::load(&d.vault, Kind::Chat, &id)
+                .unwrap()
+                .unwrap();
+            credential.custom.as_mut().unwrap().supports_images = false;
+            credentials::save(&d.vault, &credential).unwrap();
+        }
+        d.chat_send(
+            parse(json!({"text":"agent question", "attachments":[image, text]})).unwrap(),
+            true,
+        )
+        .await
+        .unwrap();
+        let sent = sent_request(request).await;
+        assert!(sent.contains("document words") && sent.contains("notes.txt"));
+        assert!(
+            !sent.contains("private-image.png")
+                && !sent.contains("\"image_attached\":true")
+                && !sent.contains("data:image")
+        );
+        assert!(
+            d.inner
+                .lock()
+                .sources
+                .iter()
+                .any(|s| s.name == "private-image.png")
+        );
+        assert_eq!(d.state_value(&d.inner.lock())["capture"], true);
+        std::fs::remove_file(image).unwrap();
+        std::fs::remove_file(text).unwrap();
+    }
+
+    #[tokio::test]
+    async fn follow_ups_hide_image_source_only_after_agent_turn() {
+        for agent in [true, false] {
+            let d = daemon();
+            let request = image_test_provider(&d).await;
+            {
+                let mut g = d.inner.lock();
+                g.settings.smart_follow_ups = true;
+                g.turn_from_agent = agent;
+                g.sources.push(Attachment {
+                    id: "image".into(),
+                    name: "private-image.png".into(),
+                    text: String::new(),
+                    image: Some("AQ==".into()),
+                    bytes: Vec::new(),
+                    mime: "image/png".into(),
+                    truncated: false,
+                });
+                g.conversation.push(Message::user("What next?"));
+            }
+            d.spawn_follow_ups();
+            let sent = sent_request(request).await;
+            assert_eq!(sent.contains("private-image.png"), !agent);
+            assert_eq!(sent.contains("image_attached"), !agent);
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_attached_image_reaches_provider() {
+        let d = daemon();
+        let request = image_test_provider(&d).await;
+        d.inner.lock().sources.push(Attachment {
+            id: "image".into(),
+            name: "owner-image.png".into(),
+            text: String::new(),
+            image: Some("AQ==".into()),
+            bytes: Vec::new(),
+            mime: "image/png".into(),
+            truncated: false,
+        });
+        d.handle("chat.send", json!({"text":"owner question"}), None)
+            .await
+            .unwrap();
+        let sent = sent_request(request).await;
+        assert!(sent.contains("owner-image.png") && sent.contains("data:image/png;base64,AQ=="));
     }
 
     #[tokio::test]
@@ -10458,6 +10704,7 @@ mod command_tests {
                 false,
                 None,
                 Some(epoch),
+                false,
                 false,
             );
             assert_eq!(turn, Ok(None), "{cmd}");

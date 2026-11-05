@@ -370,6 +370,7 @@ it refuses every command except reads and never shows local-only interviews. Wha
 own provider. The skill links into `~/.claude/skills`, `~/.agents/skills` and
 `~/.gemini/antigravity/skills`; an existing file at one of those paths makes
 activation fail, so move it first or set `skills.enable = false`.
+An agent's question never takes or sends an image.
 
 The agent flag is chosen by the caller: any program running as you can reach
 the daemon without it. It keeps an agent that follows the skill read-only and
