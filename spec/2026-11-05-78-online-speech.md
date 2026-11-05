@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 78
 intent: intent/2026-11-05-78-online-speech.md
 ---
