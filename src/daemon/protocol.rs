@@ -157,6 +157,16 @@ pub struct ItemsUpdate {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ScreenshotsList {
+    pub meeting: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScreenshotDelete {
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MeetingArg {
     pub meeting: String,
 }

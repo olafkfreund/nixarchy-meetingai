@@ -165,6 +165,13 @@ Item {
         });
     }
 
+    function plainError(e) {   // the daemon's error without its machine prefix
+        e = String(e || "");
+        if (e.indexOf("consent_required: ") === 0) return e.slice(18);
+        if (e.indexOf("local_only: ") === 0) return e.slice(12);
+        return e;
+    }
+
     function refreshItems(meeting) {
         root.send("items.list", { meeting: meeting }, function(r) { if (r.ok) root.setItems(r.data || []); });
     }
