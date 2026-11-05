@@ -12,19 +12,21 @@ The `grounded` phase of `shell/tests/smoke.sh` fails intermittently, which fails
 with an error that has nothing to do with the change under test. It failed 3 of 3 runs on clean `main` and
 2 of 3 on the #77 branch, on a busy p620, so people learn to ignore it, and a real failure could be missed.
 
-**Likely cause, from reading the harness; not yet proven by a run.** `shell/tests/harness-grounded.qml` steps through
-phases on a 500 ms timer (:32) and reads the citation chips exactly once, at phase 2, one second in (:36–41). If
-the shell has not finished loading and drawing the answer by then, the chips read as empty. That is the failure
-seen: `lineChip` and `notesChip` empty, and every later check true.
+**Cause, from reading the code; not yet confirmed by a run: two clocks race.** `shell/tests/fake-daemon.py` (`stream_grounded`, :462) sends the first
+answer, with its chips, 0.3 s after it starts, then a second answer, with no chips, 1.0 s later. `shell/tests/harness-grounded.qml` reads the chips once at its own phase 2,
+1.0 s after its timer starts (:32, :36). Nothing links the two. If the shell starts slowly, the read lands after the second answer. That matches the failure
+exactly: `lineChip` and `notesChip` are empty because the second answer has none, while `bubbleStamp` and `markersHidden` stay true because the first answer is still on screen
+as an archived row. An earlier "not loaded yet" theory is ruled out for the same reason: the answer text was already showing. So this is a test problem, not a product bug.
 
 ## Proposed outcome
 
-- The phase passes repeatedly on a busy machine, and still fails if the chips are really wrong or missing.
+- The phase passes 10 of 10 runs while the machine is busy, for example with a parallel `cargo` build, and still fails if the chips are really wrong or missing.
 - The test keeps checking the same things, with the same expected values.
 
 ## Affected users and systems
 
-Only `shell/tests/harness-grounded.qml`, and whichever other harness phases have the same fixed-time read. No product code.
+`shell/tests/harness-grounded.qml` and `shell/tests/fake-daemon.py`'s grounded mode. No product code. The harness's later phases also read at fixed times (search results, jumps, rename), so
+they may race too; the spec covers what the same fix reaches.
 
 ## Constraints
 
@@ -34,4 +36,4 @@ Only `shell/tests/harness-grounded.qml`, and whichever other harness phases have
 
 ## Open questions
 
-1. **Do other harnesses have the same pattern?** Recommended: fix `grounded` only, since it is the one seen failing, and file others if they fail.
+1. **Do other harnesses have the same pattern?** They step on fixed timers too, per review. Recommended: fix `grounded` only, since it is the only one seen failing, and file others if they fail.
