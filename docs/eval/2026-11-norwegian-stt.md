@@ -1,5 +1,7 @@
 # Norwegian speech-to-text: gate measurement (#70)
 
+> **Removed by #77.** The local Norwegian engine (NB-Whisper) these results measured is gone. The results are kept as the record.
+
 Measured on p620 (128 threads, `NIXARCHY_MEETINGAI_WHISPER_NB_THREADS=16`),
 2026-11-04. All engines run in-process through sherpa-onnx 2.0.1, the
 Whisper engines with the Silero VAD and the phantom filter. The test sets

@@ -159,7 +159,7 @@ fn data_written_before_the_rewrite_reads_back() {
     assert_eq!(meeting.title, "Fixture standup");
     assert_eq!(meeting.line_count, 2);
     assert_eq!(meeting.duration_seconds, 90);
-    assert_eq!(meeting.language, "en");
+    assert_eq!(meeting.language, None);
     let lines: Vec<_> = meetings::lines(c, &meeting.id)
         .unwrap()
         .into_iter()

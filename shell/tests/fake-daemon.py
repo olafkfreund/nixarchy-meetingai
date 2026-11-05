@@ -67,6 +67,8 @@ live_ago = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--live-
 state = {"recording": live, "since": int(time.time() * 1000) - live_ago if live else 0, "mic": True, "system": True}
 if live:
     state["meeting"] = "m-live"
+state.update(meeting_language=None, meeting_language_label="English", language_hint="Parakeet detects the language itself. This sets the language of answers and notes, over the answer language setting. Norwegian needs Deepgram.",
+             languages=[{"code": c, "name": n} for c, n in (("en", "English"), ("pl", "Polish"), ("de", "German"), ("fr", "French"), ("es", "Spanish"))])   # Parakeet's, no Norwegian
 MEETINGS = itertools.count(1)   # record.start names the new meeting m-<n>
 if first_run:
     state.update(ready={"chat": False, "speech": False}, hints={"chat": "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama.", "speech": "Speech-to-text is not ready. Check the Parakeet model, or add a Deepgram key in Providers."})
@@ -662,7 +664,14 @@ class Handler(socketserver.StreamRequestHandler):
         for raw in self.rfile:
             req = json.loads(raw)
             cmd = req["cmd"]
-            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") if cmd == "record.start" else "") + (" line=" + str(req.get("args", {}).get("line")) + " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" and req.get("args", {}).get("line") else ""))
+            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else " " + str(req.get("args", {}).get("language")) if cmd == "meeting.language.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") if cmd == "record.start" else "") + (" line=" + str(req.get("args", {}).get("line")) + " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" and req.get("args", {}).get("line") else ""))
+            if cmd == "meeting.language.set":
+                code = req.get("args", {}).get("language") or None
+                names = {l["code"]: l["name"] for l in state["languages"]}
+                state.update(meeting_language=code, meeting_language_label=names.get(code or "en", "English"))
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "state", **state})
+                continue
             if cmd == "record.start" and iv and not (state["consent"] or req.get("args", {}).get("consent")):
                 self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed."})
                 continue

@@ -118,13 +118,6 @@ pub const STT_PROVIDERS: &[SttProvider] = &[
         default_model: "parakeet-tdt-0.6b-v3",
     },
     SttProvider {
-        id: "whisper-nb-local",
-        name: "Norwegian Whisper (local)",
-        endpoint: "",
-        wire: SttWire::InProcess,
-        default_model: "whisper-nb",
-    },
-    SttProvider {
         id: "openai-compatible-stt",
         name: "OpenAI-compatible speech",
         endpoint: "",
@@ -235,7 +228,6 @@ impl ProviderConfig {
         match provider.wire {
             SttWire::InProcess => match self.id.as_str() {
                 "parakeet-local" => crate::speech::stt::parakeet::model_ready_in(parakeet_dir),
-                "whisper-nb-local" => crate::speech::stt::whisper_nb::not_ready_reason().is_none(),
                 _ => false,
             },
             SttWire::OpenAiMultipart => {
@@ -307,13 +299,13 @@ mod tests {
         );
         assert!(ChatProvider::by_id("agy-sub ").is_none());
         assert!(ChatProvider::by_id("legacy-chat").is_none());
-        assert_eq!(STT_PROVIDERS.len(), 4);
+        assert_eq!(STT_PROVIDERS.len(), 3);
         assert_eq!(
             SttProvider::by_id("deepgram-stt").unwrap().default_model,
             "nova-3"
         );
         assert!(SttProvider::by_id("retired-speech").is_none());
-        for retired in ["openai-whisper", "whisper-local"] {
+        for retired in ["openai-whisper", "whisper-local", "whisper-nb-local"] {
             assert!(STT_PROVIDERS.iter().all(|p| p.id != retired));
             assert!(SttProvider::by_id(retired).is_none());
         }
