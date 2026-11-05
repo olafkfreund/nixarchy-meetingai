@@ -5,6 +5,7 @@ import "geometry.js" as Geo
 ShellRoot {
     id: root
     property int phase: 0
+    property int waited: 0
     property var out: ({})
     function find(it, name, depth) {
         if (!it || !it.visible || (depth || 0) > 60) return null;
@@ -31,6 +32,14 @@ ShellRoot {
     Timer {
         interval: 500; repeat: true; running: true
         onTriggered: {
+            if (root.phase === 1 && root.waited++ < 16) {
+                var readyCard = overlay.geometryRoot();
+                var readySources = root.find(readyCard, "nowSources");
+                var readyChip0 = root.find(readySources, "sourceChip0");
+                var readyChip1 = root.find(readySources, "sourceChip1");
+                var readyLabel = root.find(readyCard, "bubbleLabel");
+                if (!readyChip0 || !readyChip1 || !readyChip0.text || !readyChip1.text || !readyLabel || String(readyLabel.text).indexOf("12:04") < 0) return;
+            }
             root.phase++;
             var card = overlay.geometryRoot(), c = root.client(overlay), src, chip, label, input, hit, mouse;
             if (root.phase === 2) {
@@ -44,6 +53,7 @@ ShellRoot {
                 var shown = root.visibleText(card, "Launch Friday");
                 root.out.markersHidden = shown !== "" && shown.indexOf("[1]") < 0 && shown.indexOf("[N1]") < 0;
                 Geo.dump(card, overlay.ctl, "grounded-chips", overlay.winW, overlay.winH);
+                c.send("test.next", {});
             } else if (root.phase === 4) {
                 root.out.noCitations = !!root.find(card, "noCitations");
                 root.out.archivedChips = !!root.find(card, "answerSources") && !!root.find(card, "sourceChip0");
