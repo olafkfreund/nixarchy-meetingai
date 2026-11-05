@@ -73,3 +73,6 @@ Full checks, `nix flake check`; reviews by a fresh Opus agent, Codex and agy, re
 - Step 1 (Codex; a clippy fix and read-through by Claude):
   - `hyprctl locked` was checked on p620: it prints `false`, and the code treats anything else, or a failure, as locked.
   - Automatic captures are stored only through `auto_capture_once`; `screenshots::list` is read by export and the new command only.
+- Step 2 (coder):
+  - The "ask once" flag is in memory, so the first-use confirmation shows again after a shell restart. Persisting it would need a daemon setting.
+  - The Library's `fetchMeetingView` also loads `screenshots.list`; images are fetched on click.
