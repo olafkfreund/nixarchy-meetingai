@@ -7310,11 +7310,58 @@ mod command_tests {
         id
     }
 
-    async fn image_test_provider(d: &Arc<Daemon>) -> std::thread::JoinHandle<Vec<u8>> {
-        let (url, request) = provider_server(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#);
+    /// A local chat provider whose handle returns the first request containing `marker`.
+    /// A turn also sends title and follow-up requests, which may arrive first.
+    async fn image_test_provider(
+        d: &Arc<Daemon>,
+        marker: &'static str,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/test", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+            loop {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0; 8192];
+                let complete = loop {
+                    let count = socket.read(&mut buf).unwrap_or(0);
+                    if count == 0 {
+                        break false; // a cancelled request
+                    }
+                    request.extend_from_slice(&buf[..count]);
+                    if let Some(split) = request.windows(4).position(|b| b == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..split]).to_lowercase();
+                        let size: usize = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: "))
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        if request.len() >= split + 4 + size {
+                            break true;
+                        }
+                    }
+                };
+                if !complete {
+                    continue;
+                }
+                let _ = write!(
+                    socket,
+                    "HTTP/1.1 200 Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                if String::from_utf8_lossy(&request).contains(marker) {
+                    return request;
+                }
+            }
+        });
         let id = local_custom(d, "openai", &url).await;
         d.inner.lock().settings.chat_provider = id;
-        request
+        handle
     }
 
     async fn sent_request(request: std::thread::JoinHandle<Vec<u8>>) -> String {
@@ -7340,17 +7387,22 @@ mod command_tests {
         }));
         d.inner.lock().settings.use_image_on_send = true;
         d.inner.lock().settings.capture_delay_seconds = 30;
-        let request = image_test_provider(&d).await;
+        let request = image_test_provider(&d, "agent question").await;
+        let began = std::time::Instant::now();
         d.handle("chat.send", json!({"text":"agent question"}), Some("mcp"))
             .await
             .unwrap();
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "waited for a capture"
+        );
         let sent = sent_request(request).await;
         assert!(sent.contains("agent question"));
         assert!(!sent.contains("data:image") && !sent.contains("AA=="));
         assert_eq!(calls.load(Ordering::Relaxed), 0);
 
         d.inner.lock().settings.capture_delay_seconds = 0;
-        let request = image_test_provider(&d).await;
+        let request = image_test_provider(&d, "owner question").await;
         d.handle("chat.send", json!({"text":"owner question"}), None)
             .await
             .unwrap();
@@ -7383,7 +7435,7 @@ mod command_tests {
             });
             meeting
         };
-        let request = image_test_provider(&d).await;
+        let request = image_test_provider(&d, "agent question").await;
         d.handle("chat.send", json!({"text":"agent question"}), Some("mcp"))
             .await
             .unwrap();
@@ -7395,7 +7447,7 @@ mod command_tests {
                 .is_empty()
         );
 
-        let request = image_test_provider(&d).await;
+        let request = image_test_provider(&d, "owner question").await;
         d.handle("chat.send", json!({"text":"owner question"}), None)
             .await
             .unwrap();
@@ -7428,7 +7480,7 @@ mod command_tests {
                     .contains("nothing to send")
             );
         }
-        let request = image_test_provider(&d).await;
+        let request = image_test_provider(&d, "agent question").await;
         let image = d.db_path.parent().unwrap().join("private-image.png");
         let text = d.db_path.parent().unwrap().join("notes.txt");
         image::GrayImage::from_pixel(1, 1, image::Luma([77]))
@@ -7453,7 +7505,7 @@ mod command_tests {
         assert!(sent.contains("document words") && sent.contains("notes.txt"));
         assert!(
             !sent.contains("private-image.png")
-                && !sent.contains("\"image_attached\":true")
+                && !sent.contains(r#"image_attached\":true"#)
                 && !sent.contains("data:image")
         );
         assert!(
@@ -7469,10 +7521,50 @@ mod command_tests {
     }
 
     #[tokio::test]
+    async fn an_attached_image_skips_an_agents_turn_and_comes_back_for_the_owner() {
+        let d = daemon();
+        let request = image_test_provider(&d, "agent question").await;
+        d.inner.lock().sources.push(Attachment {
+            id: "image".into(),
+            name: "private-image.png".into(),
+            text: String::new(),
+            image: Some("AQ==".into()),
+            bytes: Vec::new(),
+            mime: "image/png".into(),
+            truncated: false,
+        });
+        d.handle("chat.send", json!({"text":"agent question"}), Some("mcp"))
+            .await
+            .unwrap();
+        let sent = sent_request(request).await;
+        assert!(sent.contains("agent question"), "{sent}");
+        assert!(
+            !sent.contains("data:image")
+                && !sent.contains("AQ==")
+                && !sent.contains("private-image.png")
+                && !sent.contains("image_attached"),
+            "{sent}"
+        );
+
+        // The flag belongs to the turn: the owner's next one has its image and details again.
+        let request = image_test_provider(&d, "owner question").await;
+        d.handle("chat.send", json!({"text":"owner question"}), None)
+            .await
+            .unwrap();
+        let sent = sent_request(request).await;
+        assert!(
+            sent.contains("data:image/png;base64,AQ==")
+                && sent.contains("private-image.png")
+                && sent.contains(r#"image_attached\":true"#),
+            "{sent}"
+        );
+    }
+
+    #[tokio::test]
     async fn follow_ups_hide_image_source_only_after_agent_turn() {
         for agent in [true, false] {
             let d = daemon();
-            let request = image_test_provider(&d).await;
+            let request = image_test_provider(&d, "What next?").await;
             {
                 let mut g = d.inner.lock();
                 g.settings.smart_follow_ups = true;
@@ -7498,7 +7590,7 @@ mod command_tests {
     #[tokio::test]
     async fn owner_attached_image_reaches_provider() {
         let d = daemon();
-        let request = image_test_provider(&d).await;
+        let request = image_test_provider(&d, "owner question").await;
         d.inner.lock().sources.push(Attachment {
             id: "image".into(),
             name: "owner-image.png".into(),

@@ -72,3 +72,7 @@ Revert the merge and bump the nixos pin back. No schema or setting changes.
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+- Step 1 (Codex, build and test fixes by Claude):
+  - The tests use their own server that returns the first request containing a marker. A turn also sends a title and sometimes a follow-up request, which reached a one-connection server first and made a test fail about 4 runs in 5.
+  - The delay check asserts elapsed time, since the server's read timeout only starts after a connection.
+  - A new test covers an image-capable model, and an owner's turn right after an agent's. The earlier attached-image test used a text-only model, whose encoder drops images anyway, so it couldn't have caught that guard being removed.
