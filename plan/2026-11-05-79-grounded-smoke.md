@@ -45,3 +45,5 @@ Reviews, read-only: Codex and agy. A PR linking intent, spec and plan, closing #
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+- Step 1 (Codex; checks by Claude):
+  - **Load:** the 10 runs used the machine's natural load (about 11–16), not a parallel `cargo build`. An attempt with artificial load disturbed another session's CI on p620, and was stopped; there will not be another. So "busy machine" is weaker than the plan says. Before the fix, the phase failed under similar conditions.

@@ -55,6 +55,7 @@ slow = "--slow-settings" in sys.argv   # settings.get answers after 2.5 s and no
 locked = "--locked" in sys.argv       # settings fixed by Nix: chat_provider, meeting_mode, text_scale
 voice_mode = "--voice" in sys.argv     # transcript.get room row, transcript.relabel, direct room final, and voice.* commands
 grounded = "--grounded" in sys.argv   # citations, search, old-window jump, rename, and stale suggestion
+NEXT_TURN = threading.Event()
 lines_mode = "--lines" in sys.argv    # line actions (correct, bookmark, ask), meeting view, regenerate, and saved sources
 export_ask = "--export-ask" in sys.argv   # emit export.folder_needed after connect
 library = "--library" in sys.argv     # a second meeting, per-meeting notes answered after 0.8 s, and notes.bump
@@ -471,7 +472,7 @@ class Handler(socketserver.StreamRequestHandler):
         self.send({"event": "answer.sources", "turn": 1, "sources": GROUND_SOURCES})
         self.send({"event": "answer.done", "turn": 1, **PROVIDER})
         self.send({"event": "suggestion", "turn": 1, "text": "Current suggestion"})
-        time.sleep(1.0)
+        NEXT_TURN.wait(12)
         GROUND_NOW.update(status="writing", question="Anything else?", answer="", turn=2, cite_max=1, cite_notes=1, sources=[], suggestions=[])
         self.send({"event": "answer.started", "turn": 2, "question": "Anything else?", "automatic": True, "cite_max": 1, "cite_notes": 1, **PROVIDER})
         GROUND_NOW["answer"] = "No new evidence."
@@ -857,6 +858,8 @@ class Handler(socketserver.StreamRequestHandler):
                 cast({"event": "notes.updated", "meeting": m})
                 continue
             self.send({"id": req["id"], "ok": True, "data": data})
+            if cmd == "test.next":
+                NEXT_TURN.set()
             if cmd == "settings.set":
                 settings[req["args"]["key"]] = req["args"]["value"]
                 for r in DATA["settings.search"]:
