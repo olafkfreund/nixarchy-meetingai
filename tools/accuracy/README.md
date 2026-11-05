@@ -27,7 +27,7 @@ With local Parakeet (`--engine parakeet` or `--parakeet`), use the model directo
 
 Choose exactly one of `--engine parakeet`, `--parakeet`, `--url URL`, or `--fake TEXT`.
 `examples/accuracy_replay.rs` paces stereo audio at 1× wall-clock through `LiveTranscriber::connect_config_with` (or `transcription::transcribe` when `--dictation` is given) and reports `VmHWM` peak RSS after loading Parakeet and the speaker model.
-`score.py` prints word error rate (WER, sequence edit distance with NPSC normalisation), code-switch WER, bleed lines, lost owner words, remote words on the mic channel, invented lines per hour on silence/non-speech, phantom phrases anywhere in a line, short words kept, dictation status, median and p95 chunk inference time, and peak RSS (`VmHWM`).
+`score.py` prints word error rate (WER, sequence edit distance with NPSC normalisation), code-switch WER, bleed lines, missing owner words (these include misheard words and lines judged as bleed, so they are not all dropped audio), remote words on the mic channel, invented lines per hour on silence/non-speech, phantom phrases anywhere in a line, short words kept, dictation status, median and p95 chunk inference time, and peak RSS (`VmHWM`).
 
 ## Without audio (CI, tests)
 

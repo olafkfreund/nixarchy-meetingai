@@ -48,6 +48,7 @@ TAIL = int(4.0 * RATE)
 DELAY = int(0.12 * RATE)
 BLEED = 10 ** (-12 / 20)
 
+MEASURED_CALLS = 20
 SHORT_WORDS = {"ja", "nei", "takk", "greit"}
 
 # Common English words used in Norwegian parliamentary/technical speech that are not
@@ -482,7 +483,9 @@ def get_samples(item: dict) -> array.array:
     return item["samples"]
 
 
-def load_npsc(npsc_dir: pathlib.Path, seed: int, target_hours: float) -> list[dict]:
+def load_npsc(
+    npsc_dir: pathlib.Path, seed: int, target_hours: float, exclude: frozenset[str] = frozenset()
+) -> list[dict]:
     """NPSC as published: one JSONL file and one `<date>_16K_mp3.tar.gz` per sitting
     (`data/test/<date>.json`). Each sentence's MP3 is decoded once to 16 kHz s16 WAV."""
     import json
@@ -502,7 +505,7 @@ def load_npsc(npsc_dir: pathlib.Path, seed: int, target_hours: float) -> list[di
         lines = [json.loads(line) for line in js.read_text(encoding="utf-8").splitlines() if line.strip()]
         wanted = {}
         for r in lines:
-            if r.get("sentence_language_code") != "nb-NO":
+            if r.get("sentence_language_code") != "nb-NO" or str(r["sentence_id"]) in exclude:
                 continue
             text = norm_text(str(r.get("normsentence_text") or r.get("sentence_text") or ""))
             if text:
@@ -547,11 +550,50 @@ def load_npsc(npsc_dir: pathlib.Path, seed: int, target_hours: float) -> list[di
     return selected
 
 
+def load_librispeech(root: pathlib.Path, exclude: frozenset[str] = frozenset()) -> list[dict]:
+    """Extracted LibriSpeech (any `*.trans.txt` tree). FLAC is decoded once to `<root>/../wav`.
+    Excluded IDs are dropped here, before selection, so the build refills from the rest."""
+    rows = []
+    wav_dir = root.parent / "wav"
+    for trans in sorted(root.rglob("*.trans.txt")):
+        for line in trans.read_text(encoding="utf-8").splitlines():
+            uid, _, raw = line.partition(" ")
+            text = norm_text(raw)
+            if not text or uid in exclude:
+                continue
+            src = trans.parent / f"{uid}.wav"
+            if not src.is_file():
+                src = wav_dir / f"{uid}.wav"
+                if not src.is_file():
+                    flac = trans.parent / f"{uid}.flac"
+                    if not flac.is_file():
+                        continue
+                    wav_dir.mkdir(exist_ok=True)
+                    subprocess.run(
+                        ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(flac),
+                         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(src)],
+                        check=True,
+                    )
+            rows.append({
+                "id": uid, "speaker": f"libri_{uid.split('-')[0]}", "text": text,
+                "duration": len(read_wav_file(src)) / RATE, "wav_path": src,
+            })
+    return rows
+
+
 def load_musan_noise(musan_dir: pathlib.Path) -> list[pathlib.Path]:
     if not musan_dir.is_dir():
         return []
     noise_root = musan_dir / "noise" if (musan_dir / "noise").is_dir() else musan_dir
     return sorted(noise_root.rglob("*.wav"))
+
+
+def turn_row(u: dict, channel: int, start: int, n: int) -> dict:
+    """One turn of turns.json: channel 0 = me, 1 = them; start and n in samples."""
+    return {
+        "id": u["id"], "channel": channel,
+        "start": start / RATE, "end": (start + n) / RATE, "text": u["text"],
+    }
 
 
 def build_calls(
@@ -593,6 +635,7 @@ def build_calls(
         left: list[float] = []
         right: list[float] = []
         ref: list[str] = []
+        turns: list[dict] = []
         t = 0
         extra = batch[turns_per_call:]
         for turn in range(turns_per_call):
@@ -603,16 +646,19 @@ def build_calls(
                 if double_talk or remote_only:
                     place(left, t + DELAY, s, BLEED)
                 ref.append(f"them: {u['text']}")
+                turns.append(turn_row(u, 1, t, len(s)))
                 if double_talk and turn in (4, 8) and extra:
                     over = extra.pop(0)
                     m = get_samples(over)
                     place(left, t + len(s) // 2, m, 1.0)
                     ref.append(f"me: {over['text']}")
+                    turns.append(turn_row(over, 0, t + len(s) // 2, len(m)))
                     t += max(0, len(s) // 2 + len(m) - len(s))
                 t += len(s) + GAP
             else:
                 place(left, t, s, 1.0)
                 ref.append(f"me: {u['text']}")
+                turns.append(turn_row(u, 0, t, len(s)))
                 t += len(s) + GAP
         t += TAIL
         if len(left) < t:
@@ -624,7 +670,20 @@ def build_calls(
         txt_path = out_dir / f"{name}.txt"
         dur = write_stereo_wav(wav_path, left, right)
         txt_path.write_text("\n".join(ref) + "\n", encoding="utf-8")
+        (out_dir / f"{name}.turns.json").write_text(json.dumps(turns, indent=1) + "\n", encoding="utf-8")
         manifest.append({"name": name, "wav": str(wav_path), "txt": str(txt_path), "duration": dur})
+    return manifest
+
+
+def used_ids(calls: list[dict]) -> list[str]:
+    return [t["id"] for c in calls for t in json.loads(pathlib.Path(c["wav"]).with_suffix(".turns.json").read_text())]
+
+
+def build_measured(items: list[dict], out_dir: pathlib.Path, seed: int, calls: int) -> list[dict]:
+    """The measured set: exactly `calls` calls with turn data, or exit non-zero with the count."""
+    manifest = build_calls(items, out_dir, seed=seed, max_calls=calls)
+    if len(manifest) < calls:
+        sys.exit(f"only {len(manifest)} of {calls} calls could be built from {len(items)} items")
     return manifest
 
 
@@ -837,6 +896,13 @@ def build_owner(owner_dir: pathlib.Path, out_dir: pathlib.Path) -> list[dict]:
     return manifest
 
 
+def write_manifest(out_dir: pathlib.Path, manifest: dict[str, list[dict]]) -> None:
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    for k, items_list in manifest.items():
+        total_s = sum(x["duration"] for x in items_list)
+        print(f"{k}: {len(items_list)} files, {total_s:.1f}s")
+
+
 def main(argv: list[str] | None = None) -> None:
     cache_root = pathlib.Path(
         os.environ.get("MEETINGAI_EVAL_CACHE", os.path.expanduser("~/.cache/meetingai-eval"))
@@ -851,27 +917,43 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=70)
     parser.add_argument("--hours", type=float, default=2.0, help="NPSC target hours (default 2.0)")
     parser.add_argument("--slice", type=int, default=None, help="Build a small smoke slice of N calls per set")
+    parser.add_argument("--language", choices=["no", "en"], default="no", help="en = LibriSpeech test-clean (needs --calls-only)")
+    parser.add_argument("--libri-dir", type=pathlib.Path, default=None, help="extracted LibriSpeech dir")
+    parser.add_argument("--calls-only", action="store_true", help=f"build only the {MEASURED_CALLS} measured calls (npsc or libri) with turn data, plus the guard sets")
+    parser.add_argument("--exclude-ids", type=pathlib.Path, default=None, help="JSON list of sentence IDs to leave out (an earlier used_ids.json)")
     args = parser.parse_args(argv)
+    if args.language == "en" and not args.calls_only:
+        parser.error("--language en needs --calls-only")
+    exclude = frozenset(json.loads(args.exclude_ids.read_text(encoding="utf-8"))) if args.exclude_ids else frozenset()
 
     base = args.cache_dir
+    if args.language == "en":
+        base = pathlib.Path(cache_root).parent / "librispeech"
     npsc_dir = args.npsc_dir or (base / "npsc")
     fleurs_dir = args.fleurs_dir or (base / "fleurs" if (base / "fleurs" / "test.tsv").is_file() else base / "clips")
     musan_dir = args.musan_dir or (base / "musan")
     out_dir = args.out_dir or (base / ("slice" if args.slice else "sets"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    fleurs_items = load_fleurs(fleurs_dir, max_items=(args.slice * 20 if args.slice else None))
-    npsc_items = load_npsc(
-        npsc_dir,
-        seed=args.seed,
-        target_hours=(0.05 * args.slice if args.slice else args.hours),
-    )
+    key = "libri" if args.language == "en" else "npsc"
+    fleurs_items = [] if args.calls_only else load_fleurs(fleurs_dir, max_items=(args.slice * 20 if args.slice else None))
+    if args.language == "en":
+        npsc_items = load_librispeech(args.libri_dir or (base / "LibriSpeech"), exclude)
+        if not npsc_items:
+            sys.exit(f"no LibriSpeech transcripts under {args.libri_dir or (base / 'LibriSpeech')}")
+    else:
+        npsc_items = load_npsc(
+            npsc_dir,
+            seed=args.seed,
+            target_hours=(0.05 * args.slice if args.slice else args.hours),
+            exclude=exclude,
+        )
     musan_files = load_musan_noise(musan_dir)
 
     if not args.slice:
-        if not npsc_items:
+        if not npsc_items and args.language == "no":
             sys.exit(f"missing NPSC <date>.json + <date>_16K_mp3.tar.gz files in {npsc_dir}; see tools/accuracy/README.md")
-        if not fleurs_items:
+        if not fleurs_items and not args.calls_only:
             sys.exit(f"missing FLEURS nb_no test.tsv in {fleurs_dir}; see tools/accuracy/README.md")
         if not musan_files:
             sys.exit(f"missing MUSAN noise WAVs in {musan_dir}; see tools/accuracy/README.md")
@@ -883,7 +965,12 @@ def main(argv: list[str] | None = None) -> None:
     max_calls = args.slice
     manifest: dict[str, list[dict]] = {}
 
-    if npsc_items:
+    if args.calls_only:
+        manifest[key] = build_measured(npsc_items, out_dir / key, args.seed, max_calls or MEASURED_CALLS)
+        (out_dir / "used_ids.json").write_text(
+            json.dumps(used_ids(manifest[key])) + "\n", encoding="utf-8"
+        )
+    elif npsc_items:
         manifest["npsc"] = build_calls(npsc_items, out_dir / "npsc", seed=args.seed, max_calls=max_calls)
     if fleurs_items:
         manifest["fleurs"] = build_calls(fleurs_items, out_dir / "fleurs", seed=args.seed + 1, max_calls=max_calls)
@@ -902,6 +989,9 @@ def main(argv: list[str] | None = None) -> None:
     manifest["short_words"] = build_short_words(
         primary, out_dir / "short_words", max_items=(4 if args.slice else 20)
     )
+    if args.calls_only:
+        write_manifest(out_dir, manifest)
+        return
     manifest.update(
         build_dictations(primary, out_dir, max_clips=(1 if args.slice else 5))
     )
@@ -911,10 +1001,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.owner_dir:
         manifest["owner"] = build_owner(args.owner_dir, out_dir)
 
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    for k, items_list in manifest.items():
-        total_s = sum(x["duration"] for x in items_list)
-        print(f"{k}: {len(items_list)} files, {total_s:.1f}s")
+    write_manifest(out_dir, manifest)
 
 
 if __name__ == "__main__":
