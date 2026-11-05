@@ -16,7 +16,7 @@ reviewers:
 
 ## Decisions carried from the approved spec
 
-- **On:** one per-meeting control. Turning it on runs `slurp` once to choose the area. Cancelling leaves it off. No global setting or Nix default; auto-record never starts it.
+- **On:** one per-meeting control, available **only while recording**, since a meeting and its consent exist only from then. Turning it on runs `slurp` once to choose the area. Cancelling leaves it off. No global setting or Nix default; auto-record never starts it.
 - **Triggers:** one capture every 5 minutes; on a finished line from either channel containing a listed phrase, captures 4 s and 10 s later. Phrases, lowercase: "share my screen", "share my desktop", "sharing my screen", "can you see my screen", "here is the document", "here's the document", "here is the presentation", "here's the presentation", "next slide".
 - **Limits:** 60 captures per meeting, at most one per 3 s. At the limit it stops and says so.
 - **Before each capture, and again before storing:** this same meeting is still recording; not Local-only; consent still held; `hyprctl locked` says unlocked. An error or unknown counts as locked.
@@ -25,7 +25,7 @@ reviewers:
 - **Stop cancels at once,** including queued captures. New, restore and delete clear the area. Play on the same meeting keeps it. It is in memory only.
 - **Storage:** `meeting_screenshots` with `question = "[auto]"`. No schema change.
 - **Never to a model:** never `pending_capture` or `sources`.
-- **Export:** file names start `auto-`. Deleting a row removes the file on the next export.
+- **Export:** file names start `auto-`. Deleting a row removes the exporter's own file on the next export. Anything else in the folder is left alone.
 - **Commands:** `autoshots.start`, `autoshots.stop`, `screenshots.list {meeting}`, `screenshots.delete {id}`; none on the agent (MCP) allow-lists.
 
 ## Traps
@@ -43,11 +43,11 @@ reviewers:
 
 1. `Inner.autoshots: Option<AutoShots>` with the meeting id, area, generation, count, last fingerprint and last capture time. Reset in `reset_session` (:3691), `session_restore` (:3760) and `session_delete` (:3981); kept on Play.
 2. `grab_screen` (:1065) splits out a function taking an area. Capture and `hyprctl locked` go behind a small test seam, in the style of existing test hooks.
-3. Commands: `autoshots.start` (`slurp` off the lock, refused in Local-only, consent in interview mode, only while recording or before a start), `autoshots.stop`, and state fields `autoshots: {on, count, at_limit}`. A candidate turning Local-only (:5566) stops it.
+3. Commands: `autoshots.start` (`slurp` off the lock; refused when not recording, in Local-only, or without consent in interview mode), `autoshots.stop`, and state fields `autoshots: {on, count, at_limit}`. A candidate turning Local-only (:5566) stops it. The interview consent message (:2680) gains that screenshots may be captured, with a test on its wording.
 4. Timer: a task spawned with the recording, ticking every 5 minutes. Phrases: in `handle_live_event`, on final lines, a phrase match schedules the two delayed captures.
 5. `screenshots::delete(id)`; `screenshots.list` returning id, time, mime, whether automatic, and base64 data on request; `screenshots.delete`. Confirm by search that `screenshots::list` is read only by export (:3206), and nothing in `recap.rs` or `mcp/` reaches it.
-6. `src/core/export.rs`: `Shot` knows if it is automatic, and is named `auto-NN` (:65). The export's tracking removes files for deleted rows (`fill_tracked`, :344); test it.
-7. **Tests:** every item in the spec's list: off by default; refused in Local-only; consent; agents refused; both schedules and delays; limit and rate cap; duplicates; locked and unknown lock; a queued capture dropped by stop and never landing in a new meeting; a meeting turning Local-only stops it; New, restore and delete clear the area; Play keeps it; no automatic capture reaches a prompt or `pending_capture`; delete removes the row; export naming and removal.
+6. `src/core/export.rs`: `Shot` knows if it is automatic, and is named `auto-NN` (:65). **`write_dir` (:281) keeps other files on purpose, and a test requires it (:655),** so removal needs ownership: the exporter records the `auto-` names it wrote in `screenshots/.auto-files`, and removes only names listed there that are no longer current. A user's file, even one named `auto-99.png`, is never removed. Test both.
+7. **Tests:** off by default; refused in Local-only; consent; agents refused; both schedules and delays; limit and rate cap; duplicates; locked and unknown lock; a queued capture dropped by stop and never landing in a new meeting; a meeting turning Local-only stops it; New, restore and delete clear the area; Play keeps it; no automatic capture reaches a prompt or `pending_capture`; delete removes the row; export naming, and removal of only the exporter's files; consent wording.
 
 Check, by Claude: `cargo test --workspace`, clippy `-D warnings`, fmt.
 
