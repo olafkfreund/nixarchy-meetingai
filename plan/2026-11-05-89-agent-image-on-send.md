@@ -27,7 +27,7 @@ reviewers:
 ## Traps
 
 - Tests must never run the real `grim`.
-- `#[cfg(test)]` seam fields follow the style of `auto_capture` from #84.
+- The owner's setting has no effect on this path in tests: the seam never falls through to `grab_screen`.
 - Turns run on the test's single-threaded runtime: wait for the provider's request with `spawn_blocking`, as at `:6754`.
 - Before `cargo`: `find target/debug target/release -maxdepth 2 -name 'lib*.so*' ! -perm -u+w -delete`.
 - Codex can't run `cargo` or `nix` in its sandbox. Claude runs the checks and commits.
@@ -38,19 +38,20 @@ reviewers:
 ### 1. Daemon and README (codex) — `src/daemon/session.rs`, `README.md`
 
 1. `chat_send` (`:1777`) gains `agent: bool`; its caller (`:5624`) passes it.
-2. `image_only` (`:1794`): a waiting image counts only when `!agent`.
+2. `image_only` (`:1794`): `imported.is_empty() && !agent && (args.screenshot || pending)`. So an agent's empty question is always the empty error.
 3. `fresh` (`:1815`): `!agent && (args.screenshot || s.use_image_on_send)`.
 4. The take (`:1838`): an agent's send uses `None` and leaves `pending_capture` and its state alone.
 5. `begin_send` (`:1887`) gains `agent: bool`. Callers: `chat_send` passes its value; automatic answers (`:2409`) and the test (`:9886`) pass `false`.
 6. In `begin_send`: skip the image-support check (`:1945`) for an agent, and don't add `g.sources` images (`:2006`) for an agent.
-7. `system_prompt` (`:1643`) gains `agent: bool`, and for an agent passes `append_prompt` (`:1727`) only the sources with no image. Callers at `:2023` and `:2233` (follow-up suggestions) pass the turn's value, and every test caller passes `false`. `spawn_follow_ups` receives the value from `begin_send`.
-8. `chat_send`'s capture (`:1823`) goes through a `#[cfg(test)]` seam: a `Daemon` field returning an image and counting its calls. Only this call uses it.
+7. `Inner` gains `turn_from_agent: bool`, which `begin_send` sets before it builds the prompt, on every turn. `system_prompt` (`:1643`) reads it, and when it's true passes `append_prompt` (`:1727`) a list of only the sources with no image (`.filter(|s| s.image.is_none()).cloned()`, no change to `append_prompt`). Follow-up suggestions run later, from `finish_turn` to `spawn_follow_ups` (`:2076`, `:2181`, `:2233`), and they read the same field. This replaces the spec's `system_prompt` argument: an argument would have to pass through `finish_turn` and its test callers, and ten test calls to `system_prompt`, for the same result.
+8. `chat_send`'s capture (`:1823`) goes through a seam. Add to `Daemon`, under `#[cfg(test)]`: `chat_capture: Mutex<Option<Box<dyn Fn() -> Result<CapturedImage, String> + Send + Sync>>>`, `None` by default. In tests the call uses it, and `None` returns an error, so `grim` can't run. The test's closure counts its calls. Only this call uses it.
 9. `README.md`, "Ask your agents": add "An agent's question never takes or sends an image."
 10. **Tests**, using `provider_server` (`:6733`) and asserting on the request body:
-    - Agent, `use_image_on_send` on, `capture_delay_seconds` above zero: the seam isn't called, there's no delay, no image in the request.
-    - Agent, waiting image: no image in the request, `state.capture` stays true, no screenshot row, then the owner's send takes and sends it.
+    - Agent, `use_image_on_send` on, `capture_delay_seconds` at 30, longer than `provider_server`'s 5 s read timeout (`:6404`), so waiting would fail the test: the seam isn't called, and no image is in the request.
+    - Agent, waiting image, with a meeting open (rows are written only then, `:1842`): no image in the request, `state.capture` stays true, the row count doesn't change, then the owner's send takes and sends it and adds a row.
     - Agent, attached image and a text attachment: no image, filename or `image_attached` in the request; the text is there; `g.sources` still has the image; it works on a model without image support.
-    - Agent, empty question and a waiting image: the empty error.
+    - Agent, empty question, with a waiting image, and calling `chat_send` directly with `screenshot: true`: the empty error both times.
+    - Follow-ups: with `turn_from_agent` true, the prompt `spawn_follow_ups` builds has no image filename or `image_attached`; with it false, it has them.
     - Owner, `use_image_on_send` on: the seam is called once and the image is sent.
     - Owner, attached image: it's sent.
 
