@@ -174,3 +174,12 @@ The spec places the control "near the mode picker". Reviews showed the header ca
   - agy's tools cannot delete files, so it emptied them; Claude removed them with `git rm`.
   - `nix/hm-module.nix` and `flake.nix` still reference the deleted model files until step 4, so `nix flake check` fails between these commits.
   - `speech_guard`'s refusal now always names Deepgram or an OpenAI-compatible engine, with no Norwegian branch.
+- Step 2 (Codex; compile fixes by Claude):
+  - Nothing chosen is stored as `""`, not `en`. Reading normalises both to none, so the rule holds for old rows.
+  - `MeetingRecord.language` is now `Option<String>`; `tests/old_data.rs` is updated. Nothing in the shell or MCP reads it.
+  - `record_start`'s second block uses `g.meeting_language` after the New handling, not `chosen`, which is out of scope there and could
+    miss a change made during the blocking open.
+  - `session.new` also keeps the language if no meeting is open.
+  - Claude tightened a test's wait, and reworded the hint for engines whose support cannot be checked.
+- Step 4 (coder):
+  - `tools/accuracy/README.md` also renames `replay-turbo.jsonl` to `replay-parakeet.jsonl` in its examples.

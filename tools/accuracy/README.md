@@ -25,17 +25,8 @@ With local Parakeet (`--engine parakeet` or `--parakeet`), use the model directo
 
     python3 -I tools/accuracy/score.py tools/accuracy/data/set1.wav tools/accuracy/data/set1.txt --engine parakeet --model-dir /path/to/parakeet-model
 
-With local Norwegian Whisper or the official Whisper large-v3-turbo export (`--engine whisper-nb` or `--engine turbo`):
-
-    python3 -I tools/accuracy/score.py FILE.wav REFERENCE.txt --engine turbo \
-        --model-dir ~/.cache/meetingai-eval/no/models/sherpa-onnx-whisper-turbo \
-        --vad ~/.cache/meetingai-eval/no/models/silero_vad.onnx \
-        --parakeet-dir /path/to/parakeet-model \
-        --speaker-model /path/to/speaker-model.onnx \
-        --load-mode resident
-
-Choose exactly one of `--engine parakeet|whisper-nb|turbo`, `--parakeet`, `--url URL`, or `--fake TEXT`.
-`examples/accuracy_replay.rs` paces stereo audio at 1× wall-clock through `LiveTranscriber::connect_config_with` (or `transcription::transcribe` when `--dictation` is given) and reports `VmHWM` peak RSS after loading Parakeet and the speaker model under `--load-mode resident|unload`.
+Choose exactly one of `--engine parakeet`, `--parakeet`, `--url URL`, or `--fake TEXT`.
+`examples/accuracy_replay.rs` paces stereo audio at 1× wall-clock through `LiveTranscriber::connect_config_with` (or `transcription::transcribe` when `--dictation` is given) and reports `VmHWM` peak RSS after loading Parakeet and the speaker model.
 `score.py` prints word error rate (WER, sequence edit distance with NPSC normalisation), code-switch WER, bleed lines, lost owner words, remote words on the mic channel, invented lines per hour on silence/non-speech, phantom phrases anywhere in a line, short words kept, dictation status, median and p95 chunk inference time, and peak RSS (`VmHWM`).
 
 ## Without audio (CI, tests)
@@ -54,10 +45,6 @@ All raw datasets and generated sets stay in `~/.cache/meetingai-eval/no/` (overr
 - **NPSC (`NbAiLab/NPSC`, Norwegian Parliamentary Speech Corpus)** — National Library of Norway (`NbAiLab`), licensed under **CC0 1.0** (`https://huggingface.co/datasets/NbAiLab/NPSC`). Test split, published per sitting as `data/test/<date>.json` (JSONL) + `<date>_16K_mp3.tar.gz`. Three sittings (~70 MB) give several hours of speech; `no_mix.py` keeps the `nb-NO` sentences and selects a fixed-seed ~2 h subset.
 - **FLEURS `nb_no` (`google/fleurs`)** — Google, licensed under **CC BY 4.0** (`https://huggingface.co/datasets/google/fleurs`). Norwegian Bokmål `test` split (`test.tar.gz` + `test.tsv`): ~233 MB archive. Note: FLEURS WAVs are 32-bit float; `no_mix.py` converts them with `ffmpeg -c:a pcm_s16le`.
 - **MUSAN (`noise/` subset, OpenSLR 17)** — David Snyder, Guoguo Chen and Daniel Povey, licensed under **CC BY 4.0** (`https://www.openslr.org/17/`). Only the `noise/` subset is extracted: ~1.0 GB (`musan.tar.gz` full archive is ~11 GB; extract `musan/noise` only).
-- **Models in `~/.cache/meetingai-eval/no/models/`:**
-  - `csukuangfj/sherpa-onnx-whisper-turbo` (`sherpa-onnx-whisper-turbo.tar.bz2`, **MIT**, ~1.0 GB extracted int8 ONNX);
-  - `NbAiLab/nb-whisper-large` or `-medium` (**Apache-2.0**, exported to int8 ONNX via `tools/whisper-export/`, ~0.8–1.6 GB);
-  - `silero_vad.onnx` (**MIT**, ~2 MB).
 
 ### Download commands
 
@@ -82,12 +69,6 @@ tar -xzf ~/.cache/meetingai-eval/no/clips/test.tar.gz -C ~/.cache/meetingai-eval
 # 3. MUSAN noise/ subset only (CC BY 4.0, ~1.0 GB extracted)
 curl -fL --retry 3 "https://www.openslr.org/resources/17/musan.tar.gz" \
     | tar -xz -C ~/.cache/meetingai-eval/no --strip-components=1 musan/noise
-
-# 4. Whisper turbo int8 export and Silero VAD (MIT)
-curl -fL --retry 3 "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-turbo.tar.bz2" \
-    | tar -xj -C ~/.cache/meetingai-eval/no/models
-curl -fL --retry 3 -o ~/.cache/meetingai-eval/no/models/silero_vad.onnx \
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
 ```
 
 ### Build and score the Norwegian sets
@@ -112,27 +93,19 @@ Score a single call or the entire suite directory:
 python3 -I tools/accuracy/score.py \
     ~/.cache/meetingai-eval/no/slice/fleurs/call_001.wav \
     ~/.cache/meetingai-eval/no/slice/fleurs/call_001.txt \
-    --engine turbo \
-    --model-dir ~/.cache/meetingai-eval/no/models/sherpa-onnx-whisper-turbo \
-    --vad ~/.cache/meetingai-eval/no/models/silero_vad.onnx \
-    --load-mode resident \
-    --replay-log ~/.cache/meetingai-eval/no/slice/replay-turbo.jsonl
+    --engine parakeet \
+    --replay-log ~/.cache/meetingai-eval/no/slice/replay-parakeet.jsonl
 
 # Dictation clip (mono 16 kHz PCM via transcription::transcribe)
 python3 -I tools/accuracy/score.py \
     ~/.cache/meetingai-eval/no/slice/dictation_short/dict_short_001.wav \
     ~/.cache/meetingai-eval/no/slice/dictation_short/dict_short_001.txt \
-    --engine turbo \
-    --model-dir ~/.cache/meetingai-eval/no/models/sherpa-onnx-whisper-turbo \
-    --vad ~/.cache/meetingai-eval/no/models/silero_vad.onnx \
+    --engine parakeet \
     --dictation
 
 # Entire suite directory
 python3 -I tools/accuracy/score.py ~/.cache/meetingai-eval/no/sets \
-    --engine turbo \
-    --model-dir ~/.cache/meetingai-eval/no/models/sherpa-onnx-whisper-turbo \
-    --vad ~/.cache/meetingai-eval/no/models/silero_vad.onnx \
-    --load-mode resident
+    --engine parakeet
 ```
 
 ## Alkove Focus comparison (owner recordings only)
