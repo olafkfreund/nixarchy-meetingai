@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 89
 intent: intent/2026-11-05-89-agent-image-on-send.md
 ---
