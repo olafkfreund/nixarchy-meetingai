@@ -64,10 +64,14 @@ live = "--live" in sys.argv or k8s or team or iv or err or drop
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 live_ago = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--live-since=")), 754_000)   # --live-since=<ms-ago>: where the recording started
+AUTO = [0]
+DELETES = [0]
+PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"   # 1x1
+SHOTS = [{"id": 7, "meeting": "1", "time": 65.0, "mime": "image/png", "automatic": True}, {"id": 8, "meeting": "1", "time": 130.0, "mime": "image/png", "automatic": False}]
 state = {"recording": live, "since": int(time.time() * 1000) - live_ago if live else 0, "mic": True, "system": True}
 if live:
     state["meeting"] = "m-live"
-state.update(meeting_language=None, meeting_language_label="English", language_hint="Parakeet detects the language itself. This sets the language of answers and notes, over the answer language setting. Norwegian needs Deepgram.",
+state.update(autoshots={"on": False, "count": 0, "at_limit": False}, meeting_language=None, meeting_language_label="English", language_hint="Parakeet detects the language itself. This sets the language of answers and notes, over the answer language setting. Norwegian needs Deepgram.",
              languages=[{"code": c, "name": n} for c, n in (("en", "English"), ("pl", "Polish"), ("de", "German"), ("fr", "French"), ("es", "Spanish"))])   # Parakeet's, no Norwegian
 MEETINGS = itertools.count(1)   # record.start names the new meeting m-<n>
 if first_run:
@@ -672,8 +676,46 @@ class Handler(socketserver.StreamRequestHandler):
                 self.send({"id": req["id"], "ok": True, "data": {}})
                 cast({"event": "state", **state})
                 continue
+            if cmd == "test.limit":   # the daemon sets at_limit when capture reaches 60 while on
+                state["autoshots"] = {"on": False, "count": 60, "at_limit": True}
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "state", **state})
+                continue
+            if cmd == "autoshots.start":   # the first start is refused, as when slurp is missing
+                AUTO[0] += 1
+                if state["autoshots"]["at_limit"]:
+                    self.send({"id": req["id"], "ok": False, "error": "This meeting has reached its limit of 60 automatic screenshots."})
+                elif AUTO[0] == 1:
+                    self.send({"id": req["id"], "ok": False, "error": "slurp is not installed, so no area can be chosen."})
+                else:
+                    state["autoshots"] = {"on": True, "count": 12, "at_limit": False}
+                    self.send({"id": req["id"], "ok": True, "data": {}})
+                    cast({"event": "state", **state})
+                continue
+            if cmd == "autoshots.stop":   # the real stop clears to off; it never sets at_limit
+                state["autoshots"] = {"on": False, "count": 0, "at_limit": False}
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "state", **state})
+                continue
+            if cmd == "screenshots.list":
+                a = req.get("args", {})
+                rows = [r for r in SHOTS if str(r["meeting"]) == str(a.get("meeting"))]
+                self.send({"id": req["id"], "ok": True, "data": [{k: v for k, v in r.items() if k != "meeting"} for r in rows]})
+                continue
+            if cmd == "screenshots.get":
+                row = next((r for r in SHOTS if r["id"] == req.get("args", {}).get("id")), None)
+                if row is None:
+                    self.send({"id": req["id"], "ok": False, "error": "no such screenshot"})
+                else:
+                    self.send({"id": req["id"], "ok": True, "data": {"id": row["id"], "mime": row["mime"], "data": PNG}})
+                continue
+            if cmd == "screenshots.delete":   # the first delete's export refresh fails; the row is gone either way
+                SHOTS[:] = [r for r in SHOTS if r["id"] != req.get("args", {}).get("id")]
+                DELETES[0] += 1
+                self.send({"id": req["id"], "ok": True, "data": {"export_error": "Export folder is read-only."} if DELETES[0] == 1 else {}})
+                continue
             if cmd == "record.start" and iv and not (state["consent"] or req.get("args", {}).get("consent")):
-                self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed."})
+                self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed, and screenshots may be captured."})
                 continue
             if cmd == "record.start":
                 state.update(recording=True, since=int(time.time() * 1000), meeting="m-%d" % next(MEETINGS))

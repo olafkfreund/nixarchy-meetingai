@@ -295,6 +295,23 @@ written again whenever its notes are regenerated:
   Interviews are exported too (`local_only: true` in the frontmatter marks
   a local-only one). Voice data, keys and settings are never exported.
 
+### Automatic screenshots
+
+While recording, turn on **Auto screenshots** in the meeting view and drag over the area to capture. It's off by default and has no global setting, so you choose it for each meeting. Auto-record never turns it on.
+
+It captures every 5 minutes, starting 5 minutes after you turn it on, and twice (after 4 and 10 seconds) when either side says a phrase such as "share my screen", "here's the document" or "next slide". Frames that look almost the same as the last one aren't stored. It stops at 60 per meeting, and switching it off and on doesn't reset that.
+
+The Library lists a meeting's screenshots beside its notes, where you can preview or delete each one.
+
+**What to know before using it:**
+
+- **It captures whatever is in the area,** including other windows, notifications and anything private that appears there. You also need to be allowed to capture what others share.
+- **Automatic screenshots never go to a model.** Agents using MCP can't read or start them. The daemon can't stop other programs running as you, which can ask it for them or read the export folder.
+- **A locked screen is never captured.** This relies on `hyprctl locked`, so it needs Hyprland. If the lock state can't be read, nothing is captured and the app warns you once.
+- **Local-only interviews refuse it,** and interview mode needs recording consent. If a meeting turns Local-only or no longer has consent, capture stops and the app tells you. Screenshots already taken stay in that meeting and are still included if you export it.
+- **Images are full resolution.** On a 2560×1440 screen we measured about 0.6 MB each, so a full 60 is about 40 MB in the database, or about 90 MB for an area across two monitors. Busy or video-heavy frames may be larger.
+- **Exports are plain files** named `auto-NN`, and the export folder may sync elsewhere. Deleting a screenshot also removes the app's file from the meeting's export folder. Files you changed, or copied under another name, stay. With automatic export off, or if you've since changed the export folder, the notes there keep its caption, and the app tells you. Copies already synced elsewhere are not removed.
+
 ### Keybindings
 
 | Action | Key |

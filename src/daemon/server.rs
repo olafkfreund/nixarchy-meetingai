@@ -91,9 +91,12 @@ async fn client(stream: UnixStream, daemon: Arc<Daemon>) {
         let provider = (request.cmd == "models.list")
             .then(|| request.args.get("provider").cloned())
             .flatten();
+        let auto_epoch = (request.cmd == "autoshots.start").then(|| daemon.auto_start_received());
         if matches!(
             request.cmd.as_str(),
             "chat.send"
+                | "autoshots.start"
+                | "screenshots.delete"
                 | "voice.enroll"
                 | "questions.generate"
                 | "providers.test"
@@ -104,9 +107,13 @@ async fn client(stream: UnixStream, daemon: Arc<Daemon>) {
             let daemon = daemon.clone();
             let out = out.clone();
             tokio::spawn(async move {
-                let result = daemon
-                    .handle(&request.cmd, request.args, request.origin.as_deref())
-                    .await;
+                let result = if let Some(epoch) = auto_epoch {
+                    daemon.auto_start_at(epoch, request.origin.as_deref()).await
+                } else {
+                    daemon
+                        .handle(&request.cmd, request.args, request.origin.as_deref())
+                        .await
+                };
                 let _ = out
                     .send(protocol::reply_for(&request.id, result, provider))
                     .await;

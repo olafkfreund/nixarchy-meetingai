@@ -22,6 +22,8 @@ Item {
     property bool library: false
     property bool setupDismissed: false
     property string seriesError: ""
+    property bool autoShotsAsked: false   // the privacy confirmation is shown once per shell session
+    property string autoShotsNotice: ""
     onLibraryChanged: { backend.libraryOpen = root.library; if (!root.library) Qt.callLater(function() { composer.focusInput(); }); }
     property string previewText: ""
 
@@ -147,6 +149,16 @@ Item {
     }
     function exportFolderHook(path) { lib.setExportFolder(path); }
     function modeHook() { hdr.openPicker(); }   // tests/harness-live.qml opens the mode list for a crop
+    function toggleAutoShots() {
+        var st = backend.state.autoshots || {};
+        if (st.on) { backend.send("autoshots.stop", {}); return; }
+        var go = function() {
+            root.autoShotsAsked = true;
+            backend.send("autoshots.start", {}, function(r) { root.autoShotsNotice = r.ok ? "" : backend.plainError(r.error || "request failed"); });
+        };
+        if (root.autoShotsAsked) go();
+        else root.ask("Automatic screenshots capture whatever is in the area you choose, including other windows. The export folder may sync elsewhere. Check that you may capture what others share.", "Start", go);
+    }
     function ask(message, confirmText, yes) { confirm.ask(message, confirmText, yes); }   // the one confirmation dialog
     function focusProbe(next) {   // tests/keys.sh: what has the keyboard focus; next = do what Tab does first
         var w = card.Window.window;
@@ -449,6 +461,19 @@ Item {
                             triggerLabel: String(backend.state.meeting_language_label || "English")
                             onChanged: function(v) { backend.send("meeting.language.set", { language: v }); }
                         }
+                        Row {
+                            visible: backend.recording
+                            spacing: Style.spacing.xs
+                            Check { id: autoShotsCheck; objectName: "autoShots"; ts: metrics.ts; accessibleName: "Auto screenshots"; checked: !!(backend.state.autoshots && backend.state.autoshots.on); onToggled: root.toggleAutoShots() }
+                            UiText {
+                                anchors.verticalCenter: autoShotsCheck.verticalCenter
+                                textFormat: Text.PlainText
+                                text: { var a = backend.state.autoshots || {}; return "Auto screenshots" + (a.on ? " \u00b7 on \u00b7 " + a.count : a.at_limit ? " \u00b7 limit reached (" + a.count + ")" : ""); }
+                                color: Commons.Color.popups.text
+                                font.pixelSize: metrics.body
+                            }
+                        }
+                        UiText { objectName: "autoShotsNotice"; visible: text !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.autoShotsNotice; color: Commons.Color.popups.text; font.pixelSize: metrics.caption }
                         UiText { objectName: "meetingLanguageHint"; visible: text !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(backend.state.language_hint || ""); color: Commons.Color.popups.text; opacity: metrics.dim; font.pixelSize: metrics.caption }
                     }
 

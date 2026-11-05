@@ -1,0 +1,113 @@
+---
+status: approved
+issue: 84
+spec: spec/2026-11-05-84-auto-screenshots.md
+coders:
+  1: codex   # tricky: capture task, lifecycle, cancellation, lock discipline
+  2: coder   # the shell control and review section: ordinary QML, after #81 merges
+reviewers:
+  - codex    # read-only: lifecycle and the model boundary
+  - agy      # read-only: privacy paths and tests
+---
+
+# Plan: Automatic screenshots during a meeting
+
+**Running order:** step 1, then step 2 once #81 is merged, since step 2 builds on its notes column. Claude runs checks and commits.
+
+## Decisions carried from the approved spec
+
+- **On:** one per-meeting control, available **only while recording**, since a meeting and its consent exist only from then. Turning it on runs `slurp` once to choose the area. Cancelling leaves it off. No global setting or Nix default; auto-record never starts it.
+- **Triggers:** one capture every 5 minutes; on a finished line from either channel containing a listed phrase, captures 4 s and 10 s later. Phrases, lowercase: "share my screen", "share my desktop", "sharing my screen", "can you see my screen", "here is the document", "here's the document", "here is the presentation", "here's the presentation", "next slide".
+- **Limits:** 60 captures per meeting, at most one per 3 s. At the limit it stops and says so.
+- **Before each capture, and again before storing:** this same meeting is still recording; not Local-only; consent still held; `hyprctl locked` says unlocked. An error or unknown counts as locked.
+- **Refused** to start in Local-only. In interview mode it needs recording consent.
+- **Duplicates:** fingerprint with `grim -g "<area>" -t ppm -s 0.05 -`, compared with the last stored fingerprint by pixel difference. Near-identical frames are not stored.
+- **Stop cancels at once,** including queued captures. New, restore and delete clear the area. Play on the same meeting keeps it. It is in memory only.
+- **Storage:** `meeting_screenshots` with `question = "[auto]"`. No schema change.
+- **Never to a model:** never `pending_capture` or `sources`.
+- **Export:** file names start `auto-`. Deleting a row removes the exporter's own file on the next export. Anything else in the folder is left alone.
+- **Commands:** `autoshots.start`, `autoshots.stop`, `screenshots.list {meeting}`, `screenshots.delete {id}`; none on the agent (MCP) allow-lists.
+
+## Traps
+
+- **Lock discipline.** `handle_live_event` (:2403) runs under `inner.lock()`, which the audio loop also uses. It only schedules. `grim`, comparison and the write run in their own task, taking the lock only to check state and to store.
+- **`record_stop` (:2886) only sets a flag;** the recording task drains for up to 15 s before `finish_recording` (:3090). Cancel in `record_stop`, with a generation counter that queued tasks compare before capturing and before storing.
+- **`slurp` waits on the user.** Never hold the lock across it, as at :1796.
+- **Codex's sandbox cannot run nix, cargo or the shell suite.** Claude runs them. Nothing is committed during a handoff.
+- **Tests must never run real `grim` or `hyprctl`:** the capture and lock check are injected.
+- **No artificial CPU load on p620.**
+
+## Steps
+
+### 1. Daemon (codex) — `src/daemon/session.rs`, `src/daemon/protocol.rs`, `src/db/repos/screenshots.rs`, `src/core/export.rs`
+
+1. `Inner.autoshots: Option<AutoShots>` with the meeting id, area, generation, count, last fingerprint and last capture time. Reset in `reset_session` (:3691), `session_restore` (:3760) and `session_delete` (:3981); kept on Play.
+2. `grab_screen` (:1065) splits out a function taking an area. Capture and `hyprctl locked` go behind a small test seam, in the style of existing test hooks.
+3. Commands: `autoshots.start` (`slurp` off the lock; refused when not recording, in Local-only, or without consent in interview mode), `autoshots.stop`, and state fields `autoshots: {on, count, at_limit}`. A candidate turning Local-only (:5566) stops it. The interview consent message (:2680) gains that screenshots may be captured, with a test on its wording.
+4. Timer: a task spawned with the recording, ticking every 5 minutes. Phrases: in `handle_live_event`, on final lines, a phrase match schedules the two delayed captures.
+5. `screenshots::delete(id)`; `screenshots.list` returning id, time, mime, whether automatic, and base64 data on request; `screenshots.delete`. Confirm by search that `screenshots::list` is read only by export (:3206), and nothing in `recap.rs` or `mcp/` reaches it.
+6. `src/core/export.rs`: `Shot` knows if it is automatic, and is named `auto-NN` (:65). **`write_dir` (:281) keeps other files on purpose, and a test requires it (:655),** so removal needs ownership: the exporter records the `auto-` names it wrote in `screenshots/.auto-files`, and removes only names listed there that are no longer current. A user's file, even one named `auto-99.png`, is never removed. Test both.
+7. **Tests:** off by default; refused in Local-only; consent; agents refused; both schedules and delays; limit and rate cap; duplicates; locked and unknown lock; a queued capture dropped by stop and never landing in a new meeting; a meeting turning Local-only stops it; New, restore and delete clear the area; Play keeps it; no automatic capture reaches a prompt or `pending_capture`; delete removes the row; export naming, and removal of only the exporter's files; consent wording.
+
+Check, by Claude: `cargo test --workspace`, clippy `-D warnings`, fmt.
+
+### 2. Shell (coder, after #81 merges) — `shell/Overlay.qml`, `shell/Library.qml`, `shell/tests/`
+
+1. In the meeting view beside `meetingLanguage`: a toggle, `objectName: "autoShots"`, showing "Auto screenshots" and, when on, "on · 12". The first time, a confirmation explains what is captured: whatever is in the chosen area, including other windows, the export folder may sync, and check that you may capture shared material. The refusal shows as a notice.
+2. In the notes column, a "Screenshots" section for the selected meeting, from `screenshots.list`: time, whether automatic, preview on click, and Delete with a confirmation.
+3. The fake daemon and smoke test: the toggle, the count, the limit message, the refusal, the section and delete. `check-geometry` at 0 problems.
+
+Check, by Claude: `bash shell/tests/ci.sh`.
+
+### 3. Ship (Claude)
+
+Full checks, `nix flake check`; reviews by a fresh Opus agent, Codex and agy, read-only; measure one 60-capture meeting's database growth, and limit resolution if tens of MB is too much; README section, including the privacy limits; a PR closing #84; merge after CI; a meetingai-only nixos bump, and deploy to p620 when nothing is recording. The owner tries one real meeting with a shared screen.
+
+## Rollback
+
+`git revert -m 1 <merge>`, and bump nixos. Automatic screenshots already stored stay with their meetings, and can be deleted.
+
+## Deviations
+
+(Recorded here during implementation, in the same commit as the code.)
+- Step 1 (Codex; a clippy fix and read-through by Claude):
+  - `hyprctl locked` was checked on p620: it prints `false`, and the code treats anything else, or a failure, as locked.
+  - Automatic captures are stored only through `auto_capture_once`; `screenshots::list` is read by export and the new command only.
+- Step 2 (coder):
+  - The "ask once" flag is in memory, so the first-use confirmation shows again after a shell restart. Persisting it would need a daemon setting.
+  - The Library's `fetchMeetingView` also loads `screenshots.list`; images are fetched on click.
+
+- **Review fixes to step 1 (Codex, lead corrections):**
+  - Export ownership: `.auto-files` became `.owned-files`, listing a hash and name for every image the app wrote, manual ones too. A name holding anything else is never overwritten or removed; the shot takes the next free name. The same bytes count as ours, so a partial export recovers. This replaces the refusal when a name was taken.
+  - `screenshots.delete` also refreshes an existing export: the images at once, and for a meeting that is not live the whole export, so `notes.md` loses the caption and its links stay right. It returns `export_error` if that fails, or if an export outside the current folder was left alone. The row is deleted regardless.
+  - `screenshots.list` returns metadata only; new `screenshots.get {id}` returns one image, encoded off the lock, refused to agents.
+  - `autoshots.start` runs concurrently with other requests, and `slurp` is limited to 120 seconds.
+  - An agent's `record.start` clears a retained area when nothing is recording.
+  - The 60 limit counts the meeting's stored automatic rows, so off and on, restore and Play can't reset it. Deleting a shot frees a place.
+  - A capture that fails, or a lock state that can't be read, warns once per switch-on. A locked screen stays silent.
+  - Curly apostrophes match the phrase list.
+  - Not tested: the 5-minute tick, since `tokio` has no `test-util` here.
+
+- **Review fixes to step 2 (coder):**
+  - The shell uses `screenshots.get` for a preview and shows delete and export errors in the Library's status line.
+  - `Client.plainError` is new, since no helper could be reached. `startRecording` keeps its inline copy.
+  - The fake daemon's `autoshots.stop` now behaves like the real one; a new `test.limit` drives the limit.
+  - Not tested: the first-use dialog at the limit, only the click path.
+- **Step 3:** size measured from real frames, not from a recorded 60-capture meeting: about 0.62 MB per 2560x1440 frame, about 1.48 MB across two monitors. No resolution limit added. Video-heavy frames were not measured.
+
+- **Second review round (Codex, lead corrections):** this replaces the delete behaviour recorded above.
+  - `screenshots.delete` holds the export lock and runs concurrently. It removes files whose bytes match the row, writing nothing, then deletes the row. With automatic export on it re-exports the meeting, live or not; with it off it writes nothing and says the notes keep the caption until the next export.
+  - The export folder's parent is no longer checked, because the database records where the export is.
+  - A delete recalculates the count. At the limit, falling below 60 switches it off, so the user can start again and choose an area.
+  - A meeting that turns Local-only or no longer has consent stops capture with a notice, on the next capture attempt.
+  - The duplicate limit is 0.2%, not 1%, so one new line of text on a slide counts as a change. Not checked on real slides.
+  - `sync_shots` returns real errors and tries at most 1000 names.
+  - A failed store warns once.
+  - Each `autoshots.start` records the epoch when the request is read, so a stop that follows it wins. The server reaches it through `auto_start_at`, which refuses agents itself.
+
+- **Third review round (lead):**
+  - `remove_shot` removes only a name listed in `.owned-files` with this row's hash, or, for an export with no manifest, a name the app would have written. A renamed copy stays. This restores "anything else in the folder is left alone".
+  - If another row has the same bytes, the file stays.
+  - A delete re-exports only when the export is under the current export folder. Otherwise it would copy the meeting to the new folder, so it says the old notes still mention the screenshot.
+  - A setting change that takes consent away stops capture at once, and a meeting at the limit gets no false "stopped" notice.
+  - Not fixed: a second `autoshots.start` during area selection starts another `slurp`, and its error can show beside an "on" toggle. A delete during notes writing waits for the lock, showing nothing until it's done. A change to `export_folder` in the moment between a delete's check and its export would still export to the new folder.
