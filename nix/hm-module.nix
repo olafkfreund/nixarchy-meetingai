@@ -79,10 +79,6 @@ let
   ]
   ++ [ "NIXARCHY_MEETINGAI_OLLAMA_URL=${cfg.ollama.url}" ]
   ++ lib.optional cfg.parakeet.enable "NIXARCHY_MEETINGAI_PARAKEET_DIR=${cfg.parakeet.model}"
-  ++ lib.optionals cfg.whisperNb.enable [
-    "NIXARCHY_MEETINGAI_WHISPER_NB_DIR=${cfg.whisperNb.model}"
-    "NIXARCHY_MEETINGAI_SILERO_VAD=${cfg.whisperNb.vad}"
-  ]
   ++ [ "MEETINGAI_SPEAKER_MODEL=${cfg.speakerModel}" ]
   ++ lib.optional (
     cfg.ollamaCloud.keyFile != null
@@ -132,7 +128,12 @@ in
     name:
     lib.mkRemovedOptionModule [ "programs" "nixarchy-meetingai" "whisper" name ]
       "whisper.cpp was replaced by Parakeet (in-process); see programs.nixarchy-meetingai.parakeet.* — or use settings.speechProvider = \"openai-compatible-stt\" with your own server (settings.speechBaseUrl), or Deepgram (deepgram.keyFile)."
-  ) [ "enable" "host" "port" "threads" "extraArgs" "model" "package" ];
+  ) [ "enable" "host" "port" "threads" "extraArgs" "model" "package" ]
+  ++ map (
+    name:
+    lib.mkRemovedOptionModule [ "programs" "nixarchy-meetingai" "whisperNb" name ]
+      "the local Norwegian engine (NB-Whisper) was removed: Parakeet does not transcribe Norwegian. Deepgram can (deepgram.keyFile, settings.speechProvider = \"deepgram-stt\"), but it sends the audio to the cloud; deepgram.region = \"eu\" is advised."
+  ) [ "enable" "model" "vad" ];
 
   options.programs.nixarchy-meetingai = {
     enable = lib.mkEnableOption "the nixarchy-meetingai daemon, its Quickshell plugin and local speech-to-text";
@@ -182,26 +183,6 @@ in
       default = pkgs.callPackage ./parakeet-model.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ./nix/parakeet-model.nix { }";
       description = "The Parakeet speech model for `speechProvider = \"parakeet-local\"`: a directory with `encoder.int8.onnx`, `decoder.int8.onnx`, `joiner.int8.onnx` and `tokens.txt` (NVIDIA Parakeet TDT 0.6B v3, CC-BY-4.0). The daemon gets it as `NIXARCHY_MEETINGAI_PARAKEET_DIR`. Once Parakeet has been used the model stays loaded (about 1.1 GB RAM) while the daemon runs.";
-    };
-
-    whisperNb.enable = lib.mkOption {
-      type = lib.types.bool;
-      default = false;
-      description = "Give the daemon the local Norwegian speech model (NB-Whisper small plus the Silero voice detector). Off by default. Parakeet does not transcribe Norwegian, so turn this on and choose Norwegian under Settings, Speech language, for Norwegian meetings. It is about 2.1 GB of RAM once used.";
-    };
-
-    whisperNb.model = lib.mkOption {
-      type = lib.types.package;
-      default = pkgs.callPackage ./whisper-nb-model.nix { };
-      defaultText = lib.literalExpression "pkgs.callPackage ./nix/whisper-nb-model.nix { }";
-      description = "The NB-Whisper model for Norwegian (`speechLanguage` nb, no or nn). The daemon gets it as `NIXARCHY_MEETINGAI_WHISPER_NB_DIR`.";
-    };
-
-    whisperNb.vad = lib.mkOption {
-      type = lib.types.package;
-      default = pkgs.callPackage ./silero-vad.nix { };
-      defaultText = lib.literalExpression "pkgs.callPackage ./nix/silero-vad.nix { }";
-      description = "The Silero voice-activity model (`silero_vad.onnx`) the Norwegian engine uses to cut speech into segments. The daemon gets it as `NIXARCHY_MEETINGAI_SILERO_VAD`.";
     };
 
     speakerModel = lib.mkOption {
@@ -369,12 +350,12 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = cfg.settings.speechProvider != "whisper-local";
-        message = "programs.nixarchy-meetingai: settings.speechProvider = \"whisper-local\" was removed: whisper.cpp was replaced by Parakeet (in-process). Use \"parakeet-local\", \"deepgram-stt\" or \"openai-compatible-stt\".";
+        assertion = !(builtins.elem cfg.settings.speechProvider [ "whisper-local" "whisper-nb-local" ]);
+        message = "programs.nixarchy-meetingai: settings.speechProvider = \"whisper-local\" was removed: whisper.cpp was replaced by Parakeet (in-process). \"whisper-nb-local\" is gone too (Parakeet has no Norwegian; Deepgram can). Use \"parakeet-local\", \"deepgram-stt\" or \"openai-compatible-stt\".";
       }
       {
-        assertion = cfg.parakeet.enable || cfg.whisperNb.enable || (cfg.settings.speechProvider != null && cfg.settings.speechProvider != "parakeet-local");
-        message = "programs.nixarchy-meetingai: parakeet.enable = false needs whisperNb.enable (Norwegian only) or settings.speechProvider = \"deepgram-stt\" or \"openai-compatible-stt\" (the default provider is parakeet-local).";
+        assertion = cfg.parakeet.enable || (cfg.settings.speechProvider != null && cfg.settings.speechProvider != "parakeet-local");
+        message = "programs.nixarchy-meetingai: parakeet.enable = false needs settings.speechProvider = \"deepgram-stt\" or \"openai-compatible-stt\" (the default provider is parakeet-local).";
       }
       {
         assertion = !(cfg.settings.extra ? api_key);
