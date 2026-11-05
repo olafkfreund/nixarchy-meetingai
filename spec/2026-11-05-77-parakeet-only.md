@@ -50,8 +50,9 @@ A new one-time migration, `migrate_norwegian_engine`, next to `migrate_whisper`,
 | `speech_language` of those, with Deepgram or an OpenAI-compatible engine | unchanged | no |
 
 The notice says the local Norwegian engine was removed, Parakeet does not transcribe Norwegian, and Deepgram can. A
-fresh install is marked silently. It runs after Nix settings are applied, and skips keys Nix locks: a locked
-`settings.speechLanguage = "nb"` on Parakeet gets the normal refusal at recording start, which says what to do.
+fresh install is marked silently. It runs beside `migrate_whisper` in `Daemon::new`, before `apply_nix_settings`, so a value
+locked by Nix is simply applied again: `settings.speechLanguage = "nb"` on Parakeet then gets the normal refusal at recording
+start, which says what to do. No special handling is needed.
 
 ### S4. The meeting's language
 
@@ -139,7 +140,7 @@ control, and `settings.search` still finds it.
 
 ## Verification
 
-- **Rust:** `resolve_speech` no longer returns `whisper-nb-local`; the migration table, including a Nix-locked key being skipped; every row of the state
+- **Rust:** `resolve_speech` no longer returns `whisper-nb-local`; the migration table, including a Nix-set `nb` being refused at recording start; every row of the state
   table, including a New call never using the previous meeting's language, and choose-then-record keeping the choice; a change during a meeting surviving
   restore; `en` and `""` clearing it; a language refused on Parakeet; Deepgram receiving the chosen code; prompts using the name; clearing restoring the
   conversation's own language; a recap of an older meeting using that meeting's language; Local-only redaction; and a default meeting producing today's
