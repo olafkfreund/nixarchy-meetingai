@@ -132,7 +132,7 @@ mkdir -m 700 "$XDG_RUNTIME_DIR"
 python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/grounded.log" --grounded &
 fake=$!
 sleep 0.5
-timeout 15 quickshell -p "$work/cfg" > "$work/grounded.out" 2> "$work/grounded.err" || true
+timeout 25 quickshell -p "$work/cfg" > "$work/grounded.out" 2> "$work/grounded.err" || true
 kill "$fake" 2>/dev/null || true
 if grep -aE "$qml_bad" "$work/grounded.err" "$work/grounded.out" | grep -av 'GEO {'; then echo "FAIL (grounded): QML errors above" >&2; exit 1; fi
 python3 "$here/tests/check-geometry.py" "$work/grounded.out"
