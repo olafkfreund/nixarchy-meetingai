@@ -16,9 +16,9 @@ The recommendation is provisional. The owner decides. Whether work calls may lea
    Measured at 16.7% (under #70's 20% bar), free per minute, audio stays local, no Whisper code in the app. It is the only one measured so far.
    Limits: NPSC training overlap, not yet tried in the real app, not measured beyond p620, and it needs 16 threads there.
    It uses the machine during calls, and would have to be kept running.
-2. **If an online engine is wanted:** Groq turbo is the cheapest at about $1.12 a month, and needs no code.
+2. **If an online engine is wanted:** Groq turbo has the lowest listed ongoing cost, at about $1.12 a month, and needs no code.
    Its Norwegian accuracy is unmeasured and Norwegian is not named on its page.
-   Deepgram is the only one listing Norwegian and working with the app today. It is free for about 10 months on credit, then about $18 a month, with the EU setting.
+   Deepgram is the only one listing Norwegian and working with the app today. With the EU setting it costs nothing out of pocket for roughly 9 to 11 months on credit, then about $18 to $23 a month. See the Cost section for why that's a range.
    Part 2 measures these two. It may not be needed if the owner is happy with option 1.
 
 ## Comparison
@@ -26,9 +26,9 @@ The recommendation is provisional. The owner decides. Whether work calls may lea
 | Engine | Norwegian | Price | Works with the app today | Where audio goes |
 |---|---|---|---|---|
 | Self-run NB-Whisper small | Measured: 16.7% word errors | $0 per minute | Yes, as `openai-compatible-stt` | Stays on the machine |
-| Groq Whisper Large V3 Turbo | Not named on the page; accuracy unmeasured | $0.04/h, 10 s minimum per request | Yes, no code needed | US; logs up to 30 days, zero retention available |
-| Deepgram Nova-3 | Listed (`no`) | Streaming $0.0077/min; pre-recorded $0.0043/min | Yes (streaming) | Retained by default; opt-out per request; EU endpoint |
-| OpenAI `gpt-transcribe` | Not named; no language list | $0.0045/min | A preset exists, but uses the deprecated `whisper-1` (see below) | Not used for training by default |
+| Groq Whisper Large V3 Turbo | Not named on the page; accuracy unmeasured | $0.04/h, 10 s minimum per request | Yes, no code needed | Not stated where inference runs. Not retained by default. Logs may hold inputs and outputs up to 30 days, in the US; zero retention available |
+| Deepgram Nova-3 | Listed (`no`) | Streaming $0.0077/min, plus diarization at $0.0020/min if billed; pre-recorded $0.0043/min | Yes (streaming) | Retained by default; opt-out per request; EU endpoint |
+| OpenAI `gpt-transcribe` | Not named; no language list | Estimated $0.0045/min | A preset exists, but uses the deprecated `whisper-1` (see below) | Not used for training by default |
 | Soniox | Listed (`no`) | Async $0.10/h; real-time $0.12/h | Likely needs new code | Terms not read |
 
 Sources are in the per-provider sections below.
@@ -42,10 +42,12 @@ Twenty hours of calls a month. "Batch" means only chunks with speech are sent. T
 | Self-run NB-Whisper | $0 per minute. Uses 16 threads while running, on p620 | $0 |
 | Groq turbo | $0.04/h with a 10 s minimum: 20 h × 1.4 = 28 h | **$1.12** |
 | Soniox async | $0.10/h, 18 h (no minimum stated). Real-time is $0.12/h and may bill both channels. Likely needs new code. Unconfirmed | $1.80 |
-| OpenAI `gpt-transcribe` | $0.0045/min = $0.27/h, 18 h (no minimum found) | **$4.86** |
-| Deepgram streaming | What the app uses for Deepgram. Both channels, the whole call: 40 h × $0.462 | **$18.48** |
+| OpenAI `gpt-transcribe` | Estimated $0.0045/min = $0.27/h, 18 h (no minimum found) | About **$4.86** |
+| Deepgram streaming | What the app uses for Deepgram. Both channels, the whole call: 40 h × $0.462, or × $0.582 with diarization | **$18.48 to $23.28** |
 
-Deepgram's new accounts get $200 credit, no card, no expiry. At $18.48 a month that is about 10.8 months.
+Deepgram's new accounts get $200 credit, no card, no expiry. That lasts about 10.8 months at $18.48, or about 8.6 at $23.28.
+
+Why it's a range: the app's stream sends `diarize_model=latest` (`src/speech/stt/transcription.rs:821`), which [turns diarization on by itself](https://developers.deepgram.com/docs/diarization). Deepgram's [pricing page](https://deepgram.com/pricing) lists streaming diarization at $0.0020/min, billed on top. Whether that's charged per channel, and whether the opt-out changes any price, wasn't confirmed. So both figures are estimates at listed rates.
 
 ## The app's real chunk rate
 
@@ -91,7 +93,7 @@ The cause is unknown. This document does not claim Silero is the cause.
 
 One call is a small sample. It was not measured on any other machine.
 
-**Setting in the app.** Speech provider `openai-compatible-stt` (`src/ai/catalog/providers.rs:121`), with `speech_base_url` and `speech_model`.
+**Setting in the app.** With the server above running: `speech_provider = openai-compatible-stt` (`src/ai/catalog/providers.rs:121`), `speech_base_url = http://127.0.0.1:8391`, `speech_model = nb-whisper-small`, `speech_language = no`.
 Local-only allows it on a loopback address.
 **Not yet tried in the real app, with real calls.** That is for the owner.
 
@@ -109,7 +111,7 @@ Local-only allows it on a loopback address.
   Section 3.3: API users can opt out per request: https://deepgram.com/terms
 - **The app sends `mip_opt_out=true` only on the EU endpoint** (`src/speech/stt/transcription.rs:384`, `:825`).
   The owner's `deepgram_region` is `us`. The owner's engine today is `parakeet-local`, so nothing goes to Deepgram now.
-  Advice: set `deepgram.region = "eu"` before any real use.
+  Advice: set `deepgram.region = "eu"` before any real use. Streaming Norwegian on the EU endpoint wasn't checked.
 
 ## Groq
 
@@ -119,14 +121,14 @@ Local-only allows it on a loopback address.
   At 8.2 chunks a minute a call fits the per-minute limit, with room for more. Whether it holds on a real, busier call is not known.
   **The daily request cap is the tight one:** 2K requests at 8.2 a minute is about 4.1 hours of calls a day. 28.8K audio seconds a day is about 8.9 hours at 0.9 speech.
   Groq says the limits for your account are in its settings, and higher ones may be available.
-- Data: by default Groq does not retain inference data. Logs for reliability or abuse are kept up to 30 days. Zero retention is available to all customers in Data Controls.
-  The page does not say whether inputs train models. Data is retained in Google Cloud in the US: https://console.groq.com/docs/your-data
+- Data: by default Groq does not retain inference data. It may temporarily log inputs and outputs, so possibly your audio, to troubleshoot or investigate abuse. Those logs are kept up to 30 days, unless legally required longer. Zero retention is available to all customers in Data Controls.
+  The page does not say whether inputs train models. Retained data is in Google Cloud in the US. It doesn't say where inference runs: https://console.groq.com/docs/your-data
 
 ## OpenAI
 
 - `gpt-transcribe` is the recommended model. `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` and `gpt-4o-transcribe-diarize` are deprecated and "will shut down on February 26, 2027".
   There is no language list for `gpt-transcribe`. Norwegian is not named. Endpoint `/v1/audio/transcriptions`, 25 MB: https://developers.openai.com/api/docs/guides/speech-to-text
-- Prices: `gpt-transcribe` $0.0045/min, Whisper $0.006, `gpt-4o-transcribe` est. $0.006, mini est. $0.003: https://developers.openai.com/api/docs/pricing
+- Prices, all listed as estimated cost: `gpt-transcribe` $0.0045/min, Whisper $0.006, `gpt-4o-transcribe` $0.006, mini $0.003: https://developers.openai.com/api/docs/pricing
 - Data: API data is not used to train by default. For transcriptions, the retention table lists no abuse-monitoring retention and no application state, and it is zero-retention eligible: https://developers.openai.com/api/docs/guides/your-data
 - **The app's OpenAI preset still uses `whisper-1`** (`src/ai/catalog/presets.rs:90`), which shuts down on that date. Note it as a follow-up.
 

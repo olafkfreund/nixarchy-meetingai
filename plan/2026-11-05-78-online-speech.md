@@ -71,3 +71,4 @@ Revert the PR. Remove the downloaded server and model from the cache.
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+- Step 2: ran as written, with `whisper-server` on the first try and no conversion. The 20 calls ran at `--speed 8`.
