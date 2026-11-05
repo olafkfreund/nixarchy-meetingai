@@ -10,10 +10,10 @@ intent: intent/2026-11-05-79-grounded-smoke.md
 
 Replace the race between two clocks with one explicit handshake, in the test only.
 
-- **`shell/tests/fake-daemon.py`, `stream_grounded` (:462):** after the first answer, wait for a new test-only command, `test.next`, instead of `time.sleep(1.0)`. Wait at most 10 s, then send the
-  second answer anyway, so a broken harness fails on its checks and does not hang.
-- **`shell/tests/harness-grounded.qml` (:32–46):** the timer does not move past phase 1 until `nowSources` shows its chips, or until about 8 s has passed, when it continues and the existing check
-  fails as it should. After reading them at phase 2, the harness sends `test.next`.
+- **`shell/tests/fake-daemon.py`:** a `threading.Event` created before streaming starts, so a signal sent early is never lost. `stream_grounded` (:462) waits on it after the first answer, instead of `time.sleep(1.0)`,
+  for at most 12 s, then sends the second answer anyway, so a broken harness fails on its checks and does not hang. The command handler sets the event for `test.next` **after** sending its reply (:859), so two threads do not write to the socket at once.
+- **`shell/tests/harness-grounded.qml` (:32–46):** the timer does not advance to phase 2 until `nowSources` shows both chips and `bubbleLabel` has its stamp, or about 8 s has passed, when it continues and the existing check
+  fails as it should. After reading them at phase 2, it calls `client.send("test.next", {})` (`shell/Client.qml:78`).
 - **Later phases keep their order and timing.** Their fixed-time reads are not changed.
 - **The `timeout 15` (`smoke.sh:135`)** grows only by what the wait can add, to 25 s, so a slow start still finishes.
 
