@@ -163,9 +163,7 @@ pub fn response_instruction(length: ResponseLength, language: &str) -> String {
     let trimmed = language.trim();
     let length_rule = length.instruction();
     if trimmed.is_empty() || trimmed == "Auto" {
-        format!(
-            "Global user response preferences: {length_rule} Reply in the language of the user's latest question unless they ask for another."
-        )
+        format!("Global user response preferences: {length_rule} {AUTO_LANGUAGE_RULE}")
     } else {
         format!(
             "Global user response preferences: {length_rule} Write in {trimmed}, while leaving code, names and quoted source text untranslated where translating would change their meaning."
@@ -173,6 +171,8 @@ pub fn response_instruction(length: ResponseLength, language: &str) -> String {
     }
 }
 
+pub const AUTO_LANGUAGE_RULE: &str =
+    "Reply in the language of the user's latest question unless they ask for another.";
 pub const APP_REQUEST_LANGUAGE_RULE: &str = "This request is a button in the app, not the user's language. Reply in the language of the recent meeting speech.";
 
 /// Complete set of user preferences stored in the `app_settings` table.

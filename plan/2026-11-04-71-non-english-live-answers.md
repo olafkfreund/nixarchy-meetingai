@@ -70,3 +70,8 @@ Check, by Claude: `bash shell/tests/ci.sh`.
   - Counts through `ctl --agent`, so Local-only stays hidden; remote lines are `who = "system"`. Results in `docs/eval/2026-11-question-marks.md`.
   - The sample used a simplified prompt, through `claude -p` and Ollama directly, rather than the daemon, and added local models, because Sonnet did not show the bug.
   - The approved rule's "too little Polish" row applies, so #71 closes with S1.
+- Review fixes (Claude, from the fresh Opus review; Codex found no regressions; agy returned an empty response, not obtained):
+  - **The rule now replaces the Auto sentence,** as the plan says. It had been added beside it, leaving two contradictory instructions.
+  - A new test sends through `chat.send` to a fake provider, checking a marked request, the same words typed, and an attachment fallback.
+  - The eval doc states the 46% is below the approved 80% line, and leaves closing #71 to the owner.
+  - **Not done:** the smoke test calls `overlay.quick()`, not the real button. The Sonnet sample was not rerun with the replacement. Follow-ups can miss the rule when a line is quoted from a closed meeting with no live transcript.

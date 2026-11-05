@@ -12,11 +12,11 @@ From the owner's 36 most recent meetings visible to agents, so **Local-only inte
 | Starting with an English opener | 133 | 61 (46%) |
 | Starting with a Polish opener | 0 | — |
 
-- **46% is a floor, not a rate.** Lines opening with "when" or "how" are not all questions, so the true share on real questions is higher, by an unknown amount.
+- **46% is rough.** Lines opening with "when" or "how" are not all questions, which pulls it down, and a `?` can belong to a later sentence on the line, which pushes it up.
 - English does not depend on the `?`, as `is_question` also takes these openers.
-- **Polish barely appears:** one line has a Polish letter, and none opens with a Polish question word. So Polish detection cannot be judged from this history.
+- **Polish barely appears** in these meetings: one line has a Polish letter, and none opens with a Polish question word. Older meetings were not seen, as the list is capped at 40.
 
-**Under the approved rule:** too little Polish means S1 ships, #71 closes, and question detection gets a new issue only when seen failing.
+**Against the approved rule:** 46% is **below the 80% line**, which points to a separate spec for question detection. Polish has too little data to measure, which points to shipping S1 and opening an issue only when detection is seen failing. Both apply, and the owner decides. A missed question produces no error, so "seen failing" would be noticed only as an answer that never came.
 
 ## Does the app's own request get the right language?
 
@@ -25,15 +25,18 @@ From the owner's 36 most recent meetings visible to agents, so **Local-only inte
 | Model | Polish transcript, no rule | Polish transcript, with the rule | English transcript, either way |
 |---|---|---|---|
 | Claude Sonnet (the owner's usual) | 5 of 5 Polish | 5 of 5 Polish | 0 of 5 Polish |
-| `qwen2.5:3b` (small, local) | 0 of 5 Polish | 1 of 5 Polish | 0 of 5 Polish |
-| `gemma4:e4b` | invalid: empty replies | invalid: empty replies | invalid |
+| `qwen2.5:3b` (small, local) | 0 of 5 Polish | 2 of 5 Polish | not rerun: 0 of 5 Polish with an earlier form of the rule |
+| `gemma4:e4b` (local) | 5 of 5 Polish | 4 of 5 Polish | not rerun |
+
+The local models ran with the rule replacing the Auto sentence, as shipped. The Sonnet row used an earlier form, with the rule added beside that sentence. An earlier `gemma4:e4b` run with the same transcripts returned empty replies, and is discarded.
 
 ## Reading
 
-- **The bug is model-dependent:** it does not appear on Sonnet, and does on the small local model.
-- **The rule helps only a little there,** and does no harm in these runs: English stayed English.
-- **Choosing a language in the meeting (#77) is the stronger fix,** as it says "Write in Polish" outright.
+- **On the owner's usual model the rule changed nothing:** 5 of 5 either way. It has no measured benefit there.
+- **Only the smallest local model showed the problem,** going from 0 to 2 of 5 with the rule. On the other two, 5 to 5 and 5 to 4 are no different. So the benefit is small and unproven, on a handful of transcripts.
+- English stayed English with the rule in the runs that tested it.
+- **A chosen language was not tested.** Choosing one says "Write in Polish" outright, and should be stronger, but that is reasoning, not a result.
 
 ## Limits
 
-Ten made-up transcripts, a simplified prompt, and one person's meetings. This is a rough signal, not a measurement.
+Ten made-up transcripts, a simplified prompt sent directly through `claude -p` and Ollama, not the daemon, a crude language check, and one person's meetings. This is a rough signal, not a measurement.

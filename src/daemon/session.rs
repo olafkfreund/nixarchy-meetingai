@@ -42,8 +42,8 @@ use crate::{
         domain::{Message, Role},
         export::{self, Doc, Export, Item, Line, Shot},
         settings::{
-            APP_REQUEST_LANGUAGE_RULE, AutoResponse, FOLLOW_UP_PROMPT, MeetingMode,
-            RECAP_PROMPT_GENERAL, RECAP_PROMPT_INTERVIEW, RECAP_PROMPT_INTERVIEWER,
+            APP_REQUEST_LANGUAGE_RULE, AUTO_LANGUAGE_RULE, AutoResponse, FOLLOW_UP_PROMPT,
+            MeetingMode, RECAP_PROMPT_GENERAL, RECAP_PROMPT_INTERVIEW, RECAP_PROMPT_INTERVIEWER,
             RECAP_PROMPT_TEAM, ResponseLength, Settings, response_instruction,
         },
         vault::Vault,
@@ -1717,11 +1717,12 @@ impl Daemon {
             length = ResponseLength::Short;
         }
         prompt.push_str("\n\n");
-        prompt.push_str(&response_instruction(length, &language));
-        let auto = language.trim().is_empty() || language.trim() == "Auto";
-        if app_request && auto && !transcript.trim().is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(APP_REQUEST_LANGUAGE_RULE);
+        let instruction = response_instruction(length, &language);
+        // The rule replaces the Auto sentence: side by side they contradict each other.
+        if app_request && !transcript.trim().is_empty() {
+            prompt.push_str(&instruction.replace(AUTO_LANGUAGE_RULE, APP_REQUEST_LANGUAGE_RULE));
+        } else {
+            prompt.push_str(&instruction);
         }
         context::append_prompt(&mut prompt, &g.sources);
         prompt
@@ -7084,7 +7085,11 @@ mod command_tests {
 
         let typed = prompt(&g, transcript, false);
         let app = prompt(&g, transcript, true);
-        assert_eq!(app, format!("{typed}\n\n{APP_REQUEST_LANGUAGE_RULE}"));
+        assert_eq!(
+            typed.replace(AUTO_LANGUAGE_RULE, APP_REQUEST_LANGUAGE_RULE),
+            app
+        );
+        assert!(typed.contains(AUTO_LANGUAGE_RULE) && !app.contains(AUTO_LANGUAGE_RULE));
         assert!(!prompt(&g, "", true).contains(APP_REQUEST_LANGUAGE_RULE));
         assert!(
             !d.system_prompt(&g, false, true, "", transcript, false, false)
@@ -7105,6 +7110,49 @@ mod command_tests {
         g.conversation_response = None;
         g.settings.response_language = "French".into();
         assert!(!prompt(&g, transcript, true).contains(APP_REQUEST_LANGUAGE_RULE));
+    }
+
+    /// The flag through the real send paths: what the provider actually receives.
+    #[tokio::test]
+    async fn app_request_reaches_the_provider_only_from_the_real_paths() {
+        let file = std::env::temp_dir().join(format!("meetingai-71-{}.txt", std::process::id()));
+        std::fs::write(&file, "attached").unwrap();
+        let cases = [
+            (
+                json!({"text":"What should I say?", "app_request":true}),
+                true,
+            ),
+            (json!({"text":"What should I say?"}), false),
+            (
+                json!({"text":"", "attachments":[file.to_str().unwrap()]}),
+                true,
+            ),
+        ];
+        for (args, expected) in cases {
+            let d = daemon();
+            let (url, request) =
+                provider_server(200, r#"{"choices":[{"message":{"content":"Ok"}}]}"#);
+            let id = local_custom(&d, "lm-studio", &url).await;
+            {
+                let mut g = d.inner.lock();
+                g.settings.chat_provider = id;
+                g.transcript.push(Entry {
+                    text: "Czy możemy to omówić?".into(),
+                    who: "them",
+                    speaker: None,
+                    id: None,
+                    t0: 0.0,
+                });
+            }
+            d.handle("chat.send", args.clone(), None).await.unwrap();
+            let request = tokio::task::spawn_blocking(move || request.join().unwrap())
+                .await
+                .unwrap();
+            let body = String::from_utf8_lossy(&request);
+            assert_eq!(body.contains(APP_REQUEST_LANGUAGE_RULE), expected, "{args}");
+            assert_eq!(body.contains(AUTO_LANGUAGE_RULE), !expected, "{args}");
+        }
+        std::fs::remove_file(&file).unwrap();
     }
 
     #[tokio::test]
