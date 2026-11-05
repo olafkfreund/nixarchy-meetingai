@@ -2767,22 +2767,30 @@ impl Daemon {
 
     fn auto_stop_if_disallowed(&self, meeting: &str, generation: u64) -> bool {
         let mut g = self.inner.lock();
-        if g.autoshots
+        g.autoshots
             .as_ref()
             .is_some_and(|a| a.meeting == meeting && a.generation == generation)
             && g.meeting_id.as_deref() == Some(meeting)
+            && self.auto_stop_disallowed(&mut g)
+    }
+
+    /// Stop capture, and say so, if the live meeting no longer allows it.
+    fn auto_stop_disallowed(&self, g: &mut Inner) -> bool {
+        let running = g.autoshots.as_ref().is_some_and(|a| !a.at_limit)
             && g.recording
                 .as_ref()
-                .is_some_and(|r| !r.stop.load(Ordering::Relaxed))
-            && (self.local_now(&g) || (Self::guarded(&g) && !g.consent))
-        {
-            self.autoshots_epoch.fetch_add(1, Ordering::AcqRel);
-            g.autoshots = None;
-            self.emit_state(&g);
-            self.emit("notice", json!({"text": "Automatic screenshots stopped: this meeting no longer allows them."}));
-            return true;
+                .is_some_and(|r| !r.stop.load(Ordering::Relaxed));
+        if !running || !(self.local_now(g) || (Self::guarded(g) && !g.consent)) {
+            return false;
         }
-        false
+        self.autoshots_epoch.fetch_add(1, Ordering::AcqRel);
+        g.autoshots = None;
+        self.emit_state(g);
+        self.emit(
+            "notice",
+            json!({"text": "Automatic screenshots stopped: this meeting no longer allows them."}),
+        );
+        true
     }
 
     fn schedule_auto(self: &Arc<Self>, g: &Inner, delay: Duration) {
@@ -3589,23 +3597,39 @@ impl Daemon {
                 .map_err(|e| e.to_string())?
                 .map(PathBuf::from)
                 .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()));
+            // Another row with the same bytes may own this file; its next export renumbers them.
+            let shared = screenshots::list(c, &shot.meeting_id)
+                .map_err(|e| e.to_string())?
+                .iter()
+                .any(|row| row.id != id && row.data == shot.data);
             let export_error = folder
                 .as_ref()
+                .filter(|_| !shared)
                 .and_then(|folder| export::remove_shot(folder, &shot.data).err())
                 .map(|error| error.to_string());
             screenshots::delete(c, id).map_err(|e| e.to_string())?;
-            Ok::<_, String>((shot.meeting_id, folder.is_some(), export_error))
+            Ok::<_, String>((shot.meeting_id, folder, export_error))
         })
         .await
         .map_err(|e| e.to_string())??;
-        if exported {
-            let auto_export = self.inner.lock().settings.export_meetings;
-            if auto_export {
-                if let Err(error) = self.export_meeting(&meeting).await {
-                    export_error.get_or_insert(error);
-                }
-            } else {
+        if let Some(folder) = exported {
+            let (auto_export, root) = {
+                let g = self.inner.lock();
+                (
+                    g.settings.export_meetings,
+                    PathBuf::from(g.settings.export_folder.trim()),
+                )
+            };
+            if folder.parent() != Some(root.as_path()) {
+                // Exporting now would copy the whole meeting into the new folder.
+                export_error.get_or_insert(format!(
+                    "The notes in {} still mention this screenshot.",
+                    folder.display()
+                ));
+            } else if !auto_export {
                 export_error.get_or_insert("The exported notes still mention this screenshot until you export the meeting again.".into());
+            } else if let Err(error) = self.export_meeting(&meeting).await {
+                export_error.get_or_insert(error);
             }
         }
         {
@@ -4602,6 +4626,7 @@ impl Daemon {
         {
             self.emit("notice", json!({"text": "Speech engine and language changes apply at the next recording start."}));
         }
+        self.auto_stop_disallowed(g); // a mode change can take consent away
         let all = self.settings_reply(g)?;
         self.emit("settings", json!({"settings": all}));
         self.emit_state(g); // a provider or Local-only change flips state.ready
@@ -5162,7 +5187,9 @@ impl Daemon {
         self.local_only.store(local, Ordering::Relaxed);
         if local {
             self.autoshots_epoch.fetch_add(1, Ordering::AcqRel);
-            if g.autoshots.take().is_some() {
+            let was_on = g.autoshots.as_ref().is_some_and(|a| !a.at_limit);
+            g.autoshots = None;
+            if was_on {
                 self.emit_state(g);
                 self.emit("notice", json!({"text": "Automatic screenshots stopped: this meeting no longer allows them."}));
             }
@@ -12014,6 +12041,121 @@ mod autoshots_tests {
             .await
             .unwrap();
         assert!(d.inner.lock().autoshots.is_none());
+    }
+
+    /// A meeting with two screenshots, exported to a folder under the test's `exports`.
+    async fn exported_pair(d: &Arc<Daemon>, first: &[u8], second: &[u8]) -> (String, i64, PathBuf) {
+        let meeting = started(d).await;
+        let (id, _) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            (
+                screenshots::add(c, &meeting, 1.0, "first caption", "image/png", first).unwrap(),
+                screenshots::add(c, &meeting, 2.0, "second caption", "image/png", second).unwrap(),
+            )
+        };
+        let root = d.db_path.parent().unwrap().join("exports");
+        d.inner.lock().settings.export_folder = root.to_string_lossy().into_owned();
+        let folder = d.export_meeting(&meeting).await.unwrap();
+        (meeting, id, folder)
+    }
+
+    #[tokio::test]
+    async fn deleting_after_the_export_folder_changed_copies_nothing_there() {
+        let d = daemon();
+        let (_, id, folder) = exported_pair(&d, b"one", b"two").await;
+        let moved = d.db_path.parent().unwrap().join("moved");
+        {
+            let mut g = d.inner.lock();
+            g.settings.export_meetings = true;
+            g.settings.export_folder = moved.to_string_lossy().into_owned();
+        }
+        let reply = d
+            .handle("screenshots.delete", json!({"id": id}), None)
+            .await
+            .unwrap();
+        assert!(!moved.exists());
+        assert!(
+            reply["export_error"]
+                .as_str()
+                .unwrap()
+                .contains("still mention")
+        );
+        assert!(!folder.join("screenshots/shot-01.png").exists());
+    }
+
+    #[tokio::test]
+    async fn deleting_one_of_two_identical_rows_keeps_their_file() {
+        let d = daemon();
+        let (meeting, id, folder) = exported_pair(&d, b"same", b"same").await;
+        d.inner.lock().settings.export_meetings = false;
+        d.handle("screenshots.delete", json!({"id": id}), None)
+            .await
+            .unwrap();
+        assert!(folder.join("screenshots/shot-02.png").exists());
+        assert_eq!(
+            screenshots::list(d.inner.lock().db.connection(), &meeting)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mode_change_that_loses_consent_stops_at_once_and_stays_off() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        let mut events = d.subscribe();
+        d.handle(
+            "settings.set",
+            json!({"key": "meeting_mode", "value": "interviewer"}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(d.inner.lock().autoshots.is_none());
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| event["event"] == "notice"
+                && event["text"]
+                    == "Automatic screenshots stopped: this meeting no longer allows them.")
+        );
+        d.handle(
+            "settings.set",
+            json!({"key": "meeting_mode", "value": "general"}),
+            None,
+        )
+        .await
+        .unwrap();
+        d.auto_capture_once(&meeting, generation).await;
+        assert!(d.inner.lock().autoshots.is_none());
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_meeting_at_the_limit_gets_no_stopped_notice() {
+        let d = daemon();
+        started(&d).await;
+        d.handle("autoshots.start", json!({}), None).await.unwrap();
+        d.inner.lock().autoshots.as_mut().unwrap().at_limit = true;
+        let mut events = d.subscribe();
+        d.handle(
+            "settings.set",
+            json!({"key": "meeting_mode", "value": "interviewer"}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(d.inner.lock().autoshots.as_ref().unwrap().at_limit);
+        assert!(
+            !std::iter::from_fn(|| events.try_recv().ok()).any(|event| event["event"] == "notice"
+                && event["text"]
+                    == "Automatic screenshots stopped: this meeting no longer allows them.")
+        );
     }
 
     #[tokio::test]

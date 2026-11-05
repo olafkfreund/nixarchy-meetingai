@@ -104,3 +104,10 @@ Full checks, `nix flake check`; reviews by a fresh Opus agent, Codex and agy, re
   - `sync_shots` returns real errors and tries at most 1000 names.
   - A failed store warns once.
   - Each `autoshots.start` records the epoch when the request is read, so a stop that follows it wins. The server reaches it through `auto_start_at`, which refuses agents itself.
+
+- **Third review round (lead):**
+  - `remove_shot` removes only a name listed in `.owned-files` with this row's hash, or, for an export with no manifest, a name the app would have written. A renamed copy stays. This restores "anything else in the folder is left alone".
+  - If another row has the same bytes, the file stays.
+  - A delete re-exports only when the export is under the current export folder. Otherwise it would copy the meeting to the new folder, so it says the old notes still mention the screenshot.
+  - A setting change that takes consent away stops capture at once, and a meeting at the limit gets no false "stopped" notice.
+  - Not fixed: a second `autoshots.start` during area selection starts another `slurp`, and its error can show beside an "on" toggle. A delete during notes writing waits for the lock, showing nothing until it's done.

@@ -439,13 +439,35 @@ pub fn remove_shot(folder: &Path, data: &[u8]) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
+    // Without a manifest the export predates it, and only the app's own names can be ours.
+    let manifest = fs::read_to_string(dir.join(".owned-files")).ok();
+    let listed = format!("{}  ", sha256(data));
     for entry in entries {
         let path = entry?.path();
-        if fs::symlink_metadata(&path)?.file_type().is_file() && fs::read(&path)? == data {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let ours = match &manifest {
+            Some(text) => text
+                .lines()
+                .any(|line| line.strip_prefix(&listed) == Some(name)),
+            None => app_named(name),
+        };
+        if ours && fs::symlink_metadata(&path)?.file_type().is_file() && fs::read(&path)? == data {
             fs::remove_file(path)?;
         }
     }
     Ok(())
+}
+
+fn app_named(name: &str) -> bool {
+    name.strip_prefix("auto-")
+        .or_else(|| name.strip_prefix("shot-"))
+        .and_then(|rest| rest.split_once('.'))
+        .is_some_and(|(number, _)| {
+            number.starts_with(|c: char| c.is_ascii_digit())
+                && number.chars().all(|c| c.is_ascii_digit() || c == '-')
+        })
 }
 
 /// Choose, rename or create the meeting folder under `root`. Returns it; writes no contents.
@@ -1039,29 +1061,37 @@ mod tests {
     }
 
     #[test]
-    fn remove_shot_keeps_changed_files_symlinks_and_directories() {
+    fn remove_shot_takes_only_the_apps_own_file() {
         use std::os::unix::fs::symlink;
         let t = Tmp::new();
         remove_shot(&t.0, b"image").unwrap();
         let dir = t.0.join("screenshots");
         fs::create_dir(&dir).unwrap();
-        fs::write(dir.join("one.png"), b"image").unwrap();
-        fs::write(dir.join("two.png"), b"image").unwrap();
+        let hash = sha256(b"image");
+        let manifest = format!(
+            "{hash}  auto-01.png\n{hash}  changed.png\n{hash}  link.png\n{hash}  nested.png\n"
+        );
+        fs::write(dir.join(".owned-files"), manifest).unwrap();
+        fs::write(dir.join("auto-01.png"), b"image").unwrap();
+        fs::write(dir.join("keep-for-legal.png"), b"image").unwrap();
         fs::write(dir.join("changed.png"), b"changed").unwrap();
         fs::write(t.0.join("target"), b"image").unwrap();
         symlink(t.0.join("target"), dir.join("link.png")).unwrap();
         fs::create_dir(dir.join("nested.png")).unwrap();
         remove_shot(&t.0, b"image").unwrap();
-        assert!(!dir.join("one.png").exists());
-        assert!(!dir.join("two.png").exists());
+        assert!(!dir.join("auto-01.png").exists());
+        assert!(dir.join("keep-for-legal.png").exists());
         assert_eq!(fs::read(dir.join("changed.png")).unwrap(), b"changed");
-        assert!(
-            fs::symlink_metadata(dir.join("link.png"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        assert!(fs::symlink_metadata(dir.join("link.png")).is_ok());
         assert!(dir.join("nested.png").is_dir());
-        assert_eq!(fs::read(t.0.join("target")).unwrap(), b"image");
+        assert!(t.0.join("target").exists());
+        // An export from before the manifest: only the app's names can be ours.
+        fs::remove_file(dir.join(".owned-files")).unwrap();
+        fs::write(dir.join("shot-02.png"), b"image").unwrap();
+        fs::write(dir.join("shot-of-mine.png"), b"image").unwrap();
+        remove_shot(&t.0, b"image").unwrap();
+        assert!(!dir.join("shot-02.png").exists());
+        assert!(dir.join("shot-of-mine.png").exists());
+        assert!(dir.join("keep-for-legal.png").exists());
     }
 }
