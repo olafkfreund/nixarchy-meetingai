@@ -420,14 +420,7 @@ async fn transcribe_in_process(id: &str, wav: Vec<u8>) -> Result<String, SttErro
         || spec.bits_per_sample != 16
         || spec.sample_format != hound::SampleFormat::Int
     {
-        let engine = if id == "parakeet-local" {
-            "Parakeet"
-        } else {
-            "Norwegian Whisper"
-        };
-        return Err(SttError::Encode(format!(
-            "{engine} needs mono 16-bit audio"
-        )));
+        return Err(SttError::Encode("Parakeet needs mono 16-bit audio".into()));
     }
     let samples = reader
         .into_samples::<i16>()
@@ -437,9 +430,6 @@ async fn transcribe_in_process(id: &str, wav: Vec<u8>) -> Result<String, SttErro
     let result = match id {
         "parakeet-local" => {
             crate::speech::stt::parakeet::transcribe(samples, spec.sample_rate as i32).await
-        }
-        "whisper-nb-local" => {
-            crate::speech::stt::whisper_nb::transcribe(samples, spec.sample_rate as i32).await
         }
         _ => return Err(SttError::NotConfigured),
     };
@@ -1784,44 +1774,14 @@ mod tests {
     async fn in_process_dispatch_ignores_prompt_and_keeps_parakeet() {
         let _one_at_a_time = DECODER_TESTS.lock().await;
         crate::speech::stt::parakeet::set_decoder(Box::new(|_, _| "parakeet".into()));
-        crate::speech::stt::whisper_nb::set_decoder(Box::new(|_, _| "norwegian".into()));
         let wav = to_wav(&[0.1; 16_000]).unwrap();
-        for (id, expected) in [
-            ("parakeet-local", "parakeet"),
-            ("whisper-nb-local", "norwegian"),
-        ] {
-            let config = ProviderConfig::new(id, "", "");
-            assert_eq!(
-                transcribe_with_prompt(&config, wav.clone(), None, "secret glossary")
-                    .await
-                    .unwrap(),
-                expected
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn load_modes_keep_or_unload_the_inactive_engine() {
-        use crate::speech::stt::{LoadMode, parakeet, set_load_mode, whisper_nb};
-        let _one_at_a_time = DECODER_TESTS.lock().await;
-        let wav = to_wav(&[0.1; 16_000]).unwrap();
-        let config = ProviderConfig::new("whisper-nb-local", "", "");
-        set_load_mode(LoadMode::Resident);
-        parakeet::set_decoder(Box::new(|_, _| "parakeet".into()));
-        whisper_nb::set_decoder(Box::new(|_, _| "norwegian".into()));
-        transcribe(&config, wav.clone(), None).await.unwrap();
-        assert!(parakeet::loaded() && whisper_nb::loaded());
-        set_load_mode(LoadMode::UnloadInactive);
-        transcribe(&config, wav, None).await.unwrap();
-        assert!(!parakeet::loaded() && whisper_nb::loaded());
-        parakeet::set_decoder(Box::new(|_, _| "parakeet".into()));
-        let parakeet_config = ProviderConfig::new("parakeet-local", "", "");
-        transcribe(&parakeet_config, to_wav(&[0.1; 16_000]).unwrap(), None)
-            .await
-            .unwrap();
-        assert!(parakeet::loaded() && !whisper_nb::loaded());
-        set_load_mode(LoadMode::Resident);
-        whisper_nb::unload();
+        let config = ProviderConfig::new("parakeet-local", "", "");
+        assert_eq!(
+            transcribe_with_prompt(&config, wav, None, "secret glossary")
+                .await
+                .unwrap(),
+            "parakeet"
+        );
     }
 
     #[tokio::test]

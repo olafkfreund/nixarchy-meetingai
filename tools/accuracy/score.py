@@ -2,11 +2,11 @@
 """Score the daemon's live-paced transcription (or dictation) of a WAV against a reference file.
 
 Usage:
-  python3 -I score.py FILE.wav REFERENCE.txt (--engine parakeet|whisper-nb|turbo | --parakeet | --url URL | --fake TEXT)
+  python3 -I score.py FILE.wav REFERENCE.txt (--engine parakeet | --parakeet | --url URL | --fake TEXT)
                       [--model-dir DIR] [--parakeet-dir DIR] [--vad PATH] [--speaker-model PATH]
                       [--load-mode resident|unload] [--dictation] [--replay-log FILE]
                       [--model M] [--language L] [--glossary G]
-  python3 -I score.py SET_DIR (--engine parakeet|whisper-nb|turbo | ...) [--replay-log DIR] [--json-out FILE]
+  python3 -I score.py SET_DIR (--engine parakeet | ...) [--replay-log DIR] [--json-out FILE]
   python3 -I score.py SET_DIR --from-logs LOGDIR [--json-out FILE] [REPLAY FLAGS, used only to tell paced runs]
     (scores saved `LOGDIR/<set>/<call>.jsonl` logs instead of launching a replay)
 

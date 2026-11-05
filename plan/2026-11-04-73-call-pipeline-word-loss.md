@@ -256,3 +256,6 @@ Nothing deployed changes. `git revert` the merge; sets and logs in the cache can
 - Steps 4–6 (Claude):
   - #77 removed NB-Whisper, so only Parakeet on English was measured. The Norwegian pair, C at 8× and A-noVAD were not run. **This narrows the approved plan and awaits the owner's approval.**
   - Results are in `docs/eval/2026-11-call-pipeline.md`. Under the decision rule they point to stopping.
+- Step 7 (Claude; the owner approved stopping, 2026-11-05):
+  - The owner approved the narrowed measurement and stopping. `examples/whisper_spike.rs`'s changes are dropped, as #77 removed that file.
+  - `docs/eval/2026-11-norwegian-stt.md` is corrected, and `score.py`'s usage text no longer names the removed engines.

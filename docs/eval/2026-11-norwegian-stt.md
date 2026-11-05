@@ -1,5 +1,7 @@
 # Norwegian speech-to-text: gate measurement (#70)
 
+> **Removed by #77.** The local Norwegian engine (NB-Whisper) these results measured is gone. The results are kept as the record.
+
 Measured on p620 (128 threads, `NIXARCHY_MEETINGAI_WHISPER_NB_THREADS=16`),
 2026-11-04. All engines run in-process through sherpa-onnx 2.0.1, the
 Whisper engines with the Silero VAD and the phantom filter. The test sets
@@ -39,9 +41,12 @@ Stortinget speech, the same domain.
   needs the least RAM of the Whisper candidates, never invents text, and
   handles every dictation.
   - **The model passes the accuracy bar on its own** (14.4%).
-  - About 10 points are lost **in the call pipeline**: 336 owner words
-    "lost", likely in chunking or the `LineFilter` bleed hold.
-  - That loss would apply to any engine and deserves its own look.
+  - The call runs scored about 10 points worse, but on different sentences
+    and at `--speed 8`, so this is not a measured pipeline loss. The "336 owner
+    words lost" also counts misheard words.
+  - **Corrected by #73:** measured like for like on Parakeet and English, the
+    pipeline costs under 1 point (`docs/eval/2026-11-call-pipeline.md`). The
+    cause of this gap on NB-Whisper was not established, as #77 removed it.
 - **Latency fails on CPU for every Whisper candidate.** NB-Whisper small
   takes 2.4 s per chunk at median on p620, so Norwegian lines would arrive a
   few seconds after the speech. razer is slower.
