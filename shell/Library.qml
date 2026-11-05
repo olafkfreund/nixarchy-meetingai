@@ -385,6 +385,7 @@ Item {
             height: Math.max(0, parent.height - y)
             Column {
                 id: restoreColumn
+                property string geoColumn: "restoreColumn"
                 visible: root.wideNotes || !root.narrowNotes
                 width: root.wideNotes ? parent.width * 0.45 : parent.width
                 height: parent.height
@@ -429,7 +430,6 @@ Item {
                             color: Commons.Color.accent
                         }
                         TextMetrics { id: kindMetrics; font.family: Style.font.family; font.pixelSize: root.theme.caption; text: "Meeting" }
-                        TextMetrics { id: dateMetrics; font.family: Style.font.family; font.pixelSize: root.theme.caption; text: Qt.formatDateTime(new Date(2026, 11, 28, 23, 59), Qt.locale().dateTimeFormat(Locale.ShortFormat)) }
                         Column {
                             id: rowColumn
                             width: parent.width
@@ -459,27 +459,27 @@ Item {
                                     color: Commons.Color.popups.text
                                     font.pixelSize: root.theme.body
                                 }
+                                IconButton { objectName: "restore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Restore"; onClicked: root.client.send("session.restore", { id: rrow.modelData.id }) }
+                                IconButton { objectName: "rowMore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "⋯"; Accessible.name: "More actions"; onClicked: root.menuFor = root.menuFor === rrow.rowId ? "" : rrow.rowId }
+                            }
+                            Row {   // date, then duration and lines
+                                spacing: root.theme.gap
                                 UiText {
                                     objectName: "sessionWhen"
-                                    Layout.preferredWidth: dateMetrics.width
-                                    Layout.minimumWidth: dateMetrics.width
-                                    Layout.alignment: Qt.AlignVCenter
                                     textFormat: Text.PlainText
                                     text: rrow.dateText
                                     color: Commons.Color.popups.text
                                     opacity: root.theme.dim
                                     font.pixelSize: root.theme.caption
                                 }
-                                IconButton { objectName: "restore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "Restore"; onClicked: root.client.send("session.restore", { id: rrow.modelData.id }) }
-                                IconButton { objectName: "rowMore"; ts: root.theme.ts; Layout.alignment: Qt.AlignVCenter; text: "⋯"; Accessible.name: "More actions"; onClicked: root.menuFor = root.menuFor === rrow.rowId ? "" : rrow.rowId }
-                            }
-                            UiText {
-                                visible: rrow.modelData.kind === "meeting" && (Number(rrow.modelData.duration_seconds) > 0 || Number(rrow.modelData.line_count) > 0)
-                                textFormat: Text.PlainText
-                                text: (Number(rrow.modelData.duration_seconds) > 0 ? (Number(rrow.modelData.duration_seconds) < 60 ? "< 1 min" : Math.floor(Number(rrow.modelData.duration_seconds) / 60) + " min") : "") + (Number(rrow.modelData.duration_seconds) > 0 && Number(rrow.modelData.line_count) > 0 ? " · " : "") + (Number(rrow.modelData.line_count) > 0 ? Number(rrow.modelData.line_count) + " lines" : "")
-                                color: Commons.Color.popups.text
-                                opacity: root.theme.dim
-                                font.pixelSize: root.theme.caption
+                                UiText {
+                                    visible: rrow.modelData.kind === "meeting" && (Number(rrow.modelData.duration_seconds) > 0 || Number(rrow.modelData.line_count) > 0)
+                                    textFormat: Text.PlainText
+                                    text: (Number(rrow.modelData.duration_seconds) > 0 ? (Number(rrow.modelData.duration_seconds) < 60 ? "< 1 min" : Math.floor(Number(rrow.modelData.duration_seconds) / 60) + " min") : "") + (Number(rrow.modelData.duration_seconds) > 0 && Number(rrow.modelData.line_count) > 0 ? " · " : "") + (Number(rrow.modelData.line_count) > 0 ? Number(rrow.modelData.line_count) + " lines" : "")
+                                    color: Commons.Color.popups.text
+                                    opacity: root.theme.dim
+                                    font.pixelSize: root.theme.caption
+                                }
                             }
                             Row {
                                 visible: root.menuFor === rrow.rowId
@@ -557,6 +557,7 @@ Item {
             }
             Column {
                 id: notesColumn
+                property string geoColumn: "notesColumn"
                 visible: root.wideNotes || root.narrowNotes
                 x: root.wideNotes ? restoreColumn.width + Style.spacing.md : 0
                 width: parent.width - x
@@ -603,9 +604,15 @@ Item {
                     height: visible ? Math.max(0, parent.height - y) : 0
                     contentWidth: availableWidth
                     clip: true
+                    TextMetrics { id: notesMetrics; font.family: Style.font.family; font.pixelSize: root.theme.body; text: "n" }
                     Column {
-                        width: notesBox.availableWidth
+                        id: notesText
+                        readonly property real textW: Math.min(notesBox.availableWidth - 2 * Style.spacing.md, 80 * notesMetrics.advanceWidth)   // 80 characters a line
+                        x: Style.spacing.md
+                        width: textW
                         spacing: Style.spacing.xs
+                        topPadding: Style.spacing.md
+                        bottomPadding: Style.spacing.md
                         Column {
                             objectName: "notesTitle"
                             width: parent.width
@@ -615,7 +622,7 @@ Item {
                                 text: { var s = root.sessions.find(function(row) { return row.kind === "meeting" && String(row.id) === root.selectedId; }); return s ? String(s.title) : ""; }
                                 wrapMode: Text.Wrap   // a long title grows the header instead of being cut
                                 color: Commons.Color.popups.text
-                                font.pixelSize: root.theme.body
+                                font.pixelSize: root.theme.subtitle
                                 font.bold: true
                             }
                             UiText {
@@ -687,9 +694,9 @@ Item {
                             width: parent.width
                             textFormat: Text.PlainText
                             color: Commons.Color.popups.text
-                            opacity: root.theme.dim
-                            font.pixelSize: root.theme.caption
+                            font.pixelSize: root.theme.body
                             font.bold: true
+                            topPadding: Style.spacing.md
                         }
                         Heading { visible: (root.notesPhase === "ready" || root.notesPhase === "empty") && root.notesChunks.length > 0; text: "Timeline" }
                         Repeater {
@@ -699,7 +706,7 @@ Item {
                                 required property var modelData
                                 required property int index
                                 objectName: "chunk" + index
-                                width: notesBox.availableWidth
+                                width: notesText.width
                                 spacing: Style.spacing.xs
                                 Link { objectName: "chunkLink" + crow.index; meeting: root.selectedId; line: String(crow.modelData.line || ""); at: crow.modelData.t0; text: root.client.fmtTime(crow.modelData.t0) + "\u2013" + root.client.fmtTime(crow.modelData.t1) }
                                 UiText { width: parent.width - x - Style.spacing.xs; x: 0; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(crow.modelData.body || ""); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
@@ -713,7 +720,7 @@ Item {
                                 required property var modelData
                                 required property int index
                                 objectName: "item" + index
-                                width: notesBox.availableWidth
+                                width: notesText.width
                                 spacing: Style.spacing.xs
                                 Link { objectName: "itemLink" + irow.index; visible: irow.modelData.t0 !== null && irow.modelData.t0 !== undefined; meeting: root.selectedId; line: String(irow.modelData.line || ""); at: Number(irow.modelData.t0) || 0 }
                                 UiText { width: parent.width - x - Style.spacing.xs; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: [irow.modelData.text, irow.modelData.owner, irow.modelData.due].filter(function(x) { return x; }).join(" \u00b7 "); color: Commons.Color.popups.text; font.pixelSize: root.theme.body }
@@ -727,7 +734,7 @@ Item {
                                 required property var modelData
                                 required property int index
                                 objectName: "bookmark" + index
-                                width: notesBox.availableWidth
+                                width: notesText.width
                                 spacing: Style.spacing.xs
                                 Link { objectName: "bookmarkLink" + brow.index; meeting: root.selectedId; line: String(brow.modelData.line || ""); at: brow.modelData.t0 }
                                 UiText { width: parent.width - x - Style.spacing.xs; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: (String(brow.modelData.speaker || "") !== "" ? brow.modelData.speaker + ": " : "") + brow.modelData.text; color: Commons.Color.popups.text; font.pixelSize: root.theme.body }

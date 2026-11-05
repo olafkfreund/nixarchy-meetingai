@@ -77,3 +77,8 @@ Full checks, `nix flake check`; reviews by a fresh Opus agent, Codex and agy, re
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+- Steps 2 and 3 (coder; geometry column by Claude):
+  - `check-geometry.py` compared controls across the two columns as if one row. `restoreColumn` and `notesColumn` now set `geoColumn`, and row checks apply only within one column. Aligning the columns' tops would have been a coincidence.
+  - Rows use `advanceWidth` of "n" for the 80-character cap, as `TextMetrics` has no average width.
+  - `harness-library.qml` replays the Escape handler's logic, as a harness cannot send a real key, so a change to the handler in `Overlay.qml` would not be caught.
+  - The Library smoke timeout goes from 20 s to 45 s, for the added phases.
