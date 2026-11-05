@@ -127,3 +127,13 @@ Use a throwaway Python 3.13 venv in the scratchpad. These hashes pin the Linux x
     python3 -I tools/accuracy/libri_mix.py WAVDIR ENROLLDIR OUTDIR
 
 Builds stereo test calls with speaker bleed and double talk from LibriSpeech test-clean, with references and an owner sample each (see the script). `cargo run --release --example echo_gate_file IN.wav OUT.wav` runs a call through the daemon's echo gate. The October results are in `reports/2026-10-voice-filters.md`.
+
+## Short real utterances (#83)
+
+`short_replies.py` builds two sets of real short AMI utterances (at most 3 words and 1.5 s), split by meeting with a fixed seed: `tune` and `held` (use `held` once), at most 400 each. Output goes to `~/.cache/meetingai-eval/en83/short/{tune,held}/` as `set.wav` (16 kHz stereo, utterances on channel 1, 3 s of silence after each) and `set.json` (each utterance's window and reference). It reads the Hugging Face AMI parquet files in `~/.cache/meetingai-eval/ami-hf-ihm/raw/`:
+
+    nix-shell -p 'python3.withPackages(p:[p.pyarrow])' --run 'python3 -I tools/accuracy/short_replies.py'
+
+Score an `accuracy_replay` run (`--no-filter` or `--filter-lines` output) without a reference file. Each channel-1 line goes to the one utterance it overlaps most; an utterance is kept if that line has a word. With `--check`, the utterances the first run kept and the second lost are listed:
+
+    python3 -I tools/accuracy/short_replies.py --count BASE.jsonl --set short/tune/set.json [--check CHECKED.jsonl]
