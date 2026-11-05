@@ -70,3 +70,6 @@ Full checks, `nix flake check`; reviews by a fresh Opus agent, Codex and agy, re
 ## Deviations
 
 (Recorded here during implementation, in the same commit as the code.)
+- Step 1 (Codex; a clippy fix and read-through by Claude):
+  - `hyprctl locked` was checked on p620: it prints `false`, and the code treats anything else, or a failure, as locked.
+  - Automatic captures are stored only through `auto_capture_once`; `screenshots::list` is read by export and the new command only.

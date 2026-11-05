@@ -24,6 +24,7 @@ pub struct Line {
 }
 
 pub struct Shot {
+    pub automatic: bool,
     pub taken_at: f64,
     pub question: String,
     pub mime: String,
@@ -60,9 +61,13 @@ fn clock(secs: f64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }
 
-fn shot_name(i: usize, mime: &str) -> String {
+fn shot_name(i: usize, mime: &str, automatic: bool) -> String {
     let ext = if mime.contains("jpeg") { "jpg" } else { "png" };
-    format!("shot-{:02}.{ext}", i + 1)
+    format!(
+        "{}-{:02}.{ext}",
+        if automatic { "auto" } else { "shot" },
+        i + 1
+    )
 }
 
 /// Safe, unique names: a repeated name gets " (2)", " (3)" … before its extension.
@@ -196,13 +201,16 @@ pub fn render(e: &Export) -> String {
     }
     if !e.shots.is_empty() {
         o += "\n## Screenshots\n\n";
-        for (i, s) in e.shots.iter().enumerate() {
+        let (mut manual, mut auto) = (0, 0);
+        for s in &e.shots {
+            let i = if s.automatic { &mut auto } else { &mut manual };
             let t = clock(s.taken_at);
             o += &format!(
                 "![{t}](screenshots/{})\n\n{t} {}\n\n",
-                shot_name(i, &s.mime),
+                shot_name(*i, &s.mime, s.automatic),
                 s.question.trim()
             );
+            *i += 1;
         }
     }
     if !e.docs.is_empty() {
@@ -351,17 +359,56 @@ pub fn fill_tracked(folder: &Path, e: &Export, stored: Option<&str>) -> io::Resu
     ] {
         rm(&folder.join(n))?; // leftovers of a crash
     }
+    let (mut manual, mut auto) = (0, 0);
     let shots: Vec<_> = e
         .shots
         .iter()
-        .enumerate()
-        .map(|(i, s)| (shot_name(i, &s.mime), s.data.as_slice()))
+        .map(|s| {
+            let i = if s.automatic { &mut auto } else { &mut manual };
+            let name = shot_name(*i, &s.mime, s.automatic);
+            *i += 1;
+            (name, s.data.as_slice())
+        })
         .collect();
     let docs: Vec<_> = doc_names(&e.docs)
         .into_iter()
         .zip(e.docs.iter().map(|d| d.data.as_slice()))
         .collect();
+    let shot_dir = folder.join("screenshots");
+    let owned = shot_dir.join(".auto-files");
+    let previous = fs::read_to_string(&owned).unwrap_or_default();
+    for (name, _) in &shots {
+        if name.starts_with("auto-")
+            && fs::symlink_metadata(shot_dir.join(name)).is_ok()
+            && !previous.lines().any(|old| old == name)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "an unowned screenshot has this name",
+            ));
+        }
+    }
     write_dir(folder, "screenshots", &shots)?;
+    for name in previous.lines() {
+        if name.starts_with("auto-")
+            && !name.contains('/')
+            && !name.contains('\\')
+            && !shots.iter().any(|(current, _)| current == name)
+        {
+            rm(&shot_dir.join(name))?;
+        }
+    }
+    let current = shots
+        .iter()
+        .filter(|(n, _)| n.starts_with("auto-"))
+        .map(|(n, _)| n.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !current.is_empty() || !previous.is_empty() {
+        rm(&shot_dir.join(".auto-files.tmp"))?;
+        put(&shot_dir, Path::new(".auto-files.tmp"), current.as_bytes())?;
+        fs::rename(shot_dir.join(".auto-files.tmp"), owned)?;
+    }
     write_dir(folder, "documents", &docs)?;
     // The first name that is free or still holds exactly what we last wrote; never one the user changed.
     let ours = |name: &String| match fs::symlink_metadata(folder.join(name)) {
@@ -462,6 +509,7 @@ mod tests {
                 text: "Hello".into(),
             }],
             shots: vec![Shot {
+                automatic: false,
                 taken_at: 61.0,
                 question: "What is this?".into(),
                 mime: "image/png".into(),
@@ -580,6 +628,7 @@ mod tests {
         // a non-empty directory in the way of shot-02.png makes the write fail
         let mut bad = fixture("Safe");
         bad.shots.push(Shot {
+            automatic: false,
             taken_at: 1.0,
             question: String::new(),
             mime: "image/png".into(),
@@ -747,6 +796,46 @@ mod tests {
         assert_eq!(
             fs::read(f.join("screenshots/shot-01.png")).unwrap(),
             [1, 2, 3]
+        );
+    }
+    #[test]
+    fn automatic_files_are_named_and_only_owned_stale_files_are_removed() {
+        let t = Tmp::new();
+        let mut e = fixture("Auto");
+        e.shots.push(Shot {
+            automatic: true,
+            taken_at: 70.0,
+            question: "[auto]".into(),
+            mime: "image/png".into(),
+            data: vec![4, 5],
+        });
+        let f = write(&t.0, None, &e).unwrap();
+        assert!(f.join("screenshots/auto-01.png").is_file());
+        assert!(
+            fs::read_to_string(f.join("notes.md"))
+                .unwrap()
+                .contains("screenshots/auto-01.png")
+        );
+        fs::write(f.join("screenshots/auto-99.png"), "user").unwrap();
+        e.shots.pop();
+        fill_tracked(&f, &e, None).unwrap();
+        assert!(!f.join("screenshots/auto-01.png").exists());
+        assert_eq!(
+            fs::read(f.join("screenshots/auto-99.png")).unwrap(),
+            b"user"
+        );
+        fs::write(f.join("screenshots/auto-01.png"), "also user").unwrap();
+        e.shots.push(Shot {
+            automatic: true,
+            taken_at: 70.0,
+            question: "[auto]".into(),
+            mime: "image/png".into(),
+            data: vec![9],
+        });
+        assert!(fill_tracked(&f, &e, None).is_err());
+        assert_eq!(
+            fs::read(f.join("screenshots/auto-01.png")).unwrap(),
+            b"also user"
         );
     }
 }

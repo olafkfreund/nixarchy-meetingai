@@ -48,6 +48,10 @@ pub fn list(connection: &Connection, meeting_id: &str) -> Result<Vec<Screenshot>
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+pub fn delete(connection: &Connection, id: i64) -> Result<bool> {
+    Ok(connection.execute("DELETE FROM meeting_screenshots WHERE id = ?1", [id])? != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +77,9 @@ mod tests {
         assert_eq!(shots[0].question, "later?");
         assert_eq!(shots[1].data, [2, 3]);
         assert_eq!(shots[1].mime, "image/png");
+        assert!(delete(connection, later).unwrap());
+        assert!(!delete(connection, later).unwrap());
+        assert_eq!(list(connection, &meeting).unwrap().len(), 1);
         meetings::delete(connection, &meeting).unwrap();
         assert!(list(connection, &meeting).unwrap().is_empty());
         assert_eq!(list(connection, &other).unwrap().len(), 1);
