@@ -418,9 +418,26 @@ Item {
                         onPick: function(n) { root.pickSuggestion(n); }
                     }
 
+                    Column {   // meeting language: sets speech, answers and notes for this meeting
+                        id: langBox
+                        anchors.bottom: composer.top
+                        anchors.bottomMargin: Style.spacing.xs
+                        width: parent.width
+                        Select {
+                            objectName: "meetingLanguage"
+                            accessibleName: "Meeting language"
+                            theme: metrics; width: Math.min(parent.width, 220)
+                            value: String(backend.state.meeting_language || "")
+                            options: (backend.state.languages || []).map(function(l) { return { value: l.code === "en" ? "" : l.code, label: l.name }; })
+                            triggerLabel: String(backend.state.meeting_language_label || "English")
+                            onChanged: function(v) { backend.send("meeting.language.set", { language: v }); }
+                        }
+                        UiText { objectName: "meetingLanguageHint"; visible: text !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(backend.state.language_hint || ""); color: Commons.Color.popups.text; opacity: metrics.dim; font.pixelSize: metrics.caption }
+                    }
+
                     Column {   // ASK NEXT: up to 3 rows, each with a [1]/[2]/[3] badge
                         id: sugg
-                        anchors.bottom: composer.top
+                        anchors.bottom: langBox.top
                         anchors.bottomMargin: Style.spacing.md
                         width: parent.width
                         UiText {
@@ -488,7 +505,7 @@ Item {
                     }
 
                     // NOW: who asked, the question, status, and the answer larger than the transcript.
-                    readonly property real below: composer.height + sugg.height + Style.spacing.md * 2
+                    readonly property real below: composer.height + langBox.height + Style.spacing.xs + sugg.height + Style.spacing.md * 2
                     readonly property real avail: height - below - transcript.barHeight
                     NowCard {
                         id: nowPanel
@@ -586,19 +603,6 @@ Item {
                             onAccepted: { if (text.trim() !== "") backend.setSetting("chat_model", text.trim()); text = ""; }
                         }
                     }
-                    Cell {
-                        theme: metrics; width: sflow.cellW; label: backend.lockedLabel("speech_language", "Speech language")
-                        Select {
-                            objectName: "speechLanguage"
-                            accessibleName: "Speech language"
-                            theme: metrics; anchors.fill: parent
-                            enabled: !backend.isLocked("speech_language")
-                            value: String(backend.settings.speech_language || "")
-                            options: [{ value: "", label: "Auto" }, { value: "en", label: "English" }, { value: "nb", label: "Norwegian" }]
-                            triggerLabel: "Auto"
-                            onChanged: function(v) { backend.setSetting("speech_language", v); }
-                        }
-                    }
                     Cell {   // automatic answers while a call is recorded
                         theme: metrics; width: sflow.cellW; label: backend.lockedLabel("live_provider", "Live answers provider")
                         Select {
@@ -663,7 +667,6 @@ Item {
                         }
                     }
                 }
-                UiText { objectName: "speechLanguageHint"; visible: ["", "nb"].indexOf(String(backend.settings.speech_language || "")) >= 0; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(backend.settings.speech_language || "") === "nb" ? "Norwegian uses NB-Whisper (needs whisperNb.enable). For a call in English or another language, choose Auto." : "Auto uses Parakeet, which covers 25 European languages but not Norwegian. Pick Norwegian to use NB-Whisper (needs whisperNb.enable)."; color: Commons.Color.popups.text; opacity: metrics.dim; font.pixelSize: metrics.caption }
                 UiText { visible: root.modelsError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Error: could not list chat models. " + root.modelsError + root.fix(root.chatProvider); color: Commons.Color.popups.text; font.pixelSize: metrics.caption }
                 UiText { visible: root.liveModelsError !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: "Error: could not list live answer models. " + root.liveModelsError + root.fix(root.liveProvider); color: Commons.Color.popups.text; font.pixelSize: metrics.caption }
                 Column {

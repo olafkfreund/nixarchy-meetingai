@@ -634,12 +634,7 @@ ShellRoot {
                 root.out.settingsFolder = ff ? String(ff.text) : "";
                 root.out.hasChangeBtn = !!cb;
                 if (sw) sw.toggled();
-                var sl = root.find(card, "speechLanguage");
-                root.out.hintAuto = !!root.find(card, "speechLanguageHint");
-                if (sl) sl.changed("nb");
             } else if (root.phase === 9) {
-                var hint = root.find(card, "speechLanguageHint");
-                root.out.hintNb = hint ? String(hint.text).indexOf("choose Auto") >= 0 : false;
                 var sw2 = root.find(card, "exportMeetingsToggle");
                 root.out.settingsToggleAfter = sw2 ? sw2.checked : null;
                 overlay.exportFolderHook("/tmp/vault");
@@ -699,6 +694,15 @@ ShellRoot {
             } else if (root.phase === 19) {
                 var st2 = root.find(card, "exportStatus");
                 root.out.exportStatusErr = st2 ? String(st2.text) : "";
+                overlay.library = false;   // the meeting view: the picker needs visible items
+            } else if (root.phase === 21) {
+                var ml = root.find(card, "meetingLanguage");
+                root.out.langPicker = !!ml;
+                root.out.langNoNb = ml ? JSON.stringify(ml.options).toLowerCase().indexOf("norw") < 0 && ml.options.length > 1 : false;
+                if (ml) ml.changed("pl");
+            } else if (root.phase === 23) {
+                var mh = root.find(card, "meetingLanguageHint");
+                root.out.langHint = mh ? String(mh.text).indexOf("Parakeet detects") >= 0 : false;
                 console.log("EXPORT_FLOW " + JSON.stringify(root.out));
                 Qt.quit();
             }
@@ -712,7 +716,7 @@ mkdir -m 700 "$XDG_RUNTIME_DIR"
 python3 "$here/tests/fake-daemon.py" "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$work/export-flow.log" --export-ask &
 fake=$!
 sleep 0.5
-timeout 16 quickshell -p "$work/cfg" > "$work/export-flow.out" 2> "$work/export-flow.err" || true
+timeout 20 quickshell -p "$work/cfg" > "$work/export-flow.out" 2> "$work/export-flow.err" || true
 kill "$fake" 2>/dev/null || true
 if grep -aE "$qml_bad" "$work/export-flow.err" "$work/export-flow.out"; then echo "FAIL (export-flow): QML errors above" >&2; exit 1; fi
 python3 - "$work/export-flow.out" "$work/export-flow.log" <<'PY'
@@ -740,9 +744,9 @@ if not all(d.get(k) for k in ("hasGrip", "grew", "maxOk", "minOk", "dragOk", "ke
     bad.append(f"notes pane resize check failed: {d}")
 if "Could not export the meeting" not in d.get("exportStatusErr", ""):
     bad.append(f"Export now error check failed: {d}")
-if d.get("hintAuto") is not True or d.get("hintNb") is not True:
-    bad.append(f"speech language hint must show for Auto, and say to choose Auto when Norwegian is set: {d}")
-for need in ("settings.set export_folder", "settings.set export_meetings", "settings.set speech_language", "meetings.export"):
+if not d.get("langPicker") or d.get("langNoNb") is not True or d.get("langHint") is not True:
+    bad.append(f"meeting view must show the language picker without Norwegian, and the hint: {d}")
+for need in ("settings.set export_folder", "settings.set export_meetings", "meeting.language.set pl", "meetings.export"):
     if need not in log:
         bad.append(f"daemon log missing {need!r}: {log}")
 if bad:

@@ -183,3 +183,6 @@ The spec places the control "near the mode picker". Reviews showed the header ca
   - Claude tightened a test's wait, and reworded the hint for engines whose support cannot be checked.
 - Step 4 (coder):
   - `tools/accuracy/README.md` also renames `replay-turbo.jsonl` to `replay-parakeet.jsonl` in its examples.
+- Step 3 (coder; a first coder stalled with no edits and was replaced):
+  - The picker is a `Column` holding the `Select` and the hint, above `Composer`; `convo.below` accounts for its height.
+  - `smoke.sh`'s export-flow timeout goes from 16 s to 20 s, for the new phases.
