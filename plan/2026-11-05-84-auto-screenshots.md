@@ -110,4 +110,4 @@ Full checks, `nix flake check`; reviews by a fresh Opus agent, Codex and agy, re
   - If another row has the same bytes, the file stays.
   - A delete re-exports only when the export is under the current export folder. Otherwise it would copy the meeting to the new folder, so it says the old notes still mention the screenshot.
   - A setting change that takes consent away stops capture at once, and a meeting at the limit gets no false "stopped" notice.
-  - Not fixed: a second `autoshots.start` during area selection starts another `slurp`, and its error can show beside an "on" toggle. A delete during notes writing waits for the lock, showing nothing until it's done.
+  - Not fixed: a second `autoshots.start` during area selection starts another `slurp`, and its error can show beside an "on" toggle. A delete during notes writing waits for the lock, showing nothing until it's done. A change to `export_folder` in the moment between a delete's check and its export would still export to the new folder.

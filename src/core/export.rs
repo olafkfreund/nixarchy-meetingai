@@ -440,7 +440,11 @@ pub fn remove_shot(folder: &Path, data: &[u8]) -> io::Result<()> {
         Err(error) => return Err(error),
     };
     // Without a manifest the export predates it, and only the app's own names can be ours.
-    let manifest = fs::read_to_string(dir.join(".owned-files")).ok();
+    let manifest = match fs::read_to_string(dir.join(".owned-files")) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
     let listed = format!("{}  ", sha256(data));
     for entry in entries {
         let path = entry?.path();
