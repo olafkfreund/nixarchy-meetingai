@@ -22,7 +22,9 @@ This plan covers **Part 1 only: free, no accounts, no provider contacted with au
 - Shortlist for Part 2: Deepgram Nova-3, Groq Whisper turbo, the self-run server, with OpenAI only if Norwegian is confirmed on a current model, and Soniox only if the others miss, since it may need code. Part 2's limit is $5, with a tool that refuses non-NPSC audio.
 - The recommendation weighs word errors first, then monthly cost at 20 hours, then where audio goes, and names the best option that keeps audio local. Whether work calls may leave the machine stays the owner's call.
 
-**New since the spec:** NB-Whisper's model card lists NPSC among its training data. So its 23.9% and the self-run server's result may flatter it on this set. The document says so, and it adds this to the comparison's limits.
+**New since the spec, for this approval:**
+- NB-Whisper's model card lists NPSC among its training data. So its 23.9% and the self-run server's result may flatter it on this set. The document says so, and it adds this to the comparison's limits.
+- The 20-call run of the self-run server moves from Part 2 into Part 1. It's free and stays on this machine, and it shows whether the option is real before anyone signs up for anything.
 
 ## Traps
 
@@ -41,17 +43,18 @@ This plan covers **Part 1 only: free, no accounts, no provider contacted with au
 Claude reads the primary sources and hands the coder notes with URLs and dates. The coder writes the document from those notes, and adds nothing else.
 
 1. **Deepgram:** terms and privacy pages: default for pay-as-you-go in the improvement program, retention, whether opting out changes the price, and EU endpoint pricing.
-2. **Groq:** rate limits page and data page, and the app's real chunk rate, from saved `chunk` records in the NPSC replay runs under `~/.cache/meetingai-eval/no/results/`: chunks a minute and their length. Compare with the 20 requests a minute and 7,200 audio seconds an hour, and work out the real cost with the 10 s minimum.
+2. **Groq:** rate limits page and data page, and the app's real chunk rate. Saved runs don't record chunks, so get it locally with `accuracy_replay FILE --fake x --no-filter --speed 8` on the 20 NPSC calls, which writes `chunk` records and contacts nothing: chunks a minute and their length. Compare with the 20 requests a minute and 7,200 audio seconds an hour, and work out the real cost with the 10 s minimum.
 3. **OpenAI:** current status of `whisper-1`, `gpt-4o-transcribe` and `gpt-transcribe`, Norwegian, prices if readable, and data terms.
 4. **Soniox:** terms, and its API's shape, enough to say whether it needs code.
 5. The rest of the table from the spec, dated, with what wasn't confirmed marked as such.
 
 ### 2. Self-run server (Claude)
 
-1. `nix shell nixpkgs#whisper-cpp`: confirm it has a server, and that it serves `/v1/audio/transcriptions`. If not, try `speaches`, kept in its own directory, and record what it took.
-2. A ggml `nb-whisper-small` from `NbAiLab` on Hugging Face, the size #70 used, if one is published. If it isn't, record the conversion needed, and don't run it without asking: this is the point to stop if it's more than a download.
-3. Run it on `127.0.0.1`, and one NPSC call through `accuracy_replay --url` at 1x, using the model name and language the app would send.
-4. If that works, the 20 calls once, scored with `tools/accuracy/score.py`, at natural load, recording word errors, delay, and CPU use while it runs. It's a free number, but its setup differs from #70's (a different export and no Silero), so report it beside 23.9%, without replacing it.
+1. `nix shell nixpkgs#whisper-cpp`, and start its `whisper-server` with `--inference-path /v1/audio/transcriptions` on `127.0.0.1` (`tools/accuracy/README.md`). Only if that fails, try `speaches`, kept in its own directory, and record what it took.
+2. A ggml `nb-whisper-small` from `NbAiLab` on Hugging Face, the size #70 used, if one is published. Also record whether a CTranslate2 one is, and don't test it unless ggml fails. If either needs a conversion, record what it needs, and don't run it without asking: this is the point to stop if it's more than a download.
+3. **Can the app reach it?** From the code, find the speech setting that points at a local OpenAI-compatible server (`openai-compatible-stt`, or a `custom-*` record), and what it sends. Write the exact setting in the document. Confirm with a run of one call through `accuracy_replay --url` with the model name and language the app would send. Don't change the owner's settings: the document says the real app with this setting is still for the owner to try.
+4. **Can it keep up?** One NPSC call at 1x, with two channels, recording delay and CPU use, at natural load, with 16 threads as #70 used.
+5. If that works, the 20 calls in `~/.cache/meetingai-eval/no/sets-npsc20/` once, at `--speed 8`, with the same references, filter and `tools/accuracy/score.py` settings as #70. If `--speed 8` overruns the server, use the fastest speed that doesn't, and say so. Its setup differs from #70's (a different export, no Silero), so report it beside 23.9% with those differences stated, without replacing it.
 
 ### 3. Finish Part 1 (Claude)
 
