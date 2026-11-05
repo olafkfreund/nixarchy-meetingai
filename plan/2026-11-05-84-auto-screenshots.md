@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 84
 spec: spec/2026-11-05-84-auto-screenshots.md
 coders:
