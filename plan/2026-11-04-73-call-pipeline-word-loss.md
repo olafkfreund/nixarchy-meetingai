@@ -253,3 +253,6 @@ Nothing deployed changes. `git revert` the merge; sets and logs in the cache can
     cannot share code without a new module, and the plan keeps `src/` untouched.
   - Run B's chunk records carry `closed`, the audio time `BatchChunks::push` returned the chunk.
   - The clock stepping has unit checks; a real run first happens in step 4.
+- Steps 4–6 (Claude):
+  - #77 removed NB-Whisper, so only Parakeet on English was measured. The Norwegian pair, C at 8× and A-noVAD were not run. **This narrows the approved plan and awaits the owner's approval.**
+  - Results are in `docs/eval/2026-11-call-pipeline.md`. Under the decision rule they point to stopping.
