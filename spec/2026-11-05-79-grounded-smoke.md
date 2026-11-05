@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 79
 intent: intent/2026-11-05-79-grounded-smoke.md
 ---
