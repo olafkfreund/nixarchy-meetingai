@@ -163,6 +163,12 @@ Item {
     // The question box lives in the PanelWindow, which tests cannot walk to: they drive it through the overlay (tests/harness-lines.qml).
     function addChip(chip) { composer.addChip(chip); }
     function send() { composer.send(); }
+    function escapePressed() {
+        if (root.previewText !== "") root.previewText = "";
+        else if (root.library) { if (!lib.back()) root.library = false; }
+        else if (root.lastOpen) root.lastOpen = false;
+        else root.close();
+    }
     function geometryRoot() { return card; }   // tests/geometry.js walks this item
     readonly property real ctl: metrics.ctl
 
@@ -278,8 +284,8 @@ Item {
             color: root.solid
             borderSpec: Border.localOrSurfaceSpec("popups", "border", Commons.Color.popups.border, Commons.Color.popups.border, Style.normalBorderWidth)
             focus: true
-            // Escape closes one thing: a dialog or list (they take it themselves), the preview, Settings, the Last time drawer, then the overlay
-            Keys.onEscapePressed: { if (root.previewText !== "") root.previewText = ""; else if (root.library) root.library = false; else if (root.lastOpen) root.lastOpen = false; else root.close(); }
+            // Escape closes one thing: a dialog or list (they take it themselves), the preview, the Library's narrow notes view, the Library, the Last time drawer, then the overlay
+            Keys.onEscapePressed: root.escapePressed()
             Keys.onPressed: function(e) {
                 if (e.modifiers & Qt.ControlModifier) {   // Ctrl+= / Ctrl+- / Ctrl+0: text size
                     if (e.key === Qt.Key_Equal || e.key === Qt.Key_Plus) { root.bumpScale(10); e.accepted = true; }

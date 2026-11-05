@@ -17,9 +17,12 @@ function isText(it) { return it.truncated !== undefined && it.textFormat !== und
 
 function walk(it, card, out, depth, vp, pop) {
     if (!it || !it.visible || depth > 60) return;
+    // An item with geoColumn is an independent column: rows are only compared within one.
+    var col = it.geoColumn !== undefined ? it.geoColumn : vp.col;
+    if (col !== vp.col) vp = { x0: vp.x0, y0: vp.y0, x1: vp.x1, y1: vp.y1, col: col };
     if (it.clip === true) {   // a clipping parent (Flickable, ListView): what is outside it is not on screen
         var q = it.mapToItem(card, 0, 0);
-        vp = { x0: Math.max(vp.x0, q.x), y0: Math.max(vp.y0, q.y), x1: Math.min(vp.x1, q.x + it.width), y1: Math.min(vp.y1, q.y + it.height) };
+        vp = { x0: Math.max(vp.x0, q.x), y0: Math.max(vp.y0, q.y), x1: Math.min(vp.x1, q.x + it.width), y1: Math.min(vp.y1, q.y + it.height), col: col };
     }
     var kids = it.children || [];
     var ctl = isControl(it), txt = !ctl && isText(it);
@@ -28,6 +31,7 @@ function walk(it, card, out, depth, vp, pop) {
     if (p && it.width > 0 && it.height > 0 && p.x >= vp.x0 - 1 && p.y >= vp.y0 - 1 && p.x + it.width <= vp.x1 + 1 && p.y + it.height <= vp.y1 + 1) {
         var r = { n: String(it.objectName || ""), t: String(it).split("(")[0], x: p.x, y: p.y, w: it.width, h: it.height };
         if (pop) r.pop = 1;
+        if (col) r.col = col;
         if (ctl) {
             r.c = 1;
             r.k = isToggle(it) ? "toggle" : isSlider(it) ? "slider" : "";   // not button-tall: aligned by their centre

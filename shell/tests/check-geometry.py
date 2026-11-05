@@ -34,6 +34,8 @@ def check(snap):
         for b in rows:
             if a is b or a["y"] > b["y"] or (a["y"] == b["y"] and a["x"] >= b["x"]):
                 continue
+            if a.get("col") != b.get("col"):
+                continue   # independent columns do not share rows
             if a["x"] + a["w"] > b["x"] + 0.5 and b["x"] + b["w"] > a["x"] + 0.5:
                 continue   # stacked or overlapping horizontally: not the same row
             ov = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
