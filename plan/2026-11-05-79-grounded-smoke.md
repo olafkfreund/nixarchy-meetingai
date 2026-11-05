@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 79
 spec: spec/2026-11-05-79-grounded-smoke.md
 coders:
