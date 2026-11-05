@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 81
 spec: spec/2026-11-05-81-notes-side-panel.md
 coders:
