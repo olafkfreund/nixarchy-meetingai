@@ -188,7 +188,7 @@ PRESETS = [
     {"preset": "openai", "name": "OpenAI", "kind": "chat", "endpoint": "https://api.openai.com/v1/chat/completions", "model": "gpt-4.1-mini", "needs_key": True, "local": False},
     {"preset": "anthropic", "name": "Anthropic", "kind": "chat", "endpoint": "https://api.anthropic.com/v1/messages", "model": "claude-sonnet-5-5", "needs_key": True, "local": False},
     {"preset": "lm-studio", "name": "LM Studio", "kind": "chat", "endpoint": "http://127.0.0.1:1234/v1/chat/completions", "model": "local-model", "needs_key": False, "local": True},
-    {"preset": "openai-speech", "name": "OpenAI", "kind": "speech", "endpoint": "https://api.openai.com/v1/audio/transcriptions", "model": "whisper-1", "needs_key": True, "local": False},
+    {"preset": "openai-speech", "name": "OpenAI", "kind": "speech", "endpoint": "https://api.openai.com/v1/audio/transcriptions", "model": "gpt-transcribe", "needs_key": True, "local": False},
     {"preset": "groq-speech", "name": "Groq", "kind": "speech", "endpoint": "https://api.groq.com/openai/v1/audio/transcriptions", "model": "whisper-large-v3-turbo", "needs_key": True, "local": False},
 ]
 CUSTOM_PROVIDERS = []
