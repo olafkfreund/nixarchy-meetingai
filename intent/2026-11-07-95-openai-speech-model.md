@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 95
 author: olafkfreund
 ---
@@ -38,3 +38,5 @@ Anyone using the OpenAI speech preset. `src/ai/catalog/presets.rs`, possibly whe
 1. **Change saved `whisper-1` records and settings automatically, or only tell the user?** My recommendation, for the spec to work out: only for OpenAI's own endpoint, change the model and say so once; leave any other server alone, since `whisper-1` is also a name self-run servers accept.
 2. **Test with a real key?** I'd leave it untested and note that in the PR, unless you want to supply a key for one call on public test audio.
 3. **Do it now or nearer the date?** I'd do it now: it's small, and February is close.
+
+Decided at approval (2026-11-07): change `whisper-1` automatically only where it points at OpenAI's own endpoint, and say so once; no live test with a key, and the PR says so; do it now.
