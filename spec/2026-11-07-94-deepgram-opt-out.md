@@ -13,8 +13,9 @@ Send `mip_opt_out=true` on every request the built-in `deepgram-stt` engine make
 **Code, `src/speech/stt/transcription.rs`:**
 - `deepgram_batch_url` (:365): drop the `eu` variable (:372) and append `mip_opt_out=true` unconditionally (:383–385).
 - `live_url` (:814): append `&mip_opt_out=true` unconditionally (:824–826). The `eu` parameter stays, for the host only.
-- `connect` (:890) keeps passing `eu`; no change.
-- Custom records (`transcribe_custom`, :169; custom `stream_url`, :865) are untouched, as the intent decided.
+- `connect_config_with` (:855; its `eu` test is at :890) keeps passing `eu`; no change.
+- Custom records (`transcribe_custom`, called at :170 and defined at :277; custom `stream_url`, :865) are untouched, as the intent decided. Its raw-wav branch (:288) adds only `model` and `language`.
+- One `mip_opt_out` value only: a built-in engine's `base_url` is set by the app, either the provider's endpoint or the EU host (`src/daemon/session.rs:1570`), never by the user. So no stored URL can already carry `mip_opt_out=false`, and no de-duplication is needed.
 
 **Tests, same file:**
 - `live_url_checks_model_and_region` (:1545): add an assert that the US URL, `live_url("", None, false)`, contains `mip_opt_out=true`. The EU assert stays.
@@ -45,4 +46,4 @@ Send `mip_opt_out=true` on every request the built-in `deepgram-stt` engine make
 - The two tests above fail before the change and pass after it, checked by removing the change.
 - The step check: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check` in `nix develop`.
 - `nix flake check`, which includes the README options check.
-- `rg 'only that region opts out|EU requests opt out' README.md nix/` finds nothing.
+- `rg -n 'model improvement|opts? out' README.md nix/` lists every mention, and each one reads correctly for both regions, including the provider table at `README.md:184`. `nix flake check` covers only the generated options block (`flake.nix:365`), so the table is checked this way.
