@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 96
 author: olafkfreund
 ---
@@ -45,3 +45,5 @@ Anyone using MCP agents. `src/daemon/session.rs` (`reset_session`, `session_rest
    - **c.** Only hide suggestions.
 
    I'd pick **a**. Blocking every route means hiding the owner's own answers from agents they chose to connect, and a partial block (**c**) looks safe without being safe, since `current_answer` still returns the answer. The images themselves stay out of reach, which #89 already ensures.
+
+Decided at approval (2026-11-07): part 1 keeps the waiting screenshot and attached images across an agent's reset; part 2 is option **a**, accept and document it in the README.
