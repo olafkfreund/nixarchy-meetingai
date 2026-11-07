@@ -23,8 +23,9 @@ Branch `fix/95-openai-speech-model`, worktree `../meetingai-95`. Line numbers ar
 - A record that fails to save is logged with `tracing::warn!` and left as it was; the daemon still starts.
 - Not tested live: no OpenAI key or call. The PR says so.
 - Accepted risks:
+  - `gpt-transcribe` may treat `prompt` or `language` differently or reject one: unverified, since no call is made;
   - setting `whisper-1` back by hand on OpenAI gets moved again at the next start;
-  - an enforced Nix `speechModel = "whisper-1"` wins over the migration at every start, since Nix settings apply after `Daemon::new` (`src/daemon/mod.rs:41`).
+  - Nix settings apply after `Daemon::new` (`src/daemon/mod.rs:41`). A plain Nix default of `whisper-1` can come back once, on its first start, until the next start moves it. An enforced one wins at every start, and the notice repeats.
 
 ## Steps
 
@@ -33,19 +34,22 @@ Branch `fix/95-openai-speech-model`, worktree `../meetingai-95`. Line numbers ar
    - `shell/tests/fake-daemon.py:191`: the same change to the OpenAI speech preset's `"model"`.
    - In `drafts_are_distinct_and_ready_for_keys` (`presets.rs:160`), assert that the preset named `OpenAI` with `speech: true` drafts `model == "gpt-transcribe"`.
 
-   → verify: the step check below, and `bash shell/tests/ci.sh`.
+   → verify: the step check below, and `nix develop .#shell -c bash shell/tests/ci.sh`.
 
 2. **The migration, `src/daemon/session.rs`.**
    - New `fn migrate_openai_speech(db: &Database, vault: &Vault) -> Option<String>`, next to `migrate_gemini` (:950).
-   - For each `credentials::list(vault, Kind::Speech)` where `model == "whisper-1"` and `reqwest::Url::parse(&base_url)` has host `api.openai.com`: set `model = "gpt-transcribe"`, then `credentials::save`. On a save error, `tracing::warn!` and skip.
-   - Settings, read with `crate::db::settings::get` as `migrate_whisper` does: if `speech_provider` is `openai-compatible-stt`, `speech_model` is `whisper-1`, and `speech_base_url`'s host is `api.openai.com`, set `speech_model` to `gpt-transcribe`.
-   - Return the notice if either changed, else `None`.
+   - For each `credentials::list(vault, Kind::Speech)` where `model == "whisper-1"` and `reqwest::Url::parse(&base_url)` has host `api.openai.com`: set `model = "gpt-transcribe"`, then `credentials::save`.
+     - A save error is logged with `tracing::warn!`, and that record is skipped.
+     - A `list` error is also logged, and the settings part below still runs.
+   - Settings, read with `crate::db::settings::get` as `migrate_whisper` does: if `speech_provider` is `openai-compatible-stt`, `speech_model` is `whisper-1`, and `speech_base_url`'s host is `api.openai.com`, set `speech_model` to `gpt-transcribe`. A failed write is logged, and counts as no change.
+   - Return the notice only if a record save or the settings write succeeded, else `None`.
    - Add it to the array in `Daemon::new` (:1183–1187), after `migrate_norwegian_engine`.
    - Tests, beside `saved_whisper_local_migrates_once_with_a_notice` (:9562), with `Database::open_in_memory()` and a `Vault::open` in a fresh temp directory (as at :8653):
      - an OpenAI-host record with `whisper-1` becomes `gpt-transcribe`, and the notice is returned;
      - a loopback `whisper-1` record, and an OpenAI record with another model, are unchanged;
-     - the settings case is changed; with a loopback `speech_base_url`, it's unchanged;
+     - the settings case is changed; each of these leaves it unchanged: a loopback `speech_base_url`, another `speech_model` on OpenAI's host, and another `speech_provider` (`deepgram-stt`) with the OpenAI URL and `whisper-1`;
      - a second run returns `None`.
+   - **Test fixtures:** after step 1, `Preset::draft()` gives `gpt-transcribe` and an empty key. `credentials::save` calls `validate()` first (`credentials.rs:209`), and the preset test sets a key before validating. So each fixture sets `model = "whisper-1"` (or the other model) and `api_key = "sample-secret"`, as the preset test does (`presets.rs:175`), before saving.
 
    → verify: the step check. Then remove the host test, and separately the model test: a test must fail each time.
    Traps:
@@ -64,7 +68,7 @@ Branch `fix/95-openai-speech-model`, worktree `../meetingai-95`. Line numbers ar
 - Step 1's assert fails with the preset unchanged.
 - Step 2's removals each fail a test.
 - `rg whisper-1 src shell` finds only the migration and its tests.
-- The step check, `bash shell/tests/ci.sh` and `nix flake check` pass.
+- The step check, `nix develop .#shell -c bash shell/tests/ci.sh` and `nix flake check` pass.
 
 ## Rollback
 
