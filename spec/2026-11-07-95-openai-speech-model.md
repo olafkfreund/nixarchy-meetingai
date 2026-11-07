@@ -19,7 +19,7 @@ intent: intent/2026-11-07-95-openai-speech-model.md
 
 **3. Docs.** The README names no OpenAI speech model today (`rg whisper-1 README.md` finds nothing). Add one line under the speech engines (`README.md:185`), saying a `whisper-1` setting pointing at OpenAI is moved to `gpt-transcribe` at start, and why.
 
-**Not tested live**, as decided: no OpenAI key or call. The request shape stays the one the preset already sends: multipart with `file`, `model`, an optional `prompt` and `language`, and `/text` read from JSON (`Preset::draft`'s `response_path`, :116). OpenAI's guide documents `/v1/audio/transcriptions` for `gpt-transcribe`. The PR says so.
+**Not tested live**, as decided: no OpenAI key or call. The request shape doesn't change. The preset sets the endpoint, the multipart wire and `/text` as the response path (`Preset::draft`, :116), and `transcribe_custom` (`src/speech/stt/transcription.rs:277`) builds and sends the request. OpenAI's guide documents `/v1/audio/transcriptions` for `gpt-transcribe`. The PR says so.
 
 ## Alternatives rejected
 
@@ -30,8 +30,12 @@ intent: intent/2026-11-07-95-openai-speech-model.md
 
 ## Risks
 
-- **`gpt-transcribe` might treat `prompt` or `language` differently, or reject one of them.** That's unverified: no call is made. If it fails, the user gets the error and can set the model back by hand. They won't be migrated again, since `whisper-1` would no longer appear on OpenAI after that date anyway. It's in the PR.
-- **Nix-declared settings:** Nix settings are applied after `Daemon::new` (`src/daemon/mod.rs:41`), so after this migration. A plain Nix default is written once per value, so it doesn't come back. With `enforce`, `whisper-1` is written again at every start, and the notice would repeat while the setting stays `whisper-1`. That's left as is: it's an unlikely setup, and the README line tells Nix users to change `settings.speechModel`.
+- **`gpt-transcribe` might treat `prompt` or `language` differently, or reject one of them.** That's unverified: no call is made. If it fails, the user gets the error. Setting `whisper-1` back by hand doesn't stick: the next start moves it again. Until February, they can use a self-run server or another OpenAI model. It's in the PR, and it's the price of fixing this before the shutdown, as decided.
+- **Nix-declared settings:** Nix settings are applied after `Daemon::new` (`src/daemon/mod.rs:41`), so after this migration.
+  - A plain Nix default is written once per value. On the first start after it's declared, it can put `whisper-1` back until the next start migrates it again.
+  - With `enforce`, `whisper-1` comes back at every start, the migration never holds, and the notice repeats.
+
+  That's left as is: the user chose to force the value. It's an unlikely setup, and the README line tells Nix users to change `settings.speechModel` themselves.
 - **Hosts:** p620 has no OpenAI speech record or setting (it uses `parakeet-local`), so nothing changes there.
 
 ## Verification
@@ -41,6 +45,7 @@ intent: intent/2026-11-07-95-openai-speech-model.md
   - a loopback record with `whisper-1`, and an OpenAI record with another model, are unchanged;
   - the settings case is changed, and a self-run base URL is left alone;
   - a second run returns `None`.
-  - The preset test (`drafts_are_distinct_and_ready_for_keys`, `presets.rs:160`) still passes.
+  - The preset test (`drafts_are_distinct_and_ready_for_keys`, `presets.rs:160`) still passes, and a new assert checks that the OpenAI speech preset's draft has `model == "gpt-transcribe"`. That assert fails if the preset isn't changed.
+  - `rg whisper-1 src shell` then finds only the migration and its tests.
 - Each test fails with the migration's matching removed.
 - The step check (`cargo test`, `clippy -D warnings`, `fmt --check` in `nix develop`), `bash shell/tests/ci.sh`, and `nix flake check`.
