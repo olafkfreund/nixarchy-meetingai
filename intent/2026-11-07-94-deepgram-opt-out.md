@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 94
 author: olafkfreund
 ---
@@ -40,3 +40,5 @@ Anyone using `deepgram-stt`. `src/speech/stt/transcription.rs`, its tests, and `
 ## Open questions
 
 - **Price.** Deepgram's page doesn't say whether opting out changes the price. The pricing page lists one price, with no mention of the program. I propose going ahead without asking Deepgram, and stating that in the PR.
+
+Decided at approval (2026-11-07): go ahead without asking Deepgram about price; the PR says so.
