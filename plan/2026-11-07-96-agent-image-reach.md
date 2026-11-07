@@ -17,6 +17,8 @@ Branch `fix/96-agent-image-reach`, worktree `../meetingai-96`. Line numbers are 
 ## Decisions carried from the approved spec
 
 - When an agent (`origin == Some("mcp")`, the `agent` flag `dispatch` already has) starts a new session or reopens a meeting or chat, the owner's waiting screenshot (`pending_capture`) is kept. Everything else is cleared as today.
+- **Beyond the spec, found in plan review:** a fourth agent path, `record.start` with `"new": true`, resets the session too (`src/daemon/session.rs:3309`). Agents may call it when the owner turned on "Let AI agents start recording" (`:5888`). It keeps the screenshot too.
+- The shell is told the true `capture` state after any agent restore, successful or not.
 - Attached images (`g.sources`) are not kept. They're files the owner picked and can attach again, and the shell doesn't show them, so kept ones would go unseen into the new session.
 - The owner's own new session and restore keep clearing everything.
 - The shell must still show the screenshot after the reset.
@@ -37,21 +39,37 @@ Branch `fix/96-agent-image-reach`, worktree `../meetingai-96`. Line numbers are 
          }
      }
      ```
-   - Use it instead of `reset_session` at exactly three places:
+   - Use it instead of `reset_session` at exactly four places:
      - `session_restore`'s chat branch (:4352);
      - its meeting branch (:4360);
-     - the `session.new` handler (:6084).
+     - the `session.new` handler (:6084);
+     - `record_start`'s `if new` branch (:3309).
 
-     The other callers (:3309, :4573, :5465) stay as they are.
-   - In the chat branch, add `self.emit_state(g);` after `self.restore_chat(g, id)?;`, before `return Ok(json!({"kind": "chat"}))` (:4355). The shell sets `capture` false on `session.reset` (`shell/Client.qml:329`), and only a `state` event shows it again. The meeting branch (:4421) and `session.new` (:6089) already emit state.
+     The other callers (:4573, :5465) stay as they are.
+   - `record_start` (:3132) doesn't receive `agent` today. Add an `agent: bool` parameter, pass it from the `"record.start"` dispatch arm (:6148), and pass `false` at every other caller (`rg -n 'record_start\(' src`, tests included).
+   - **The shell must see the kept screenshot.** It sets `capture` false on `session.reset` (`shell/Client.qml:329`), and only a following `state` event shows it again. `session_restore` can fail after emitting `session.reset`, and its chat branch returns without a state event (:4355). So in the `"session.restore"` dispatch arm (:6144), emit state after the call whether it succeeded or not:
+     ```rust
+     "session.restore" => {
+         let r = self.session_restore(&parse::<protocol::IdArg>(args)?.id, agent);
+         if agent {
+             self.emit_state(&self.inner.lock());
+         }
+         r
+     }
+     ```
+     `session_restore` drops its guard before returning, so this lock doesn't deadlock. `session.new` (:6089) and `record_start` already emit state after their reset.
    - Test `agent_reset_keeps_waiting_screenshot`, beside `agent_leaves_waiting_image_and_its_meeting_row_for_owner` (:7418). For each of `session.new`, `session.restore` of a saved chat and `session.restore` of a saved meeting:
      - set `pending_capture` to a `CapturedImage`, call with `Some("mcp")`, then assert `state_value(...)["capture"] == true`;
      - for the chat restore, subscribe first and assert a `state` event with `capture: true` comes after `session.reset`.
      - The owner's `session.new` (origin `None`) clears it.
 
-     Build the saved chat and meeting the way the existing restore tests do (around :7828 and :7887).
+     Build the saved chat and meeting the way `ordinary_sessions_work_from_mcp_and_shell_and_shell_keeps_local_only` does (:10122): `conversations::create` and `meetings::start`.
+   - Also `record.start` with `{"consent": true, "new": true}` and `Some("mcp")`, with `mcp_allow_record` on, keeps `capture` true. Stop the recording afterwards. Find how existing tests turn on `mcp_allow_record` and avoid real capture (`rg -n mcp_allow_record src/daemon/session.rs`).
 
-   → verify: the step check. Then remove the take-and-restore from the helper: a test must fail. Then remove the new `emit_state`: the chat event check must fail.
+   → verify: the step check. Then each removal must fail a test:
+   - the take-and-restore in the helper;
+   - the dispatch arm's `emit_state` (the chat event check);
+   - passing `agent` into `record_start` (pass `false` instead).
    Traps:
    - Never hold `self.inner.lock()` across an `.await`.
    - `session_restore` refuses an agent for a local-only interview before resetting (:4343); keep that order.
@@ -69,7 +87,7 @@ Branch `fix/96-agent-image-reach`, worktree `../meetingai-96`. Line numbers are 
 
 - Both removals in step 1 fail a test.
 - The existing `agent_leaves_waiting_image_and_its_meeting_row_for_owner` passes.
-- The step check, `bash shell/tests/ci.sh`, `bash shell/tests/smoke.sh` and `nix flake check` pass.
+- The step check, `nix develop .#shell -c bash shell/tests/ci.sh`, `nix develop .#shell -c bash shell/tests/smoke.sh` and `nix flake check` pass.
 
 ## Rollback
 
