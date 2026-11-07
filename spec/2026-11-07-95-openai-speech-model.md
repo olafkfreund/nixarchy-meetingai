@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 95
 intent: intent/2026-11-07-95-openai-speech-model.md
 ---
