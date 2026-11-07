@@ -14,7 +14,7 @@ let
       nativeBuildInputs = [ bzip2 ];
       src = fetchurl {
         url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${name}.tar.bz2";
-        hash = "sha256-V5PQ/Tl8V3jSzyEmmU1Y6dVrG+fATRPHoVuxtOr7Fr8=";
+        hash = "sha256-FJXpG1nX/FPdypHzQxdY7Jn4+iU/2w4ehRvg9ysUsPk=";
       };
       passthru = {
         encoder = "${self}/encoder.int8.onnx";

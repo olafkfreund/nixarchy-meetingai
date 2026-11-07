@@ -230,7 +230,7 @@ in
         ]
       );
       default = null;
-      description = "Deepgram API region; EU requests opt out of model improvement.";
+      description = "Deepgram API region: `eu` processes audio in the EU. Both regions opt out of model improvement.";
     };
 
     ollama.url = lib.mkOption {
