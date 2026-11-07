@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 94
 spec: spec/2026-11-07-94-deepgram-opt-out.md
 coders:
