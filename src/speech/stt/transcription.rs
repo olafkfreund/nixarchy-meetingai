@@ -364,6 +364,9 @@ fn to_wav(samples: &[f32]) -> Result<Vec<u8>, SttError> {
 use crate::speech::stt::filter::LineFilter;
 /// A stored endpoint may carry its own `mip_opt_out`; the app always sends one, `true`.
 fn drop_opt_out(url: &mut reqwest::Url) {
+    if !url.query_pairs().any(|(k, _)| k == "mip_opt_out") {
+        return;
+    }
     let kept: Vec<(String, String)> = url
         .query_pairs()
         .filter(|(k, _)| k != "mip_opt_out")
@@ -1615,6 +1618,12 @@ mod tests {
             reqwest::Url::parse("https://api.deepgram.com/v1/listen?mip_opt_out=false").unwrap();
         drop_opt_out(&mut url);
         assert_eq!(url.query(), None);
+
+        // A query without the key is left exactly as stored.
+        let mut url =
+            reqwest::Url::parse("https://api.deepgram.com/v1/listen?flag&a%20b=1").unwrap();
+        drop_opt_out(&mut url);
+        assert_eq!(url.query(), Some("flag&a%20b=1"));
     }
 
     #[tokio::test]
@@ -1628,7 +1637,14 @@ mod tests {
                 tcp,
                 |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
                     assert_eq!(request.uri().path(), "/listen");
-                    assert!(request.uri().query().unwrap_or("").contains("model=nova-3"));
+                    let query = request.uri().query().unwrap_or("");
+                    assert!(query.contains("model=nova-3"));
+                    assert!(query.starts_with("tenant=two&"), "{query}");
+                    let opt_out: Vec<_> = query
+                        .split('&')
+                        .filter(|pair| pair.starts_with("mip_opt_out="))
+                        .collect();
+                    assert_eq!(opt_out, ["mip_opt_out=true"], "{query}");
                     Ok(response)
                 },
             )
@@ -1637,7 +1653,7 @@ mod tests {
             drop(ws);
         });
         let mut config = ProviderConfig::new("deepgram-stt", "sample-key", "");
-        config.base_url = format!("http://{address}/listen?tenant=two");
+        config.base_url = format!("http://{address}/listen?tenant=two&mip_opt_out=false");
         let live = LiveTranscriber::connect_config_with(&config, SttHints::default())
             .await
             .unwrap();

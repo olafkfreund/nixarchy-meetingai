@@ -54,7 +54,9 @@ Branch `fix/94-deepgram-opt-out`, worktree `../meetingai-94`. Line numbers are f
      - in `live_url`, put back its `if eu`;
      - remove the `drop_opt_out` call in `deepgram_batch_url`.
 
-     The live stored-URL call isn't reachable without a socket; the helper's own test covers it.
+     - remove the `drop_opt_out` call in the live stored-URL branch.
+
+     **Deviation, from the final Opus review:** the live stored-URL call is tested after all. `configured_stream_keeps_the_supplied_host` already opens a local socket on that branch; its stored URL now carries `mip_opt_out=false`, and the handshake asserts one `mip_opt_out=true` and that `tenant=two` is kept. `drop_opt_out` also returns early when no `mip_opt_out` is present, so other stored queries keep their exact encoding.
    Traps:
    - Before cargo, run `find target/debug target/release -maxdepth 2 -name 'lib*.so*' ! -perm -u+w -delete`.
    - Codex's sandbox can't run nix or cargo: the lead runs the check.
