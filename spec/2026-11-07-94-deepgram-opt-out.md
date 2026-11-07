@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 94
 intent: intent/2026-11-07-94-deepgram-opt-out.md
 ---
