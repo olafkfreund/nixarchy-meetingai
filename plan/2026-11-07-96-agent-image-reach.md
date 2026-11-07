@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 96
 spec: spec/2026-11-07-96-agent-image-reach.md
 coders:
