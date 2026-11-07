@@ -362,6 +362,19 @@ fn to_wav(samples: &[f32]) -> Result<Vec<u8>, SttError> {
     encode_wav(samples).map_err(|e| SttError::Encode(e.to_string()))
 }
 use crate::speech::stt::filter::LineFilter;
+/// A stored endpoint may carry its own `mip_opt_out`; the app always sends one, `true`.
+fn drop_opt_out(url: &mut reqwest::Url) {
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(k, _)| k != "mip_opt_out")
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    url.set_query(None);
+    if !kept.is_empty() {
+        url.query_pairs_mut().extend_pairs(kept);
+    }
+}
+
 fn deepgram_batch_url(
     endpoint: &str,
     model: &str,
@@ -369,7 +382,7 @@ fn deepgram_batch_url(
 ) -> Result<reqwest::Url, SttError> {
     let mut url = reqwest::Url::parse(endpoint)
         .map_err(|_| SttError::Protocol("invalid speech endpoint".into()))?;
-    let eu = url.host_str() == Some("api.eu.deepgram.com");
+    drop_opt_out(&mut url);
     {
         let mut query = url.query_pairs_mut();
         query
@@ -380,9 +393,7 @@ fn deepgram_batch_url(
         if let Some(language) = language.filter(|v| !v.is_empty()) {
             query.append_pair("language", language);
         }
-        if eu {
-            query.append_pair("mip_opt_out", "true");
-        }
+        query.append_pair("mip_opt_out", "true");
     }
     Ok(url)
 }
@@ -821,9 +832,7 @@ fn live_url(model: &str, language: Option<&str>, eu: bool) -> Result<String, Stt
         "wss://{host}/v1/listen?model={}&encoding=linear16&sample_rate=16000&channels=2&multichannel=true&diarize_model=latest&interim_results=true&smart_format=true&punctuate=true&vad_events=true&endpointing=300&utterance_end_ms=1000",
         validated_model(model)?
     );
-    if eu {
-        url.push_str("&mip_opt_out=true");
-    }
+    url.push_str("&mip_opt_out=true");
     if let Some(language) = language.filter(|l| !l.is_empty() && *l != "en") {
         let mut encoded_url = reqwest::Url::parse("https://speech.invalid/").unwrap();
         encoded_url
@@ -894,6 +903,7 @@ impl LiveTranscriber {
         } else {
             let mut target = reqwest::Url::parse(&config.base_url)
                 .map_err(|_| SttError::Protocol("Speech service URL is invalid".into()))?;
+            drop_opt_out(&mut target);
             let scheme = match target.scheme() {
                 "https" => "wss",
                 "http" => "ws",
@@ -1551,6 +1561,7 @@ mod tests {
         assert!(
             plain.starts_with("wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16")
         );
+        assert!(plain.contains("&mip_opt_out=true"));
         assert!(!plain.contains("language="));
         assert!(
             !live_url("", Some("en"), false)
@@ -1567,6 +1578,43 @@ mod tests {
                 .unwrap()
                 .contains("&mip_opt_out=true&language=fr-CA")
         );
+    }
+
+    #[test]
+    fn batch_url_opts_out_on_both_regions() {
+        for endpoint in [
+            "https://api.deepgram.com/v1/listen",
+            "https://api.eu.deepgram.com/v1/listen",
+            "https://api.deepgram.com/v1/listen?mip_opt_out=false&tag=x",
+        ] {
+            let url = deepgram_batch_url(endpoint, "nova-3", None).unwrap();
+            let opt_out: Vec<_> = url
+                .query_pairs()
+                .filter(|(key, _)| key == "mip_opt_out")
+                .map(|(_, value)| value.into_owned())
+                .collect();
+            assert_eq!(opt_out, vec!["true".to_owned()]);
+            if endpoint.contains("tag=x") {
+                assert!(
+                    url.query_pairs()
+                        .any(|(key, value)| key == "tag" && value == "x")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drop_opt_out_keeps_other_pairs() {
+        let mut url =
+            reqwest::Url::parse("https://api.deepgram.com/v1/listen?a=1&mip_opt_out=false&b=2")
+                .unwrap();
+        drop_opt_out(&mut url);
+        assert_eq!(url.query(), Some("a=1&b=2"));
+
+        let mut url =
+            reqwest::Url::parse("https://api.deepgram.com/v1/listen?mip_opt_out=false").unwrap();
+        drop_opt_out(&mut url);
+        assert_eq!(url.query(), None);
     }
 
     #[tokio::test]
