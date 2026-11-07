@@ -18,26 +18,50 @@ Branch `fix/94-deepgram-opt-out`, worktree `../meetingai-94`. Line numbers are f
 
 - Every request the built-in `deepgram-stt` engine sends, batch or live, US or EU, carries `mip_opt_out=true`. The region still chooses the host, and nothing else.
 - Custom speech records (`transcribe_custom`, custom `stream_url`) are untouched. The README says they send only what their owner configured.
-- One `mip_opt_out` value only: a built-in engine's `base_url` is set by the app, never by the user (`src/daemon/session.rs:1570`), so no de-duplication.
+- **One `mip_opt_out` value only. This corrects the spec, found in plan review:** the spec said a built-in engine's `base_url` is never set by the user, but a saved `deepgram-stt` credential carries its own `base_url` (`src/core/security/credentials.rs:28`, loaded at `src/daemon/session.rs:1554`). Its query is kept: batch parses it (`transcription.rs:216`), live joins it (`:906`). So any existing `mip_opt_out` is removed before `true` is added.
 - No Deepgram call, no sign-up. The PR says opting out wasn't checked against Deepgram's pricing, which lists one price.
 - The default region stays `us`. No new setting.
 
 ## Steps
 
 1. **Code and tests, `src/speech/stt/transcription.rs`.**
-   - `deepgram_batch_url` (:365): remove `let eu = …` (:372) and the `if eu` around `append_pair("mip_opt_out", "true")` (:383–385), so it's always appended.
+   - New helper, near `deepgram_batch_url`:
+     ```rust
+     /// A stored endpoint may carry its own `mip_opt_out`; the app always sends one, `true`.
+     fn drop_opt_out(url: &mut reqwest::Url) {
+         let kept: Vec<(String, String)> = url
+             .query_pairs()
+             .filter(|(k, _)| k != "mip_opt_out")
+             .map(|(k, v)| (k.into_owned(), v.into_owned()))
+             .collect();
+         url.set_query(None);
+         if !kept.is_empty() {
+             url.query_pairs_mut().extend_pairs(kept);
+         }
+     }
+     ```
+   - `deepgram_batch_url` (:365): call `drop_opt_out(&mut url)` after the parse. Remove `let eu = …` (:372) and the `if eu` around `append_pair("mip_opt_out", "true")` (:383–385), so it's always appended.
    - `live_url` (:814): append `&mip_opt_out=true` always (:824–826). Keep the `eu` parameter for the host.
+   - `connect_config_with`, the stored-URL branch (:895): call `drop_opt_out(&mut target)` right after `target` is parsed, before its query is joined (:906).
    - `live_url_checks_model_and_region` (:1545): assert `live_url("", None, false)` contains `mip_opt_out=true`. Keep the EU asserts.
-   - New `#[test] fn batch_url_opts_out_on_both_regions`: `deepgram_batch_url("https://api.deepgram.com/v1/listen", "nova-3", None)` and the same with `https://api.eu.deepgram.com/v1/listen` both have the query pair `mip_opt_out=true`. Check it with `url.query_pairs()`, not a substring.
+   - New `#[test] fn batch_url_opts_out_on_both_regions`:
+     - `deepgram_batch_url("https://api.deepgram.com/v1/listen", "nova-3", None)` and the same with `https://api.eu.deepgram.com/v1/listen` both have the query pair `mip_opt_out=true`. Check with `url.query_pairs()`, not a substring.
+     - With `https://api.deepgram.com/v1/listen?mip_opt_out=false&tag=x`, the only `mip_opt_out` pair is `true`, and `tag=x` is kept.
+   - New `#[test] fn drop_opt_out_keeps_other_pairs`: `…?a=1&mip_opt_out=false&b=2` becomes `…?a=1&b=2`, and `…?mip_opt_out=false` has no query left.
 
-   → verify: `nix develop -c bash -c 'cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check'`. Then put back each `if eu` by itself: a test must fail each time.
+   → verify: `nix develop -c bash -c 'cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check'`. Then each removal must fail a test:
+     - in `deepgram_batch_url`, put back `let eu = url.host_str() == Some("api.eu.deepgram.com");` and its `if eu`, together;
+     - in `live_url`, put back its `if eu`;
+     - remove the `drop_opt_out` call in `deepgram_batch_url`.
+
+     The live stored-URL call isn't reachable without a socket; the helper's own test covers it.
    Traps:
    - Before cargo, run `find target/debug target/release -maxdepth 2 -name 'lib*.so*' ! -perm -u+w -delete`.
    - Codex's sandbox can't run nix or cargo: the lead runs the check.
 
 2. **Docs.**
    - `nix/hm-module.nix:233`: the `deepgram.region` description becomes "Deepgram API region: `eu` processes audio in the EU. Both regions opt out of model improvement."
-   - `README.md:509`: the same text in the generated options block, escaped like its neighbours. The flake check compares that block with the module.
+   - `README.md:509`: the generated options block. Run `nix build .#docs` and paste the result between `<!-- nix-options:begin -->` and `<!-- nix-options:end -->` (`flake.nix:374`). The flake check compares the two.
    - `README.md:184`, provider table: `deepgram.region = "eu"` "uses `api.eu.deepgram.com`". Every request opts out of model improvement.
    - `README.md:202`: replace "only that region opts out of model improvement" with: set `deepgram.region = "eu"` to keep processing in the EU. Every request opts out of model improvement.
    - After the provider table, one sentence: a custom speech record sends only what you configured, so add `mip_opt_out=true` to its URL to opt out with Deepgram.
@@ -50,7 +74,7 @@ Branch `fix/94-deepgram-opt-out`, worktree `../meetingai-94`. Line numbers are f
 
 - Step 1's check, and the two removals that each fail a test.
 - `nix flake check` passes.
-- `bash shell/tests/ci.sh` passes (no shell change; it guards against surprises).
+- `nix develop .#shell -c bash shell/tests/ci.sh` passes (no shell change; it guards against surprises).
 
 ## Rollback
 
