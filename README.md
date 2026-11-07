@@ -181,8 +181,11 @@ only as long as you need it, and make hiring decisions yourself.
 | Provider | Where it runs | Notes |
 | --- | --- | --- |
 | Parakeet (default, `parakeet-local`) | in the daemon, on the CPU | NVIDIA Parakeet TDT 0.6B v3; about 1.1 GB RAM while loaded; 25 European languages, detected automatically |
-| Deepgram (`deepgram-stt`) | cloud | a key in Providers, or an agenix file: `deepgram.keyFile = config.age.secrets.api-deepgram.path;` (a key in Providers wins); `deepgram.region = "eu"` uses `api.eu.deepgram.com` and opts out of model improvement |
+| Deepgram (`deepgram-stt`) | cloud | a key in Providers, or an agenix file: `deepgram.keyFile = config.age.secrets.api-deepgram.path;` (a key in Providers wins); `deepgram.region = "eu"` uses `api.eu.deepgram.com`; every request opts out of model improvement |
 | OpenAI-compatible (`openai-compatible-stt`) | your server | any server with `/v1/audio/transcriptions` (a whisper server, vLLM, Groq, OpenAI): `settings.speechProvider = "openai-compatible-stt"`, `settings.speechBaseUrl` and `settings.speechModel` (required). whisper.cpp's `whisper-server` works when started with `--inference-path /v1/audio/transcriptions` |
+
+A custom speech record sends only what you configured, so add
+`mip_opt_out=true` to its URL to opt out with Deepgram.
 
 OpenAI shuts `whisper-1` down on February 26, 2027. A `whisper-1` model that
 points at OpenAI (a saved OpenAI speech provider, or `settings.speechModel`
@@ -205,7 +208,8 @@ accept a language. Choosing English clears the choice.
 Parakeet has no Norwegian: a Norwegian call on Parakeet comes out wrong, as
 Swedish-looking text, and Norwegian is not offered while Parakeet is the engine.
 Deepgram can do Norwegian, but it sends the audio to the cloud. If you use it,
-set `deepgram.region = "eu"`: only that region opts out of model improvement.
+set `deepgram.region = "eu"` to keep processing in the EU. Every request opts
+out of model improvement.
 
 The local Norwegian engine (NB-Whisper) was removed. A saved `whisper-nb-local`
 choice becomes `parakeet-local` once, with a notice, and a saved Norwegian speech
@@ -512,7 +516,7 @@ null
 
 
 
-Deepgram API region; EU requests opt out of model improvement\.
+Deepgram API region: ` eu ` processes audio in the EU\. Both regions opt out of model improvement\.
 
 
 
