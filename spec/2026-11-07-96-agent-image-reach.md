@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 96
 intent: intent/2026-11-07-96-agent-image-reach.md
 ---
@@ -55,3 +55,5 @@ As decided (option **a**). In the README's "Ask your agents" section, after "An 
   - The test fails with the helper's take-and-restore removed, and the chat branch's event check fails with the new `emit_state` removed.
 - The existing `agent_leaves_waiting_image_and_its_meeting_row_for_owner` (:7418) still passes.
 - The step check (`cargo test`, `clippy -D warnings`, `fmt --check` in `nix develop`), `bash shell/tests/ci.sh`, and `nix flake check`.
+
+Approved 2026-11-07 with the narrower Part 1: only the waiting screenshot is kept, not attached images.
