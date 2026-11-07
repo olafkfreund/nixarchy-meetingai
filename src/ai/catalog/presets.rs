@@ -87,7 +87,7 @@ pub const PRESETS: &[Preset] = &[
         name: "OpenAI",
         speech: true,
         endpoint: "https://api.openai.com/v1/audio/transcriptions",
-        model: "whisper-1",
+        model: "gpt-transcribe",
         wire: "multipart-wav",
         images: false,
     },
@@ -172,5 +172,10 @@ mod tests {
             first.api_key = "sample-secret".into();
             assert!(first.validate().is_ok(), "{}", template.name);
         }
+        let openai = PRESETS
+            .iter()
+            .find(|p| p.name == "OpenAI" && p.speech)
+            .unwrap();
+        assert_eq!(openai.draft().model, "gpt-transcribe");
     }
 }

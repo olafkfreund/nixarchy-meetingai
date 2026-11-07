@@ -187,6 +187,12 @@ only as long as you need it, and make hiring decisions yourself.
 A custom speech record sends only what you configured, so add
 `mip_opt_out=true` to its URL to opt out with Deepgram.
 
+OpenAI shuts `whisper-1` down on February 26, 2027. A `whisper-1` model that
+points at OpenAI (a saved OpenAI speech provider, or `settings.speechModel`
+with an `api.openai.com` `speechBaseUrl`) is moved to `gpt-transcribe` at start,
+with a notice. Other servers keep their model. A `settings.speechModel` declared
+in Nix must be changed in Nix.
+
 whisper.cpp was removed in favour of Parakeet; the `whisper.*` options now
 fail with a message saying so. A saved `whisper-local` choice becomes
 `parakeet-local` once, with a notice. For Deepgram or OpenAI-compatible setups
