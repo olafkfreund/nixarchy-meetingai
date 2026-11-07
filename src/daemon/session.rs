@@ -976,6 +976,43 @@ fn migrate_gemini(db: &Database, vault: &Vault) -> Option<String> {
     None
 }
 
+fn migrate_openai_speech(db: &Database, vault: &Vault) -> Option<String> {
+    let openai_host = |url: &str| {
+        reqwest::Url::parse(url).is_ok_and(|url| url.host_str() == Some("api.openai.com"))
+    };
+    let mut changed = false;
+    match credentials::list(vault, Kind::Speech) {
+        Ok(records) => {
+            for mut record in records {
+                if record.model == "whisper-1" && openai_host(&record.base_url) {
+                    record.model = "gpt-transcribe".into();
+                    match credentials::save(vault, &record) {
+                        Ok(()) => changed = true,
+                        Err(error) => {
+                            tracing::warn!(provider = %record.provider, %error, "could not migrate OpenAI speech record")
+                        }
+                    }
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "could not list speech records for migration"),
+    }
+    let get = |key| store::get(db.connection(), key).ok().flatten();
+    if get("speech_provider").as_deref() == Some("openai-compatible-stt")
+        && get("speech_model").as_deref() == Some("whisper-1")
+        && get("speech_base_url").is_some_and(|url| openai_host(&url))
+    {
+        match store::set(db.connection(), "speech_model", "gpt-transcribe") {
+            Ok(()) => changed = true,
+            Err(error) => tracing::warn!(%error, "could not migrate OpenAI speech setting"),
+        }
+    }
+    changed.then(|| {
+        "OpenAI speech now uses gpt-transcribe: whisper-1 shuts down on February 26, 2027."
+            .to_owned()
+    })
+}
+
 /// whisper.cpp is gone: a saved `whisper-local` becomes `parakeet-local`, and a user who never
 /// stored a provider (the old default was whisper) is told once, tracked by a marker setting.
 /// An old `ggml-*` speech model name is cleared so no other engine is sent it.
@@ -1184,6 +1221,7 @@ impl Daemon {
             migrate_gemini(&db, &vault),
             migrate_whisper(&db),
             migrate_norwegian_engine(&db),
+            migrate_openai_speech(&db, &vault),
         ]
         .into_iter()
         .flatten()
@@ -9574,6 +9612,102 @@ mod command_tests {
             Some("")
         );
         assert_eq!(migrate_whisper(&db), None);
+    }
+
+    #[test]
+    fn openai_speech_record_migration_matches_host_and_model() {
+        let db = Database::open_in_memory().unwrap();
+        let root = std::env::temp_dir().join(format!("nm-openai-{}", uuid::Uuid::new_v4()));
+        let vault = Vault::open(&root).unwrap();
+        let preset = crate::ai::presets::PRESETS
+            .iter()
+            .find(|p| p.name == "OpenAI" && p.speech)
+            .unwrap();
+        let mut records = Vec::new();
+        for (url, model, expected) in [
+            (
+                "https://api.openai.com/v1/audio/transcriptions",
+                "whisper-1",
+                "gpt-transcribe",
+            ),
+            (
+                "http://127.0.0.1:8000/v1/audio/transcriptions",
+                "whisper-1",
+                "whisper-1",
+            ),
+            (
+                "https://api.openai.com/v1/audio/transcriptions",
+                "other-model",
+                "other-model",
+            ),
+        ] {
+            let mut record = preset.draft();
+            record.base_url = url.into();
+            record.model = model.into();
+            record.api_key = "sample-secret".into();
+            credentials::save(&vault, &record).unwrap();
+            records.push((record.provider, expected));
+        }
+        assert_eq!(
+            migrate_openai_speech(&db, &vault).as_deref(),
+            Some(
+                "OpenAI speech now uses gpt-transcribe: whisper-1 shuts down on February 26, 2027."
+            )
+        );
+        for (provider, expected) in records {
+            let saved = credentials::load(&vault, Kind::Speech, &provider)
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.model, expected);
+        }
+        assert_eq!(migrate_openai_speech(&db, &vault), None);
+    }
+
+    #[test]
+    fn openai_speech_setting_migration_matches_provider_host_and_model() {
+        use crate::db::settings::{get, set};
+        let root = std::env::temp_dir().join(format!("nm-openai-{}", uuid::Uuid::new_v4()));
+        let vault = Vault::open(&root).unwrap();
+        for (provider, url, model, expected) in [
+            (
+                "openai-compatible-stt",
+                "https://api.openai.com/v1/audio/transcriptions",
+                "whisper-1",
+                "gpt-transcribe",
+            ),
+            (
+                "openai-compatible-stt",
+                "http://127.0.0.1:8000/v1/audio/transcriptions",
+                "whisper-1",
+                "whisper-1",
+            ),
+            (
+                "openai-compatible-stt",
+                "https://api.openai.com/v1/audio/transcriptions",
+                "other-model",
+                "other-model",
+            ),
+            (
+                "deepgram-stt",
+                "https://api.openai.com/v1/audio/transcriptions",
+                "whisper-1",
+                "whisper-1",
+            ),
+        ] {
+            let db = Database::open_in_memory().unwrap();
+            set(db.connection(), "speech_provider", provider).unwrap();
+            set(db.connection(), "speech_base_url", url).unwrap();
+            set(db.connection(), "speech_model", model).unwrap();
+            assert_eq!(
+                migrate_openai_speech(&db, &vault).is_some(),
+                expected == "gpt-transcribe"
+            );
+            assert_eq!(
+                get(db.connection(), "speech_model").unwrap().as_deref(),
+                Some(expected)
+            );
+            assert_eq!(migrate_openai_speech(&db, &vault), None);
+        }
     }
 
     #[test]
