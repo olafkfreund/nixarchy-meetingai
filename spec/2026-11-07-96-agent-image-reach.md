@@ -11,9 +11,9 @@ intent: intent/2026-11-07-96-agent-image-reach.md
 ### Part 1: an agent's reset keeps the waiting screenshot
 
 **Narrower than the approved intent, for the owner to confirm:** only the waiting screenshot (`pending_capture`) is kept, not attached images.
-- Attached images in `g.sources` aren't lost by a reset: they're saved with their conversation, and `restore_chat` adds them back when it's reopened (`src/daemon/session.rs:4472`).
-- Carrying them through an agent's `session.new` would put the old session's images into a new, unrelated one, unseen, and send them with the owner's next question.
-- The waiting screenshot is the only image stored nowhere else.
+- Attached images in `g.sources` are dropped by any reset, the owner's own included. They aren't saved with the conversation (`src/daemon/session.rs:2109` filters them out). But each came from a file the owner picked (`attachments` are paths, `src/daemon/protocol.rs:60`), which is still on disk and can be attached again.
+- The shell doesn't show `g.sources`, so images kept through an agent's reset would be invisible. They'd go, unseen, with every owner question in the new, possibly unrelated, session.
+- The waiting screenshot exists only in memory, and the shell shows that one waits. It's the one image a reset really loses.
 
 **Code, `src/daemon/session.rs`:**
 - A small helper next to `reset_session` (:4268):
@@ -43,8 +43,8 @@ As decided (option **a**). In the README's "Ask your agents" section, after "An 
 
 ## Risks
 
-- **An agent's reset followed by the owner's question sends the kept screenshot** with that question, in the new session. That's what the owner captured it for, and the shell shows that one waits. The screenshot is stored with whatever meeting is open when it's sent, as today.
-- **A meeting or chat restored by an agent now has a waiting screenshot from before.** Same as above: it waits for the owner, visibly.
+- **An agent's reset followed by the owner's question sends the kept screenshot** with that question, in the new session. That's what the owner captured it for, and the shell shows that one waits.
+- **It can be stored with a different meeting.** A screenshot is saved with the meeting open when it's sent (`src/daemon/session.rs:1971`). If an agent restores another meeting in between, the screenshot taken during meeting A is saved under meeting B. Today it's discarded instead. That's accepted: losing it is worse, and the owner sees which meeting is open when asking.
 - **Hosts:** p620, at the next deploy. No database, setting or Nix change.
 
 ## Verification
