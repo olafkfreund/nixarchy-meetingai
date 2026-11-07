@@ -58,6 +58,8 @@ Branch `fix/96-agent-image-reach`, worktree `../meetingai-96`. Line numbers are 
      }
      ```
      `session_restore` drops its guard before returning, so this lock doesn't deadlock. `session.new` (:6089) and `record_start` already emit state after their reset.
+
+     **Deviation, from the final Opus review:** `record_start` emits state only on success. If it fails after the reset (no audio device, a database error), the shell would show no screenshot while one waits. Its error branch now emits state too. It isn't covered by a test: the test daemon has no failing capture to trigger it.
    - Test `agent_reset_keeps_waiting_screenshot`, beside `agent_leaves_waiting_image_and_its_meeting_row_for_owner` (:7418). For each of `session.new`, `session.restore` of a saved chat and `session.restore` of a saved meeting:
      - set `pending_capture` to a `CapturedImage`, call with `Some("mcp")`, then assert `state_value(...)["capture"] == true`;
      - for the chat restore, subscribe first and assert a `state` event with `capture: true` comes after `session.reset`.

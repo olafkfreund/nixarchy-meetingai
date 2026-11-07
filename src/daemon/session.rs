@@ -3378,6 +3378,8 @@ impl Daemon {
                     id
                 }
                 Err(error) => {
+                    // An agent's reset kept a screenshot; the shell cleared its indicator on session.reset.
+                    self.emit_state(g);
                     drop(guard);
                     return Err(error);
                 }
