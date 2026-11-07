@@ -372,7 +372,11 @@ own provider. The skill links into `~/.claude/skills`, `~/.agents/skills` and
 activation fail, so move it first or set `skills.enable = false`.
 An agent's question never takes or sends an image.
 
-An agent never gets your images. It can read the text around them: your questions, the answers and follow-up suggestions, which can name an image's file. That's what an agent can already read about anything else. Starting a new session or reopening a meeting from an agent keeps a screenshot that's waiting for your question.
+An agent never gets your images. It can read the text around them: your
+questions, the answers and follow-up suggestions, which can name an image's
+file. That's what an agent can already read about anything else. Starting a new
+session or reopening a meeting from an agent keeps a screenshot that's waiting
+for your question.
 
 The agent flag is chosen by the caller: any program running as you can reach
 the daemon without it. It keeps an agent that follows the skill read-only and
