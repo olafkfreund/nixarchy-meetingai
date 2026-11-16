@@ -3147,7 +3147,11 @@ impl Daemon {
             return Err("no_call");
         }
         if g.call.window_state != "bound" {
-            return Err("ambiguous");
+            return Err(if g.call.window_state == "ambiguous" {
+                "ambiguous"
+            } else {
+                "no_window"
+            });
         }
         if Target::Window(g.call.window.clone()) != *target || !present {
             return Err("window_closed");
@@ -13077,6 +13081,7 @@ mod autoshots_tests {
         for (call, state, showing, stopping, cause) in [
             ("none", "bound", true, false, "no_call"),
             ("call", "ambiguous", true, false, "ambiguous"),
+            ("call", "none", true, false, "no_window"),
             ("call", "bound", false, false, "not_showing"),
             ("call", "bound", true, true, "countdown"),
         ] {

@@ -446,6 +446,12 @@ sound for N min." with the action `stop=Stop notes`.
 
    → verify: `bash shell/tests/lint.sh`. The harnesses run in step 6.
 
+   - *Implementation notes (step 5, coder):*
+     - `Header.qml`'s manual stop still sends `{}`; the daemon defaults a missing reason to `"user"`, so no change is needed there.
+     - A countdown notification for a reason other than `call_end` reads "No sound for a while. Notes stop in N s."; the shell's notification Stop sends reason `notification`, the chip's Stop `inactivity_chip`.
+     - The meeting view's countdown line shows `in_s` as last received; only the bar chip ticks.
+     - *Deviation (step 4 fix):* with no meeting window (`callWindowState` `none`), `auto_eligible` now pauses with cause `no_window` instead of `ambiguous`, so the shell says "no meeting window" rather than "several possible windows".
+
    Traps:
    - **run Quickshell only through the test scripts,** which source
      `shell/tests/headless.sh`. Starting it directly crashed the portals before
