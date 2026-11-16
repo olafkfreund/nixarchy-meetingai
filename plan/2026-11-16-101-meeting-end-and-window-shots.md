@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 101
 spec: spec/2026-11-16-101-meeting-end-and-window-shots.md
 coders:
@@ -367,6 +367,7 @@ sound for N min." with the action `stop=Stop notes`.
      - **The lock** has no event, so while autoshots are on, step 1's 1 s loop
        also runs `hyprctl locked` (as `auto_lock_state`, `:2873`) and bumps
        `elig_gen` when the answer changes.
+     - **Accepted by the owner with this plan (2026-11-16).**
      - **Remaining limit:** a lock and unlock that both happen within one tick
        *and* inside one capture (≤ 3 s) is not seen. The lock is also checked
        before and after `grim` (`:2946`, `:2967`).
