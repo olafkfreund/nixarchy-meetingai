@@ -180,9 +180,7 @@ sound for N min." with the action `stop=Stop notes`.
    - **The poll:** `tokio::spawn` a 1 s loop in `src/daemon/mod.rs`, next to
      the calendar loop at `:63`.
      - It re-parses whenever the file's mtime or size changes.
-     - **Every tick, unchanged file or not,** it re-runs the pid probe when
-       `call` is not `none`, and the 600 s age rule, as
-       `CallState.qml:81-84` does.
+     - **Every tick, unchanged file or not,** it re-runs the pid probe in every state (a `stat`, cheap; *deviation:* the shell only probes during a call, but an idle dead writer must read as not `present` too), and the 600 s age rule. A gone or stale writer gives `present: false`, never "present, no call".
      - It calls `daemon.on_call_reading(r)` only when the reading differs.
    - **The shared hooks,** so later steps only extend them:
      - **`Inner`** (`session.rs:334`) gains `call: CallReading`.

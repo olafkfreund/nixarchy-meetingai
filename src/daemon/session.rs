@@ -22,7 +22,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::protocol::{self, event, parse};
+use super::{
+    callstate::CallReading,
+    protocol::{self, event, parse},
+};
 use crate::ai::providers::{
     CHAT_PROVIDERS, ChatProvider, ProviderConfig, SttProvider, endpoint_allowed,
 };
@@ -332,6 +335,7 @@ struct Recording {
 }
 
 struct Inner {
+    call: CallReading,
     db: Database,
     settings: Settings,
     conversation: Conversation,
@@ -433,6 +437,7 @@ pub struct Daemon {
     /// Bumped by Cancel and a session reset: a `chat.send` still preparing (screenshot delay) drops out.
     send_epoch: AtomicU64,
     autoshots_epoch: AtomicU64,
+    elig_gen: AtomicU64,
     #[cfg(test)]
     auto_capture: Mutex<Option<AutoCapture>>,
     #[cfg(test)]
@@ -1203,6 +1208,7 @@ impl Daemon {
             chunking: AtomicBool::new(false),
             send_epoch: AtomicU64::new(0),
             autoshots_epoch: AtomicU64::new(0),
+            elig_gen: AtomicU64::new(0),
             #[cfg(test)]
             auto_capture: Mutex::new(None),
             #[cfg(test)]
@@ -1234,6 +1240,7 @@ impl Daemon {
             },
             enrolling: AtomicBool::new(false),
             inner: Mutex::new(Inner {
+                call: CallReading::default(),
                 db,
                 settings,
                 conversation: Conversation::new(),
@@ -1419,7 +1426,20 @@ impl Daemon {
     }
 
     fn emit_state(&self, g: &Inner) {
+        self.elig_gen.fetch_add(1, Ordering::AcqRel);
         self.emit("state", self.state_value(g));
+    }
+
+    pub(super) fn on_call_reading(&self, reading: CallReading) {
+        let mut g = self.inner.lock();
+        if g.call == reading {
+            return;
+        }
+        tracing::info!(present = reading.present, schema = reading.schema, call = %reading.call,
+            by = %reading.by, window_state = %reading.window_state, "call reading changed");
+        g.call = reading;
+        self.elig_gen.fetch_add(1, Ordering::AcqRel);
+        self.emit_state(&g);
     }
 
     /// Stop recording (finishing the meeting), then ask the server to exit.
