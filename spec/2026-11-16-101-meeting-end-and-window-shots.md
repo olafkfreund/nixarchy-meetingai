@@ -111,6 +111,7 @@ lost title does not end it.
 | `callWindowClass` | the class of the bound window, shown in the meetingai UI |
 | `callWindowShowing` | for a native or web-app window: true. For a browser window: true only while its title matches a meeting pattern. |
 | `callBy` | how the call was confirmed: `native`, `webapp`, `title` or `fallback` |
+| `callWindowSeq` | a counter, incremented whenever `callWindow` or `callWindowShowing` changes, so a reader that polls cannot miss a change that reverted between polls |
 
 Titles stay where they are today: in memory and in the 0600 file only.
 
@@ -152,6 +153,8 @@ Titles stay where they are today: in memory and in the 0600 file only.
 
   It is re-evaluated on every change of the reading.
 - **An inactivity countdown** comes from B4. Call end wins when both apply.
+- **Every automatic stop countdown lasts 30 s,** for call end, inactivity and
+  F1 alike, as #64 does today.
 - **Each countdown gets a fresh `gen`** (a counter). `stopping` is
   `{gen, reason, at}`.
 - **`record.keep {gen}`** acts only on the current `gen`.
@@ -209,9 +212,12 @@ No titles, no transcript text, no meeting or window ids.
   - `inactivity_chip`;
   - `autoshots {on, count, paused: <cause>}`;
   - `call_window {state, class}`.
-- `call_window.class` is stripped in Local-only, from replies (the list at
-  `session.rs:6010`) and from the broadcast `state` event alike. The other
-  fields carry nothing about the meeting.
+- `call_window.class` is removed:
+  - from every reply to an agent (MCP or `agent` origin), in any mode;
+  - in Local-only, also from the broadcast `state` event (the list at
+    `session.rs:6010`).
+
+  The other fields carry nothing about the meeting.
 - `record.keep` is not on the agent (MCP or `agent`) allow-lists.
 
 ### C. meetingai shell
@@ -246,7 +252,7 @@ No titles, no transcript text, no meeting or window ids.
   The #84 refusals for Local-only and consent stay.
 - **D2. An eligibility generation.** `elig_gen` increments whenever a capture
   would become ineligible, that is when any of these changes:
-  - the call or the window;
+  - the call or the window, including a new `callWindowSeq`;
   - `showing`;
   - a countdown;
   - the lock state;
@@ -308,6 +314,14 @@ answer updates the intent in the same commit.
   side: steady mic noise keeps a forgotten recording alive.
   - **Recommended:** amend the outcome to "no sound".
   - Upgrade path: a VAD model, if this proves to leak in practice.
+- **F5. Which Chrome tab holds the mic.** Chrome reports one audio process for
+  all its tabs. So a meeting title in a Chrome window does not prove the mic
+  stream belongs to that tab. If another tab (a voice note, a different call)
+  holds the mic, that window can be taken as the meeting: for adoption and for
+  screenshots.
+  - **Recommended:** accept this for Chrome, since a Meet PWA or a window of
+    its own has one tab.
+  - Upgrade path: the state-only extension (decision 3).
 
 ## Alternatives rejected
 
@@ -334,8 +348,7 @@ answer updates the intent in the same commit.
 - **Same-window views** (a Teams or Slack chat in the call's window) can be
   captured: the title cannot tell. Limits: the off default, the indicator,
   delete, and pausing once the call ends.
-- **A Chrome title binding does not prove which tab owns the mic.** Accepted
-  under decision 3, for meetings in their own window or PWA.
+- **A Chrome title binding does not prove which tab owns the mic.** See F5.
 - **The process walk may fail** for sandboxed apps: no window, and the
   refusal says why.
 - **Two readers of one file** (the daemon decides; the shell displays). Both
