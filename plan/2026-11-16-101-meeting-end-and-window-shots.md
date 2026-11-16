@@ -556,6 +556,11 @@ sound for N min." with the action `stop=Stop notes`.
 - **A gap reset that clears the inactivity chip** now broadcasts state, so the shell does not keep showing it.
 - **The call-reading log line** carries `event`, `reason` and `origin` like the others.
 - README: only the bar chip is sure to show under Do Not Disturb; the notification may be hidden.
+- *(agy's review)* **A sticky pause** (`locked`, `window_closed`, `hidden_not_updating`) is no longer replaced by a transient cause; only what ended it clears it (unlock, re-bind, a stored capture). An unchanged frame clears only `hidden_not_updating`, and only for a visible window. Play clears a retained pause; the next check sets the current one.
+- *(agy)* **`elig_gen` is read before the eligibility check,** not after the `monitors` lookup, so a flip during that lookup also discards the capture.
+- *(agy)* **A change of call, or `inactivity_stop_minutes` set to 0,** cancels an inactivity countdown and clears the chip at once.
+- *(agy)* **`autoshots.start` says "not in a call" before "meeting-mode is too old",** so a missing detector reads as no call.
+- *(agy, shell)* After **Keep**, the call's end no longer also offers "Stop notes"; the countdown chip uses one clock (no "31 s"); `stopGen` holds a u64; the bar tooltip names the app (`calls.app`, shell-local) as well as the class. The meeting view shows the class only: it has no call state. The inactivity notification's action id is `chipstop`, not `stop`, so the shell can tell it from the call-end offer.
 - *Not added:* tests for an `inactivity_call` countdown expiring into a stop, and frames stopping during a countdown. `expire` reads the real clock while the inactivity tests use a fake one; the expiry path itself is covered by the `call_end` expiry tests. Verified live in step 9 (F1).
 
 ## Tests

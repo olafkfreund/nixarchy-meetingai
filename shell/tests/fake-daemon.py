@@ -753,6 +753,8 @@ class Handler(socketserver.StreamRequestHandler):
                 if not state.get("stopping") or state["stopping"].get("gen") != gen:
                     self.send({"id": req["id"], "ok": False, "error": "no such countdown"})
                     continue
+                if state["stopping"].get("reason") == "call_end":   # as the daemon: only a call-end Keep releases the notes from the call
+                    state["for_call"] = False
                 state["stopping"] = None
                 if state["autoshots"].get("paused") == "countdown":
                     state["autoshots"]["paused"] = None

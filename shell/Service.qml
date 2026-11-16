@@ -18,7 +18,7 @@ Item {
     property double offeredFor: -1   // the call (its start) already offered or auto-started
     property double calledKey: 0     // the call (its start) that reached "call"; it may end through "maybe"
     property bool waiting: false     // a call came before the daemon or its settings were ready
-    property int stopGen: 0          // the countdown (daemon gen) already notified
+    property double stopGen: 0       // the countdown (daemon gen, a u64) already notified
     property bool chipShown: false   // the inactivity notification for this chip is up
 
     // One recording: a restart into the same meeting is a different recording
@@ -75,6 +75,7 @@ Item {
                 client.send("record.stop", { reason: "notification" });
         } else if (what === "keep") {
             client.send("record.keep", { gen: key });
+            root.calledKey = 0;   // kept: the end of this call needs no "still recording" offer
         } else if (what === "chipstop") {
             if (client.recording && root.recId() === meeting) client.send("record.stop", { reason: "inactivity_chip" });
         }

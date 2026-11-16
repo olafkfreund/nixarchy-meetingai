@@ -1652,6 +1652,17 @@ impl Daemon {
     }
 
     /// Once a second: start or cancel the inactivity countdown and show or clear the chip.
+    /// The sound clock restarted or inactivity was turned off: its countdown and chip no longer apply.
+    fn clear_inactivity(&self, g: &mut Inner, cause: &'static str) {
+        if matches!(
+            g.stopping.as_ref().map(|s| s.reason),
+            Some("inactivity" | "inactivity_call")
+        ) {
+            self.cancel_countdown(g, cause);
+        }
+        g.sound.chip = None;
+    }
+
     fn inactivity_tick(self: &Arc<Self>, now: Instant) {
         let mut g = self.inner.lock();
         let current = g.stopping.as_ref().map(|s| s.reason);
@@ -1754,6 +1765,7 @@ impl Daemon {
         let ended = g.call.call == "call" && reading.call != "call" && reading.present;
         if g.call.call != reading.call || g.call.present != reading.present {
             g.sound.reset(Instant::now());
+            self.clear_inactivity(&mut g, "call_changed");
         }
         g.call = reading;
         self.elig_gen.fetch_add(1, Ordering::AcqRel);
@@ -3172,10 +3184,10 @@ impl Daemon {
 
     fn sync_auto_pause(g: &mut Inner) {
         let cause = g.autoshots.as_ref().and_then(|a| {
-            Self::auto_eligible(g, &a.target, true).err().or_else(|| {
-                a.paused
-                    .filter(|c| matches!(*c, "locked" | "hidden_not_updating" | "window_closed"))
-            })
+            // A sticky cause is cleared only by what ended it (unlock, re-bind, a stored capture).
+            a.paused
+                .filter(|c| matches!(*c, "locked" | "hidden_not_updating" | "window_closed"))
+                .or_else(|| Self::auto_eligible(g, &a.target, true).err())
         });
         if let Some(a) = g.autoshots.as_mut()
             && a.paused != cause
@@ -3186,6 +3198,13 @@ impl Daemon {
                 reason = cause.unwrap_or("resumed"),
                 origin = "daemon"
             );
+        }
+    }
+
+    fn auto_clear_pause(&self, meeting: &str, generation: u64, cause: &str) {
+        let paused = self.inner.lock().autoshots.as_ref().and_then(|a| a.paused);
+        if paused == Some(cause) {
+            self.auto_pause(meeting, generation, None);
         }
     }
 
@@ -3450,6 +3469,7 @@ impl Daemon {
                 return;
             }
         };
+        let elig_gen = self.elig_gen.load(Ordering::Acquire);
         let eligible = {
             let g = self.inner.lock();
             if !self.auto_allowed(&g, meeting, generation) {
@@ -3468,7 +3488,6 @@ impl Daemon {
                 return;
             }
         };
-        let elig_gen = self.elig_gen.load(Ordering::Acquire);
         let (image, fingerprint) = match self.auto_image(&target).await {
             Ok(image) => image,
             Err(error) => {
@@ -3492,7 +3511,10 @@ impl Daemon {
         }
         // A pause clears only once a capture passes, so a hidden, frozen window logs one cause, not two per tick.
         if same_frame(&previous, &fingerprint) {
-            self.auto_pause(meeting, generation, None);
+            // An unchanged visible frame proves only that the window is repainting.
+            if visible {
+                self.auto_clear_pause(meeting, generation, "hidden_not_updating");
+            }
             return;
         }
         match self.auto_lock_state().await {
@@ -3602,11 +3624,11 @@ impl Daemon {
                     "This meeting has reached its limit of 60 automatic screenshots.".into(),
                 );
             }
-            if g.call.schema < 2 {
-                return Err("meeting-mode is too old".into());
-            }
             if !g.call.present || g.call.call != "call" {
                 return Err("not in a call".into());
+            }
+            if g.call.schema < 2 {
+                return Err("meeting-mode is too old".into());
             }
             if g.call.window_state == "ambiguous" {
                 return Err("several possible windows".into());
@@ -3941,6 +3963,7 @@ impl Daemon {
                             && Target::Window(g.call.window.clone()) == a.target
                         {
                             a.generation = self.autoshots_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+                            a.paused = None;
                         } else {
                             g.autoshots = None;
                         }
@@ -5287,6 +5310,9 @@ impl Daemon {
             self.emit("notice", json!({"text": "Speech engine and language changes apply at the next recording start."}));
         }
         self.auto_stop_disallowed(g); // a mode change can take consent away
+        if g.settings.inactivity_stop_minutes == 0 {
+            self.clear_inactivity(g, "off");
+        }
         let all = self.settings_reply(g)?;
         self.emit("settings", json!({"settings": all}));
         self.emit_state(g); // a provider or Local-only change flips state.ready
@@ -12759,8 +12785,9 @@ mod command_tests {
         d.feed_sound(&loud(0)[..2 * 1_600], t);
         let t = silence(&d, t, 70);
         assert_eq!(reason(&d), Some("inactivity"));
-        // A change of call resets the clock (at the real now); the countdown goes on the next tick.
+        // A change of call resets the clock (at the real now) and cancels the countdown at once.
         d.on_call_reading(call_reading(2, "maybe", 0.0, "native"));
+        assert_eq!(reason(&d), None);
         let t = Instant::now().max(t);
         d.inactivity_tick(t);
         assert_eq!(reason(&d), None);
@@ -12849,6 +12876,23 @@ mod command_tests {
         d.feed_sound(&loud(0), t);
         d.inactivity_tick(t);
         assert_eq!(reason(&d), None);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn turning_inactivity_off_clears_its_chip_and_countdown() {
+        let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        let _ = silence(&d, t0, 10 * 60 + 8);
+        assert_eq!(reason(&d), Some("inactivity"));
+        d.handle(
+            "settings.set",
+            json!({"key": "inactivity_stop_minutes", "value": 0}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reason(&d), None);
+        assert!(d.state_value(&d.inner.lock())["inactivity_chip"].is_null());
         d.handle("record.stop", json!({}), None).await.unwrap();
     }
 
@@ -13043,16 +13087,20 @@ mod command_tests {
         let mut reading = call_reading(2, "call", now_ms() as f64, "native");
         reading.window = "0xSecretWindow".into();
         d.on_call_reading(reading);
-        d.handle("record.start", json!({"title": "Secret roadmap"}), None)
-            .await
-            .unwrap();
+        d.handle(
+            "record.start",
+            json!({"title": "Secret roadmap"}),
+            Some("Secret origin"),
+        )
+        .await
+        .unwrap();
         let meeting = d.inner.lock().meeting_id.clone().unwrap();
         d.on_call_reading(call_reading(2, "none", 0.0, "native"));
         // Client-chosen text never reaches the logged reason or origin.
         d.handle(
             "record.stop",
             json!({"reason": "Secret client reason"}),
-            Some("Secret origin"),
+            Some("shell"),
         )
         .await
         .unwrap();
@@ -13061,7 +13109,7 @@ mod command_tests {
             output.contains("record_start") && output.contains("record_stop"),
             "{output}"
         );
-        assert!(output.contains("origin=\"cli\""), "{output}");
+        assert!(output.contains("origin=\"shell\""), "{output}");
         assert!(
             output.contains("reason=\"other\"") && output.contains("origin=\"other\""),
             "{output}"
@@ -13195,6 +13243,24 @@ mod autoshots_tests {
             assert_eq!(d.state_value(&d.inner.lock())["autoshots"]["paused"], cause);
             assert!(d.inner.lock().autoshots.is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn a_lock_pause_outlives_a_transient_cause() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        d.auto_start().await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        d.auto_pause(&meeting, generation, Some("locked"));
+        let call = d.inner.lock().call.clone();
+        let mut off = call.clone();
+        off.call = "none".into();
+        d.on_call_reading(off);
+        d.on_call_reading(call);
+        assert_eq!(
+            d.inner.lock().autoshots.as_ref().unwrap().paused,
+            Some("locked")
+        );
     }
 
     #[tokio::test]

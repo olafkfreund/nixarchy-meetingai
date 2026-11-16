@@ -41,11 +41,11 @@ BarWidget {
     readonly property var stopping: client.recording ? (client.state.stopping || null) : null
     readonly property var inactive: client.recording ? (client.state.inactivity_chip || null) : null
     property double stopAt: 0   // when the countdown ends, from in_s at the last state
-    onStoppingChanged: root.stopAt = root.stopping ? Date.now() + Number(root.stopping.in_s) * 1000 : 0
+    onStoppingChanged: { root.now = Date.now(); root.stopAt = root.stopping ? root.now + Number(root.stopping.in_s) * 1000 : 0; }   // same clock, or a mid-second event reads in_s + 1
     readonly property int stopLeft: root.stopping ? Math.max(0, Math.ceil((root.stopAt - root.now) / 1000)) : 0
     readonly property string windowTip: {
         var w = client.state.call_window || {};
-        return w.state === "bound" ? "Meeting window" + (w.class ? " \u00b7 " + w.class : "") : w.state === "ambiguous" ? "several possible windows" : "no meeting window";
+        return w.state === "bound" ? "Meeting window" + (calls.app ? " \u00b7 " + calls.app : "") + (w.class ? " \u00b7 " + w.class : "") : w.state === "ambiguous" ? "several possible windows" : "no meeting window";
     }
 
     function takeNotes() {
