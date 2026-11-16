@@ -108,6 +108,7 @@ pub fn run() -> Result<(), String> {
                         daemon.on_call_reading(reading.clone());
                         previous = reading;
                     }
+                    daemon.auto_poll_lock().await;
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             });
