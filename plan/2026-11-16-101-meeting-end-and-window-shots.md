@@ -100,6 +100,56 @@ it. meetingai must work with schema 1 until then.
 **The merge gate** (spec, Verification): the PR stays open until meeting-mode's
 schema 2 is deployed and the full live matrix in step 9 passes.
 
+## Wire contract (shared by every step)
+
+**`state` fields.** These are always present; when idle they hold the null or
+false shown here:
+
+```json
+{
+  "for_call": false,
+  "stopping": null,
+  "inactivity_chip": null,
+  "call_window": {"state": "none", "class": ""},
+  "autoshots": {"on": false, "count": 0, "at_limit": false, "paused": null}
+}
+```
+
+- **`stopping`:** `null` or `{"gen": u64, "reason": "call_end" | "inactivity" |
+  "inactivity_call", "in_s": u32}`.
+- **`inactivity_chip`:** `null` or `{"minutes": u32}`. It is cleared when a
+  countdown starts and when sound returns.
+- **`call_window.state`:** `"none"`, `"bound"` or `"ambiguous"`.
+  `call_window.class` is a string, `""` when stripped or unknown.
+- **`autoshots.paused`:** `null` or one of `"no_call"`, `"not_showing"`,
+  `"countdown"`, `"window_closed"`, `"hidden_not_updating"`, `"locked"` or
+  `"ambiguous"`.
+  - The shell maps each to text, for example `window_closed` → "Paused:
+    meeting window closed".
+  - `on` stays true while paused. The Overlay toggle at `:153-155` must
+    therefore read `paused == "window_closed"` as "press to re-bind" (it sends
+    `autoshots.start`), not as stop.
+
+**Commands:**
+- **`record.keep {"gen": u64}`:** `{ok}` or an error, "no such countdown".
+- **`record.stop {"reason"?: string}`:** the reason is free text, logged only.
+  The shell's manual stop sends `"user"`; the inactivity chip's **Stop notes**
+  sends `"inactivity_chip"`.
+- **`autoshots.start {}`:** the error text names the cause: "no meeting window",
+  "several possible windows", "meeting-mode is too old", "not in a call".
+
+**Notifications** (shell). The `gen` is a property on the QML `Process`, as
+`key` is today (`Service.qml:64`); it is not a `notify-send` flag. The bodies:
+
+| Reason | Body |
+|---|---|
+| `call_end` | "The call ended. Notes stop in 30 s." |
+| `inactivity` | "No sound for N min. Notes stop in 30 s." |
+| `inactivity_call` | "No sound in this call for 3×N min. Notes stop in 30 s." |
+
+Each has the action `keep=Keep recording`. The inactivity chip's body is "No
+sound for N min." with the action `stop=Stop notes`.
+
 ## Steps
 
 1. **New `src/daemon/callstate.rs`: the call-state reader, plus the shared
@@ -163,8 +213,21 @@ schema 2 is deployed and the full live matrix in step 9 passes.
      - `record_start` constructs it at `:3222`.
      - `reset_session` (`:4268`) does not touch `g.recording`, so these fields
        survive it.
-     - Set `for_call` at the construction from `g.call`: schema 2 means
-       `call == call`; schema 1 is the `≥ since − 5 s` rule.
+     - Set `for_call` at the construction from `g.call`, and only when
+       `present`, `call == "call"` and `since > 0`:
+       - schema 2: set;
+       - schema 1: set when `recording_since ≥ since − 5 s`, as
+         `ownerSince > 1` and `nosince` in `call-state.sh` require today.
+     - With schema 1, a call reaching `call` while recording applies the same
+       rule. That is not adoption: it covers notes started up to 5 s before the
+       call.
+     - **Transitional state:** between `:3222` and `:3366`, `g.recording` is
+       `Some` while `g.meeting_id` is still unset or the previous one. Ownership
+       and countdown logic require `g.meeting_id.is_some()` and
+       `!r.stop.load()`. `finish_recording` (`:3597`) clears `stopping`.
+   - **Call end wins:** starting a `call_end` countdown replaces any inactivity
+     countdown, with a new `gen`. The inactivity tick never replaces a
+     `call_end` countdown.
    - **`on_call_reading` (from step 1)** is extended, after it stores the
      reading:
      - it applies adoption, guarded by `handled_since` and `kept`;
@@ -227,12 +290,20 @@ schema 2 is deployed and the full live matrix in step 9 passes.
      - a per-channel sustained-sound detector: 300 ms above 0.008 within 1 s,
        `SOUND_LEVEL` from `transcription.rs:412`, made `pub(crate)`;
      - it sets `last_sound[ch]`, and records `last_frame`, which drives the 5 s
-       gap reset.
+       gap reset;
+     - **for testability,** the clock state lives on `Inner`
+       (`SoundClock {last_sound: [Option<Instant>; 2], last_frame, window}`),
+       with `fn feed_sound(&self, samples, now)` and
+       `fn inactivity_tick(&self, now)`. `recording_task` calls both, and unit
+       tests call them directly, because tests run with `capture: false`
+       (`:164`, `:3284`) and never get `SessionEvent::Audio`.
    - **Rules, on a 1 s check in the same task:**
      - the inactivity countdown (reason `inactivity`) through step 2's
        countdown;
      - mic sound cancels it;
      - the chip state `inactivity_chip`, in `state`;
+     - **during a call:** sound on *either* channel clears the chip and cancels
+       an `inactivity_call` countdown;
      - F1: 3 × N during `call` leads to a countdown with reason
        `inactivity_call`;
      - resets at every point in the decisions above;
@@ -277,8 +348,22 @@ schema 2 is deployed and the full live matrix in step 9 passes.
      - bind to `g.call.window` when schema 2, `present`, `call`, and `bound`;
        otherwise return an error naming the cause;
      - a paused-closed state is restartable.
-   - **`elig_gen`** (from step 1) is already bumped by `on_call_reading` and by
-     `emit_state`, which covers countdowns, consent, Local-only and settings.
+   - **Two kinds of checks.** `auto_timer` exits for good when `auto_allowed`
+     fails (`:2863-2867`), so:
+     - **terminating checks stay in `auto_allowed`:** a different meeting or
+       generation, Local-only, no consent, and recording ended;
+     - **the transient checks go into a new `auto_eligible`,** which returns
+       the pause cause and never ends the timer: no call, not showing, a
+       countdown, window closed, hidden and not updating, locked, ambiguous.
+   - **`elig_gen`** (from step 1) is bumped by `on_call_reading` and
+     `emit_state`. It is **also bumped explicitly** at these places, whether
+     or not they emit state:
+     - `set_candidate` (`:5222`);
+     - `candidate.local_only` (`:6159`);
+     - `record_start`, `stop_locked` and `record.keep`;
+     - each countdown start and cancel;
+     - the inactivity tick, when the chip changes;
+     - the lock poll below.
      - **The lock** has no event, so while autoshots are on, step 1's 1 s loop
        also runs `hyprctl locked` (as `auto_lock_state`, `:2873`) and bumps
        `elig_gen` when the answer changes.
@@ -300,11 +385,14 @@ schema 2 is deployed and the full live matrix in step 9 passes.
      - visible means its workspace is a monitor's active or special workspace
        (`hyprctl monitors -j`);
      - a hidden window gets two `ppm` fingerprints 1 s apart, and identical
-       ones mean a skip.
+       ones mean a skip. "Identical" is byte equality (`a == b`), not
+       `same_frame`'s tolerance.
    - **The pause cause:** kept on `AutoShots`, reported as `autoshots.paused`,
      and logged once per change of cause, so not every tick.
    - **Stop → Play:** keeps the binding only if the same id exists and the
-     call is on (the retained state at `:3367-3373`).
+     call is on (the retained state at `:3367-3373`). Run `hyprctl clients -j`
+     **before** taking the lock at `:3296`: the `parking_lot` guard is held
+     through `:3373`.
 
    → verify: `cargo test`, with the fake capture and fake `hyprctl` injected as
    in `auto_capture`:
@@ -320,6 +408,10 @@ schema 2 is deployed and the full live matrix in step 9 passes.
    Traps:
    - #84's tests rely on `auto_capture` taking the area string: update the
      injected fakes to the target;
+   - the 13 tests in `mod autoshots_tests` (`:11922`) set only `auto_area`.
+     Their `daemon()` helper must seed a schema 2, bound, showing
+     `CallReading` and a fake `hyprctl` hook (clients and monitors), or all of
+     them fail;
    - never call `grim` in tests;
    - do not run `grim` against the owner's desktop during development.
 
@@ -358,7 +450,12 @@ schema 2 is deployed and the full live matrix in step 9 passes.
      `shell/tests/headless.sh`. Starting it directly crashed the portals before
      (memory);
    - no `/tmp/nm.*` wildcards;
-   - titles stay shell-local, never sent.
+   - titles stay shell-local, never sent;
+   - **Overlay geometry:** a new line inside `convo` (`Overlay.qml:413-597`)
+     must be counted in `convo.below` (`:550`), or `check-geometry.py` in
+     `ci.sh` fails;
+   - `call-state.sh` fails between steps 5 and 6. That is expected: step 6
+     updates `harness-call.qml` and `fake-daemon.py`.
 
 6. **Shell tests and the fake daemon.**
    - **`shell/tests/fake-daemon.py`:**
