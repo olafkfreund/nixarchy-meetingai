@@ -94,51 +94,93 @@ reviewers:
 - It shows the app and window state.
 
 **Out of this repository:** meeting-mode's schema 2 (spec section A) is its own
-intent → spec → plan in `nixarchy-meeting-mode`. meetingai must work with
-schema 1 until then.
+intent → spec → plan in `nixarchy-meeting-mode`. This plan does not implement
+it. meetingai must work with schema 1 until then.
+
+**The merge gate** (spec, Verification): the PR stays open until meeting-mode's
+schema 2 is deployed and the full live matrix in step 9 passes.
 
 ## Steps
 
-1. **New `src/daemon/callstate.rs`: the call-state reader.**
-   - **The reading:**
-     - `pub struct CallReading {present, schema, call, since, by, window,
-       window_state, window_class, showing, window_seq}`;
-     - `fn parse(bytes, now, probe) -> CallReading`;
-     - title fields are ignored and never stored.
-   - **Validation, as in `CallState.qml:22-31`:**
+1. **New `src/daemon/callstate.rs`: the call-state reader, plus the shared
+   hooks later steps use.**
+   - **The reading:** `pub struct CallReading`. Each field maps from a JSON key
+     in the file:
+
+     | Field | JSON key | Default |
+     |---|---|---|
+     | `present` | derived | |
+     | `schema` | `schema` | 1 when absent |
+     | `call` | `call` | `none` |
+     | `since` | `callSince` | |
+     | `by` | `callBy` | `""` |
+     | `window` | `callWindow` | `""` |
+     | `window_state` | `callWindowState` | `none` |
+     | `window_class` | `callWindowClass` | `""` |
+     | `showing` | `callWindowShowing` | false |
+     | `window_seq` | `callWindowSeq` | 0 |
+
+     `callTitle` and `callApp` are not read.
+   - **`fn parse(bytes, now, probe) -> CallReading`** applies this validation,
+     as in `CallState.qml:22-31`:
      - a new pid counts as gone until `probe(pid)` (a `/proc/<pid>` exists
        check, injectable in tests) says otherwise;
      - no pid and `updated` older than 600 s means stale;
      - `call` other than `call` or `maybe` reads as `none`.
    - **The poll:** `tokio::spawn` a 1 s loop in `src/daemon/mod.rs`, next to
-     the calendar loop at `:63`. It checks the file's mtime and size, and on a
-     change parses it and calls `daemon.on_call_reading(r)`.
-   - **`Inner`** (`session.rs:334`) gains `call: CallReading`.
+     the calendar loop at `:63`.
+     - It re-parses whenever the file's mtime or size changes.
+     - **Every tick, unchanged file or not,** it re-runs the pid probe when
+       `call` is not `none`, and the 600 s age rule, as
+       `CallState.qml:81-84` does.
+     - It calls `daemon.on_call_reading(r)` only when the reading differs.
+   - **The shared hooks,** so later steps only extend them:
+     - **`Inner`** (`session.rs:334`) gains `call: CallReading`.
+     - **`Daemon`** (`:426`) gains `elig_gen: AtomicU64`.
+     - **`on_call_reading(&self, r)`:** stores `r`, bumps `elig_gen`, logs
+       the transition (present, schema, call, by, window_state), and calls
+       `emit_state`.
+     - **`emit_state` (`:1420`)** also bumps `elig_gen`. Every state change
+       goes through it: consent, Local-only, countdowns, settings.
 
-   → verify: `cargo test callstate`, with fixtures for schema 1, schema 2, a
-   dead pid, a new pid, stale, garbage, and a file with titles (the test
-   asserts no title in `Debug`).
+   → verify: `cargo test callstate`, with fixtures for:
+   - schema 1 and schema 2;
+   - a dead pid;
+   - a new pid;
+   - stale;
+   - **a writer that dies with the file unchanged;**
+   - a pid-less file aging past 600 s while unchanged;
+   - garbage;
+   - a file with titles (the test asserts no title in `Debug`).
 
    Traps:
    - never hold `inner.lock()` across `.await`;
    - the probe must not block the loop (`tokio::fs::metadata`).
 
 2. **`session.rs`: ownership, the countdown, `record.keep` and logging.**
-   - **The recording** (the struct `record_start` reserves at `:3222`) gains
-     `for_call`, `kept`, and `handled_since: Option<f64>`.
-     - **Watch out:** `reset_session(g)` at `:3309` runs after the lock is
-       released at `:3259`/`:3273`. The new fields live on the recording
-       struct, and are set only after `reset_session`.
-   - **`on_call_reading`:** stores the reading, then:
-     - applies adoption, guarded by `handled_since`;
-     - re-evaluates the countdown condition;
-     - bumps `elig_gen` (step 4);
-     - logs the transitions.
+   - **`struct Recording` (`session.rs:327`)** gains `for_call`, `kept`, and
+     `handled_since: Option<f64>`.
+     - `record_start` constructs it at `:3222`.
+     - `reset_session` (`:4268`) does not touch `g.recording`, so these fields
+       survive it.
+     - Set `for_call` at the construction from `g.call`: schema 2 means
+       `call == call`; schema 1 is the `≥ since − 5 s` rule.
+   - **`on_call_reading` (from step 1)** is extended, after it stores the
+     reading:
+     - it applies adoption, guarded by `handled_since` and `kept`;
+     - it re-evaluates the countdown condition.
    - **`stopping: Option<Stopping {gen, reason, at}>` on `Inner`:**
-     - `start_countdown` spawns a task that sleeps 30 s, then takes the lock
-       and re-checks the `gen`, the recording id and the condition before
-       calling the stop path with its reason;
-     - `record_stop` (`:3392`) and `record_start` clear it.
+     - `start_countdown` spawns a task that sleeps 30 s, then calls
+       `expire(gen)`.
+     - **Split `record_stop` (`:3392`)** into
+       `fn stop_locked(&self, g: &mut Inner, reason) -> Result<Value, String>`,
+       holding today's body after the lock is taken, plus a thin
+       `record_stop()` that locks and calls it.
+     - **`expire(gen)`** takes the lock once, re-checks the `gen`, the
+       recording id and the condition, and calls `stop_locked` with the guard
+       it already holds. Never call `record_stop` while locked: it would
+       deadlock.
+     - `stop_locked` and `record_start` clear `stopping`.
    - **New commands in `dispatch` (`:6148` area):**
      - `record.keep {gen}`;
      - `record.stop {reason?}`, which keeps the plain stop working.
@@ -150,11 +192,17 @@ schema 1 until then.
        `call_window.class` for every agent origin.
      - The broadcast removes it in Local-only (`emit` at `:1297` /
        `local_now` at `:1539`).
-   - **Logging:** at start, stop, adopt, keep, countdown start, cancel and
-     expire, and "call ended, notes not owned". The `origin` is threaded from
-     `handle` (`:5843`); `None` logs as `cli`.
+   - **Logging:** at start, stop, adopt, keep, kept (a re-adoption refused),
+     countdown start, cancel (with its cause) and expire, and "call ended, notes
+     not owned". The `origin` is threaded from `handle` (`:5843`); `None` logs
+     as `cli`. Inactivity chips and autoshot skips are logged in steps 3
+     and 4.
 
    → verify: `cargo test` with new tests:
+   - call-end priority when call end and inactivity apply together;
+   - `call_window.class` absent from `state.get` for `mcp` and `agent` in
+     normal mode, and from both the reply and the broadcast `state` event in
+     Local-only;
    - schema 2 start and adoption once per `since`, including `maybe` → `call`;
    - no adoption on `fallback`;
    - the schema 1 rule with no upper bound;
@@ -169,7 +217,9 @@ schema 1 until then.
      tests in the existing `mod tests`;
    - `parking_lot` locks are not `Send` across await;
    - the expiry task holds an `Arc<Daemon>` and must tolerate the daemon state
-     having moved on.
+     having moved on;
+   - steps 1 and 2 share `on_call_reading`. Step 2 extends what step 1
+     created.
 
 3. **The sound clock, inactivity, and `inactivity_stop_minutes`.**
    - **Audio:** in `recording_task`'s audio branch (`session.rs:3467-3473`),
@@ -185,12 +235,17 @@ schema 1 until then.
      - the chip state `inactivity_chip`, in `state`;
      - F1: 3 × N during `call` leads to a countdown with reason
        `inactivity_call`;
-     - resets at every point in the decisions above.
+     - resets at every point in the decisions above;
+     - log each inactivity chip shown, and each countdown, with its reason.
    - **The setting:**
      - `src/core/models/settings.rs`: a field, its default 10, `keys`, the
        reader and the writer next to `auto_record_on_call` (`:223`, `:273`,
        `:298`, `:401`, `:473`);
-     - `src/daemon/nix_settings.rs:55`: the key;
+     - `src/daemon/nix_settings.rs`: the key is numeric, so it does not go in
+       the boolean list at `:55-60`. It goes in the numeric validation path,
+       with a range of 0 to 240;
+     - `session.rs:149`: add it to `NUMERIC_SETTINGS`, growing the array to 7,
+       which `settings.set` uses at `:4597`;
      - `nix/hm-module.nix`: an option `inactivityStopMinutes` (nullable int,
        ≥ 0), next to `autoRecordOnCall` (`:55`, `:258`);
      - the Settings row in `shell/Overlay.qml`, next to the existing toggles.
@@ -222,15 +277,24 @@ schema 1 until then.
      - bind to `g.call.window` when schema 2, `present`, `call`, and `bound`;
        otherwise return an error naming the cause;
      - a paused-closed state is restartable.
-   - **`elig_gen: AtomicU64`:** bumped in `on_call_reading` on any change of:
-     - the call, the window, `showing` or `window_seq`;
-     - a countdown;
-     - the lock;
-     - Local-only or consent.
-
-     `auto_capture_once` (`:2928`) reads it before `grim`, and stores only if
-     it is unchanged and `auto_allowed` plus the D3 checks pass under the lock.
-     This is next to the existing check at `:2975`.
+   - **`elig_gen`** (from step 1) is already bumped by `on_call_reading` and by
+     `emit_state`, which covers countdowns, consent, Local-only and settings.
+     - **The lock** has no event, so while autoshots are on, step 1's 1 s loop
+       also runs `hyprctl locked` (as `auto_lock_state`, `:2873`) and bumps
+       `elig_gen` when the answer changes.
+     - **Remaining limit:** a lock and unlock that both happen within one tick
+       *and* inside one capture (≤ 3 s) is not seen. The lock is also checked
+       before and after `grim` (`:2946`, `:2967`).
+   - **`auto_capture_once` (`:2928`):** read `elig_gen` before `grim`. Store
+     only if it is unchanged and all of these pass under the lock, next to the
+     existing check at `:2975`:
+     1. `auto_allowed`: the #84 checks, the same meeting, not Local-only,
+        consent;
+     2. `g.call.present`, `g.call.call == "call"`, `g.call.window_state ==
+        "bound"`, and `g.call.window` equal to the bound id;
+     3. `g.call.showing`;
+     4. `g.stopping` is none;
+     5. the window was present in this capture's `hyprctl clients -j`.
    - **Window checks:**
      - the window must be in `hyprctl clients -j`;
      - visible means its workspace is a monitor's active or special workspace
@@ -238,14 +302,16 @@ schema 1 until then.
      - a hidden window gets two `ppm` fingerprints 1 s apart, and identical
        ones mean a skip.
    - **The pause cause:** kept on `AutoShots`, reported as `autoshots.paused`,
-     and logged.
+     and logged once per change of cause, so not every tick.
    - **Stop → Play:** keeps the binding only if the same id exists and the
      call is on (the retained state at `:3367-3373`).
 
    → verify: `cargo test`, with the fake capture and fake `hyprctl` injected as
    in `auto_capture`:
    - each refusal and each pause cause;
-   - an `elig_gen` flip that reverts mid-capture is discarded;
+   - an `elig_gen` flip that reverts mid-capture is discarded, for each source:
+     a call reading, `callWindowSeq`, a countdown, consent, Local-only, and the
+     lock poll;
    - hidden and identical skipped;
    - the timeout;
    - restart after a close;
@@ -275,18 +341,22 @@ schema 1 until then.
      - the tooltip shows `call_window`: the app and class, "no meeting
        window", or "several possible windows".
    - **`shell/Overlay.qml`:**
-     - the same two lines in the meeting view;
+     - the same two lines in the meeting view, plus the window identity line
+       (the app and class, "no meeting window", or "several possible windows");
      - the auto screenshots label shows `autoshots.paused` (`:467-471`), and a
-       start refusal shows its reason (`:157`).
+       start refusal shows its reason (`:157`);
+     - the first-use confirmation at `:160` is rewritten. The old text was
+       "whatever is in the area you choose"; the new text says it captures the
+       meeting window only, even when hidden or covered, that the export
+       folder may sync, and to check that you may capture what others share.
    - **`shell/Client.qml`:** add `origin: "shell"` to every request (`:86`).
 
-   → verify:
-   - `bash shell/tests/lint.sh`;
-   - `bash shell/tests/headless.sh` for each harness touched.
+   → verify: `bash shell/tests/lint.sh`. The harnesses run in step 6.
 
    Traps:
-   - **run Quickshell only through `shell/tests/headless.sh`.** Starting it
-     directly crashed the portals before (memory);
+   - **run Quickshell only through the test scripts,** which source
+     `shell/tests/headless.sh`. Starting it directly crashed the portals before
+     (memory);
    - no `/tmp/nm.*` wildcards;
    - titles stay shell-local, never sent.
 
@@ -303,10 +373,27 @@ schema 1 until then.
      - drop the cases that tested shell-side timers (`autostop`, `takeover`,
        `gone-pending`, `maybe-end`, `manual-new`); their logic now lives in
        step 2's Rust tests.
-   - **`harness-autoshots.qml`:** the paused label and the refusal reason.
+   - **`harness-autoshots.qml`:**
+     - the paused label and the refusal reason;
+     - the new first-use text, replacing the area text at `:45`.
+   - **`shell/tests/smoke.sh:754`:** the "slurp is not installed" refusal
+     assertion becomes the "no meeting window" refusal.
+   - **Visual cases for the bar and the overlay.** `harness-call.qml` mounts
+     only `Service`, so it cannot show the chips. Add scenarios `stopping`,
+     `inactivity` and `window-states` to `live-shots.sh`. They cover:
+     - the countdown chip;
+     - the inactivity chip with its **Stop notes** action;
+     - the three window-state texts in the tooltip and the meeting view.
+   - **`shell/tests/ci.sh`:**
+     - add `step call-state; bash "$here/call-state.sh"`, which it never ran
+       before (`:15-24`);
+     - add the new scenarios to the `live-shots` loop.
+   - **`origin`:** a fake-daemon assertion that every request carries
+     `origin: "shell"`.
 
    → verify:
-   - `bash shell/tests/ci.sh`;
+   - `bash shell/tests/ci.sh`, which now includes `call-state` and the new
+     shots;
    - `nix build .#checks.x86_64-linux.shell`.
 
    Traps: the same as step 5. The fixtures must not contain real titles.
@@ -330,8 +417,8 @@ schema 1 until then.
    - write its intent → spec → plan from spec section A, with the same review;
    - stop for the owner at each gate.
 
-   Its implementation is tracked there. meetingai can merge before it,
-   provided step 9's schema 1 checks pass.
+   Its implementation is tracked there. This PR waits for it: the merge gate
+   above.
 
 9. **Deploy and live verification** (mine; deploying needs the owner's OK).
    - **After the owner deploys to p620,** use `scratchpad/measure/sample.sh`
@@ -345,7 +432,8 @@ schema 1 until then.
      - join and leave a Meet tab, a Meet PWA, Teams, a Discord voice channel
        and Zoom;
      - record the end and its delay, the window state, autoshot pauses, and
-       the hidden repaint skip;
+       the hidden repaint skip, a screenshot taken while the window was hidden,
+       and the countdown chip with Do Not Disturb on;
      - Discord and Chrome confirm F1's 3 × N behaviour.
    - The results go into the PR as text. The samples are deleted afterwards.
 
