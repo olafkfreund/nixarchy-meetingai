@@ -39,8 +39,13 @@ why.
   That one flag is applied to every browser mic stream. A browser mic also
   becomes a call after 60 s with no confirmation at all (`maybeDelay`,
   `SettingsModel.js:19`).
-- **The Teams pattern matches any Teams page.** `\| Microsoft Teams` also
-  matches "Chat | Microsoft Teams" (`SettingsModel.js:18`).
+- **Any other mic user keeps the call alive.** The detector takes the highest
+  state across all qualifying streams (`Service.qml:129`). An idle Discord
+  voice channel, or a second browser mic, keeps `call` on after the real
+  meeting ends.
+- **Loose patterns.** `\| Microsoft Teams` also matches "Chat | Microsoft
+  Teams", and `^Zoom( Meeting| Workplace)?` matches an idle Zoom Workplace
+  (`SettingsModel.js:18`).
 - **Ownership is by timestamp.** The call stops notes automatically only when
   they started no more than 5 s before it (`shell/Service.qml:29`). Notes
   started earlier, for example by hand before joining, get only a "Stop notes?"
@@ -51,8 +56,17 @@ why.
   `shell/Service.qml:183`):
   - a shell restart during the 30 s countdown;
   - a restart after a takeover;
-  - the detector dying while a stop is pending.
-- **No silence backstop.** Nothing ends a recording that nobody is speaking into.
+  - the detector dying while a stop is pending;
+  - a detector restart mid-call: the new `callSince` replaces `ownerSince`
+    (`shell/Service.qml:158`), so the running notes stop being the call's;
+  - a recording started from the CLI or an agent with no shell running.
+- **After the call, the system channel keeps hearing things.** meeting-mode
+  resumes the media it paused (`resumeMedia`, `Service.qml:247`), and
+  meetingai transcribes system audio. Music or a video after the call is
+  transcribed, which is the owner's symptom.
+- **No inactivity backstop.** Nothing ends a recording nobody is in a meeting
+  for. A backstop based on "no transcript text" would not fire anyway while
+  resumed media or room speech produces text.
 
 Diagnosis is also hard:
 
@@ -107,9 +121,14 @@ Observable by the owner:
   tell (several candidates, or no window), it says so. It never guesses
   silently.
 - **Auto screenshots show only the meeting window,** wherever it is and
-  whatever covers it. When that window is unknown or cannot be shown safely
-  (closed, another tab active in its browser window), nothing is captured, and
-  the control says why. There is no automatic fallback to the screen, a
+  whatever covers it, while the call is on. No capture is taken:
+  - when the meeting window is unknown, or more than one window could be it;
+  - when it may not be showing the meeting: it was closed, another tab is
+    active in its browser window, or the call has ended (including during
+    the stop countdown);
+  - when its frames may be stale.
+
+  The control says why. There is no automatic fallback to the screen, a
   rectangle or another window.
 - **A forgotten recording does not run for hours.** How and when is question 2.
 - **Wrong and missed stops can be explained afterwards.** The daemon log holds
@@ -149,7 +168,9 @@ Observable by the owner:
   - never sent to a model;
   - skipped while the screen is locked;
   - capped, and deletable one at a time;
-  - the export and sync disclosure.
+  - the export and sync disclosure;
+  - agents (MCP) can neither start them nor read them, and any new window
+    information gets the same treatment, including Local-only redaction.
 
   Capturing a hidden window removes "I can see what is being captured" as a
   safeguard, so the indicator matters more.
@@ -165,7 +186,10 @@ Observable by the owner:
 1. **Notes running before the call.** If notes are already running when a call
    starts, are they the call's notes, stopping when it ends? **Recommended:**
    yes, with **Keep recording** as the escape. A room recording that should
-   outlive a call then needs one click.
+   outlive a call then needs one click. The risk: a false call (an idle
+   Teams chat, Zoom Workplace) would adopt a room recording and could stop it.
+   So this needs the false-call paths above fixed first. The spec must show
+   that it does.
 2. **Inactivity.** This conflicts with "never stop a live meeting silently":
    a quiet webinar looks like a forgotten recording. The options:
    - **(a)** After a long stretch with no speech on either channel, show the
@@ -174,8 +198,14 @@ Observable by the owner:
      only remind.
    - **(c)** Remind only, never stop.
 
-   **Recommended:** (b). "No speech" must mean no voice detected. Missing
-   transcript text, for example after a speech engine error, does not count.
+   **Recommended:** (b), with a setting for the length and an Off choice.
+   - **What counts as speech:** "no speech" means no voice detected. Missing
+     transcript text, for example after a speech engine error, does not count.
+   - **Resumed media:** music or a video after the call must not reset the
+     clock. That needs a decision in the spec, such as counting only the mic
+     once no call is detected.
+   - **Keep recording:** choosing it restarts the clock. It does not switch the
+     backstop off.
 3. **A Chrome extension.** The researchers disagree:
    - **Codex:** a narrow, state-only extension (in call / left call) is worth
      it if Meet or Teams must be followed through tab switches.
@@ -194,8 +224,11 @@ Observable by the owner:
    - whether hidden-window frames are current.
 
    **Recommended:** one test call on p620 between the owner's own accounts or
-   devices, with no other people: Meet in a tab, Meet as a PWA, then Teams.
-   - The owner joins and leaves; the session samples state.
+   devices, with no other people: Meet in a tab, Meet as a PWA, Teams, and a
+   Discord voice channel.
+   - The owner joins and leaves.
+   - A small script samples state and writes only the redacted fields below,
+     so no agent reads raw titles or `hyprctl` output.
    - Kept: stream state, app name, window class, `stableId` and workspace, plus
      whether a title matched, never the title itself.
    - Hidden-window captures are viewed once to judge freshness, then deleted
@@ -208,3 +241,6 @@ Observable by the owner:
      weaker guarantee, or drop it.
    - **On for every call:** turning it on automatically for every detected call
      would reverse #84's privacy decision.
+
+   Also for the spec: the window closing and reopening, and Stop → Play on the
+   same meeting, which keeps auto screenshots on today.
