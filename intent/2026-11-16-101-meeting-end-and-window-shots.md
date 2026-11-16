@@ -112,8 +112,12 @@ Observable by the owner:
 - **Capture stops when the meeting ends.** Within about a minute of leaving
   (the exact delays are for the spec), no new audio is captured. The notes then
   finish as they do today. This holds:
-  - for notes started by hand for that call;
-  - for apps that keep the mic open after the meeting.
+  - for notes started by hand for that call.
+
+  *Amended with the spec (F1):* when an app keeps the mic open after the
+  meeting, nothing on the machine shows that it ended. Those notes get a
+  reminder after the inactivity length. During a call, after 3 × that length
+  with no sound on either channel, they get the countdown and stop.
 - **Every stop is announced.** A stop is preceded by a visible countdown with
   **Keep recording**, which Do Not Disturb cannot hide.
 - **The meeting is identified, or meetingai says it is not.** During a call,
@@ -126,7 +130,8 @@ Observable by the owner:
   - when it may not be showing the meeting: it was closed, another tab is
     active in its browser window, or the call has ended (including during
     the stop countdown);
-  - when its frames may be stale.
+  - when it is hidden and not repainting. *Amended with the spec (F2):* no
+    tool can prove a window's content is current.
 
   The control says why. There is no automatic fallback to the screen, a
   rectangle or another window.
@@ -138,7 +143,8 @@ Observable by the owner:
   - a countdown started, cancelled or completed;
   - a stop that was offered but not taken.
 - **Older detector:** with a meeting-mode that lacks any new information,
-  meetingai behaves as it does today.
+  meetingai stops notes as it does today. *Amended with the spec (F3):* auto
+  screenshots are then unavailable, because the drawn rectangle is removed.
 
 ## Affected users and systems
 
@@ -199,7 +205,10 @@ Observable by the owner:
    - **(c)** Remind only, never stop.
 
    **Recommended:** (b), with a setting for the length and an Off choice.
-   - **What counts as speech:** "no speech" means no voice detected. Missing
+   - **What counts as speech:** "no speech" means no sound above the level
+     threshold, measured before any engine. *Amended with the spec (F4):* there
+     is no engine-independent voice detector, and steady noise errs on the
+     side of not stopping. Missing
      transcript text, for example after a speech engine error, does not count.
    - **Resumed media:** music or a video after the call must not reset the
      clock. That needs a decision in the spec, such as counting only the mic

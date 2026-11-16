@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: 101
 intent: intent/2026-11-16-101-meeting-end-and-window-shots.md
 ---
@@ -288,7 +288,7 @@ No titles, no transcript text, no meeting or window ids.
   key keeps `slurp`. With an old meeting-mode (schema 1), auto screenshots are
   therefore unavailable, with a reason. **The owner confirms (F3).**
 
-### F. For the owner to decide with this spec
+### F. Owner decisions (approved 2026-11-16: all recommendations)
 
 Each item changes an approved intent outcome. Approving the spec with an
 answer updates the intent in the same commit.
