@@ -365,7 +365,7 @@ struct SoundClock {
     since: Option<Instant>,
     last_sound: [Option<Instant>; 2],
     last_frame: Option<Instant>,
-    window: [(Option<Instant>, u32); 2],
+    window: [(Option<Instant>, u32, u32); 2], // (start, count, the previous adjacent window's count)
     chip: Option<u32>,
 }
 
@@ -397,10 +397,14 @@ impl SoundClock {
             if w.0
                 .is_none_or(|s| now.saturating_duration_since(s) >= SOUND_WINDOW)
             {
-                *w = (Some(now), 0);
+                // Carry an adjacent window's count, so a burst across the boundary still counts
+                // (in effect 300 ms within 2 s: errs on the side of not stopping).
+                let adjacent =
+                    w.0.is_some_and(|s| now.saturating_duration_since(s) < SOUND_WINDOW * 2);
+                *w = (Some(now), 0, if adjacent { w.1 } else { 0 });
             }
             w.1 += n;
-            if w.1 >= SOUND_FRAMES {
+            if w.1 + w.2 >= SOUND_FRAMES {
                 self.last_sound[ch] = Some(now);
             }
         }
@@ -1248,7 +1252,7 @@ async fn grab_screen(region: bool) -> Result<CapturedImage, String> {
 async fn capture_deadline<T>(future: impl std::future::Future<Output = T>) -> Result<T, String> {
     tokio::time::timeout(Duration::from_secs(3), future)
         .await
-        .map_err(|_| "grim timed out".to_string())
+        .map_err(|_| "timed out".to_string())
 }
 
 #[cfg(not(test))]
@@ -1635,7 +1639,9 @@ impl Daemon {
     }
 
     fn feed_sound_in(&self, g: &mut Inner, samples: &[f32], now: Instant) {
-        if g.sound.feed(samples, now) && g.sound.chip.take().is_some() {
+        // A gap reset clears the chip; say so, or the shell keeps showing it.
+        let had_chip = g.sound.chip.is_some();
+        if g.sound.feed(samples, now) && had_chip {
             self.emit_state(g);
         }
     }
@@ -1694,10 +1700,8 @@ impl Daemon {
             return;
         }
         if !due {
-            if reason != "call_end" {
-                self.cancel_countdown(&mut g, "condition_gone");
-                self.emit_state(&g);
-            }
+            self.cancel_countdown(&mut g, "condition_gone");
+            self.emit_state(&g);
             return;
         }
         tracing::info!(event = "countdown_expire", reason, origin = "system");
@@ -1744,8 +1748,9 @@ impl Daemon {
         if g.call == reading {
             return;
         }
-        tracing::info!(present = reading.present, schema = reading.schema, call = %reading.call,
-            by = %reading.by, window_state = %reading.window_state, "call reading changed");
+        tracing::info!(event = "call_reading", reason = %reading.call, origin = "meeting-mode",
+            present = reading.present, schema = reading.schema, by = %reading.by,
+            window_state = %reading.window_state);
         let ended = g.call.call == "call" && reading.call != "call" && reading.present;
         if g.call.call != reading.call || g.call.present != reading.present {
             g.sound.reset(Instant::now());
@@ -3211,11 +3216,14 @@ impl Daemon {
             .ok_or("test hyprctl not injected".into());
         #[cfg(not(test))]
         {
-            let out = tokio::process::Command::new("hyprctl")
-                .args([what, "-j"])
-                .output()
-                .await
-                .map_err(|e| e.to_string())?;
+            let out = capture_deadline(
+                tokio::process::Command::new("hyprctl")
+                    .args([what, "-j"])
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await?
+            .map_err(|e| e.to_string())?;
             if !out.status.success() {
                 return Err("hyprctl failed".into());
             }
@@ -3352,10 +3360,13 @@ impl Daemon {
         };
         #[cfg(not(test))]
         {
-            let Ok(output) = tokio::process::Command::new("hyprctl")
-                .arg("locked")
-                .output()
-                .await
+            let Ok(Ok(output)) = capture_deadline(
+                tokio::process::Command::new("hyprctl")
+                    .arg("locked")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
             else {
                 return LockState::Unknown;
             };
@@ -3422,8 +3433,13 @@ impl Daemon {
         };
         match self.auto_lock_state().await {
             LockState::Unlocked => {}
-            LockState::Locked | LockState::Unknown => {
+            LockState::Locked => {
                 self.auto_pause(meeting, generation, Some("locked"));
+                return;
+            }
+            LockState::Unknown => {
+                self.auto_pause(meeting, generation, Some("locked"));
+                self.auto_capture_failed(meeting, generation, "lock state unknown");
                 return;
             }
         }
@@ -3452,7 +3468,6 @@ impl Daemon {
                 return;
             }
         };
-        self.auto_pause(meeting, generation, None);
         let elig_gen = self.elig_gen.load(Ordering::Acquire);
         let (image, fingerprint) = match self.auto_image(&target).await {
             Ok(image) => image,
@@ -3475,13 +3490,20 @@ impl Daemon {
                 return;
             }
         }
+        // A pause clears only once a capture passes, so a hidden, frozen window logs one cause, not two per tick.
         if same_frame(&previous, &fingerprint) {
+            self.auto_pause(meeting, generation, None);
             return;
         }
         match self.auto_lock_state().await {
             LockState::Unlocked => {}
-            LockState::Locked | LockState::Unknown => {
+            LockState::Locked => {
                 self.auto_pause(meeting, generation, Some("locked"));
+                return;
+            }
+            LockState::Unknown => {
+                self.auto_pause(meeting, generation, Some("locked"));
+                self.auto_capture_failed(meeting, generation, "lock state unknown");
                 return;
             }
         }
@@ -3512,6 +3534,13 @@ impl Daemon {
             return;
         }
         let a = g.autoshots.as_mut().unwrap();
+        if a.paused.take().is_some() {
+            tracing::info!(
+                event = "autoshots_pause",
+                reason = "resumed",
+                origin = "daemon"
+            );
+        }
         a.last_fingerprint = fingerprint;
         a.count += 1;
         if a.count >= 60 {
@@ -3659,7 +3688,7 @@ impl Daemon {
             g.autoshots.as_ref().map(|a| a.target.clone())
         };
         let retained_present = if let Some(target) = &retained_window {
-            self.auto_window(target).await?.is_some()
+            self.auto_window(target).await.ok().flatten().is_some()
         } else {
             false
         };
@@ -3970,8 +3999,10 @@ impl Daemon {
         {
             return Err("no such countdown".into());
         }
+        let call_end = g.stopping.as_ref().is_some_and(|s| s.reason == "call_end");
         self.cancel_countdown(&mut g, "keep");
-        if let Some(r) = &mut g.recording {
+        // Keep on an inactivity countdown only restarts the clock; the notes stay the call's.
+        if call_end && let Some(r) = &mut g.recording {
             r.for_call = false;
             r.kept = true;
         }
@@ -6437,7 +6468,17 @@ impl Daemon {
     ) -> Result<Value, String> {
         if !matches!(origin, Some("mcp" | "agent")) {
             return self
-                .dispatch(cmd, args, false, origin.unwrap_or("cli"))
+                // Only known origins reach the logs; anything else is a client we don't name.
+                .dispatch(
+                    cmd,
+                    args,
+                    false,
+                    match origin {
+                        None => "cli",
+                        Some("shell") => "shell",
+                        Some(_) => "other",
+                    },
+                )
                 .await;
         }
         if cmd.starts_with("voice.") || cmd == "meetings.export" {
@@ -6789,6 +6830,11 @@ impl Daemon {
                     .map(|v| v.as_str().ok_or("record.stop reason must be a string"))
                     .transpose()?
                     .unwrap_or("user");
+                // The reason is logged: only known values, never text a client chose.
+                let reason = match reason {
+                    "user" | "notification" | "inactivity_chip" => reason,
+                    _ => "other",
+                };
                 if origin == "cli" && reason == "user" {
                     self.record_stop()
                 } else {
@@ -12731,6 +12777,33 @@ mod command_tests {
         d.handle("record.stop", json!({}), None).await.unwrap();
     }
 
+    #[test]
+    fn a_burst_across_the_window_boundary_counts() {
+        let mut c = SoundClock::default();
+        let t0 = Instant::now();
+        c.feed(&[0.0, 0.0], t0);
+        // 200 ms at the end of one 1 s window, 100 ms at the start of the next: 300 ms.
+        let ms100 = &loud(0)[..2 * 1_600];
+        c.feed(ms100, t0 + Duration::from_millis(800));
+        c.feed(ms100, t0 + Duration::from_millis(900));
+        assert!(c.last_sound[0].is_none());
+        c.feed(ms100, t0 + Duration::from_millis(1_000));
+        assert!(c.last_sound[0].is_some());
+    }
+
+    #[tokio::test]
+    async fn a_gap_reset_broadcasts_the_cleared_chip() {
+        let (d, t0) = recording_in(call_reading(2, "call", now_ms() as f64, "native")).await;
+        let t = silence(&d, t0, 10 * 60 + 4);
+        assert!(!d.state_value(&d.inner.lock())["inactivity_chip"].is_null());
+        let mut events = d.subscribe();
+        d.feed_sound(&[0.0, 0.0], t + Duration::from_secs(10));
+        let cleared = std::iter::from_fn(|| events.try_recv().ok())
+            .any(|e| e["event"] == "state" && e["inactivity_chip"].is_null());
+        assert!(cleared);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
     #[tokio::test]
     async fn keep_restarts_the_sound_clock() {
         let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
@@ -12746,6 +12819,14 @@ mod command_tests {
         assert_eq!(reason(&d), None);
         let _ = silence(&d, t, 70);
         assert_eq!(reason(&d), Some("inactivity"));
+        // Keep on an inactivity countdown does not mark the notes kept: a later call still adopts them.
+        let generation = d.inner.lock().stopping.as_ref().unwrap().generation;
+        d.handle("record.keep", json!({"gen": generation}), None)
+            .await
+            .unwrap();
+        assert!(!d.inner.lock().recording.as_ref().unwrap().kept);
+        d.on_call_reading(call_reading(2, "call", now_ms() as f64, "native"));
+        assert!(d.inner.lock().recording.as_ref().unwrap().for_call);
         d.handle("record.stop", json!({}), None).await.unwrap();
     }
 
@@ -12967,19 +13048,31 @@ mod command_tests {
             .unwrap();
         let meeting = d.inner.lock().meeting_id.clone().unwrap();
         d.on_call_reading(call_reading(2, "none", 0.0, "native"));
-        d.handle("record.stop", json!({"reason": "user"}), Some("shell"))
-            .await
-            .unwrap();
+        // Client-chosen text never reaches the logged reason or origin.
+        d.handle(
+            "record.stop",
+            json!({"reason": "Secret client reason"}),
+            Some("Secret origin"),
+        )
+        .await
+        .unwrap();
         let output = String::from_utf8(logs.lock().clone()).unwrap();
         assert!(
             output.contains("record_start") && output.contains("record_stop"),
             "{output}"
         );
+        assert!(output.contains("origin=\"cli\""), "{output}");
         assert!(
-            output.contains("origin=\"cli\"") && output.contains("origin=\"shell\""),
+            output.contains("reason=\"other\"") && output.contains("origin=\"other\""),
             "{output}"
         );
-        for secret in ["Secret roadmap", "0xSecretWindow", meeting.as_str()] {
+        for secret in [
+            "Secret roadmap",
+            "0xSecretWindow",
+            "Secret client",
+            "Secret origin",
+            meeting.as_str(),
+        ] {
             assert!(!output.contains(secret), "{output}");
         }
     }
@@ -13490,7 +13583,7 @@ mod autoshots_tests {
             capture_deadline(std::future::pending::<()>())
                 .await
                 .unwrap_err(),
-            "grim timed out"
+            "timed out"
         );
     }
 
@@ -13512,7 +13605,7 @@ mod autoshots_tests {
         let notices: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
             .filter(|event| event["event"] == "notice")
             .collect();
-        assert!(notices.is_empty());
+        assert_eq!(notices.len(), 1, "an unreadable lock state warns once");
         d.handle("autoshots.stop", json!({}), None).await.unwrap();
         d.handle("autoshots.start", json!({}), None).await.unwrap();
         let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;

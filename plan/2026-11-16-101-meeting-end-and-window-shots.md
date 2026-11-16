@@ -543,6 +543,21 @@ sound for N min." with the action `stop=Stop notes`.
 
    → verify: the table in the PR, each row as expected.
 
+### Review fixes (pre-merge review: Opus, Codex)
+
+*Deviations, each with a test unless noted:*
+- **Keep on an inactivity countdown** (`inactivity`, `inactivity_call`) only restarts the sound clock. Only Keep on `call_end` clears `for_call` and marks the recording kept, so a later call still adopts it, and the call's own end still counts down. (Approved decision "Keep clears `for_call`" is read as the call-end Keep, per spec B4: Keep "does not switch the backstop off".)
+- **`hyprctl` calls** (`clients`, `monitors`, `locked`) run under the 3 s deadline with `kill_on_drop`, so a stalled compositor cannot stall the 1 s call-state loop. In `record.start`, a failed window lookup drops the retained autoshot binding instead of failing the start.
+- **An unreadable lock state** pauses as `locked` *and* warns once ("none are being saved"), as #84 did and the README says.
+- **A pause clears only when a capture is stored** (or matches the last frame), so a hidden, frozen window logs one cause, not "resumed" then `hidden_not_updating` every tick.
+- **An expired countdown whose condition is gone** is cancelled for every reason, `call_end` included.
+- **Logged `reason` and `origin` take known values only:** `record.stop` reasons other than `user`, `notification`, `inactivity_chip` log as `other`; origins other than `shell` (or none, `cli`) log as `other`. Agents can no longer put text in the logs.
+- **Sound windows:** a burst across a 1 s window boundary counts: an adjacent window's count carries over, so in effect 300 ms within 2 s, erring on the side of not stopping.
+- **A gap reset that clears the inactivity chip** now broadcasts state, so the shell does not keep showing it.
+- **The call-reading log line** carries `event`, `reason` and `origin` like the others.
+- README: only the bar chip is sure to show under Do Not Disturb; the notification may be hidden.
+- *Not added:* tests for an `inactivity_call` countdown expiring into a stop, and frames stopping during a countdown. `expire` reads the real clock while the inactivity tests use a fake one; the expiry path itself is covered by the `call_end` expiry tests. Verified live in step 9 (F1).
+
 ## Tests
 
 - `cargo test`: all existing tests pass, plus the new ones listed in steps

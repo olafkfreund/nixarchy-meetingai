@@ -352,8 +352,8 @@ Mode is switched on (switching it on by hand is not a call).
   (`settings.autoRecordOnCall`) starts the notes at once instead, except in interviewer mode, where
   consent stays manual and the offer is shown.
 - **Call ends** while recording notes that belong to the call (started during it, or, with a newer meeting-mode, already running when it
-  started): the bar shows **Notes stop in 30 s · Keep** and a notification with **Keep recording**, which Do
-  Not Disturb does not hide. Keep lets the notes run on. If the call comes back within the 30 s, nothing
+  started): the bar shows **Notes stop in 30 s · Keep**, which Do Not Disturb cannot hide, and a
+  notification with **Keep recording**, which it may. Keep lets the notes run on. If the call comes back within the 30 s, nothing
   stops. Notes that don't belong to the call get a "Stop notes" offer instead. The daemon decides this
   itself, so it works without the shell and from the CLI.
 - **No sound:** after `settings.inactivityStopMinutes` (default 10, 0 for off) with no microphone sound and
