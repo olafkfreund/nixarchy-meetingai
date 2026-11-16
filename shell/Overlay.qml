@@ -690,6 +690,25 @@ Item {
                             Check { objectName: "noContext"; ts: metrics.ts; accessibleName: "No context"; Layout.alignment: Qt.AlignVCenter; checked: root.noContext; onToggled: root.noContext = !root.noContext }
                         }
                     }
+                    Cell {   // stop notes after N minutes with no sound, 0 = off
+                        theme: metrics; width: sflow.cellW
+                        label: backend.lockedLabel("inactivity_stop_minutes", Number(backend.settings.inactivity_stop_minutes) === 0 ? "Stop on silence: off" : "Stop after " + (backend.settings.inactivity_stop_minutes === undefined ? 10 : backend.settings.inactivity_stop_minutes) + " min of silence")
+                        PanelSlider {
+                            objectName: "inactivityMinutes"
+                            Accessible.role: Accessible.Slider; Accessible.name: "Stop after minutes of silence"; property string accName: "Stop after minutes of silence"
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width
+                            enabled: !backend.isLocked("inactivity_stop_minutes")
+                            minimum: 0; maximum: 240; step: 5; integer: true
+                            trackHeight: Math.max(4, Math.round(Style.spacing.controlHeight * 0.11 * metrics.ts))
+                            knobSize: Math.max(14, Math.round(Style.spacing.controlHeight * 0.38 * metrics.ts))
+                            value: backend.settings.inactivity_stop_minutes === undefined ? 10 : Number(backend.settings.inactivity_stop_minutes)
+                            trackColor: Qt.alpha(Commons.Color.popups.text, 0.2)
+                            fillColor: Commons.Color.popups.text
+                            knobColor: Commons.Color.popups.text
+                            onMoved: function(v) { var n = Math.round(v / 5) * 5; if (n !== Number(backend.settings.inactivity_stop_minutes)) backend.setSetting("inactivity_stop_minutes", n); }
+                        }
+                    }
                     Cell {   // overlay text size, 80..160 % (Ctrl+= / Ctrl+- / Ctrl+0)
                         theme: metrics; width: sflow.cellW; label: backend.lockedLabel("text_scale", "Text size " + Math.round(backend.textScale * 100) + "%")
                         PanelSlider {

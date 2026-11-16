@@ -307,6 +307,7 @@ sound for N min." with the action `stop=Stop notes`.
        `inactivity_call`;
      - resets at every point in the decisions above;
      - log each inactivity chip shown, and each countdown, with its reason.
+   - *Implementation notes (step 3, coder):* the 1 s tick runs from the audio branch (no frames, no tick; a running countdown is then cancelled by `expire`); one lock covers the ring push and the sound feed; a change of `present` and `finish_recording` also reset the clock; no chip shows while a countdown runs; README gets the regenerated Nix options block (`docs-match`).
    - **The setting:**
      - `src/core/models/settings.rs`: a field, its default 10, `keys`, the
        reader and the writer next to `auto_record_on_call` (`:223`, `:273`,

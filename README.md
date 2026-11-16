@@ -970,6 +970,27 @@ attribute set of string
 
 
 
+## programs\.nixarchy-meetingai\.settings\.inactivityStopMinutes
+
+
+
+Stop notes after this many minutes with no sound (0 is off)\.
+
+
+
+*Type:*
+null or integer between 0 and 240 (both inclusive)
+
+
+
+*Default:*
+
+```nix
+null
+```
+
+
+
 ## programs\.nixarchy-meetingai\.settings\.liveModel
 
 

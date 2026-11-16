@@ -409,7 +409,7 @@ pub struct SttHints {
 /// Channel, start, end (seconds) and samples of one utterance.
 pub type BatchChunk = (u8, f64, f64, Vec<f32>);
 /// A sample above this level counts as sound (about -42 dBFS).
-const SOUND_LEVEL: f32 = 0.008;
+pub(crate) const SOUND_LEVEL: f32 = 0.008;
 /// 0.2 s at 16 kHz.
 const MIN_SOUND_SAMPLES: usize = 3_200;
 /// Transcribe one chunk of samples (language from the config).

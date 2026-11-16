@@ -149,7 +149,8 @@ const MANAGED_SETTINGS: [&str; 13] = [
     "meeting_context",
 ];
 /// Settings the shell shows as numbers rather than strings.
-const NUMERIC_SETTINGS: [&str; 6] = [
+const NUMERIC_SETTINGS: [&str; 7] = [
+    "inactivity_stop_minutes",
     "capture_delay_seconds",
     "text_scale",
     "overlay_x",
@@ -344,6 +345,74 @@ struct Stopping {
     meeting: String,
 }
 
+/// Sustained sound: this long above `SOUND_LEVEL` within one window.
+const SOUND_WINDOW: Duration = Duration::from_secs(1);
+const SOUND_FRAMES: u32 = audio::SAMPLE_RATE * 3 / 10;
+/// A gap in frames at least this long restarts the clock.
+const FRAME_GAP: Duration = Duration::from_secs(5);
+
+/// When each channel (0 mic, 1 system) last sounded; times are passed in so tests can fake them.
+#[derive(Default)]
+struct SoundClock {
+    since: Option<Instant>,
+    last_sound: [Option<Instant>; 2],
+    last_frame: Option<Instant>,
+    window: [(Option<Instant>, u32); 2],
+    chip: Option<u32>,
+}
+
+impl SoundClock {
+    fn reset(&mut self, now: Instant) {
+        *self = Self {
+            since: Some(now),
+            last_frame: self.last_frame,
+            ..Self::default()
+        };
+    }
+
+    /// O(samples), no allocation. Returns true when a gap restarted the clock.
+    fn feed(&mut self, samples: &[f32], now: Instant) -> bool {
+        let gap = self
+            .last_frame
+            .is_some_and(|l| now.saturating_duration_since(l) >= FRAME_GAP);
+        if gap {
+            self.reset(now);
+        }
+        self.last_frame = Some(now);
+        let mut above = [0u32; 2];
+        for f in samples.as_chunks::<2>().0 {
+            above[0] += u32::from(f[0].abs() > transcription::SOUND_LEVEL);
+            above[1] += u32::from(f[1].abs() > transcription::SOUND_LEVEL);
+        }
+        for (ch, n) in above.into_iter().enumerate() {
+            let w = &mut self.window[ch];
+            if w.0
+                .is_none_or(|s| now.saturating_duration_since(s) >= SOUND_WINDOW)
+            {
+                *w = (Some(now), 0);
+            }
+            w.1 += n;
+            if w.1 >= SOUND_FRAMES {
+                self.last_sound[ch] = Some(now);
+            }
+        }
+        gap
+    }
+
+    fn idle(&self, ch: usize, now: Instant) -> Duration {
+        [self.last_sound[ch], self.since]
+            .into_iter()
+            .flatten()
+            .max()
+            .map_or(Duration::ZERO, |t| now.saturating_duration_since(t))
+    }
+
+    fn frames_live(&self, now: Instant) -> bool {
+        self.last_frame
+            .is_some_and(|l| now.saturating_duration_since(l) < FRAME_GAP)
+    }
+}
+
 fn owns_call(call: &CallReading, since_ms: i64) -> bool {
     call.present
         && call.call == "call"
@@ -376,6 +445,7 @@ struct Inner {
     // Recording.
     recording: Option<Recording>,
     stopping: Option<Stopping>,
+    sound: SoundClock,
     meeting_id: Option<String>,
     /// Set from the moment recording ends until its notes are written.
     finishing_meeting: Option<String>,
@@ -1277,6 +1347,7 @@ impl Daemon {
                 autoshots: None,
                 recording: None,
                 stopping: None,
+                sound: SoundClock::default(),
                 meeting_id: None,
                 effective: (String::new(), String::new()),
                 loading: false,
@@ -1367,7 +1438,7 @@ impl Daemon {
             "since": g.recording.as_ref().map_or(0, |r| r.since_ms),
             "for_call": g.recording.as_ref().is_some_and(|r| r.for_call && !r.stop.load(Ordering::Relaxed)),
             "stopping": g.stopping.as_ref().map(|s| json!({"gen": s.generation, "reason": s.reason, "in_s": s.at.saturating_duration_since(Instant::now()).as_secs().saturating_add(1).min(30) as u32})),
-            "inactivity_chip": null,
+            "inactivity_chip": g.sound.chip.map(|minutes| json!({"minutes": minutes})),
             "call_window": {"state": g.call.window_state, "class": g.call.window_class},
             "mic": g.mic,
             "system": g.system,
@@ -1509,6 +1580,80 @@ impl Daemon {
         });
     }
 
+    /// The inactivity countdown reason due now, if any. `present == false` is unknown, never "no call".
+    fn inactivity_want(g: &Inner, now: Instant) -> Option<&'static str> {
+        let limit = Duration::from_secs(u64::from(g.settings.inactivity_stop_minutes) * 60);
+        if limit.is_zero() || !Self::recording_live(g) || !g.sound.frames_live(now) {
+            return None;
+        }
+        let (mic, system) = (g.sound.idle(0, now), g.sound.idle(1, now));
+        match (g.call.present, g.call.call.as_str()) {
+            (true, "none") => (mic >= limit).then_some("inactivity"),
+            (true, "call") => (mic.min(system) >= limit * 3).then_some("inactivity_call"),
+            _ => None,
+        }
+    }
+
+    fn recording_live(g: &Inner) -> bool {
+        g.meeting_id.is_some()
+            && g.recording
+                .as_ref()
+                .is_some_and(|r| !r.stop.load(Ordering::Relaxed))
+    }
+
+    /// Minutes of silence to show as a chip: any call state but a known "no call".
+    fn chip_due(g: &Inner, now: Instant) -> Option<u32> {
+        let minutes = g.settings.inactivity_stop_minutes;
+        let limit = Duration::from_secs(u64::from(minutes) * 60);
+        (minutes > 0
+            && Self::recording_live(g)
+            && g.sound.frames_live(now)
+            && !(g.call.present && g.call.call == "none")
+            && g.sound.idle(0, now).min(g.sound.idle(1, now)) >= limit)
+            .then_some(minutes)
+    }
+
+    fn feed_sound_in(&self, g: &mut Inner, samples: &[f32], now: Instant) {
+        if g.sound.feed(samples, now) && g.sound.chip.take().is_some() {
+            self.emit_state(g);
+        }
+    }
+
+    #[cfg(test)]
+    fn feed_sound(&self, samples: &[f32], now: Instant) {
+        self.feed_sound_in(&mut self.inner.lock(), samples, now);
+    }
+
+    /// Once a second: start or cancel the inactivity countdown and show or clear the chip.
+    fn inactivity_tick(self: &Arc<Self>, now: Instant) {
+        let mut g = self.inner.lock();
+        let current = g.stopping.as_ref().map(|s| s.reason);
+        match Self::inactivity_want(&g, now) {
+            Some(reason) if current != Some(reason) && current != Some("call_end") => {
+                g.sound.chip = None;
+                self.start_countdown(&mut g, reason);
+                self.emit_state(&g);
+            }
+            None if matches!(current, Some("inactivity" | "inactivity_call")) => {
+                self.cancel_countdown(&mut g, "sound");
+                self.emit_state(&g);
+            }
+            _ => {}
+        }
+        let chip = Self::chip_due(&g, now).filter(|_| g.stopping.is_none());
+        if chip != g.sound.chip {
+            g.sound.chip = chip;
+            if chip.is_some() {
+                tracing::info!(
+                    event = "inactivity_chip",
+                    reason = "inactivity",
+                    origin = "system"
+                );
+            }
+            self.emit_state(&g);
+        }
+    }
+
     fn expire(&self, generation: u64) {
         let mut g = self.inner.lock();
         let Some(stopping) = g.stopping.as_ref() else {
@@ -1517,16 +1662,25 @@ impl Daemon {
         if stopping.generation != generation || g.meeting_id.as_deref() != Some(&stopping.meeting) {
             return;
         }
-        if stopping.reason != "call_end" || !Self::call_end_due(&g) || Instant::now() < stopping.at
-        {
+        let (reason, at) = (stopping.reason, stopping.at);
+        let now = Instant::now();
+        let due = match reason {
+            "call_end" => Self::call_end_due(&g),
+            "inactivity" | "inactivity_call" => Self::inactivity_want(&g, now) == Some(reason),
+            _ => false,
+        };
+        if now < at {
             return;
         }
-        tracing::info!(
-            event = "countdown_expire",
-            reason = stopping.reason,
-            origin = "system"
-        );
-        let _ = self.stop_locked(&mut g, "call_end", "system");
+        if !due {
+            if reason != "call_end" {
+                self.cancel_countdown(&mut g, "condition_gone");
+                self.emit_state(&g);
+            }
+            return;
+        }
+        tracing::info!(event = "countdown_expire", reason, origin = "system");
+        let _ = self.stop_locked(&mut g, reason, "system");
     }
 
     fn adopt_call(g: &mut Inner, ended: bool) {
@@ -1572,6 +1726,9 @@ impl Daemon {
         tracing::info!(present = reading.present, schema = reading.schema, call = %reading.call,
             by = %reading.by, window_state = %reading.window_state, "call reading changed");
         let ended = g.call.call == "call" && reading.call != "call" && reading.present;
+        if g.call.call != reading.call || g.call.present != reading.present {
+            g.sound.reset(Instant::now());
+        }
         g.call = reading;
         self.elig_gen.fetch_add(1, Ordering::AcqRel);
         Self::adopt_call(&mut g, ended);
@@ -3388,6 +3545,8 @@ impl Daemon {
                 kept: false,
                 handled_since: (for_call && g.call.schema >= 2).then_some(g.call.since),
             });
+            g.sound = SoundClock::default();
+            g.sound.reset(Instant::now());
             self.cancel_countdown(g, "record_start");
             self.elig_gen.fetch_add(1, Ordering::AcqRel);
             (
@@ -3597,6 +3756,7 @@ impl Daemon {
             r.for_call = false;
             r.kept = true;
         }
+        g.sound.reset(Instant::now());
         self.elig_gen.fetch_add(1, Ordering::AcqRel);
         tracing::info!(event = "record_keep", reason = "user", origin);
         self.emit_state(&g);
@@ -3630,6 +3790,7 @@ impl Daemon {
         let (mut closing, mut done, mut deadline) = (false, false, None);
         let mut system_on = true;
         let mut levels = Levels::default();
+        let mut last_tick = Instant::now();
         while !done {
             let mut events = Vec::new();
             let stopping = stop.load(Ordering::Relaxed);
@@ -3664,8 +3825,17 @@ impl Daemon {
                     SessionEvent::Audio(mut samples) => {
                         self.route_audio(&mut samples);
                         self.tap_audio(&samples);
-                        self.inner.lock().ring.push_interleaved(&samples);
-                        if let Some(v) = levels.feed(&samples, Instant::now()) {
+                        let now = Instant::now();
+                        {
+                            let mut g = self.inner.lock();
+                            g.ring.push_interleaved(&samples);
+                            self.feed_sound_in(&mut g, &samples, now);
+                        }
+                        if now.duration_since(last_tick) >= Duration::from_secs(1) {
+                            last_tick = now;
+                            self.inactivity_tick(now);
+                        }
+                        if let Some(v) = levels.feed(&samples, now) {
                             self.emit("levels", v);
                         }
                         if let Some(l) = &live
@@ -3803,6 +3973,7 @@ impl Daemon {
                 g.last_elapsed = g.meeting_offset + r.started.elapsed().as_secs_f64();
             }
             self.cancel_countdown(g, "finish_recording");
+            g.sound = SoundClock::default();
             let _ = meetings::finish(g.db.connection(), meeting, g.last_elapsed as i64);
             g.meeting_id = None;
             g.ring = MicRing::new(VOICE_RING_SECONDS, audio::SAMPLE_RATE);
@@ -12264,6 +12435,196 @@ mod command_tests {
                 .load(Ordering::Relaxed)
         );
         assert!(d.inner.lock().stopping.is_none());
+    }
+
+    fn loud(channel: usize) -> Vec<f32> {
+        let mut v = vec![0.0; 2 * 4_800];
+        for f in v.chunks_mut(2) {
+            f[channel] = 0.5;
+        }
+        v
+    }
+
+    /// Silent frames every 4 s with a tick each, from `t0` for `secs` seconds; returns the end.
+    fn silence(d: &Arc<Daemon>, t0: Instant, secs: u64) -> Instant {
+        let mut t = t0;
+        while t < t0 + Duration::from_secs(secs) {
+            d.feed_sound(&[0.0, 0.0], t);
+            d.inactivity_tick(t);
+            t += Duration::from_secs(4);
+        }
+        t
+    }
+
+    async fn recording_in(call: CallReading) -> (Arc<Daemon>, Instant) {
+        let d = daemon();
+        d.on_call_reading(call);
+        d.handle("record.start", json!({}), None).await.unwrap();
+        (d, Instant::now())
+    }
+
+    fn reason(d: &Arc<Daemon>) -> Option<&'static str> {
+        d.inner.lock().stopping.as_ref().map(|s| s.reason)
+    }
+
+    #[tokio::test]
+    async fn no_call_counts_the_mic_only_and_mic_sound_cancels() {
+        let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        // System sound every few seconds must not keep it alive.
+        let mut t = t0;
+        while t < t0 + Duration::from_secs(10 * 60 + 8) {
+            d.feed_sound(&loud(1), t);
+            d.inactivity_tick(t);
+            t += Duration::from_secs(4);
+        }
+        assert_eq!(reason(&d), Some("inactivity"));
+        d.feed_sound(&loud(0), t);
+        d.inactivity_tick(t);
+        assert_eq!(reason(&d), None);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn short_sound_is_not_sound_and_resets_restart_the_clock() {
+        let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        let t = silence(&d, t0, 9 * 60);
+        // 100 ms is below the 300 ms needed.
+        d.feed_sound(&loud(0)[..2 * 1_600], t);
+        let t = silence(&d, t, 70);
+        assert_eq!(reason(&d), Some("inactivity"));
+        // A change of call resets the clock (at the real now); the countdown goes on the next tick.
+        d.on_call_reading(call_reading(2, "maybe", 0.0, "native"));
+        let t = Instant::now().max(t);
+        d.inactivity_tick(t);
+        assert_eq!(reason(&d), None);
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let t = silence(&d, Instant::now(), 9 * 60);
+        assert_eq!(reason(&d), None);
+        // A gap of 5 s or more restarts it.
+        let t = t + Duration::from_secs(120);
+        d.feed_sound(&[0.0, 0.0], t);
+        let t = silence(&d, t, 9 * 60);
+        assert_eq!(reason(&d), None);
+        let _ = silence(&d, t, 70);
+        assert_eq!(reason(&d), Some("inactivity"));
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn keep_restarts_the_sound_clock() {
+        let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        let t = silence(&d, t0, 10 * 60 + 8);
+        let generation = d.inner.lock().stopping.as_ref().unwrap().generation;
+        d.handle("record.keep", json!({"gen": generation}), None)
+            .await
+            .unwrap();
+        let _ = t;
+        d.inactivity_tick(Instant::now());
+        assert_eq!(reason(&d), None);
+        let t = silence(&d, Instant::now(), 9 * 60);
+        assert_eq!(reason(&d), None);
+        let _ = silence(&d, t, 70);
+        assert_eq!(reason(&d), Some("inactivity"));
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn during_a_call_a_chip_comes_first_then_three_times_n_stops() {
+        let (d, t0) = recording_in(call_reading(2, "call", now_ms() as f64, "native")).await;
+        let t = silence(&d, t0, 10 * 60 + 4);
+        assert_eq!(
+            d.state_value(&d.inner.lock())["inactivity_chip"],
+            json!({"minutes": 10})
+        );
+        assert_eq!(reason(&d), None);
+        // Sound on either channel clears the chip.
+        d.feed_sound(&loud(1), t);
+        d.inactivity_tick(t);
+        assert!(d.state_value(&d.inner.lock())["inactivity_chip"].is_null());
+        let t = silence(&d, t, 30 * 60 + 8);
+        assert_eq!(reason(&d), Some("inactivity_call"));
+        assert!(d.state_value(&d.inner.lock())["inactivity_chip"].is_null());
+        d.feed_sound(&loud(0), t);
+        d.inactivity_tick(t);
+        assert_eq!(reason(&d), None);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unknown_call_state_shows_only_the_chip() {
+        let (d, t0) = recording_in(CallReading::default()).await;
+        let _ = silence(&d, t0, 31 * 60);
+        assert_eq!(reason(&d), None);
+        assert_eq!(
+            d.state_value(&d.inner.lock())["inactivity_chip"],
+            json!({"minutes": 10})
+        );
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_frames_and_zero_minutes_never_stop() {
+        let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        d.inactivity_tick(t0 + Duration::from_secs(3_600));
+        assert_eq!(reason(&d), None);
+        d.inner.lock().settings.inactivity_stop_minutes = 0;
+        let _ = silence(&d, t0, 31 * 60);
+        assert_eq!(reason(&d), None);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn call_end_countdown_is_not_replaced_by_inactivity() {
+        let (d, t0) = recording_in(call_reading(2, "call", now_ms() as f64, "native")).await;
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let _ = silence(&d, t0, 11 * 60);
+        assert_eq!(reason(&d), Some("call_end"));
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inactivity_expiry_rechecks_the_clock_under_the_lock() {
+        let (d, _) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        let now = Instant::now();
+        let past = now.checked_sub(Duration::from_secs(11 * 60)).unwrap();
+        let generation = {
+            let mut g = d.inner.lock();
+            g.sound.since = Some(past);
+            g.sound.last_frame = Some(now);
+            d.start_countdown(&mut g, "inactivity");
+            g.stopping.as_mut().unwrap().at = now - Duration::from_millis(1);
+            g.stopping.as_ref().unwrap().generation
+        };
+        // Sound came back: expiry must not stop, and drops the countdown.
+        d.inner.lock().sound.last_sound[0] = Some(now);
+        d.expire(generation);
+        assert!(d.inner.lock().stopping.is_none());
+        assert!(
+            !d.inner
+                .lock()
+                .recording
+                .as_ref()
+                .unwrap()
+                .stop
+                .load(Ordering::Relaxed)
+        );
+        let generation = {
+            let mut g = d.inner.lock();
+            g.sound.last_sound[0] = None;
+            d.start_countdown(&mut g, "inactivity");
+            g.stopping.as_mut().unwrap().at = now - Duration::from_millis(1);
+            g.stopping.as_ref().unwrap().generation
+        };
+        d.expire(generation);
+        assert!(
+            d.inner
+                .lock()
+                .recording
+                .as_ref()
+                .unwrap()
+                .stop
+                .load(Ordering::Relaxed)
+        );
     }
 
     #[tokio::test]
