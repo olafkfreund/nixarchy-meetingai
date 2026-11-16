@@ -332,6 +332,23 @@ struct Recording {
     since_ms: i64,
     stop: Arc<AtomicBool>,
     speech: Option<ProviderConfig>,
+    for_call: bool,
+    kept: bool,
+    handled_since: Option<f64>,
+}
+
+struct Stopping {
+    generation: u64,
+    reason: &'static str,
+    at: Instant,
+    meeting: String,
+}
+
+fn owns_call(call: &CallReading, since_ms: i64) -> bool {
+    call.present
+        && call.call == "call"
+        && call.since > 0.0
+        && (call.schema >= 2 || since_ms as f64 >= call.since - 5_000.0)
 }
 
 struct Inner {
@@ -358,6 +375,7 @@ struct Inner {
     autoshots: Option<AutoShots>,
     // Recording.
     recording: Option<Recording>,
+    stopping: Option<Stopping>,
     meeting_id: Option<String>,
     /// Set from the moment recording ends until its notes are written.
     finishing_meeting: Option<String>,
@@ -1258,6 +1276,7 @@ impl Daemon {
                 pending_capture: None,
                 autoshots: None,
                 recording: None,
+                stopping: None,
                 meeting_id: None,
                 effective: (String::new(), String::new()),
                 loading: false,
@@ -1346,13 +1365,17 @@ impl Daemon {
             "language_hint": language_hint,
             "recording": g.recording.as_ref().is_some_and(|r| !r.stop.load(Ordering::Relaxed)),
             "since": g.recording.as_ref().map_or(0, |r| r.since_ms),
+            "for_call": g.recording.as_ref().is_some_and(|r| r.for_call && !r.stop.load(Ordering::Relaxed)),
+            "stopping": g.stopping.as_ref().map(|s| json!({"gen": s.generation, "reason": s.reason, "in_s": s.at.saturating_duration_since(Instant::now()).as_secs().saturating_add(1).min(30) as u32})),
+            "inactivity_chip": null,
+            "call_window": {"state": g.call.window_state, "class": g.call.window_class},
             "mic": g.mic,
             "system": g.system,
             "series": g.series,
             "candidate": g.candidate,
             "consent": g.consent,
             "finishing": g.finishing_meeting.is_some(),   // stopped, notes still being written
-            "autoshots": {"on": g.autoshots.as_ref().is_some_and(|a| !a.at_limit), "count": g.autoshots.as_ref().map_or(0, |a| a.count), "at_limit": g.autoshots.as_ref().is_some_and(|a| a.at_limit)},
+            "autoshots": {"on": g.autoshots.as_ref().is_some_and(|a| !a.at_limit), "count": g.autoshots.as_ref().map_or(0, |a| a.count), "at_limit": g.autoshots.as_ref().is_some_and(|a| a.at_limit), "paused": null},
             "capture": g.pending_capture.is_some(),   // a screenshot waits for the next question
             "meeting": g.meeting_id.as_ref().or(g.resume_meeting.as_ref()),
             "calendar_title": g.calendar.as_ref().map(|e| e.title.as_str()),
@@ -1427,18 +1450,132 @@ impl Daemon {
 
     fn emit_state(&self, g: &Inner) {
         self.elig_gen.fetch_add(1, Ordering::AcqRel);
-        self.emit("state", self.state_value(g));
+        let mut state = self.state_value(g);
+        if self.local_now(g) {
+            state["call_window"]["class"] = "".into();
+        }
+        self.emit("state", state);
     }
 
-    pub(super) fn on_call_reading(&self, reading: CallReading) {
+    fn cancel_countdown(&self, g: &mut Inner, cause: &str) {
+        if let Some(stopping) = g.stopping.take() {
+            self.elig_gen.fetch_add(1, Ordering::AcqRel);
+            tracing::info!(
+                event = "countdown_cancel",
+                reason = stopping.reason,
+                origin = "system",
+                cause
+            );
+        }
+    }
+
+    fn call_end_due(g: &Inner) -> bool {
+        g.meeting_id.is_some()
+            && g.recording
+                .as_ref()
+                .is_some_and(|r| r.for_call && !r.stop.load(Ordering::Relaxed))
+            && g.call.present
+            && g.call.call != "call"
+    }
+
+    fn update_call_end(self: &Arc<Self>, g: &mut Inner) {
+        if Self::call_end_due(g) {
+            if g.stopping.as_ref().is_some_and(|s| s.reason == "call_end") {
+                return;
+            }
+            self.start_countdown(g, "call_end");
+        } else if g.stopping.as_ref().is_some_and(|s| s.reason == "call_end") {
+            self.cancel_countdown(g, "call_state_changed");
+        }
+    }
+
+    fn start_countdown(self: &Arc<Self>, g: &mut Inner, reason: &'static str) {
+        if reason != "call_end" && g.stopping.as_ref().is_some_and(|s| s.reason == "call_end") {
+            return;
+        }
+        self.cancel_countdown(g, "replaced");
+        let generation = self.elig_gen.fetch_add(1, Ordering::AcqRel) + 1;
+        g.stopping = Some(Stopping {
+            generation,
+            reason,
+            at: Instant::now() + Duration::from_secs(30),
+            meeting: g.meeting_id.clone().expect("countdown needs a meeting"),
+        });
+        tracing::info!(event = "countdown_start", reason, origin = "system");
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            me.expire(generation);
+        });
+    }
+
+    fn expire(&self, generation: u64) {
+        let mut g = self.inner.lock();
+        let Some(stopping) = g.stopping.as_ref() else {
+            return;
+        };
+        if stopping.generation != generation || g.meeting_id.as_deref() != Some(&stopping.meeting) {
+            return;
+        }
+        if stopping.reason != "call_end" || !Self::call_end_due(&g) || Instant::now() < stopping.at
+        {
+            return;
+        }
+        tracing::info!(
+            event = "countdown_expire",
+            reason = stopping.reason,
+            origin = "system"
+        );
+        let _ = self.stop_locked(&mut g, "call_end", "system");
+    }
+
+    fn adopt_call(g: &mut Inner, ended: bool) {
+        if g.meeting_id.is_none() {
+            return;
+        }
+        let call = g.call.clone();
+        if let Some(r) = g
+            .recording
+            .as_mut()
+            .filter(|r| !r.stop.load(Ordering::Relaxed))
+        {
+            if !r.for_call && call.present && call.call == "call" && call.since > 0.0 {
+                if call.schema >= 2 && r.handled_since != Some(call.since) {
+                    if r.kept {
+                        r.handled_since = Some(call.since);
+                        tracing::info!(event = "kept", reason = "call", origin = "system");
+                    } else if call.by != "fallback" {
+                        r.handled_since = Some(call.since);
+                        r.for_call = true;
+                        tracing::info!(event = "adopt", reason = "call", origin = "system");
+                    }
+                } else if call.schema < 2 && !r.kept && owns_call(&call, r.since_ms) {
+                    r.for_call = true;
+                    tracing::info!(event = "adopt", reason = "schema1_slack", origin = "system");
+                }
+            }
+            if ended && !r.for_call {
+                tracing::info!(
+                    event = "call_ended_not_owned",
+                    reason = "call_end",
+                    origin = "system"
+                );
+            }
+        }
+    }
+
+    pub(super) fn on_call_reading(self: &Arc<Self>, reading: CallReading) {
         let mut g = self.inner.lock();
         if g.call == reading {
             return;
         }
         tracing::info!(present = reading.present, schema = reading.schema, call = %reading.call,
             by = %reading.by, window_state = %reading.window_state, "call reading changed");
+        let ended = g.call.call == "call" && reading.call != "call" && reading.present;
         g.call = reading;
         self.elig_gen.fetch_add(1, Ordering::AcqRel);
+        Self::adopt_call(&mut g, ended);
+        self.update_call_end(&mut g);
         self.emit_state(&g);
     }
 
@@ -3154,6 +3291,7 @@ impl Daemon {
         consent: bool,
         title: String,
         new: bool,
+        origin: &str,
     ) -> Result<Value, String> {
         let (stop, speech, device, output_device, system, echo_gate) = {
             let mut guard = self.inner.lock();
@@ -3239,12 +3377,19 @@ impl Daemon {
             // Line times count from the first frame sent to the transcriber, so the ring restarts too.
             g.ring = MicRing::new(VOICE_RING_SECONDS, audio::SAMPLE_RATE);
             // Reserve the slot so a second start cannot race the blocking open below.
+            let since_ms = now_ms();
+            let for_call = owns_call(&g.call, since_ms);
             g.recording = Some(Recording {
                 started: Instant::now(),
-                since_ms: now_ms(),
+                since_ms,
                 stop: stop.clone(),
                 speech: speech.clone(),
+                for_call,
+                kept: false,
+                handled_since: (for_call && g.call.schema >= 2).then_some(g.call.since),
             });
+            self.cancel_countdown(g, "record_start");
+            self.elig_gen.fetch_add(1, Ordering::AcqRel);
             (
                 stop,
                 speech,
@@ -3384,6 +3529,8 @@ impl Daemon {
                         }
                     }
                     g.meeting_id = Some(id.clone());
+                    Self::adopt_call(g, false);
+                    self.update_call_end(g);
                     if let Some(a) = g.autoshots.as_mut() {
                         if a.meeting == id {
                             a.generation = self.autoshots_epoch.fetch_add(1, Ordering::AcqRel) + 1;
@@ -3394,6 +3541,7 @@ impl Daemon {
                     g.speaker_names =
                         meetings::speaker_names(g.db.connection(), &id).unwrap_or_default();
                     self.emit_state(g);
+                    tracing::info!(event = "record_start", reason = "user", origin);
                     id
                 }
                 Err(error) => {
@@ -3410,19 +3558,48 @@ impl Daemon {
     }
 
     fn record_stop(&self) -> Result<Value, String> {
+        self.record_stop_with("user", "cli")
+    }
+
+    fn record_stop_with(&self, reason: &str, origin: &str) -> Result<Value, String> {
         let mut guard = self.inner.lock();
-        let g = &mut *guard;
+        self.stop_locked(&mut guard, reason, origin)
+    }
+
+    fn stop_locked(&self, g: &mut Inner, reason: &str, origin: &str) -> Result<Value, String> {
         match &g.recording {
             Some(r) if !r.stop.swap(true, Ordering::Relaxed) => {}
             _ => return Err("Not recording.".into()),
         }
         g.pending_question = None;
         g.pending_created = None;
+        self.cancel_countdown(g, "record_stop");
+        self.elig_gen.fetch_add(1, Ordering::AcqRel);
         self.autoshots_epoch.fetch_add(1, Ordering::AcqRel);
         if g.dictation.as_ref().is_some_and(|d| d.meeting) {
             g.dictation = None;
         }
+        tracing::info!(event = "record_stop", reason, origin);
         self.emit_state(g);
+        Ok(json!({}))
+    }
+
+    fn record_keep(&self, generation: u64, origin: &str) -> Result<Value, String> {
+        let mut g = self.inner.lock();
+        if g.stopping
+            .as_ref()
+            .is_none_or(|s| s.generation != generation)
+        {
+            return Err("no such countdown".into());
+        }
+        self.cancel_countdown(&mut g, "keep");
+        if let Some(r) = &mut g.recording {
+            r.for_call = false;
+            r.kept = true;
+        }
+        self.elig_gen.fetch_add(1, Ordering::AcqRel);
+        tracing::info!(event = "record_keep", reason = "user", origin);
+        self.emit_state(&g);
         Ok(json!({}))
     }
 
@@ -3625,6 +3802,7 @@ impl Daemon {
             if let Some(r) = g.recording.take() {
                 g.last_elapsed = g.meeting_offset + r.started.elapsed().as_secs_f64();
             }
+            self.cancel_countdown(g, "finish_recording");
             let _ = meetings::finish(g.db.connection(), meeting, g.last_elapsed as i64);
             g.meeting_id = None;
             g.ring = MicRing::new(VOICE_RING_SECONDS, audio::SAMPLE_RATE);
@@ -5867,7 +6045,9 @@ impl Daemon {
         origin: Option<&str>,
     ) -> Result<Value, String> {
         if !matches!(origin, Some("mcp" | "agent")) {
-            return self.dispatch(cmd, args, false).await;
+            return self
+                .dispatch(cmd, args, false, origin.unwrap_or("cli"))
+                .await;
         }
         if cmd.starts_with("voice.") || cmd == "meetings.export" {
             return Err("not allowed for agents".into());
@@ -6008,7 +6188,9 @@ impl Daemon {
             }
             _ => None,
         };
-        let mut result = self.dispatch(cmd, args, origin == Some("mcp")).await;
+        let mut result = self
+            .dispatch(cmd, args, origin == Some("mcp"), origin.unwrap_or("cli"))
+            .await;
         if let Ok(value) = &mut result {
             self.hide_interviews(cmd, value);
         }
@@ -6020,6 +6202,9 @@ impl Daemon {
 
     /// Strip what a local-only interview leaves in replies to agents.
     fn hide_interviews(&self, cmd: &str, value: &mut Value) {
+        if cmd == "state.get" {
+            value["call_window"]["class"] = "".into();
+        }
         let g = self.inner.lock();
         let Ok(hidden) = candidates::local_only_ids(g.db.connection()) else {
             return;
@@ -6060,6 +6245,7 @@ impl Daemon {
         cmd: &str,
         args: Value,
         agent: bool,
+        origin: &str,
     ) -> Result<Value, String> {
         match cmd {
             "state.get" => Ok(self.state_value(&self.inner.lock())),
@@ -6167,7 +6353,7 @@ impl Daemon {
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
             "record.start" => {
                 let a = parse::<protocol::RecordStart>(args)?;
-                self.record_start(a.consent, a.title, a.new).await
+                self.record_start(a.consent, a.title, a.new, origin).await
             }
             "candidate.create" => {
                 let name = parse::<protocol::NameArg>(args)?.name;
@@ -6202,7 +6388,21 @@ impl Daemon {
                 self.questions(cmd, args)
             }
             "candidates.delete" => self.candidate_delete(&parse::<protocol::IdArg>(args)?.id),
-            "record.stop" => self.record_stop(),
+            "record.keep" => {
+                self.record_keep(args["gen"].as_u64().ok_or("record.keep needs gen")?, origin)
+            }
+            "record.stop" => {
+                let reason = args
+                    .get("reason")
+                    .map(|v| v.as_str().ok_or("record.stop reason must be a string"))
+                    .transpose()?
+                    .unwrap_or("user");
+                if origin == "cli" && reason == "user" {
+                    self.record_stop()
+                } else {
+                    self.record_stop_with(reason, origin)
+                }
+            }
             "autoshots.start" => self.auto_start().await,
             "autoshots.stop" => Ok(self.auto_stop()),
             "screenshots.list" => {
@@ -9869,6 +10069,9 @@ mod command_tests {
             since_ms: 0,
             stop: Arc::new(AtomicBool::new(false)),
             speech: None,
+            for_call: false,
+            kept: false,
+            handled_since: None,
         });
         d.local_only.store(true, Ordering::Relaxed);
         let err = d.handle("record.tap", tap, None).await.unwrap_err();
@@ -11931,6 +12134,272 @@ mod command_tests {
                 .unwrap_err()
                 .contains("local-only")
         );
+    }
+
+    fn call_reading(schema: u64, call: &str, since: f64, by: &str) -> CallReading {
+        CallReading {
+            present: true,
+            schema,
+            call: call.into(),
+            since,
+            by: by.into(),
+            ..CallReading::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn call_ownership_and_countdown_follow_the_reading() {
+        let d = daemon();
+        let since = now_ms() as f64 - 60_000.0;
+        d.on_call_reading(call_reading(2, "call", since, "native"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        assert_eq!(d.state_value(&d.inner.lock())["for_call"], true);
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let first = d.inner.lock().stopping.as_ref().unwrap().generation;
+        assert_eq!(
+            d.state_value(&d.inner.lock())["stopping"]["reason"],
+            "call_end"
+        );
+        d.on_call_reading(CallReading::default());
+        assert!(d.inner.lock().stopping.is_none());
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let second = d.inner.lock().stopping.as_ref().unwrap().generation;
+        assert_ne!(first, second);
+        assert_eq!(
+            d.handle("record.keep", json!({"gen": first}), None)
+                .await
+                .unwrap_err(),
+            "no such countdown"
+        );
+        d.expire(first);
+        assert!(
+            !d.inner
+                .lock()
+                .recording
+                .as_ref()
+                .unwrap()
+                .stop
+                .load(Ordering::Relaxed)
+        );
+        d.handle("record.keep", json!({"gen": second}), None)
+            .await
+            .unwrap();
+        assert_eq!(d.state_value(&d.inner.lock())["for_call"], false);
+        assert!(d.inner.lock().stopping.is_none());
+        d.on_call_reading(call_reading(2, "call", since + 120_000.0, "native"));
+        assert!(!d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.handle("record.stop", json!({"reason": "user"}), None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn schema2_adopts_once_and_fallback_does_not_adopt() {
+        let d = daemon();
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let since = now_ms() as f64;
+        d.on_call_reading(call_reading(2, "maybe", since, "native"));
+        assert!(!d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.on_call_reading(call_reading(2, "call", since, "fallback"));
+        assert!(!d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.on_call_reading(call_reading(2, "call", since, "native"));
+        assert!(d.inner.lock().recording.as_ref().unwrap().for_call);
+        assert_eq!(
+            d.inner.lock().recording.as_ref().unwrap().handled_since,
+            Some(since)
+        );
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let generation = d.inner.lock().stopping.as_ref().unwrap().generation;
+        d.handle("record.keep", json!({"gen": generation}), None)
+            .await
+            .unwrap();
+        d.on_call_reading(call_reading(2, "call", since + 1.0, "native"));
+        assert!(!d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn schema1_uses_slack_without_an_upper_bound() {
+        let d = daemon();
+        let earlier = now_ms() as f64 - 300_000.0;
+        d.on_call_reading(call_reading(1, "call", earlier, "fallback"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        assert!(d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+        tokio::task::yield_now().await;
+        let d = daemon();
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let start = d.inner.lock().recording.as_ref().unwrap().since_ms as f64;
+        d.on_call_reading(call_reading(1, "call", start + 6_000.0, "native"));
+        assert!(!d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.on_call_reading(call_reading(1, "call", start + 5_000.0, "native"));
+        assert!(d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn call_end_replaces_inactivity_and_expiry_rechecks_under_lock() {
+        let d = daemon();
+        d.on_call_reading(call_reading(2, "call", now_ms() as f64, "native"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let old = {
+            let mut g = d.inner.lock();
+            d.start_countdown(&mut g, "inactivity");
+            g.stopping.as_ref().unwrap().generation
+        };
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let generation = d.inner.lock().stopping.as_ref().unwrap().generation;
+        assert_ne!(old, generation);
+        assert_eq!(d.inner.lock().stopping.as_ref().unwrap().reason, "call_end");
+        d.expire(old);
+        d.inner.lock().stopping.as_mut().unwrap().at = Instant::now() - Duration::from_secs(1);
+        d.expire(generation);
+        assert!(
+            d.inner
+                .lock()
+                .recording
+                .as_ref()
+                .unwrap()
+                .stop
+                .load(Ordering::Relaxed)
+        );
+        assert!(d.inner.lock().stopping.is_none());
+    }
+
+    #[tokio::test]
+    async fn manual_stop_cancels_countdown_and_agents_cannot_keep() {
+        let d = daemon();
+        d.on_call_reading(call_reading(2, "call", now_ms() as f64, "native"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let generation = d.inner.lock().stopping.as_ref().unwrap().generation;
+        for origin in ["agent", "mcp"] {
+            assert_eq!(
+                d.handle("record.keep", json!({"gen": generation}), Some(origin))
+                    .await
+                    .unwrap_err(),
+                "not allowed for agents"
+            );
+        }
+        d.handle(
+            "record.stop",
+            json!({"reason": "inactivity_chip"}),
+            Some("shell"),
+        )
+        .await
+        .unwrap();
+        assert!(d.inner.lock().stopping.is_none());
+        d.expire(generation);
+    }
+
+    #[tokio::test]
+    async fn transitional_recording_waits_for_meeting_id() {
+        let d = daemon();
+        d.on_call_reading(call_reading(2, "call", now_ms() as f64, "native"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let meeting = d.inner.lock().meeting_id.take().unwrap();
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        assert!(d.inner.lock().stopping.is_none());
+        {
+            let mut g = d.inner.lock();
+            g.meeting_id = Some(meeting);
+            Daemon::adopt_call(&mut g, false);
+            d.update_call_end(&mut g);
+            assert_eq!(g.stopping.as_ref().unwrap().reason, "call_end");
+        }
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn call_window_class_is_private_to_agents_and_local_broadcasts() {
+        let d = daemon();
+        let mut reading = call_reading(2, "call", now_ms() as f64, "native");
+        reading.window_state = "bound".into();
+        reading.window_class = "Private class".into();
+        d.on_call_reading(reading);
+        assert_eq!(
+            d.handle("state.get", json!({}), None).await.unwrap()["call_window"]["class"],
+            "Private class"
+        );
+        for origin in ["agent", "mcp"] {
+            let state = d
+                .handle("state.get", json!({}), Some(origin))
+                .await
+                .unwrap();
+            assert_eq!(state["call_window"]["class"], "");
+        }
+        local_interview(&d).await;
+        let mut events = d.subscribe();
+        d.emit_state(&d.inner.lock());
+        let event = events.recv().await.unwrap();
+        assert_eq!(event["call_window"]["class"], "");
+        for origin in ["agent", "mcp"] {
+            assert_eq!(
+                d.handle("state.get", json!({}), Some(origin))
+                    .await
+                    .unwrap()["call_window"]["class"],
+                ""
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_logs_omit_titles_meeting_ids_and_window_ids() {
+        if std::env::var_os("MEETINGAI_LOG_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "daemon::session::command_tests::lifecycle_logs_omit_titles_meeting_ids_and_window_ids"])
+                .env("MEETINGAI_LOG_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        struct LogWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || LogWriter(Arc::clone(&writer)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let d = daemon();
+        let mut reading = call_reading(2, "call", now_ms() as f64, "native");
+        reading.window = "0xSecretWindow".into();
+        d.on_call_reading(reading);
+        d.handle("record.start", json!({"title": "Secret roadmap"}), None)
+            .await
+            .unwrap();
+        let meeting = d.inner.lock().meeting_id.clone().unwrap();
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        d.handle("record.stop", json!({"reason": "user"}), Some("shell"))
+            .await
+            .unwrap();
+        let output = String::from_utf8(logs.lock().clone()).unwrap();
+        assert!(
+            output.contains("record_start") && output.contains("record_stop"),
+            "{output}"
+        );
+        assert!(
+            output.contains("origin=\"cli\"") && output.contains("origin=\"shell\""),
+            "{output}"
+        );
+        for secret in ["Secret roadmap", "0xSecretWindow", meeting.as_str()] {
+            assert!(!output.contains(secret), "{output}");
+        }
     }
 }
 

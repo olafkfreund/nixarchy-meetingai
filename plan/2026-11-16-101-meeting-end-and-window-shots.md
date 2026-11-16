@@ -223,6 +223,7 @@ sound for N min." with the action `stop=Stop notes`.
        `Some` while `g.meeting_id` is still unset or the previous one. Ownership
        and countdown logic require `g.meeting_id.is_some()` and
        `!r.stop.load()`. `finish_recording` (`:3597`) clears `stopping`.
+   - *Implementation note:* `Stopping` also keeps the meeting id (internal, never in `state` or logs) so expiry can confirm the same recording, and the stop path takes an `origin` for its log line.
    - **Call end wins:** starting a `call_end` countdown replaces any inactivity
      countdown, with a new `gen`. The inactivity tick never replaces a
      `call_end` countdown.
