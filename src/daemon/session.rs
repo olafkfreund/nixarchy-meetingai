@@ -12680,7 +12680,10 @@ mod command_tests {
         let g = d.inner.lock();
         assert!(g.recording.as_ref().unwrap().stop.load(Ordering::Relaxed));
         assert_eq!(g.handoff.as_ref().unwrap().token, g.handoff_seq);
-        assert!(g.handoff_seq > 1_000_000_000_000, "the counter starts at the clock, not 0");
+        assert!(
+            g.handoff_seq > 1_000_000_000_000,
+            "the counter starts at the clock, not 0"
+        );
         assert_eq!(g.recording.as_ref().unwrap().call_class, "teams");
     }
 
