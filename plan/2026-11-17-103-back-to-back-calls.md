@@ -218,6 +218,9 @@ detected.
   briefly `maybe`) made the shell try `record.start` too early. That start
   was refused, and an error notification showed before the handoff started
   the notes. The tests now also fail on any refused start.
+- *Review fix (Codex):* `handoff_seq` starts at the clock in ms, not 0. The
+  shell remembers the last token it handled, and a daemon restart would
+  otherwise reuse token 1 and be ignored.
 
 ## Tests
 

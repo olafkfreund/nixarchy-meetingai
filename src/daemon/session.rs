@@ -1384,7 +1384,8 @@ impl Daemon {
                 loading: false,
                 finishing_meeting: None,
                 handoff: None,
-                handoff_seq: 0,
+                // tokens never repeat across daemon restarts: the shell remembers the last one it handled
+                handoff_seq: now_ms().max(0) as u64,
                 resume_meeting: None,
                 meeting_offset: 0.0,
                 speaker_offset: 0,
@@ -12678,7 +12679,8 @@ mod command_tests {
         assert_eq!(state["handoff_pending"], true);
         let g = d.inner.lock();
         assert!(g.recording.as_ref().unwrap().stop.load(Ordering::Relaxed));
-        assert_eq!(g.handoff.as_ref().unwrap().token, 1);
+        assert_eq!(g.handoff.as_ref().unwrap().token, g.handoff_seq);
+        assert!(g.handoff_seq > 1_000_000_000_000, "the counter starts at the clock, not 0");
         assert_eq!(g.recording.as_ref().unwrap().call_class, "teams");
     }
 
