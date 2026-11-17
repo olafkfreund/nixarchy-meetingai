@@ -1469,6 +1469,8 @@ impl Daemon {
             "language_hint": language_hint,
             "recording": g.recording.as_ref().is_some_and(|r| !r.stop.load(Ordering::Relaxed)),
             "handoff": g.handoff.as_ref().filter(|h| g.recording.is_none() && g.finishing_meeting.is_none() && h.at.elapsed() < Duration::from_secs(120)).map(|h| h.token),
+            // the old notes are still being saved for a handoff: the shell waits for the token instead of starting now
+            "handoff_pending": g.handoff.as_ref().is_some_and(|h| (g.recording.is_some() || g.finishing_meeting.is_some()) && h.at.elapsed() < Duration::from_secs(120)),
             "since": g.recording.as_ref().map_or(0, |r| r.since_ms),
             "for_call": g.recording.as_ref().is_some_and(|r| r.for_call && !r.stop.load(Ordering::Relaxed)),
             "stopping": g.stopping.as_ref().map(|s| json!({"gen": s.generation, "reason": s.reason, "in_s": s.at.saturating_duration_since(Instant::now()).as_secs().saturating_add(1).min(30) as u32})),
@@ -12673,6 +12675,7 @@ mod command_tests {
         let state = events.recv().await.unwrap();
         assert_eq!(state["recording"], false);
         assert_eq!(state["handoff"], Value::Null);
+        assert_eq!(state["handoff_pending"], true);
         let g = d.inner.lock();
         assert!(g.recording.as_ref().unwrap().stop.load(Ordering::Relaxed));
         assert_eq!(g.handoff.as_ref().unwrap().token, 1);
@@ -12761,8 +12764,10 @@ mod command_tests {
             });
             g.finishing_meeting = Some("saving".into());
             assert!(d.state_value(&g)["handoff"].is_null());
+            assert_eq!(d.state_value(&g)["handoff_pending"], true);
             g.finishing_meeting = None;
             assert_eq!(d.state_value(&g)["handoff"], 7);
+            assert_eq!(d.state_value(&g)["handoff_pending"], false);
             g.handoff.as_mut().unwrap().at = Instant::now() - Duration::from_secs(120);
             assert!(d.state_value(&g)["handoff"].is_null());
             g.handoff.as_mut().unwrap().at = Instant::now();

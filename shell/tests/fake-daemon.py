@@ -87,11 +87,13 @@ def _parse_window(spec):
 state = {"recording": live, "since": int(time.time() * 1000) - live_ago if live else 0, "mic": True, "system": True}
 if live:
     state["meeting"] = "m-live"
-state.update(for_call=for_call, stopping=_parse_stopping(stopping_arg), inactivity_chip={"minutes": inactivity_arg} if inactivity_arg is not None else None,
+state.update(handoff=None, handoff_pending=False, for_call=for_call, stopping=_parse_stopping(stopping_arg), inactivity_chip={"minutes": inactivity_arg} if inactivity_arg is not None else None,
              call_window=_parse_window(call_win_arg),
              autoshots={"on": bool(paused_arg), "count": 4 if paused_arg else 0, "at_limit": False, "paused": paused_arg},
              meeting_language=None, meeting_language_label="English", language_hint="Parakeet detects the language itself. This sets the language of answers and notes, over the answer language setting. Norwegian needs Deepgram.",
              languages=[{"code": c, "name": n} for c, n in (("en", "English"), ("pl", "Polish"), ("de", "German"), ("fr", "French"), ("es", "Spanish"))])   # Parakeet's, no Norwegian
+FINISH = [0.0]      # test.new_call: the old meeting is saved until this time; record.start is refused before it
+HANDOFFS = [0]
 MEETINGS = itertools.count(1)   # record.start names the new meeting m-<n>
 if first_run:
     state.update(ready={"chat": False, "speech": False}, hints={"chat": "No AI provider is set up. Open Providers to add a key, or use a subscription CLI or Ollama.", "speech": "Speech-to-text is not ready. Check the Parakeet model, or add a Deepgram key in Providers."})
@@ -691,7 +693,7 @@ class Handler(socketserver.StreamRequestHandler):
                 log(f"BAD_ORIGIN {cmd} {req.get('origin')!r}")
                 self.send({"id": req.get("id"), "ok": False, "error": "missing origin shell"})
                 os._exit(1)
-            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else " " + str(req.get("args", {}).get("language")) if cmd == "meeting.language.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") if cmd == "record.start" else "") + (" reason=" + str(req.get("args", {}).get("reason")) if cmd == "record.stop" and req.get("args", {}).get("reason") else "") + (" gen=" + str(req.get("args", {}).get("gen")) if cmd == "record.keep" else "") + (" line=" + str(req.get("args", {}).get("line")) + " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" and req.get("args", {}).get("line") else " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" else "") + (" app_request" if cmd == "chat.send" and req.get("args", {}).get("app_request") else ""))
+            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else " " + str(req.get("args", {}).get("language")) if cmd == "meeting.language.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") + " reason=" + ("call" if req.get("args", {}).get("reason") == "call" else "user") if cmd == "record.start" else "") + (" reason=" + str(req.get("args", {}).get("reason")) if cmd == "record.stop" and req.get("args", {}).get("reason") else "") + (" gen=" + str(req.get("args", {}).get("gen")) if cmd == "record.keep" else "") + (" line=" + str(req.get("args", {}).get("line")) + " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" and req.get("args", {}).get("line") else " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" else "") + (" app_request" if cmd == "chat.send" and req.get("args", {}).get("app_request") else ""))
             if cmd == "meeting.language.set":
                 code = req.get("args", {}).get("language") or None
                 names = {l["code"]: l["name"] for l in state["languages"]}
@@ -708,6 +710,22 @@ class Handler(socketserver.StreamRequestHandler):
                 state["autoshots"] = {"on": True, "count": 12, "at_limit": False, "paused": req.get("args", {}).get("paused", "window_closed")}
                 self.send({"id": req["id"], "ok": True, "data": {}})
                 cast({"event": "state", **state})
+                continue
+            if cmd == "test.new_call":   # the daemon stopped the old notes for a different call: saving takes finish_ms, then the handoff token shows
+                FINISH[0] = time.time() + req.get("args", {}).get("finish_ms", 0) / 1000
+                state.update(recording=False, stopping=None, inactivity_chip=None, handoff=None, handoff_pending=True)
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "state", **state})
+                def ready():
+                    time.sleep(max(FINISH[0] - time.time(), 0))
+                    HANDOFFS[0] += 1
+                    state.update(handoff=HANDOFFS[0], handoff_pending=False)
+                    cast({"event": "state", **state})
+                threading.Thread(target=ready, daemon=True).start()
+                continue
+            if cmd == "record.start" and time.time() < FINISH[0]:
+                log("REFUSED")
+                self.send({"id": req["id"], "ok": False, "error": "the previous meeting is still being saved"})
                 continue
             if cmd == "test.window":
                 a = req.get("args", {})
@@ -765,7 +783,7 @@ class Handler(socketserver.StreamRequestHandler):
                 self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed, and screenshots may be captured."})
                 continue
             if cmd == "record.start":
-                state.update(recording=True, since=int(time.time() * 1000), meeting="m-%d" % next(MEETINGS), stopping=None, inactivity_chip=None)
+                state.update(recording=True, since=int(time.time() * 1000), meeting="m-%d" % next(MEETINGS), stopping=None, inactivity_chip=None, handoff=None, handoff_pending=False)
                 if iv:
                     state["consent"] = True
                 cast({"event": "state", **state})   # after consent, so the cast carries it

@@ -205,6 +205,20 @@ detected.
    - **Verify:** read it back.
    - **Traps:** none.
 
+## Implementation notes
+
+- *Step 1 (Codex):* as planned; no deviation.
+- *Step 2 (coder, deviation):* the fake daemon logs `REFUSED` when it
+  refuses a start while saving, so the tests count only accepted starts.
+- *Step 2 (lead, deviation):* the daemon's state also carries
+  `handoff_pending`, which is true while a handoff waits for the old notes
+  to be saved (recording slot or `finishing_meeting` still set, under
+  120 s). `react()` returns `idle` while it is true, without marking the
+  call as offered. Without it, a call that came back during saving (Meet
+  briefly `maybe`) made the shell try `record.start` too early. That start
+  was refused, and an error notification showed before the handoff started
+  the notes. The tests now also fail on any refused start.
+
 ## Tests
 
 - `cargo test`: all pass, including the new tests from step 1.
