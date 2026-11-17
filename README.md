@@ -301,7 +301,9 @@ written again whenever its notes are regenerated:
 
 ### Automatic screenshots
 
-While recording, turn on **Auto screenshots** in the meeting view and drag over the area to capture. It's off by default and has no global setting, so you choose it for each meeting. Auto-record never turns it on.
+While recording a call, turn on **Auto screenshots** in the meeting view. It captures the meeting window only (`grim -T`), wherever it is and whatever covers it. It's off by default and has no global setting, so you choose it for each meeting. Auto-record never turns it on.
+
+It needs a meeting-mode that names the call's window (state file schema 2). With an older one, or when there is no meeting window or several windows could be it, it is refused with the reason. While on, it pauses, and says why, when the call ends or a stop countdown runs, the window closes (press it again to pick up the new window), a browser window shows another tab, the window is hidden and not repainting, or the screen is locked. It never falls back to the screen or another window. The manual region screenshot key still lets you drag an area.
 
 It captures every 5 minutes, starting 5 minutes after you turn it on, and twice (after 4 and 10 seconds) when either side says a phrase such as "share my screen", "here's the document" or "next slide". Frames that look almost the same as the last one aren't stored. It stops at 60 per meeting, and switching it off and on doesn't reset that.
 
@@ -309,7 +311,7 @@ The Library lists a meeting's screenshots beside its notes, where you can previe
 
 **What to know before using it:**
 
-- **It captures whatever is in the area,** including other windows, notifications and anything private that appears there. You also need to be allowed to capture what others share.
+- **It captures the meeting window even when you can't see it,** so watch the indicator. Anything shown inside that window is captured, such as a chat in the same Teams window. You also need to be allowed to capture what others share.
 - **Automatic screenshots never go to a model.** Agents using MCP can't read or start them. The daemon can't stop other programs running as you, which can ask it for them or read the export folder.
 - **A locked screen is never captured.** This relies on `hyprctl locked`, so it needs Hyprland. If the lock state can't be read, nothing is captured and the app warns you once.
 - **Local-only interviews refuse it,** and interview mode needs recording consent. If a meeting turns Local-only or no longer has consent, capture stops and the app tells you. Screenshots already taken stay in that meeting and are still included if you export it.
@@ -340,14 +342,24 @@ Mode is switched on (switching it on by hand is not a call).
 - **Maybe** is a browser holding the microphone that nothing has confirmed yet. The bar shows a dim dot and
   nothing else.
 - **Call** is a call app holding the microphone, or a browser call that a meeting window title, a screen
-  share or one minute of continuous microphone confirms. The bar shows an outlined dot and a **Take notes?**
+  share or one minute of continuous microphone confirms (a newer meeting-mode confirms a browser call only by
+  its own window's title).
+  The bar tooltip and the meeting view name the window taken as the meeting, or say "no meeting window" or
+  "several possible windows". The bar shows an outlined dot and a **Take notes?**
   chip with the app's glyph, and a notification with a "Take notes" button. Click the chip to start (it
   names the session after the call window), right-click to dismiss it for this call. The record hotkey and
   `omarchy-shell meetingai offer` do the same. Auto-record calls
   (`settings.autoRecordOnCall`) starts the notes at once instead, except in interviewer mode, where
   consent stays manual and the offer is shown.
-- **Call ends** while recording: a "Stop notes" offer. The notes are never stopped by themselves, because a
-  call can drop and resume.
+- **Call ends** while recording notes that belong to the call (started during it, or, with a newer meeting-mode, already running when it
+  started): the bar shows **Notes stop in 30 s · Keep**, which Do Not Disturb cannot hide, and a
+  notification with **Keep recording**, which it may. Keep lets the notes run on. If the call comes back within the 30 s, nothing
+  stops. Notes that don't belong to the call get a "Stop notes" offer instead. The daemon decides this
+  itself, so it works without the shell and from the CLI.
+- **No sound:** after `settings.inactivityStopMinutes` (default 10, 0 for off) with no microphone sound and
+  no call, the same 30 s countdown stops the notes. During a call it only shows **No sound for N min · Stop
+  notes**, and stops after three times that with no sound on either side, for apps that keep the microphone
+  after the meeting.
 - **No detector:** if the state file is still missing 30 seconds after start, Settings says "Call
   detection is off: enable the meeting-mode plugin" with the command. A state file whose writer has
   exited is ignored.
@@ -966,6 +978,27 @@ attribute set of string
 {
   capture_delay_seconds = "3";
 }
+```
+
+
+
+## programs\.nixarchy-meetingai\.settings\.inactivityStopMinutes
+
+
+
+Stop notes after this many minutes with no sound (0 is off)\.
+
+
+
+*Type:*
+null or integer between 0 and 240 (both inclusive)
+
+
+
+*Default:*
+
+```nix
+null
 ```
 
 

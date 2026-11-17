@@ -42,7 +42,7 @@ ShellRoot {
             } else if (root.phase === 5) {
                 ok = root.find(card, "confirmOk");
                 var t = root.texts(card);
-                root.out.confirm = t.indexOf("including other windows") >= 0 && t.indexOf("export folder may sync") >= 0 && t.indexOf("Check that you may capture what others share") >= 0 && !!ok;
+                root.out.confirm = t.indexOf("capture the meeting window only, even when it is hidden or covered") >= 0 && t.indexOf("export folder may sync") >= 0 && t.indexOf("Check that you may capture what others share") >= 0 && !!ok;
                 if (ok) ok.clicked();
             } else if (root.phase === 6) {
                 root.out.refusal = String((root.find(card, "autoShotsNotice") || {}).text || "");
@@ -50,11 +50,14 @@ ShellRoot {
                 if (b) b.toggled();
             } else if (root.phase === 7) {
                 root.out.noSecondConfirm = !root.find(card, "confirmOk");
-                root.out.label = root.texts(card).indexOf("Auto screenshots · on · 12") >= 0;
+                root.out.onLabel = root.texts(card).indexOf("Auto screenshots · on · 12") >= 0;
                 Geo.dump(card, overlay.ctl, "autoshots", overlay.winW, overlay.winH);
                 b = root.find(card, "autoShots");
                 if (b) b.toggled();
+                root.client(overlay).send("test.pause", { paused: "window_closed" });
             } else if (root.phase === 8) {
+                root.out.paused = root.texts(card).indexOf("Auto screenshots · Paused: meeting window closed · 12") >= 0;
+                root.out.label = root.out.onLabel && root.out.paused && root.out.refusal.indexOf("no meeting window") >= 0;
                 root.client(overlay).send("test.limit", {});   // the daemon reaches 60 while on
             } else if (root.phase === 9) {
                 root.out.limit = root.texts(card).indexOf("limit reached (60)") >= 0;

@@ -53,6 +53,7 @@ let
     auto_response = autoResponse;
     smart_follow_ups = smartFollowUps;
     auto_record_on_call = autoRecordOnCall;
+    inactivity_stop_minutes = inactivityStopMinutes;
     export_folder = exportFolder;
     calendar_enabled = calendarEnabled;
     speech_provider = speechProvider;
@@ -256,6 +257,7 @@ in
       autoResponse = nullable (lib.types.enum enums.autoResponse) "Which utterances get an automatic answer.";
       smartFollowUps = nullable bool "Suggest follow-up questions.";
       autoRecordOnCall = nullable bool "Start recording when a call begins.";
+      inactivityStopMinutes = nullable (lib.types.ints.between 0 240) "Stop notes after this many minutes with no sound (0 is off).";
       exportFolder = nullable str "Folder for exported meeting notes, screenshots and documents (plain files; readable by you only).";
       calendarEnabled = nullable bool "Name sessions from the calendar (read-only, through `gog`; off by default).";
       speechProvider = nullable str "Speech-to-text provider (`parakeet-local` (the default), `deepgram-stt`, or `openai-compatible-stt`).";

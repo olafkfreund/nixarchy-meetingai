@@ -60,7 +60,13 @@ lines_mode = "--lines" in sys.argv    # line actions (correct, bookmark, ask), m
 export_ask = "--export-ask" in sys.argv   # emit export.folder_needed after connect
 library = "--library" in sys.argv     # a second meeting, per-meeting notes answered after 0.8 s, and notes.bump
 LIB_NOTES = {"1": "# Meeting recap\n## Summary\nfake", "3": ""}
-live = "--live" in sys.argv or k8s or team or iv or err or drop
+stopping_arg = next((a.split("=", 1)[1] if "=" in a else "call_end:7:30" for a in sys.argv if a == "--stopping" or a.startswith("--stopping=")), None)
+inactivity_arg = next((int(a.split("=", 1)[1]) if "=" in a else 10 for a in sys.argv if a == "--inactivity" or a.startswith("--inactivity=")), None)
+window_states = "--window-states" in sys.argv
+call_win_arg = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--call-window=")), "bound:Zoom" if window_states or stopping_arg else "")
+paused_arg = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--autoshots-paused=")), "countdown" if stopping_arg else None)
+for_call = "--for-call" in sys.argv or bool(stopping_arg)
+live = "--live" in sys.argv or k8s or team or iv or err or drop or bool(stopping_arg) or inactivity_arg is not None or window_states
 scale = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--scale=")), 100)
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 live_ago = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--live-since=")), 754_000)   # --live-since=<ms-ago>: where the recording started
@@ -68,10 +74,23 @@ AUTO = [0]
 DELETES = [0]
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"   # 1x1
 SHOTS = [{"id": 7, "meeting": "1", "time": 65.0, "mime": "image/png", "automatic": True}, {"id": 8, "meeting": "1", "time": 130.0, "mime": "image/png", "automatic": False}]
+def _parse_stopping(spec):
+    if not spec:
+        return None
+    parts = spec.split(":")
+    return {"reason": parts[0] or "call_end", "gen": int(parts[1]) if len(parts) > 1 else 7, "in_s": int(parts[2]) if len(parts) > 2 else 30}
+def _parse_window(spec):
+    if not spec:
+        return {"state": "none", "class": ""}
+    parts = spec.split(":", 1)
+    return {"state": parts[0], "class": parts[1] if len(parts) > 1 else ""}
 state = {"recording": live, "since": int(time.time() * 1000) - live_ago if live else 0, "mic": True, "system": True}
 if live:
     state["meeting"] = "m-live"
-state.update(autoshots={"on": False, "count": 0, "at_limit": False}, meeting_language=None, meeting_language_label="English", language_hint="Parakeet detects the language itself. This sets the language of answers and notes, over the answer language setting. Norwegian needs Deepgram.",
+state.update(for_call=for_call, stopping=_parse_stopping(stopping_arg), inactivity_chip={"minutes": inactivity_arg} if inactivity_arg is not None else None,
+             call_window=_parse_window(call_win_arg),
+             autoshots={"on": bool(paused_arg), "count": 4 if paused_arg else 0, "at_limit": False, "paused": paused_arg},
+             meeting_language=None, meeting_language_label="English", language_hint="Parakeet detects the language itself. This sets the language of answers and notes, over the answer language setting. Norwegian needs Deepgram.",
              languages=[{"code": c, "name": n} for c, n in (("en", "English"), ("pl", "Polish"), ("de", "German"), ("fr", "French"), ("es", "Spanish"))])   # Parakeet's, no Norwegian
 MEETINGS = itertools.count(1)   # record.start names the new meeting m-<n>
 if first_run:
@@ -90,7 +109,7 @@ NOTICED = []
 TURNS = itertools.count(2)
 HANDLERS = set()   # connected clients: --drop's answer goes to whoever is connected, as the real daemon's does
 VOICE = {"enrolled": False, "model": "", "created": 0}
-settings = {"auto_record_on_call": auto, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced", "text_scale": scale, "voice_check_paused": False, "export_meetings": True, "export_folder": ""}
+settings = {"auto_record_on_call": auto, "inactivity_stop_minutes": 10, "reduce_motion": False, "chat_provider": "claude-sub", "chat_model": "sonnet", "live_provider": "claude-sub", "live_model": "haiku", "response_pace": "Balanced", "text_scale": scale, "voice_check_paused": False, "export_meetings": True, "export_folder": ""}
 
 
 if voice_mode:
@@ -668,7 +687,11 @@ class Handler(socketserver.StreamRequestHandler):
         for raw in self.rfile:
             req = json.loads(raw)
             cmd = req["cmd"]
-            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else " " + str(req.get("args", {}).get("language")) if cmd == "meeting.language.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") if cmd == "record.start" else "") + (" line=" + str(req.get("args", {}).get("line")) + " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" and req.get("args", {}).get("line") else " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" else "") + (" app_request" if cmd == "chat.send" and req.get("args", {}).get("app_request") else ""))
+            if req.get("origin") != "shell":
+                log(f"BAD_ORIGIN {cmd} {req.get('origin')!r}")
+                self.send({"id": req.get("id"), "ok": False, "error": "missing origin shell"})
+                os._exit(1)
+            log(cmd + (" " + str(req.get("args", {}).get("key")) if cmd == "settings.set" else " " + str(req.get("args", {}).get("language")) if cmd == "meeting.language.set" else "") + (" title=" + str(req.get("args", {}).get("title", "")) + (" new" if req.get("args", {}).get("new") else "") if cmd == "record.start" else "") + (" reason=" + str(req.get("args", {}).get("reason")) if cmd == "record.stop" and req.get("args", {}).get("reason") else "") + (" gen=" + str(req.get("args", {}).get("gen")) if cmd == "record.keep" else "") + (" line=" + str(req.get("args", {}).get("line")) + " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" and req.get("args", {}).get("line") else " text=" + str(req.get("args", {}).get("text", "")) if cmd == "chat.send" else "") + (" app_request" if cmd == "chat.send" and req.get("args", {}).get("app_request") else ""))
             if cmd == "meeting.language.set":
                 code = req.get("args", {}).get("language") or None
                 names = {l["code"]: l["name"] for l in state["languages"]}
@@ -677,23 +700,34 @@ class Handler(socketserver.StreamRequestHandler):
                 cast({"event": "state", **state})
                 continue
             if cmd == "test.limit":   # the daemon sets at_limit when capture reaches 60 while on
-                state["autoshots"] = {"on": False, "count": 60, "at_limit": True}
+                state["autoshots"] = {"on": False, "count": 60, "at_limit": True, "paused": None}
                 self.send({"id": req["id"], "ok": True, "data": {}})
                 cast({"event": "state", **state})
                 continue
-            if cmd == "autoshots.start":   # the first start is refused, as when slurp is missing
+            if cmd == "test.pause":
+                state["autoshots"] = {"on": True, "count": 12, "at_limit": False, "paused": req.get("args", {}).get("paused", "window_closed")}
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "state", **state})
+                continue
+            if cmd == "test.window":
+                a = req.get("args", {})
+                state["call_window"] = {"state": a.get("state", "none"), "class": a.get("class", "")}
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "state", **state})
+                continue
+            if cmd == "autoshots.start":   # the first start is refused, as when there is no meeting window
                 AUTO[0] += 1
                 if state["autoshots"]["at_limit"]:
                     self.send({"id": req["id"], "ok": False, "error": "This meeting has reached its limit of 60 automatic screenshots."})
                 elif AUTO[0] == 1:
-                    self.send({"id": req["id"], "ok": False, "error": "slurp is not installed, so no area can be chosen."})
+                    self.send({"id": req["id"], "ok": False, "error": "no meeting window"})
                 else:
-                    state["autoshots"] = {"on": True, "count": 12, "at_limit": False}
+                    state["autoshots"] = {"on": True, "count": 12, "at_limit": False, "paused": None}
                     self.send({"id": req["id"], "ok": True, "data": {}})
                     cast({"event": "state", **state})
                 continue
             if cmd == "autoshots.stop":   # the real stop clears to off; it never sets at_limit
-                state["autoshots"] = {"on": False, "count": 0, "at_limit": False}
+                state["autoshots"] = {"on": False, "count": 0, "at_limit": False, "paused": None}
                 self.send({"id": req["id"], "ok": True, "data": {}})
                 cast({"event": "state", **state})
                 continue
@@ -714,18 +748,31 @@ class Handler(socketserver.StreamRequestHandler):
                 DELETES[0] += 1
                 self.send({"id": req["id"], "ok": True, "data": {"export_error": "Export folder is read-only."} if DELETES[0] == 1 else {}})
                 continue
+            if cmd == "record.keep":
+                gen = req.get("args", {}).get("gen")
+                if not state.get("stopping") or state["stopping"].get("gen") != gen:
+                    self.send({"id": req["id"], "ok": False, "error": "no such countdown"})
+                    continue
+                if state["stopping"].get("reason") == "call_end":   # as the daemon: only a call-end Keep releases the notes from the call
+                    state["for_call"] = False
+                state["stopping"] = None
+                if state["autoshots"].get("paused") == "countdown":
+                    state["autoshots"]["paused"] = None
+                self.send({"id": req["id"], "ok": True, "data": {}})
+                cast({"event": "state", **state})
+                continue
             if cmd == "record.start" and iv and not (state["consent"] or req.get("args", {}).get("consent")):
                 self.send({"id": req["id"], "ok": False, "error": "consent_required: Tell the candidate this interview is being recorded and transcribed, and screenshots may be captured."})
                 continue
             if cmd == "record.start":
-                state.update(recording=True, since=int(time.time() * 1000), meeting="m-%d" % next(MEETINGS))
+                state.update(recording=True, since=int(time.time() * 1000), meeting="m-%d" % next(MEETINGS), stopping=None, inactivity_chip=None)
                 if iv:
                     state["consent"] = True
                 cast({"event": "state", **state})   # after consent, so the cast carries it
                 if iv:
                     threading.Thread(target=self.stream_iv_call, daemon=True).start()
             elif cmd == "record.stop":
-                state["recording"] = False
+                state.update(recording=False, stopping=None, inactivity_chip=None)
                 cast({"event": "state", **state})
             elif cmd in ("screenshot.capture", "capture.clear", "chat.send"):   # a screenshot waits for the next question
                 state["capture"] = cmd == "screenshot.capture"
