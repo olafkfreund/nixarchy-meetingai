@@ -342,6 +342,7 @@ struct Recording {
     stop: Arc<AtomicBool>,
     speech: Option<ProviderConfig>,
     for_call: bool,
+    call_class: String,
     kept: bool,
     handled_since: Option<f64>,
 }
@@ -351,6 +352,11 @@ struct Stopping {
     reason: &'static str,
     at: Instant,
     meeting: String,
+}
+
+struct Handoff {
+    token: u64,
+    at: Instant,
 }
 
 /// Sustained sound: this long above `SOUND_LEVEL` within one window.
@@ -461,6 +467,8 @@ struct Inner {
     meeting_id: Option<String>,
     /// Set from the moment recording ends until its notes are written.
     finishing_meeting: Option<String>,
+    handoff: Option<Handoff>,
+    handoff_seq: u64,
     resume_meeting: Option<String>,
     meeting_offset: f64,
     speaker_offset: i64,
@@ -1375,6 +1383,9 @@ impl Daemon {
                 effective: (String::new(), String::new()),
                 loading: false,
                 finishing_meeting: None,
+                handoff: None,
+                // tokens never repeat across daemon restarts: the shell remembers the last one it handled
+                handoff_seq: now_ms().max(0) as u64,
                 resume_meeting: None,
                 meeting_offset: 0.0,
                 speaker_offset: 0,
@@ -1458,6 +1469,9 @@ impl Daemon {
             "languages": languages,
             "language_hint": language_hint,
             "recording": g.recording.as_ref().is_some_and(|r| !r.stop.load(Ordering::Relaxed)),
+            "handoff": g.handoff.as_ref().filter(|h| g.recording.is_none() && g.finishing_meeting.is_none() && h.at.elapsed() < Duration::from_secs(120)).map(|h| h.token),
+            // the old notes are still being saved for a handoff: the shell waits for the token instead of starting now
+            "handoff_pending": g.handoff.as_ref().is_some_and(|h| (g.recording.is_some() || g.finishing_meeting.is_some()) && h.at.elapsed() < Duration::from_secs(120)),
             "since": g.recording.as_ref().map_or(0, |r| r.since_ms),
             "for_call": g.recording.as_ref().is_some_and(|r| r.for_call && !r.stop.load(Ordering::Relaxed)),
             "stopping": g.stopping.as_ref().map(|s| json!({"gen": s.generation, "reason": s.reason, "in_s": s.at.saturating_duration_since(Instant::now()).as_secs().saturating_add(1).min(30) as u32})),
@@ -1737,10 +1751,12 @@ impl Daemon {
                     } else if call.by != "fallback" {
                         r.handled_since = Some(call.since);
                         r.for_call = true;
+                        r.call_class = call.window_class.clone();
                         tracing::info!(event = "adopt", reason = "call", origin = "system");
                     }
                 } else if call.schema < 2 && !r.kept && owns_call(&call, r.since_ms) {
                     r.for_call = true;
+                    r.call_class = call.window_class.clone();
                     tracing::info!(event = "adopt", reason = "schema1_slack", origin = "system");
                 }
             }
@@ -1770,6 +1786,25 @@ impl Daemon {
         g.call = reading;
         self.elig_gen.fetch_add(1, Ordering::AcqRel);
         Self::sync_auto_pause(&mut g);
+        if g.call.call == "call" && !g.call.window_class.is_empty() {
+            let class = g.call.window_class.clone();
+            if let Some(r) = g
+                .recording
+                .as_mut()
+                .filter(|r| r.for_call && !r.stop.load(Ordering::Relaxed))
+            {
+                if r.call_class.is_empty() {
+                    r.call_class = class;
+                } else if !r.kept && r.call_class != class {
+                    g.handoff_seq += 1;
+                    g.handoff = Some(Handoff {
+                        token: g.handoff_seq,
+                        at: Instant::now(),
+                    });
+                    let _ = self.stop_locked(&mut g, "new_call", "system");
+                }
+            }
+        }
         Self::adopt_call(&mut g, ended);
         self.update_call_end(&mut g);
         self.emit_state(&g);
@@ -3704,6 +3739,7 @@ impl Daemon {
         title: String,
         new: bool,
         origin: &str,
+        reason: &'static str,
     ) -> Result<Value, String> {
         let retained_window = {
             let g = self.inner.lock();
@@ -3800,12 +3836,18 @@ impl Daemon {
             // Reserve the slot so a second start cannot race the blocking open below.
             let since_ms = now_ms();
             let for_call = owns_call(&g.call, since_ms);
+            g.handoff = None;
             g.recording = Some(Recording {
                 started: Instant::now(),
                 since_ms,
                 stop: stop.clone(),
                 speech: speech.clone(),
                 for_call,
+                call_class: if for_call {
+                    g.call.window_class.clone()
+                } else {
+                    String::new()
+                },
                 kept: false,
                 handled_since: (for_call && g.call.schema >= 2).then_some(g.call.since),
             });
@@ -3971,7 +4013,7 @@ impl Daemon {
                     g.speaker_names =
                         meetings::speaker_names(g.db.connection(), &id).unwrap_or_default();
                     self.emit_state(g);
-                    tracing::info!(event = "record_start", reason = "user", origin);
+                    tracing::info!(event = "record_start", reason, origin);
                     id
                 }
                 Err(error) => {
@@ -6811,7 +6853,13 @@ impl Daemon {
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
             "record.start" => {
                 let a = parse::<protocol::RecordStart>(args)?;
-                self.record_start(a.consent, a.title, a.new, origin).await
+                let reason = if a.reason.as_deref() == Some("call") {
+                    "call"
+                } else {
+                    "user"
+                };
+                self.record_start(a.consent, a.title, a.new, origin, reason)
+                    .await
             }
             "candidate.create" => {
                 let name = parse::<protocol::NameArg>(args)?.name;
@@ -10534,6 +10582,7 @@ mod command_tests {
             stop: Arc::new(AtomicBool::new(false)),
             speech: None,
             for_call: false,
+            call_class: String::new(),
             kept: false,
             handled_since: None,
         });
@@ -12611,6 +12660,129 @@ mod command_tests {
         }
     }
 
+    fn classed_call(class: &str) -> CallReading {
+        let mut reading = call_reading(2, "call", now_ms() as f64, "native");
+        reading.window_class = class.into();
+        reading
+    }
+
+    #[tokio::test]
+    async fn different_call_stops_before_the_handoff_is_ready() {
+        let d = daemon();
+        d.on_call_reading(classed_call("teams"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let mut events = d.subscribe();
+        d.on_call_reading(classed_call("chrome"));
+        let state = events.recv().await.unwrap();
+        assert_eq!(state["recording"], false);
+        assert_eq!(state["handoff"], Value::Null);
+        assert_eq!(state["handoff_pending"], true);
+        let g = d.inner.lock();
+        assert!(g.recording.as_ref().unwrap().stop.load(Ordering::Relaxed));
+        assert_eq!(g.handoff.as_ref().unwrap().token, g.handoff_seq);
+        assert!(
+            g.handoff_seq > 1_000_000_000_000,
+            "the counter starts at the clock, not 0"
+        );
+        assert_eq!(g.recording.as_ref().unwrap().call_class, "teams");
+    }
+
+    #[tokio::test]
+    async fn different_call_during_countdown_cancels_it() {
+        let d = daemon();
+        d.on_call_reading(classed_call("teams"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        assert_eq!(d.inner.lock().stopping.as_ref().unwrap().reason, "call_end");
+        d.on_call_reading(classed_call("chrome"));
+        let g = d.inner.lock();
+        assert!(g.recording.as_ref().unwrap().stop.load(Ordering::Relaxed));
+        assert!(g.stopping.is_none());
+        assert!(g.handoff.is_some());
+    }
+
+    #[tokio::test]
+    async fn different_call_requires_owned_live_notes_and_known_classes() {
+        for (owner, next, call, kept, for_call) in [
+            ("teams", "teams", "call", false, true),
+            ("teams", "", "call", false, true),
+            ("", "chrome", "call", false, true),
+            ("teams", "chrome", "maybe", false, true),
+            ("teams", "chrome", "call", true, true),
+            ("teams", "chrome", "call", false, false),
+        ] {
+            let d = daemon();
+            d.on_call_reading(classed_call(owner));
+            d.handle("record.start", json!({}), None).await.unwrap();
+            {
+                let mut g = d.inner.lock();
+                let r = g.recording.as_mut().unwrap();
+                r.kept = kept;
+                r.for_call = for_call;
+            }
+            let mut reading = classed_call(next);
+            reading.call = call.into();
+            d.on_call_reading(reading);
+            let g = d.inner.lock();
+            assert!(
+                !g.recording.as_ref().unwrap().stop.load(Ordering::Relaxed),
+                "{owner} -> {next} ({call})"
+            );
+            assert!(g.handoff.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_owner_class_is_filled_once() {
+        let d = daemon();
+        d.on_call_reading(classed_call(""));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        assert!(
+            d.inner
+                .lock()
+                .recording
+                .as_ref()
+                .unwrap()
+                .call_class
+                .is_empty()
+        );
+        d.on_call_reading(classed_call("teams"));
+        assert_eq!(
+            d.inner.lock().recording.as_ref().unwrap().call_class,
+            "teams"
+        );
+        d.on_call_reading(classed_call("teams"));
+        assert_eq!(
+            d.inner.lock().recording.as_ref().unwrap().call_class,
+            "teams"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_waits_for_save_expires_and_clears_on_start() {
+        let d = daemon();
+        {
+            let mut g = d.inner.lock();
+            g.handoff = Some(Handoff {
+                token: 7,
+                at: Instant::now(),
+            });
+            g.finishing_meeting = Some("saving".into());
+            assert!(d.state_value(&g)["handoff"].is_null());
+            assert_eq!(d.state_value(&g)["handoff_pending"], true);
+            g.finishing_meeting = None;
+            assert_eq!(d.state_value(&g)["handoff"], 7);
+            assert_eq!(d.state_value(&g)["handoff_pending"], false);
+            g.handoff.as_mut().unwrap().at = Instant::now() - Duration::from_secs(120);
+            assert!(d.state_value(&g)["handoff"].is_null());
+            g.handoff.as_mut().unwrap().at = Instant::now();
+        }
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let g = d.inner.lock();
+        assert!(g.handoff.is_none());
+        assert!(d.state_value(&g)["handoff"].is_null());
+    }
+
     #[tokio::test]
     async fn call_ownership_and_countdown_follow_the_reading() {
         let d = daemon();
@@ -13104,12 +13276,32 @@ mod command_tests {
         )
         .await
         .unwrap();
+        for reason in [json!("call"), json!("Secret client reason")] {
+            let other = daemon();
+            other
+                .handle("record.start", json!({"reason": reason}), None)
+                .await
+                .unwrap();
+        }
+        let other = daemon();
+        other.on_call_reading(classed_call("teams"));
+        other.handle("record.start", json!({}), None).await.unwrap();
+        other.on_call_reading(classed_call("chrome"));
         let output = String::from_utf8(logs.lock().clone()).unwrap();
         assert!(
             output.contains("record_start") && output.contains("record_stop"),
             "{output}"
         );
         assert!(output.contains("origin=\"shell\""), "{output}");
+        let starts: Vec<_> = output
+            .lines()
+            .filter(|line| line.contains("event=\"record_start\""))
+            .collect();
+        assert_eq!(starts.len(), 4, "{output}");
+        assert!(starts[0].contains("reason=\"user\""), "{output}");
+        assert!(starts[1].contains("reason=\"call\""), "{output}");
+        assert!(starts[2].contains("reason=\"user\""), "{output}");
+        assert!(output.contains("reason=\"new_call\""), "{output}");
         assert!(
             output.contains("reason=\"other\"") && output.contains("origin=\"other\""),
             "{output}"

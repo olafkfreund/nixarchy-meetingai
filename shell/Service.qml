@@ -15,6 +15,7 @@ Item {
     Client { id: client }
     readonly property var calls: client.calls   // titles stay in memory; never logged
     property string prevCall: "none"
+    property double handledHandoff: 0   // the daemon's last handoff token acted on
     property double offeredFor: -1   // the call (its start) already offered or auto-started
     property double calledKey: 0     // the call (its start) that reached "call"; it may end through "maybe"
     property bool waiting: false     // a call came before the daemon or its settings were ready
@@ -25,6 +26,16 @@ Item {
     function recId() { return String(client.state.meeting) + "@" + Number(client.state.since); }
 
     // The daemon keeps its one-time provider notice (e.g. the removed Gemini key) until this service asks.
+    // The daemon ended the old notes because a different call began; once they are saved it offers a token and the new call gets its own.
+    // meeting-mode keeps callSince across such a switch, so the call may already be marked as offered.
+    function checkHandoff() {
+        var h = client.state.handoff;
+        if (typeof h !== "number" || h === root.handledHandoff || calls.call !== "call") return;
+        root.handledHandoff = h;
+        root.offeredFor = -1;
+        root.react();
+    }
+
     Connections {
         target: client
         function onConnectedChanged() {
@@ -53,8 +64,10 @@ Item {
 
     // The overlay's consent banner lives in another Client, so a refused start (candidate not told,
     // or local_only) is shown as a notification here; the interviewer then starts it from the overlay.
-    function startNotes(quiet, title) {
-        client.send("record.start", title ? { new: true, title: title } : { new: true }, function(r) {
+    function startNotes(quiet, title, reason) {
+        var args = title ? { new: true, title: title } : { new: true };
+        if (reason) args.reason = reason;
+        client.send("record.start", args, function(r) {
             var e = String(r.error || "");
             if (r.ok) { if (!quiet) Quickshell.execDetached(["notify-send", "-a", "nixarchy-meetingai", "nixarchy-meetingai", "Taking notes"]); return; }
             if (!quiet && e.indexOf("language_unsupported: ") === 0) {
@@ -101,11 +114,12 @@ Item {
     function react() {
         var key = calls.since || 1;
         if (calls.call !== "call" || client.recording || root.offeredFor === key) return "idle";
+        if (client.state.handoff_pending === true) return "idle";   // the old notes are being saved; checkHandoff() starts this call's notes when they are
         if (!client.connected || !client.settingsReady) { root.waiting = true; return "waiting"; }   // settings decide auto-record
         root.waiting = false;
         root.offeredFor = key;
         if (client.settings.auto_record_on_call === true && client.settings.meeting_mode !== "interviewer") {
-            root.startNotes(false, calls.title);
+            root.startNotes(false, calls.title, "call");
             return "recording";
         }
         root.offer("A call started" + (calls.app ? " in " + calls.app : ""), "take", "Take notes", key);
@@ -121,6 +135,7 @@ Item {
             if (!client.recording) { root.stopGen = 0; root.chipShown = false; }
         }
         function onStateChanged() {
+            root.checkHandoff();
             var st = client.state.stopping;
             if (st && st.gen !== root.stopGen) {
                 root.stopGen = st.gen;
@@ -138,6 +153,7 @@ Item {
         target: root.calls
         function onCallChanged() {
             root.prevCall = root.calls.call;
+            root.checkHandoff();
             if (root.calls.call === "call") root.calledKey = root.calls.since || 1;   // also a call already on at startup
             if (!root.calls.seen) return;
             if (client.connected) client.send("calendar.refresh", {});

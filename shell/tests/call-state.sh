@@ -146,4 +146,32 @@ dead() { case $1 in base) wr "$(st none)" ;; go) wr "$(st call 999999999)"; slee
 run dead --auto dead
 no_record dead; no_offer dead
 
+# A different call while notes are owned (daemon step 1): the fake plays the stop (test.new_call {finish_ms}), saves for finish_ms, then offers the
+# handoff token; the shell then starts the new call's notes once, with reason=call. It never starts before the token.
+newcall() { python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(b"{\"id\":1,\"cmd\":\"test.new_call\",\"args\":{\"finish_ms\":%s},\"origin\":\"shell\"}\n" % sys.argv[2].encode()); s.recv(4096)' "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$1"; }
+starts() { echo $(( $(grep -c 'record\.start' "$work/$1.log") - $(grep -c REFUSED "$work/$1.log") )); }   # accepted starts
+once_by_call() { [ "$(starts "$1")" = 1 ] || fail "$1" "expected one accepted record.start, got $(starts "$1")"
+    ! grep -q REFUSED "$work/$1.log" || fail "$1" "a start was tried while the old notes were being saved"
+    grep -q 'record.start .* reason=call' "$work/$1.log" || fail "$1" "the automatic start does not carry reason=call"; }
+cs=$(date +%s%3N)
+teams2meet() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) newcall 1500; sleep 1; [ "$(grep -c 'record\.start' "$work/handoff.log")" = 0 ] || fail handoff "a start before the old notes were saved"; sleep 4 ;; esac; }
+run handoff "--live --auto --for-call" teams2meet
+once_by_call handoff
+
+direct() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) newcall 1000; wr "$(st call $$ "" "$cs")"; sleep 5 ;; esac; }
+run direct "--live --auto --for-call" direct
+once_by_call direct
+
+flap() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) newcall 1500; sleep 0.3; wr "$(st maybe $$ "" "$cs")"; sleep 0.5; wr "$(st call $$ "" "$cs")"; sleep 4 ;; esac; }
+run flap "--live --auto --for-call" flap
+once_by_call flap
+
+sameclass() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st call $$ "" "$cs")"; sleep 3 ;; esac; }
+run sameclass "--live --auto --for-call" sameclass
+no_record sameclass
+
+manualstop() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) user record.stop; sleep 3 ;; esac; }
+run manualstop "--live --auto --for-call" manualstop
+[ "$(starts manualstop)" = 0 ] || fail manualstop "a manual stop restarted the notes"
+
 echo "call-state ok"

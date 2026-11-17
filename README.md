@@ -355,7 +355,10 @@ Mode is switched on (switching it on by hand is not a call).
   started): the bar shows **Notes stop in 30 s · Keep**, which Do Not Disturb cannot hide, and a
   notification with **Keep recording**, which it may. Keep lets the notes run on. If the call comes back within the 30 s, nothing
   stops. Notes that don't belong to the call get a "Stop notes" offer instead. The daemon decides this
-  itself, so it works without the shell and from the CLI.
+  itself, so it works without the shell and from the CLI. If a call in a different app (another window
+  class) starts while the notes still belong to the old call, the old notes stop at once; when they are
+  saved, the new call gets its own notes, or the offer to start them. Two meetings in a row in the same
+  app share one note.
 - **No sound:** after `settings.inactivityStopMinutes` (default 10, 0 for off) with no microphone sound and
   no call, the same 30 s countdown stops the notes. During a call it only shows **No sound for N min · Stop
   notes**, and stops after three times that with no sound on either side, for apps that keep the microphone
