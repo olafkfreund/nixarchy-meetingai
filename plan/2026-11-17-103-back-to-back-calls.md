@@ -49,8 +49,10 @@ detected.
   2. `stop_locked(g, "new_call", "system")`.
 
   This order matters: `stop_locked` emits state (`session.rs:4013`), and
-  that state must already carry the handoff. The stop also cancels any
-  countdown.
+  the internal `g.handoff` must already be set by then. The *emitted*
+  `handoff` is still `null` at that moment: the recording slot stays until
+  the capture task ends. It turns into the token only when saving is done
+  (see "Handoff readiness"). The stop also cancels any countdown.
 - What triggers it and what doesn't:
   - it covers `none`/`maybe` → `call` during the countdown, and a direct
     `call` → `call` switch;
@@ -69,6 +71,12 @@ detected.
   - `finishing_meeting` is `None`.
 
   Otherwise it shows `null`.
+- **Where it lives.** `Inner` (`session.rs:435`) gains
+  `handoff: Option<Handoff>` and `handoff_seq: u64`. Both start as
+  `None` / `0` where `Inner` is built (`session.rs:1377`, next to
+  `finishing_meeting: None`). `Recording` gains `call_class: String`; add it
+  to every `Recording { .. }` literal, including the test fixture at
+  `session.rs:10531`.
 - **The ready signal.** Clearing `finishing_meeting` already emits state
   (`session.rs:4267`), so the shell sees the token appear.
 - **When `handoff` clears.** Only on a recording start (`g.handoff = None`
@@ -96,12 +104,22 @@ detected.
 - **The protocol.** `protocol::RecordStart` (`src/daemon/protocol.rs:81`)
   gains `reason: Option<String>`, with `#[serde(default)]` as on the other
   fields.
-- **The daemon's whitelist.** `record_start` logs
-  `reason = if a.reason.as_deref() == Some("call") { "call" } else { "user" }`
-  at `session.rs:3974`, so it never logs text a client chose.
+- **Passing it through.** The dispatcher (`session.rs:6812`) maps it to a
+  fixed `&'static str`:
+  `let reason = if a.reason.as_deref() == Some("call") { "call" } else { "user" };`
+  It passes `reason` as a new last parameter of `record_start`
+  (`session.rs:3701`), whose only caller is that dispatcher. The log at
+  `session.rs:3974` uses it, so the log never carries text a client chose.
 - **The shell.** `startNotes(quiet, title, reason)` adds `reason` to the
   `record.start` args only when it is given. `react()` passes `"call"`;
   every other caller passes nothing.
+
+**Risks (from the spec)**
+- A window class that changes inside one call would split the note. None
+  was seen live: Teams kept `omateams` and Meet kept `google-chrome`.
+- A save that takes over 120 s lets the handoff expire; the ordinary
+  next-call path takes over.
+- Host: p620 only; a deploy needs the owner's OK.
 
 **Accepted limits**
 - Same-app back-to-back meetings still share one note.
@@ -127,8 +145,8 @@ detected.
      whitelisted log.
    - **Lib tests**, next to the #101 call tests (around `session.rs:12620`):
      - a `for_call` recording plus another class → `record_stop` with
-       `new_call`, and the emitted state has `handoff` set before
-       `recording` is false;
+       `new_call`; `g.handoff` is set when the stop's state is emitted,
+       while the emitted `handoff` is still `null`;
      - no stop for: the same class, an empty class on either side, a
        `maybe` reading, `kept`, or notes that aren't `for_call`;
      - an empty `call_class` is filled from the first classed reading and
@@ -139,32 +157,48 @@ detected.
      - a recording start clears it;
      - `record.start` with `reason: "call"` logs `call`; with anything else,
        or nothing, it logs `user`.
-   - **Verify:** `cargo test --lib` passes; `cargo clippy --all-targets -- -D warnings`
-     is clean.
+   - **Verify:** `cargo test --lib daemon::session` first, then `cargo test`
+     (the approved full run), then `cargo clippy --all-targets -- -D warnings`.
    - **Traps:** the stop must come after setting `handoff`; never log
      `reason` unfiltered.
 2. **Shell** (`shell/Service.qml`, `shell/tests/fake-daemon.py`,
-   `shell/tests/call-state.sh` and its harness)
+   `shell/tests/call-state.sh`; `shell/tests/harness-call.qml` only if it
+   must expose `handledHandoff`)
    - **`Service.qml`:** `handledHandoff`, `checkHandoff()`, and the
      `startNotes` reason as above.
-   - **`fake-daemon.py`:**
-     - a configurable finishing delay that refuses `record.start` while it
-       lasts;
-     - `handoff` in the state with the readiness rule;
-     - `new_call` stops on a class change;
-     - log `record.start` with its reason.
+   - **`fake-daemon.py`:** it does not read meeting-mode's file, so the
+     daemon's class rule is tested in step 1's lib tests, not here. The
+     fake only scripts what the daemon does after it, through a test
+     request in the style of `test.pause` / `test.window`
+     (`fake-daemon.py:707`, `712`):
+     - `test.new_call {finish_ms}`:
+       - sets `recording=False`, `stopping=None`, and an internal
+         `finishing` until `finish_ms` from now, then broadcasts;
+       - while finishing, `record.start` fails with the daemon's
+         "finishing" error and `state.handoff` stays `null`;
+       - when finishing ends, sets `state.handoff` to a new token and
+         broadcasts.
+     - `record.start` (`fake-daemon.py:768`) clears `handoff`, and logs the
+       request's `reason`, or `user` when there is none.
+     - `state.handoff` starts as `null`.
    - **New `call-state.sh` cases:**
-     - Teams → Meet during the countdown: the old notes stop, saving ends,
-       then new notes start with `reason=call`;
+     - Each case sends `test.new_call` the way `live-shots.sh:90` sends
+       `test.window`, while the state file says `call`. The baseline file
+       may carry `"callWindowClass"`, but the fake ignores it.
+     - Teams → Meet during the countdown: `test.new_call {finish_ms: 1500}`;
+       no `record.start` succeeds before 1.5 s; then exactly one start with
+       `reason=call`;
      - a direct `call → call` switch with the same `callSince`: new notes
        start once;
-     - Meet briefly `maybe` while Teams saves: new notes still start;
+     - Meet briefly `maybe` while Teams saves (write `maybe`, then `call`
+       with the same `callSince`, inside `finish_ms`): new notes still start
+       once;
      - same class: notes kept;
      - a manual stop during a call: no new start.
    - **Verify:** `shell/tests/ci.sh` passes, including `call-state`.
    - **Traps:** use `headless.sh`; keep `react()`'s existing once-per-call
      behaviour for all other paths.
-3. **README** (`README.md`, the stop-countdown paragraph near line 360)
+3. **README** (`README.md:354`, the "Call ends" bullet)
    - **Change:** one short paragraph. A call in a different app during the
      countdown starts new notes once the old ones are saved. Two meetings in
      a row in the same app share one note.
@@ -173,7 +207,7 @@ detected.
 
 ## Tests
 
-- `cargo test --lib`: all pass, including the new tests from step 1.
+- `cargo test`: all pass, including the new tests from step 1.
 - `cargo clippy --all-targets -- -D warnings`: clean.
 - `shell/tests/ci.sh`: passes, including the new `call-state` cases.
 - Live on p620, after the owner's OK:
