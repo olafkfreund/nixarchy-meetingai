@@ -84,6 +84,8 @@ pub struct RecordStart {
     pub title: String,
     /// A call starts a fresh meeting instead of resuming the last one.
     pub new: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
