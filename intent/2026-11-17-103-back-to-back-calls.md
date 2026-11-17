@@ -21,14 +21,23 @@ author: olafkfreund
 
 ## Proposed outcome
 
-- A different call starting during the call-end countdown stops the old
-  notes at once, and the new call is handled as any new call is: notes
-  start by themselves when `auto_record_on_call` is on, or the shell offers
-  to start them.
-- A short drop inside the same call (seen live: 2 s, 6 s and 20 s, same app
-  and window class) still cancels the countdown and keeps the notes.
-- The daemon log says `reason="call"` for an automatic start on a call, and
-  `reason="user"` only for a click or a CLI start.
+- A different call starting while call-owned notes are recording (during
+  the call-end countdown, or straight after another call with no gap) asks
+  the old notes to stop at once. When they have finished saving, the new
+  call is handled as any new call is: notes start by themselves when
+  `auto_record_on_call` is on (outside interviewer mode), otherwise the
+  shell offers to start them. The new call must not be missed because the
+  old notes were still finishing.
+- "Different" is judged on what the daemon knows: the window class. Both
+  classes must be known and differ. When either is unknown (no window,
+  ambiguous) the notes are kept, as today.
+- A short drop inside the same call (seen live: 2 s, 6 s and 20 s, same
+  window class) still cancels the countdown and keeps the notes. A `maybe`
+  call keeps starting the countdown, as today.
+- The daemon log says `reason="call"` for an automatic start on a call and
+  `reason="user"` for a click, a notification action or a CLI start. The
+  shell sends the reason explicitly; the daemon accepts only fixed values
+  and defaults to `user`.
 
 ## Affected users and systems
 
@@ -39,8 +48,9 @@ author: olafkfreund
 
 ## Constraints
 
-- Never stop notes the user started for something other than this call:
-  only notes owned by the ending call (`for_call`) are affected, as today.
+- Only call-owned notes (`for_call`: started for a call, or manual notes
+  adopted by one) are affected. Notes that are not call-owned, or were kept
+  with Keep, are never stopped by this.
 - Keep (`record.keep`) still wins: kept notes are never stopped by this.
 - Logs keep their privacy rule: a fixed set of reasons, never window titles
   or text a client chose.
@@ -48,8 +58,9 @@ author: olafkfreund
 
 ## Open questions
 
-1. **What makes a call "different"?** Recommendation: a different window
-   class or app from the call that ended (Teams → Meet). Two meetings in a
+1. **What makes a call "different"?** Recommendation: a different, known
+   window class from the call that ended (Teams → Meet). The daemon has no
+   app name, only the window class. Two meetings in a
    row in the same app (two Meet tabs, or one Teams meeting after another)
    would then still share one note. A stricter test, a different window id,
    breaks on the Teams window that is replaced mid-call, as seen live at
