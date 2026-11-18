@@ -227,11 +227,14 @@ BarWidget {
         bar: root.bar
         owner: root
         open: root.menuOpen
-        contentWidth: popup.fittedContentWidth(Style.space(180))
-        contentHeight: popup.fittedContentHeight(root.confirmQuit ? Style.space(140) : col.implicitHeight)
+        // The stop confirmation needs a wide card: ConfirmDialog takes the host's width less 32 (306 here); at the menu's 180 its text wrapped one word per line.
+        // shortcut: the height is a constant (fits 5 lines; scales with the font size), a pinned larger `title` font token alone can clip it; upgrade by giving ConfirmDialog an implicitHeight in the Omarchy tree.
+        contentWidth: popup.fittedContentWidth(Style.space(root.confirmQuit ? 370 : 180))
+        contentHeight: popup.fittedContentHeight(root.confirmQuit ? Style.space(190) : col.implicitHeight)
 
         Column {
             id: col
+            visible: !root.confirmQuit   // the menu labels showed faintly through the dialog's scrim
             width: parent.width
             spacing: Style.spacing.xs
 
