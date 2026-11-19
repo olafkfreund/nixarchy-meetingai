@@ -3738,6 +3738,7 @@ impl Daemon {
         consent: bool,
         title: String,
         new: bool,
+        agent: bool,
         origin: &str,
         reason: &'static str,
     ) -> Result<Value, String> {
@@ -3936,7 +3937,7 @@ impl Daemon {
                         g.meeting_language.clone(),
                     )
                 });
-                self.reset_session(g);
+                self.reset_session_keeping_capture(g, agent);
                 self.emit("session.reset", json!({}));
                 if let Some((candidate, consent, local_only, language)) = keep {
                     g.candidate = candidate;
@@ -4017,6 +4018,8 @@ impl Daemon {
                     id
                 }
                 Err(error) => {
+                    // An agent's reset kept a screenshot; the shell cleared its indicator on session.reset.
+                    self.emit_state(g);
                     drop(guard);
                     return Err(error);
                 }
@@ -4979,6 +4982,19 @@ impl Daemon {
         self.local_only.store(false, Ordering::Relaxed);
     }
 
+    /// An agent's reset keeps the owner's waiting screenshot: it exists nowhere else.
+    fn reset_session_keeping_capture(&self, g: &mut Inner, agent: bool) {
+        let kept = if agent {
+            g.pending_capture.take()
+        } else {
+            None
+        };
+        self.reset_session(g);
+        if kept.is_some() {
+            g.pending_capture = kept;
+        }
+    }
+
     fn known_series(g: &Inner, id: &str) -> Result<(), String> {
         match items::series_get(g.db.connection(), id) {
             Ok(Some(_)) => Ok(()),
@@ -5033,7 +5049,7 @@ impl Daemon {
             return Err("This interview is local-only".into());
         }
         if conversations::require_conversation(g.db.connection(), id).is_ok() {
-            self.reset_session(g);
+            self.reset_session_keeping_capture(g, agent);
             self.emit("session.reset", json!({}));
             self.restore_chat(g, id)?;
             return Ok(json!({"kind": "chat"}));
@@ -5041,7 +5057,7 @@ impl Daemon {
         let record = meetings::get(g.db.connection(), id)
             .map_err(|e| e.to_string())?
             .ok_or("This session no longer exists.")?;
-        self.reset_session(g);
+        self.reset_session_keeping_capture(g, agent);
         self.emit("session.reset", json!({}));
         g.meeting_language = record.language;
         if let Some(chat) =
@@ -6787,7 +6803,7 @@ impl Daemon {
                         return Err("This candidate already has an interview.".into());
                     }
                 }
-                self.reset_session(&mut g);
+                self.reset_session_keeping_capture(&mut g, agent);
                 g.meeting_language = keep_language;
                 g.series = series;
                 self.set_candidate(&mut g, a.candidate);
@@ -6847,7 +6863,13 @@ impl Daemon {
                 Ok(json!({}))
             }
             "last_time.get" => self.last_time(&parse::<protocol::SeriesArg>(args)?.series),
-            "session.restore" => self.session_restore(&parse::<protocol::IdArg>(args)?.id, agent),
+            "session.restore" => {
+                let r = self.session_restore(&parse::<protocol::IdArg>(args)?.id, agent);
+                if agent {
+                    self.emit_state(&self.inner.lock());
+                }
+                r
+            }
             "session.list" => self.session_list(false),
             "meetings.search" => self.meetings_search(parse(args)?),
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
@@ -6858,7 +6880,7 @@ impl Daemon {
                 } else {
                     "user"
                 };
-                self.record_start(a.consent, a.title, a.new, origin, reason)
+                self.record_start(a.consent, a.title, a.new, agent, origin, reason)
                     .await
             }
             "candidate.create" => {
@@ -8195,6 +8217,72 @@ mod command_tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn agent_reset_keeps_waiting_screenshot() {
+        let d = daemon();
+        let (chat, meeting) = {
+            let g = d.inner.lock();
+            let c = g.db.connection();
+            (
+                conversations::create(c, "Saved chat", 1).unwrap(),
+                meetings::start(c, "Saved meeting", "", "en", None, Default::default()).unwrap(),
+            )
+        };
+
+        for (cmd, args) in [
+            ("session.new", json!({})),
+            ("session.restore", json!({"id": chat})),
+            ("session.restore", json!({"id": meeting})),
+        ] {
+            d.inner.lock().pending_capture = Some(CapturedImage {
+                base64: "AA==".into(),
+                mime: "image/png",
+            });
+            let mut events = d.subscribe();
+            d.handle(cmd, args, Some("mcp")).await.unwrap();
+            assert_eq!(d.state_value(&d.inner.lock())["capture"], true, "{cmd}");
+            if cmd == "session.restore" {
+                let events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+                let reset = events
+                    .iter()
+                    .position(|e| e["event"] == "session.reset")
+                    .unwrap();
+                assert!(
+                    events[reset + 1..]
+                        .iter()
+                        .any(|e| e["event"] == "state" && e["capture"] == true),
+                    "the shell must see the kept screenshot after {cmd}"
+                );
+            }
+        }
+
+        d.handle("session.new", json!({}), None).await.unwrap();
+        assert_eq!(d.state_value(&d.inner.lock())["capture"], false);
+
+        d.inner.lock().pending_capture = Some(CapturedImage {
+            base64: "AA==".into(),
+            mime: "image/png",
+        });
+        d.handle(
+            "settings.set",
+            json!({"key": "mcp_allow_record", "value": true}),
+            None,
+        )
+        .await
+        .unwrap();
+        d.handle(
+            "record.start",
+            json!({"consent": true, "new": true}),
+            Some("mcp"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(d.state_value(&d.inner.lock())["capture"], true);
+        d.handle("record.stop", json!({}), Some("mcp"))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
