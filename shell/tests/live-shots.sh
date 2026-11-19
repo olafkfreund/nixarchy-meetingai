@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Frames of a live meeting against fake-daemon.py --live: partial words, a
 # question from the other side, a streamed answer, then suggestions.
-# usage: [SCENARIO=live|k8s|team|interviewer|r5|first-run|no-daemon|error|providers|call] [SCALE=100] [MEETINGAI_GEOMETRY=1] live-shots.sh [OUT_DIR]   (needs a Wayland session and grim)
+# usage: [SCENARIO=live|k8s|team|interviewer|r5|first-run|no-daemon|error|providers|call|stopping|inactivity|window-states] [SCALE=100] [MEETINGAI_GEOMETRY=1] live-shots.sh [OUT_DIR]   (needs a Wayland session and grim)
 # SCENARIO=k8s plays the captured real answer (fake-daemon.py --k8s); SCALE is the text_scale setting.
 # MEETINGAI_GEOMETRY=1 also runs tests/check-geometry.py on what the harness dumped. SCENARIO=providers switches through every
 # provider and asserts the model dropdowns (fake-daemon.py --providers). QML warnings (stdout or stderr) fail the run.
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 out=${1:-/tmp/meetingai-live}
-scenario=${SCENARIO:-live}; [ "$scenario" = error ] && export MEETINGAI_ASK=1; scale=${SCALE:-100}; size=${CARD_SIZE:-}   # SCENARIO=r5 CARD_SIZE=700x520 (not SIZE: the Nix toolchain exports SIZE=size): resized card, Profiles and Prompts tabs
+scenario=${SCENARIO:-live}; export SCENARIO=$scenario; [ "$scenario" = error ] && export MEETINGAI_ASK=1; scale=${SCALE:-100}; size=${CARD_SIZE:-}   # SCENARIO=r5 CARD_SIZE=700x520 (not SIZE: the Nix toolchain exports SIZE=size): resized card, Profiles and Prompts tabs
 tree=${OMARCHY_SHELL_TREE:-/nix/store/gmshfnfmc8wrz4f85f49b3xx1j8a6v0l-nixarchy-omarchy-tree/shell}
 work=$(mktemp -d /tmp/nm.XXXX)   # short: unix socket paths cap at 108 bytes
 trap 'kill $(jobs -p) 2>/dev/null || true; chmod -R u+w "$work"; rm -rf "$work"' EXIT
@@ -68,25 +68,74 @@ case $scenario in
     providers) frames="1-opencode-error:5.1 2-providers-tab:5.5" ;;   # opencode's list fails at ~8 s; the Providers tab opens at 13 s
     k8s) frames="1-answering:2 2-ready:9 3-settings:4 4-mode:2" ;;
     call) frames="1-chip:0.3 2-maybe:0.6 3-recording:0.6" ;;   # a Zoom call (outlined dot + chip), then a maybe (dim dot), then recording (filled dot + timer)
+    stopping) frames="1-overlay:0.5 2-bar:0.3" ;;
+    inactivity) frames="1-overlay:0.5 2-bar:0.3" ;;
+    window-states) frames="1-bound:0.5 2-ambiguous:0.5 3-none:0.5" ;;
     *) frames="1-question:1 2-answering:2.4 3-suggestions:3 4-you-speaking:2.2 5-asked:2.4 6-settings:4 7-mode:2 8-bar:0.3" ;;
 esac
 for f in $frames; do
     sleep "${f#*:}"
     region=$g
-    case ${f%:*} in *-bar) read -r lx ly _ < "$work/layer"; region="$lx,$ly 160x36" ;; esac   # the bar widget pill, top left of the monitor
+    case ${f%:*} in *-bar) read -r lx ly _ < "$work/layer"; region="$lx,$ly $(case $scenario in stopping|inactivity) echo 320 ;; *) echo 160 ;; esac)x36" ;; esac   # the bar widget pill, top left of the monitor
     case ${f%:*} in 1-chip|2-maybe|3-recording) read -r lx ly _ < "$work/layer"; region="$lx,$ly 320x36" ;; esac
     if [ "$scenario" = call ]; then   # the next state for the bar: maybe, then the recording (the fake daemon answers record.start)
         case ${f%:*} in
             2-maybe) python3 -c 'import sys; p = sys.argv[1]; s = open(p).read(); open(p, "w").write(s.replace("\"call\": \"call\"", "\"call\": \"maybe\""))' "$XDG_RUNTIME_DIR/meeting-mode.json" ;;   # in place: the watcher sees it
-            3-recording) python3 -c 'import socket,json,os,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(b"{\"id\":1,\"cmd\":\"record.start\",\"args\":{}}\n"); s.recv(4096)' "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" ;;
+            3-recording) python3 -c 'import socket,json,os,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(b"{\"id\":1,\"cmd\":\"record.start\",\"args\":{},\"origin\":\"shell\"}\n"); s.recv(4096)' "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" ;;
         esac
         sleep 0.5
     fi
+    if [ "$scenario" = window-states ]; then
+        case ${f%:*} in
+            2-ambiguous) python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(b"{\"id\":1,\"cmd\":\"test.window\",\"args\":{\"state\":\"ambiguous\",\"class\":\"\"},\"origin\":\"shell\"}\n"); s.recv(4096)' "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock"; sleep 0.5 ;;
+            3-none) python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(b"{\"id\":1,\"cmd\":\"test.window\",\"args\":{\"state\":\"none\",\"class\":\"\"},\"origin\":\"shell\"}\n"); s.recv(4096)' "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock"; sleep 0.5 ;;
+        esac
+    fi
     grim -g "$region" "$out/crop-${f%:*}.png"
 done
+if [ "$scenario" = window-states ]; then sleep 0.4; kill "$qs" 2>/dev/null || true; fi
 wait "$qs" || true
 # QML problems: an ERROR, a binding loop, a TypeError, a ReferenceError, any file.qml:line (our own GEO/PROV/KEY dumps are not problems)
-if grep -aE 'ERROR|\.qml:[0-9]+|Binding loop|TypeError|ReferenceError' "$work/qs.err" "$work/qs.out" | grep -avE 'GEO \{|PROV |KEY |DROP '; then echo "FAIL: QML problems above" >&2; exit 1; fi
+if grep -aE 'ERROR|\.qml:[0-9]+|Binding loop|TypeError|ReferenceError' "$work/qs.err" "$work/qs.out" | grep -avE 'GEO \{|PROV |KEY |DROP |STOPPING |INACTIVITY |WIN_STATE '; then echo "FAIL: QML problems above" >&2; exit 1; fi
+case $scenario in
+    stopping)
+        python3 - "$work/qs.out" "$work/fake.log" <<'PY'
+import json, re, sys
+line = next((l for l in open(sys.argv[1], errors="replace") if "STOPPING {" in l), None)
+if not line:
+    sys.exit("FAIL (stopping): no STOPPING dump")
+d = json.loads(line[line.index("STOPPING ") + 9:])
+log = open(sys.argv[2]).read()
+if not re.match(r"^Notes stop in \d+ s · Keep$", d.get("chip", "")) or d.get("notice") != "Notes stop in 30 s · press to keep" or not d.get("paused") or not d.get("cleared") or "record.keep gen=7" not in log:
+    sys.exit(f"FAIL (stopping): {d} log={log!r}")
+print("stopping: chip, overlay notice, paused autoshots and record.keep ok")
+PY
+        ;;
+    inactivity)
+        python3 - "$work/qs.out" "$work/fake.log" <<'PY'
+import json, sys
+line = next((l for l in open(sys.argv[1], errors="replace") if "INACTIVITY {" in l), None)
+if not line:
+    sys.exit("FAIL (inactivity): no INACTIVITY dump")
+d = json.loads(line[line.index("INACTIVITY ") + 11:])
+log = open(sys.argv[2]).read()
+if d.get("chip") != "No sound for 10 min · Stop notes" or d.get("notice") != "No sound for 10 min · press to stop notes" or not d.get("cleared") or "record.stop reason=inactivity_chip" not in log:
+    sys.exit(f"FAIL (inactivity): {d} log={log!r}")
+print("inactivity: chip, overlay notice and Stop notes action ok")
+PY
+        ;;
+    window-states)
+        python3 - "$work/qs.out" <<'PY'
+import json, sys
+dumps = [json.loads(l[l.index("WIN_STATE ") + 10:]) for l in open(sys.argv[1], errors="replace") if "WIN_STATE {" in l]
+views = [d.get("view") for d in dumps]
+tips = [d.get("tip", "").split(" · ", 2)[2] if d.get("tip", "").count(" · ") >= 2 else "" for d in dumps]
+if views != ["Meeting window · Zoom", "Several possible windows", "No meeting window"] or tips != ["Meeting window · Zoom", "several possible windows", "no meeting window"]:
+    sys.exit(f"FAIL (window-states): views={views} tips={tips}")
+print("window-states: bound, ambiguous and none in tooltip and meeting view ok")
+PY
+        ;;
+esac
 if [ "$scenario" = providers ]; then
     python3 - "$work/qs.out" <<'PY'
 import json, sys

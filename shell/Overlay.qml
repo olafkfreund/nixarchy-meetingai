@@ -151,13 +151,13 @@ Item {
     function modeHook() { hdr.openPicker(); }   // tests/harness-live.qml opens the mode list for a crop
     function toggleAutoShots() {
         var st = backend.state.autoshots || {};
-        if (st.on) { backend.send("autoshots.stop", {}); return; }
+        if (st.on && st.paused !== "window_closed") { backend.send("autoshots.stop", {}); return; }   // paused: window closed -> press to re-bind
         var go = function() {
             root.autoShotsAsked = true;
             backend.send("autoshots.start", {}, function(r) { root.autoShotsNotice = r.ok ? "" : backend.plainError(r.error || "request failed"); });
         };
         if (root.autoShotsAsked) go();
-        else root.ask("Automatic screenshots capture whatever is in the area you choose, including other windows. The export folder may sync elsewhere. Check that you may capture what others share.", "Start", go);
+        else root.ask("Automatic screenshots capture the meeting window only, even when it is hidden or covered. The export folder may sync elsewhere. Check that you may capture what others share.", "Start", go);
     }
     function ask(message, confirmText, yes) { confirm.ask(message, confirmText, yes); }   // the one confirmation dialog
     function focusProbe(next) {   // tests/keys.sh: what has the keyboard focus; next = do what Tab does first
@@ -468,10 +468,32 @@ Item {
                             UiText {
                                 anchors.verticalCenter: autoShotsCheck.verticalCenter
                                 textFormat: Text.PlainText
-                                text: { var a = backend.state.autoshots || {}; return "Auto screenshots" + (a.on ? " \u00b7 on \u00b7 " + a.count : a.at_limit ? " \u00b7 limit reached (" + a.count + ")" : ""); }
+                                text: { var a = backend.state.autoshots || {}; var why = { no_call: "no call", not_showing: "meeting window not showing", countdown: "notes are stopping", window_closed: "meeting window closed", hidden_not_updating: "meeting window not updating", locked: "screen locked", ambiguous: "several possible windows", no_window: "no meeting window" }; return "Auto screenshots" + (a.on ? (a.paused ? " \u00b7 Paused: " + (why[a.paused] || a.paused) + " \u00b7 " + a.count : " \u00b7 on \u00b7 " + a.count) : a.at_limit ? " \u00b7 limit reached (" + a.count + ")" : ""); }
                                 color: Commons.Color.popups.text
                                 font.pixelSize: metrics.body
                             }
+                        }
+                        UiText {
+                            objectName: "stopNotice"
+                            readonly property var stop: backend.recording ? backend.state.stopping : null
+                            readonly property var idle: backend.recording ? backend.state.inactivity_chip : null
+                            visible: !!stop || !!idle
+                            width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap
+                            text: stop ? "Notes stop in " + stop.in_s + " s \u00b7 press to keep" : idle ? "No sound for " + idle.minutes + " min \u00b7 press to stop notes" : ""
+                            color: Commons.Color.popups.text; font.pixelSize: metrics.caption; font.bold: true
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: { if (parent.stop) backend.send("record.keep", { gen: parent.stop.gen }); else backend.send("record.stop", { reason: "inactivity_chip" }); }
+                            }
+                        }
+                        UiText {
+                            objectName: "windowIdentity"
+                            visible: backend.recording
+                            width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap
+                            readonly property var w: backend.state.call_window || {}
+                            text: w.state === "bound" ? "Meeting window" + (w.class ? " \u00b7 " + w.class : "") : w.state === "ambiguous" ? "Several possible windows" : "No meeting window"
+                            color: Commons.Color.popups.text; opacity: metrics.dim; font.pixelSize: metrics.caption
                         }
                         UiText { objectName: "autoShotsNotice"; visible: text !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: root.autoShotsNotice; color: Commons.Color.popups.text; font.pixelSize: metrics.caption }
                         UiText { objectName: "meetingLanguageHint"; visible: text !== ""; width: parent.width; textFormat: Text.PlainText; wrapMode: Text.Wrap; text: String(backend.state.language_hint || ""); color: Commons.Color.popups.text; opacity: metrics.dim; font.pixelSize: metrics.caption }
@@ -688,6 +710,25 @@ Item {
                         RowLayout {
                             anchors.fill: parent
                             Check { objectName: "noContext"; ts: metrics.ts; accessibleName: "No context"; Layout.alignment: Qt.AlignVCenter; checked: root.noContext; onToggled: root.noContext = !root.noContext }
+                        }
+                    }
+                    Cell {   // stop notes after N minutes with no sound, 0 = off
+                        theme: metrics; width: sflow.cellW
+                        label: backend.lockedLabel("inactivity_stop_minutes", Number(backend.settings.inactivity_stop_minutes) === 0 ? "Stop on silence: off" : "Stop after " + (backend.settings.inactivity_stop_minutes === undefined ? 10 : backend.settings.inactivity_stop_minutes) + " min of silence")
+                        PanelSlider {
+                            objectName: "inactivityMinutes"
+                            Accessible.role: Accessible.Slider; Accessible.name: "Stop after minutes of silence"; property string accName: "Stop after minutes of silence"
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width
+                            enabled: !backend.isLocked("inactivity_stop_minutes")
+                            minimum: 0; maximum: 240; step: 5; integer: true
+                            trackHeight: Math.max(4, Math.round(Style.spacing.controlHeight * 0.11 * metrics.ts))
+                            knobSize: Math.max(14, Math.round(Style.spacing.controlHeight * 0.38 * metrics.ts))
+                            value: backend.settings.inactivity_stop_minutes === undefined ? 10 : Number(backend.settings.inactivity_stop_minutes)
+                            trackColor: Qt.alpha(Commons.Color.popups.text, 0.2)
+                            fillColor: Commons.Color.popups.text
+                            knobColor: Commons.Color.popups.text
+                            onMoved: function(v) { var n = Math.round(v / 5) * 5; if (n !== Number(backend.settings.inactivity_stop_minutes)) backend.setSetting("inactivity_stop_minutes", n); }
                         }
                     }
                     Cell {   // overlay text size, 80..160 % (Ctrl+= / Ctrl+- / Ctrl+0)

@@ -6,6 +6,35 @@ import "geometry.js" as Geo
 
 // Overlay plus bar pill for tests/live-shots.sh, against fake-daemon.py --live.
 ShellRoot {
+    id: root
+    readonly property string scenario: Quickshell.env("SCENARIO")
+    property var snap: ({})
+    property string lastWin: ""
+    function find(it, name, depth) {
+        if (!it || !it.visible || (depth || 0) > 60) return null;
+        if (it.objectName === name) return it;
+        var kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) { var f = find(kids[i], name, (depth || 0) + 1); if (f) return f; }
+        return null;
+    }
+    function texts(it, depth) {
+        if (!it || !it.visible || (depth || 0) > 60) return "";
+        var s = typeof it.text === "string" ? it.text : "", kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) { var t = texts(kids[i], (depth || 0) + 1); if (t) s = s ? s + " " + t : t; }
+        return s;
+    }
+    function click(it) {
+        if (!it) return;
+        var kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) if (typeof kids[i].clicked === "function") { kids[i].clicked(null); return; }
+    }
+    function barTip(it, depth) {
+        if (!it || (depth || 0) > 20) return "";
+        if (typeof it.tooltipText === "string" && it.tooltipText !== "") return it.tooltipText;
+        var kids = it.children || [];
+        for (var i = 0; i < kids.length; i++) { var t = barTip(kids[i], (depth || 0) + 1); if (t) return t; }
+        return "";
+    }
     Overlay {
         id: overlay
         Component.onCompleted: overlay.open("{}")
@@ -20,6 +49,40 @@ ShellRoot {
     Timer { interval: 2000; running: overlay.iv; onTriggered: overlay.recordHook(false) }   // interviewer: the consent banner
     Timer { interval: 6000; running: overlay.iv; onTriggered: overlay.recordHook(true) }
     Timer { interval: 16000; running: Quickshell.env("MEETINGAI_ASK") !== "1"; onTriggered: overlay.showLibrary(overlay.iv ? "candidate" : "settings") }
+    Timer {
+        interval: 4600; running: root.scenario === "stopping" || root.scenario === "inactivity"
+        onTriggered: {
+            var card = overlay.geometryRoot();
+            var chipName = root.scenario === "stopping" ? "stopChip" : "inactivityChip";
+            var chip = root.find(barWidget, chipName), notice = root.find(card, "stopNotice");
+            root.snap = { chip: root.texts(chip), notice: root.texts(notice), paused: root.texts(card).indexOf("Paused: notes are stopping") >= 0 };
+            root.click(chip);
+            afterAct.start();
+        }
+    }
+    Timer {
+        id: afterAct
+        interval: 700
+        onTriggered: {
+            var card = overlay.geometryRoot();
+            var chipName = root.scenario === "stopping" ? "stopChip" : "inactivityChip";
+            root.snap.cleared = !root.find(barWidget, chipName) && !root.find(card, "stopNotice");
+            console.log((root.scenario === "stopping" ? "STOPPING " : "INACTIVITY ") + JSON.stringify(root.snap));
+            Qt.quit();
+        }
+    }
+    Timer {
+        interval: 250; repeat: true; running: root.scenario === "window-states"
+        onTriggered: {
+            var card = overlay.geometryRoot(), wi = root.find(card, "windowIdentity"), tip = root.barTip(barWidget);
+            var v = wi ? String(wi.text) : "";
+            if (v !== "" && v !== root.lastWin && tip.indexOf("Taking notes") === 0) {
+                root.lastWin = v;
+                console.log("WIN_STATE " + JSON.stringify({ view: v, tip: tip }));
+                if (Quickshell.env("MEETINGAI_GEOMETRY") === "1") Geo.dump(card, overlay.ctl, v, overlay.winW, overlay.winH);
+            }
+        }
+    }
     QtObject {   // stand-in for the shell's Bar host
         id: barStub
         property string position: "top"
@@ -43,6 +106,6 @@ ShellRoot {
         WlrLayershell.layer: WlrLayer.Overlay
         color: "transparent"
         Rectangle { anchors.fill: parent; color: Commons.Color.bar.background }
-        BarWidget { bar: barStub; anchors.fill: parent }
+        BarWidget { id: barWidget; bar: barStub; anchors.fill: parent }
     }
 }

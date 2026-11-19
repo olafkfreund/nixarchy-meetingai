@@ -15,9 +15,10 @@ step() { echo "=== $*"; }
 step lint;       bash "$here/lint.sh"
 step smoke;      bash "$here/smoke.sh"
 step smoke-real; bash "$here/smoke-real.sh"
+step call-state; bash "$here/call-state.sh"
 step keys;       bash "$here/keys.sh"
 for scale in 100 150; do
-    for scenario in live k8s team interviewer r5 first-run no-daemon error providers; do
+    for scenario in live k8s team interviewer r5 first-run no-daemon error providers stopping inactivity window-states; do
         step "live-shots $scenario $scale%"
         SCENARIO=$scenario SCALE=$scale bash "$here/live-shots.sh" "$out/$scenario-$scale"
     done

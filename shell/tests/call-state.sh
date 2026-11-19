@@ -50,7 +50,7 @@ no_record() { ! grep -q 'record\.\(start\|stop\)' "$work/$1.log" || fail "$1" "t
 user() { python3 - "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$1" <<'EOF'
 import json, socket, sys
 s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
-s.sendall((json.dumps({"id": 1, "cmd": sys.argv[2], "args": {}}) + "\n").encode())
+s.sendall((json.dumps({"id": 1, "cmd": sys.argv[2], "args": {}, "origin": "shell"}) + "\n").encode())
 for line in s.makefile():
     r = json.loads(line)
     if r.get("id") == 1:
@@ -84,7 +84,7 @@ run interviewer "--interviewer --auto" started
 ! grep -q 'record\.start' "$work/interviewer.log" || fail interviewer "auto-recorded in interviewer mode"
 grep -q -- '-A take=Take notes' "$work/interviewer.notify" || fail interviewer "no offer in interviewer mode"
 
-# the call ends while recording: offer "Stop notes", never stop alone
+# the call ends while recording without for_call: offer "Stop notes", never stop alone
 hangup() { case $1 in base) wr "$(st call)" ;; go) wr "$(st none)"; sleep 4 ;; esac; }
 run hangup "--live --auto" hangup
 no_record hangup
@@ -97,56 +97,23 @@ run viamaybe "--live --auto" viamaybe
 no_record viamaybe
 grep -q -- '-A stop=Stop notes' "$work/viamaybe.notify" || fail viamaybe "no Stop notes offer on call -> maybe -> none"
 
-# the call ends while the notes it started run: they stop by themselves after the grace period (2 s here), unless kept
-# every write passes the same callSince (a missing one reads as a different call); the recording started 2 s before the daemon, after the call
+# with for_call, the old Stop notes offer does not show; the daemon's stopping state shows Keep, which sends its gen
 stops() { [ "$(grep -c 'record\.stop' "$work/$1.log")" = "$2" ] || fail "$1" "expected $2 record.stop"; }
 cs=$(( $(date +%s%3N) - 10000 ))
-autostop() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st none $$ "" "$cs")"; sleep 3 ;; esac; }
-run autostop "--live --live-since=2000" autostop
-stops autostop 1
-grep -q -- '-A keep=Keep recording' "$work/autostop.notify" || fail autostop "no Keep recording offer"
-grep -q -- '-t 2000' "$work/autostop.notify" || fail autostop "the offer does not expire with the grace period"
-
-maybeend() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st maybe $$ "" "$cs")"; sleep 3 ;; esac; }
-run maybeend "--live --live-since=2000" maybeend
-stops maybeend 1
-
-# a call that returns during the grace period takes the notes over: the first timer must not fire, the second end stops them
-cs=$(( $(date +%s%3N) - 60000 ))
-takeover() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go)
-    wr "$(st none $$ "" "$cs")"; sleep 0.5
-    t2=$(date +%s%3N); wr "$(st call $$ "" "$t2")"; sleep 2.5
-    wr "$(st none $$ "" "$t2")"; echo MARK >> "$work/takeover.log"; sleep 3 ;; esac; }
-run takeover "--live --live-since=30000" takeover
-stops takeover 1
-[ "$(grep -n 'record\.stop' "$work/takeover.log" | cut -d: -f1)" -gt "$(grep -n MARK "$work/takeover.log" | cut -d: -f1)" ] || fail takeover "the notes stopped before the second end"
-
-cs=$(( $(date +%s%3N) - 10000 ))
-NOTIFY_ANSWER=keep run keep "--live --live-since=2000" autostop
+owned() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st none $$ "" "$cs")"; sleep 3 ;; esac; }
+NOTIFY_ANSWER=keep run keep "--live --for-call --stopping=call_end:7:30" owned
 no_record keep
-! grep -q -- '-A stop=' "$work/keep.notify" || fail keep "offered Stop notes after Keep recording"
-
-manualnew() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st none $$ "" "$cs")"; sleep 0.5; user record.stop; user record.start; sleep 3 ;; esac; }
-run manualnew "--live --live-since=2000" manualnew
-stops manualnew 1
+grep -q -- '-A keep=Keep recording' "$work/keep.notify" || fail keep "no Keep recording offer"
+grep -q -- '-t 30000' "$work/keep.notify" || fail keep "the offer does not carry the 30 s timeout"
+grep -q 'The call ended\. Notes stop in 30 s\.' "$work/keep.notify" || fail keep "wrong countdown notification body"
+grep -q 'record\.keep gen=7' "$work/keep.log" || fail keep "Keep did not send record.keep with the countdown gen"
+! grep -q -- '-A stop=' "$work/keep.notify" || fail keep "offered Stop notes when for_call is true"
 
 dead=$(sh -c 'echo $$')   # a pid that has exited
 gone() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st none "$dead" "" "$cs")"; sleep 3 ;; esac; }
 run gone "--live --live-since=2000" gone
 no_record gone
 grep -q -- '-A stop=Stop notes' "$work/gone.notify" || fail gone "no Stop notes offer when the writer went"
-
-gonepending() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st maybe $$ "" "$cs")"; sleep 0.5; wr "$(st maybe "$dead" "" "$cs")"; sleep 3 ;; esac; }
-run gonepending "--live --live-since=2000" gonepending
-no_record gonepending
-[ "$(grep -c -- '-A stop=Stop notes' "$work/gonepending.notify")" = 1 ] || fail gonepending "expected exactly one Stop notes offer"
-
-# Keep holds for that recording only: stopped and restarted before a new call, the new notes stop when that call ends
-keepnext() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go)
-    wr "$(st none $$ "" "$cs")"; sleep 0.3; user record.stop; user record.start; sleep 0.3
-    cs2=$(date +%s%3N); wr "$(st call $$ "" "$cs2")"; sleep 0.5; wr "$(st none $$ "" "$cs2")"; sleep 3 ;; esac; }
-NOTIFY_ANSWER=keep run keepnext "--live --live-since=2000" keepnext
-stops keepnext 2   # the user's, then the automatic one
 
 # a call with no callSince owns nothing: older notes get the offer, never a stop
 nosince() { case $1 in base) wr "$(st call $$ "" 0)" ;; go) wr "$(st none $$ "" 0)"; sleep 3 ;; esac; }
@@ -178,5 +145,33 @@ grep -q -- '-A take=Take notes' "$work/race.snap" || fail race "the IPC offer di
 dead() { case $1 in base) wr "$(st none)" ;; go) wr "$(st call 999999999)"; sleep 3; wr "$(st call 0 1000)"; sleep 3 ;; esac; }
 run dead --auto dead
 no_record dead; no_offer dead
+
+# A different call while notes are owned (daemon step 1): the fake plays the stop (test.new_call {finish_ms}), saves for finish_ms, then offers the
+# handoff token; the shell then starts the new call's notes once, with reason=call. It never starts before the token.
+newcall() { python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(b"{\"id\":1,\"cmd\":\"test.new_call\",\"args\":{\"finish_ms\":%s},\"origin\":\"shell\"}\n" % sys.argv[2].encode()); s.recv(4096)' "$XDG_RUNTIME_DIR/nixarchy-meetingai/daemon.sock" "$1"; }
+starts() { echo $(( $(grep -c 'record\.start' "$work/$1.log") - $(grep -c REFUSED "$work/$1.log") )); }   # accepted starts
+once_by_call() { [ "$(starts "$1")" = 1 ] || fail "$1" "expected one accepted record.start, got $(starts "$1")"
+    ! grep -q REFUSED "$work/$1.log" || fail "$1" "a start was tried while the old notes were being saved"
+    grep -q 'record.start .* reason=call' "$work/$1.log" || fail "$1" "the automatic start does not carry reason=call"; }
+cs=$(date +%s%3N)
+teams2meet() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) newcall 1500; sleep 1; [ "$(grep -c 'record\.start' "$work/handoff.log")" = 0 ] || fail handoff "a start before the old notes were saved"; sleep 4 ;; esac; }
+run handoff "--live --auto --for-call" teams2meet
+once_by_call handoff
+
+direct() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) newcall 1000; wr "$(st call $$ "" "$cs")"; sleep 5 ;; esac; }
+run direct "--live --auto --for-call" direct
+once_by_call direct
+
+flap() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) newcall 1500; sleep 0.3; wr "$(st maybe $$ "" "$cs")"; sleep 0.5; wr "$(st call $$ "" "$cs")"; sleep 4 ;; esac; }
+run flap "--live --auto --for-call" flap
+once_by_call flap
+
+sameclass() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) wr "$(st call $$ "" "$cs")"; sleep 3 ;; esac; }
+run sameclass "--live --auto --for-call" sameclass
+no_record sameclass
+
+manualstop() { case $1 in base) wr "$(st call $$ "" "$cs")" ;; go) user record.stop; sleep 3 ;; esac; }
+run manualstop "--live --auto --for-call" manualstop
+[ "$(starts manualstop)" = 0 ] || fail manualstop "a manual stop restarted the notes"
 
 echo "call-state ok"

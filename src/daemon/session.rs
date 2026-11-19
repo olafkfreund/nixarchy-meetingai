@@ -22,7 +22,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::protocol::{self, event, parse};
+use super::{
+    callstate::CallReading,
+    protocol::{self, event, parse},
+};
 use crate::ai::providers::{
     CHAT_PROVIDERS, ChatProvider, ProviderConfig, SttProvider, endpoint_allowed,
 };
@@ -146,7 +149,8 @@ const MANAGED_SETTINGS: [&str; 13] = [
     "meeting_context",
 ];
 /// Settings the shell shows as numbers rather than strings.
-const NUMERIC_SETTINGS: [&str; 6] = [
+const NUMERIC_SETTINGS: [&str; 7] = [
+    "inactivity_stop_minutes",
     "capture_delay_seconds",
     "text_scale",
     "overlay_x",
@@ -296,11 +300,19 @@ const AUTO_PHRASES: [&str; 9] = [
 #[cfg(test)]
 type ChatCapture = Box<dyn Fn() -> Result<CapturedImage, String> + Send + Sync>;
 #[cfg(test)]
-type AutoCapture = Box<dyn Fn(&str) -> Result<(Vec<u8>, Vec<u8>), String> + Send + Sync>;
+type AutoCapture = Box<dyn Fn(&Target) -> Result<(Vec<u8>, Vec<u8>), String> + Send + Sync>;
+#[cfg(test)]
+type AutoHyprctl = Box<dyn Fn(&str) -> serde_json::Value + Send + Sync>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Target {
+    Window(String),
+}
 
 struct AutoShots {
     meeting: String,
-    area: String,
+    target: Target,
+    paused: Option<&'static str>,
     generation: u64,
     count: usize,
     last_fingerprint: Vec<u8>,
@@ -329,9 +341,105 @@ struct Recording {
     since_ms: i64,
     stop: Arc<AtomicBool>,
     speech: Option<ProviderConfig>,
+    for_call: bool,
+    call_class: String,
+    kept: bool,
+    handled_since: Option<f64>,
+}
+
+struct Stopping {
+    generation: u64,
+    reason: &'static str,
+    at: Instant,
+    meeting: String,
+}
+
+struct Handoff {
+    token: u64,
+    at: Instant,
+}
+
+/// Sustained sound: this long above `SOUND_LEVEL` within one window.
+const SOUND_WINDOW: Duration = Duration::from_secs(1);
+const SOUND_FRAMES: u32 = audio::SAMPLE_RATE * 3 / 10;
+/// A gap in frames at least this long restarts the clock.
+const FRAME_GAP: Duration = Duration::from_secs(5);
+
+/// When each channel (0 mic, 1 system) last sounded; times are passed in so tests can fake them.
+#[derive(Default)]
+struct SoundClock {
+    since: Option<Instant>,
+    last_sound: [Option<Instant>; 2],
+    last_frame: Option<Instant>,
+    window: [(Option<Instant>, u32, u32); 2], // (start, count, the previous adjacent window's count)
+    chip: Option<u32>,
+}
+
+impl SoundClock {
+    fn reset(&mut self, now: Instant) {
+        *self = Self {
+            since: Some(now),
+            last_frame: self.last_frame,
+            ..Self::default()
+        };
+    }
+
+    /// O(samples), no allocation. Returns true when a gap restarted the clock.
+    fn feed(&mut self, samples: &[f32], now: Instant) -> bool {
+        let gap = self
+            .last_frame
+            .is_some_and(|l| now.saturating_duration_since(l) >= FRAME_GAP);
+        if gap {
+            self.reset(now);
+        }
+        self.last_frame = Some(now);
+        let mut above = [0u32; 2];
+        for f in samples.as_chunks::<2>().0 {
+            above[0] += u32::from(f[0].abs() > transcription::SOUND_LEVEL);
+            above[1] += u32::from(f[1].abs() > transcription::SOUND_LEVEL);
+        }
+        for (ch, n) in above.into_iter().enumerate() {
+            let w = &mut self.window[ch];
+            if w.0
+                .is_none_or(|s| now.saturating_duration_since(s) >= SOUND_WINDOW)
+            {
+                // Carry an adjacent window's count, so a burst across the boundary still counts
+                // (in effect 300 ms within 2 s: errs on the side of not stopping).
+                let adjacent =
+                    w.0.is_some_and(|s| now.saturating_duration_since(s) < SOUND_WINDOW * 2);
+                *w = (Some(now), 0, if adjacent { w.1 } else { 0 });
+            }
+            w.1 += n;
+            if w.1 + w.2 >= SOUND_FRAMES {
+                self.last_sound[ch] = Some(now);
+            }
+        }
+        gap
+    }
+
+    fn idle(&self, ch: usize, now: Instant) -> Duration {
+        [self.last_sound[ch], self.since]
+            .into_iter()
+            .flatten()
+            .max()
+            .map_or(Duration::ZERO, |t| now.saturating_duration_since(t))
+    }
+
+    fn frames_live(&self, now: Instant) -> bool {
+        self.last_frame
+            .is_some_and(|l| now.saturating_duration_since(l) < FRAME_GAP)
+    }
+}
+
+fn owns_call(call: &CallReading, since_ms: i64) -> bool {
+    call.present
+        && call.call == "call"
+        && call.since > 0.0
+        && (call.schema >= 2 || since_ms as f64 >= call.since - 5_000.0)
 }
 
 struct Inner {
+    call: CallReading,
     db: Database,
     settings: Settings,
     conversation: Conversation,
@@ -354,9 +462,13 @@ struct Inner {
     autoshots: Option<AutoShots>,
     // Recording.
     recording: Option<Recording>,
+    stopping: Option<Stopping>,
+    sound: SoundClock,
     meeting_id: Option<String>,
     /// Set from the moment recording ends until its notes are written.
     finishing_meeting: Option<String>,
+    handoff: Option<Handoff>,
+    handoff_seq: u64,
     resume_meeting: Option<String>,
     meeting_offset: f64,
     speaker_offset: i64,
@@ -433,6 +545,7 @@ pub struct Daemon {
     /// Bumped by Cancel and a session reset: a `chat.send` still preparing (screenshot delay) drops out.
     send_epoch: AtomicU64,
     autoshots_epoch: AtomicU64,
+    elig_gen: AtomicU64,
     #[cfg(test)]
     auto_capture: Mutex<Option<AutoCapture>>,
     #[cfg(test)]
@@ -440,7 +553,8 @@ pub struct Daemon {
     #[cfg(test)]
     auto_unlocked: Mutex<Option<Box<dyn Fn() -> bool + Send + Sync>>>,
     #[cfg(test)]
-    auto_area: Mutex<Option<String>>,
+    auto_hyprctl: Mutex<Option<AutoHyprctl>>,
+    lock_seen: Mutex<Option<LockState>>,
     #[cfg(test)]
     auto_schedules: Mutex<Vec<Duration>>,
     /// Tests: the capture open fails the way a panicked blocking task does.
@@ -1143,14 +1257,23 @@ async fn grab_screen(region: bool) -> Result<CapturedImage, String> {
     })
 }
 
+async fn capture_deadline<T>(future: impl std::future::Future<Output = T>) -> Result<T, String> {
+    tokio::time::timeout(Duration::from_secs(3), future)
+        .await
+        .map_err(|_| "timed out".to_string())
+}
+
 #[cfg(not(test))]
-async fn screen_area(area: &str, ppm: bool) -> Result<Vec<u8>, String> {
+async fn capture(target: &Target, ppm: bool) -> Result<Vec<u8>, String> {
     let mut command = tokio::process::Command::new("grim");
-    command.args(["-g", area]);
+    let Target::Window(id) = target;
+    command.args(["-T", id]);
     if ppm {
         command.args(["-t", "ppm", "-s", "0.05"]);
     }
-    let output = command.arg("-").output().await.map_err(|e| e.to_string())?;
+    let output = capture_deadline(command.kill_on_drop(true).arg("-").output())
+        .await?
+        .map_err(|e| e.to_string())?;
     if !output.status.success() || output.stdout.is_empty() {
         return Err(format!(
             "grim: {}",
@@ -1203,6 +1326,7 @@ impl Daemon {
             chunking: AtomicBool::new(false),
             send_epoch: AtomicU64::new(0),
             autoshots_epoch: AtomicU64::new(0),
+            elig_gen: AtomicU64::new(0),
             #[cfg(test)]
             auto_capture: Mutex::new(None),
             #[cfg(test)]
@@ -1210,7 +1334,8 @@ impl Daemon {
             #[cfg(test)]
             auto_unlocked: Mutex::new(None),
             #[cfg(test)]
-            auto_area: Mutex::new(None),
+            auto_hyprctl: Mutex::new(None),
+            lock_seen: Mutex::new(None),
             #[cfg(test)]
             auto_schedules: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -1234,6 +1359,7 @@ impl Daemon {
             },
             enrolling: AtomicBool::new(false),
             inner: Mutex::new(Inner {
+                call: CallReading::default(),
                 db,
                 settings,
                 conversation: Conversation::new(),
@@ -1251,10 +1377,15 @@ impl Daemon {
                 pending_capture: None,
                 autoshots: None,
                 recording: None,
+                stopping: None,
+                sound: SoundClock::default(),
                 meeting_id: None,
                 effective: (String::new(), String::new()),
                 loading: false,
                 finishing_meeting: None,
+                handoff: None,
+                // tokens never repeat across daemon restarts: the shell remembers the last one it handled
+                handoff_seq: now_ms().max(0) as u64,
                 resume_meeting: None,
                 meeting_offset: 0.0,
                 speaker_offset: 0,
@@ -1338,14 +1469,21 @@ impl Daemon {
             "languages": languages,
             "language_hint": language_hint,
             "recording": g.recording.as_ref().is_some_and(|r| !r.stop.load(Ordering::Relaxed)),
+            "handoff": g.handoff.as_ref().filter(|h| g.recording.is_none() && g.finishing_meeting.is_none() && h.at.elapsed() < Duration::from_secs(120)).map(|h| h.token),
+            // the old notes are still being saved for a handoff: the shell waits for the token instead of starting now
+            "handoff_pending": g.handoff.as_ref().is_some_and(|h| (g.recording.is_some() || g.finishing_meeting.is_some()) && h.at.elapsed() < Duration::from_secs(120)),
             "since": g.recording.as_ref().map_or(0, |r| r.since_ms),
+            "for_call": g.recording.as_ref().is_some_and(|r| r.for_call && !r.stop.load(Ordering::Relaxed)),
+            "stopping": g.stopping.as_ref().map(|s| json!({"gen": s.generation, "reason": s.reason, "in_s": s.at.saturating_duration_since(Instant::now()).as_secs().saturating_add(1).min(30) as u32})),
+            "inactivity_chip": g.sound.chip.map(|minutes| json!({"minutes": minutes})),
+            "call_window": {"state": g.call.window_state, "class": g.call.window_class},
             "mic": g.mic,
             "system": g.system,
             "series": g.series,
             "candidate": g.candidate,
             "consent": g.consent,
             "finishing": g.finishing_meeting.is_some(),   // stopped, notes still being written
-            "autoshots": {"on": g.autoshots.as_ref().is_some_and(|a| !a.at_limit), "count": g.autoshots.as_ref().map_or(0, |a| a.count), "at_limit": g.autoshots.as_ref().is_some_and(|a| a.at_limit)},
+            "autoshots": {"on": g.autoshots.as_ref().is_some_and(|a| !a.at_limit), "count": g.autoshots.as_ref().map_or(0, |a| a.count), "at_limit": g.autoshots.as_ref().is_some_and(|a| a.at_limit), "paused": g.autoshots.as_ref().and_then(|a| Self::auto_eligible(g, &a.target, true).err().or(a.paused))},
             "capture": g.pending_capture.is_some(),   // a screenshot waits for the next question
             "meeting": g.meeting_id.as_ref().or(g.resume_meeting.as_ref()),
             "calendar_title": g.calendar.as_ref().map(|e| e.title.as_str()),
@@ -1419,7 +1557,257 @@ impl Daemon {
     }
 
     fn emit_state(&self, g: &Inner) {
-        self.emit("state", self.state_value(g));
+        self.elig_gen.fetch_add(1, Ordering::AcqRel);
+        let mut state = self.state_value(g);
+        if self.local_now(g) {
+            state["call_window"]["class"] = "".into();
+        }
+        self.emit("state", state);
+    }
+
+    fn cancel_countdown(&self, g: &mut Inner, cause: &str) {
+        if let Some(stopping) = g.stopping.take() {
+            self.elig_gen.fetch_add(1, Ordering::AcqRel);
+            Self::sync_auto_pause(g);
+            tracing::info!(
+                event = "countdown_cancel",
+                reason = stopping.reason,
+                origin = "system",
+                cause
+            );
+        }
+    }
+
+    fn call_end_due(g: &Inner) -> bool {
+        g.meeting_id.is_some()
+            && g.recording
+                .as_ref()
+                .is_some_and(|r| r.for_call && !r.stop.load(Ordering::Relaxed))
+            && g.call.present
+            && g.call.call != "call"
+    }
+
+    fn update_call_end(self: &Arc<Self>, g: &mut Inner) {
+        if Self::call_end_due(g) {
+            if g.stopping.as_ref().is_some_and(|s| s.reason == "call_end") {
+                return;
+            }
+            self.start_countdown(g, "call_end");
+        } else if g.stopping.as_ref().is_some_and(|s| s.reason == "call_end") {
+            self.cancel_countdown(g, "call_state_changed");
+        }
+    }
+
+    fn start_countdown(self: &Arc<Self>, g: &mut Inner, reason: &'static str) {
+        if reason != "call_end" && g.stopping.as_ref().is_some_and(|s| s.reason == "call_end") {
+            return;
+        }
+        self.cancel_countdown(g, "replaced");
+        let generation = self.elig_gen.fetch_add(1, Ordering::AcqRel) + 1;
+        g.stopping = Some(Stopping {
+            generation,
+            reason,
+            at: Instant::now() + Duration::from_secs(30),
+            meeting: g.meeting_id.clone().expect("countdown needs a meeting"),
+        });
+        Self::sync_auto_pause(g);
+        tracing::info!(event = "countdown_start", reason, origin = "system");
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            me.expire(generation);
+        });
+    }
+
+    /// The inactivity countdown reason due now, if any. `present == false` is unknown, never "no call".
+    fn inactivity_want(g: &Inner, now: Instant) -> Option<&'static str> {
+        let limit = Duration::from_secs(u64::from(g.settings.inactivity_stop_minutes) * 60);
+        if limit.is_zero() || !Self::recording_live(g) || !g.sound.frames_live(now) {
+            return None;
+        }
+        let (mic, system) = (g.sound.idle(0, now), g.sound.idle(1, now));
+        match (g.call.present, g.call.call.as_str()) {
+            (true, "none") => (mic >= limit).then_some("inactivity"),
+            (true, "call") => (mic.min(system) >= limit * 3).then_some("inactivity_call"),
+            _ => None,
+        }
+    }
+
+    fn recording_live(g: &Inner) -> bool {
+        g.meeting_id.is_some()
+            && g.recording
+                .as_ref()
+                .is_some_and(|r| !r.stop.load(Ordering::Relaxed))
+    }
+
+    /// Minutes of silence to show as a chip: any call state but a known "no call".
+    fn chip_due(g: &Inner, now: Instant) -> Option<u32> {
+        let minutes = g.settings.inactivity_stop_minutes;
+        let limit = Duration::from_secs(u64::from(minutes) * 60);
+        (minutes > 0
+            && Self::recording_live(g)
+            && g.sound.frames_live(now)
+            && !(g.call.present && g.call.call == "none")
+            && g.sound.idle(0, now).min(g.sound.idle(1, now)) >= limit)
+            .then_some(minutes)
+    }
+
+    fn feed_sound_in(&self, g: &mut Inner, samples: &[f32], now: Instant) {
+        // A gap reset clears the chip; say so, or the shell keeps showing it.
+        let had_chip = g.sound.chip.is_some();
+        if g.sound.feed(samples, now) && had_chip {
+            self.emit_state(g);
+        }
+    }
+
+    #[cfg(test)]
+    fn feed_sound(&self, samples: &[f32], now: Instant) {
+        self.feed_sound_in(&mut self.inner.lock(), samples, now);
+    }
+
+    /// Once a second: start or cancel the inactivity countdown and show or clear the chip.
+    /// The sound clock restarted or inactivity was turned off: its countdown and chip no longer apply.
+    fn clear_inactivity(&self, g: &mut Inner, cause: &'static str) {
+        if matches!(
+            g.stopping.as_ref().map(|s| s.reason),
+            Some("inactivity" | "inactivity_call")
+        ) {
+            self.cancel_countdown(g, cause);
+        }
+        g.sound.chip = None;
+    }
+
+    fn inactivity_tick(self: &Arc<Self>, now: Instant) {
+        let mut g = self.inner.lock();
+        let current = g.stopping.as_ref().map(|s| s.reason);
+        match Self::inactivity_want(&g, now) {
+            Some(reason) if current != Some(reason) && current != Some("call_end") => {
+                g.sound.chip = None;
+                self.start_countdown(&mut g, reason);
+                self.emit_state(&g);
+            }
+            None if matches!(current, Some("inactivity" | "inactivity_call")) => {
+                self.cancel_countdown(&mut g, "sound");
+                self.emit_state(&g);
+            }
+            _ => {}
+        }
+        let chip = Self::chip_due(&g, now).filter(|_| g.stopping.is_none());
+        if chip != g.sound.chip {
+            g.sound.chip = chip;
+            if chip.is_some() {
+                tracing::info!(
+                    event = "inactivity_chip",
+                    reason = "inactivity",
+                    origin = "system"
+                );
+            }
+            self.emit_state(&g);
+        }
+    }
+
+    fn expire(&self, generation: u64) {
+        let mut g = self.inner.lock();
+        let Some(stopping) = g.stopping.as_ref() else {
+            return;
+        };
+        if stopping.generation != generation || g.meeting_id.as_deref() != Some(&stopping.meeting) {
+            return;
+        }
+        let (reason, at) = (stopping.reason, stopping.at);
+        let now = Instant::now();
+        let due = match reason {
+            "call_end" => Self::call_end_due(&g),
+            "inactivity" | "inactivity_call" => Self::inactivity_want(&g, now) == Some(reason),
+            _ => false,
+        };
+        if now < at {
+            return;
+        }
+        if !due {
+            self.cancel_countdown(&mut g, "condition_gone");
+            self.emit_state(&g);
+            return;
+        }
+        tracing::info!(event = "countdown_expire", reason, origin = "system");
+        let _ = self.stop_locked(&mut g, reason, "system");
+    }
+
+    fn adopt_call(g: &mut Inner, ended: bool) {
+        if g.meeting_id.is_none() {
+            return;
+        }
+        let call = g.call.clone();
+        if let Some(r) = g
+            .recording
+            .as_mut()
+            .filter(|r| !r.stop.load(Ordering::Relaxed))
+        {
+            if !r.for_call && call.present && call.call == "call" && call.since > 0.0 {
+                if call.schema >= 2 && r.handled_since != Some(call.since) {
+                    if r.kept {
+                        r.handled_since = Some(call.since);
+                        tracing::info!(event = "kept", reason = "call", origin = "system");
+                    } else if call.by != "fallback" {
+                        r.handled_since = Some(call.since);
+                        r.for_call = true;
+                        r.call_class = call.window_class.clone();
+                        tracing::info!(event = "adopt", reason = "call", origin = "system");
+                    }
+                } else if call.schema < 2 && !r.kept && owns_call(&call, r.since_ms) {
+                    r.for_call = true;
+                    r.call_class = call.window_class.clone();
+                    tracing::info!(event = "adopt", reason = "schema1_slack", origin = "system");
+                }
+            }
+            if ended && !r.for_call {
+                tracing::info!(
+                    event = "call_ended_not_owned",
+                    reason = "call_end",
+                    origin = "system"
+                );
+            }
+        }
+    }
+
+    pub(super) fn on_call_reading(self: &Arc<Self>, reading: CallReading) {
+        let mut g = self.inner.lock();
+        if g.call == reading {
+            return;
+        }
+        tracing::info!(event = "call_reading", reason = %reading.call, origin = "meeting-mode",
+            present = reading.present, schema = reading.schema, by = %reading.by,
+            window_state = %reading.window_state);
+        let ended = g.call.call == "call" && reading.call != "call" && reading.present;
+        if g.call.call != reading.call || g.call.present != reading.present {
+            g.sound.reset(Instant::now());
+            self.clear_inactivity(&mut g, "call_changed");
+        }
+        g.call = reading;
+        self.elig_gen.fetch_add(1, Ordering::AcqRel);
+        Self::sync_auto_pause(&mut g);
+        if g.call.call == "call" && !g.call.window_class.is_empty() {
+            let class = g.call.window_class.clone();
+            if let Some(r) = g
+                .recording
+                .as_mut()
+                .filter(|r| r.for_call && !r.stop.load(Ordering::Relaxed))
+            {
+                if r.call_class.is_empty() {
+                    r.call_class = class;
+                } else if !r.kept && r.call_class != class {
+                    g.handoff_seq += 1;
+                    g.handoff = Some(Handoff {
+                        token: g.handoff_seq,
+                        at: Instant::now(),
+                    });
+                    let _ = self.stop_locked(&mut g, "new_call", "system");
+                }
+            }
+        }
+        Self::adopt_call(&mut g, ended);
+        self.update_call_end(&mut g);
+        self.emit_state(&g);
     }
 
     /// Stop recording (finishing the meeting), then ask the server to exit.
@@ -2806,6 +3194,153 @@ impl Daemon {
                 .is_some_and(|a| a.meeting == meeting && a.generation == generation && !a.at_limit)
     }
 
+    fn auto_eligible(g: &Inner, target: &Target, present: bool) -> Result<(), &'static str> {
+        if !g.call.present || g.call.call != "call" {
+            return Err("no_call");
+        }
+        if g.call.window_state != "bound" {
+            return Err(if g.call.window_state == "ambiguous" {
+                "ambiguous"
+            } else {
+                "no_window"
+            });
+        }
+        if Target::Window(g.call.window.clone()) != *target || !present {
+            return Err("window_closed");
+        }
+        if !g.call.showing {
+            return Err("not_showing");
+        }
+        if g.stopping.is_some() {
+            return Err("countdown");
+        }
+        Ok(())
+    }
+
+    fn sync_auto_pause(g: &mut Inner) {
+        let cause = g.autoshots.as_ref().and_then(|a| {
+            // A sticky cause is cleared only by what ended it (unlock, re-bind, a stored capture).
+            a.paused
+                .filter(|c| matches!(*c, "locked" | "hidden_not_updating" | "window_closed"))
+                .or_else(|| Self::auto_eligible(g, &a.target, true).err())
+        });
+        if let Some(a) = g.autoshots.as_mut()
+            && a.paused != cause
+        {
+            a.paused = cause;
+            tracing::info!(
+                event = "autoshots_pause",
+                reason = cause.unwrap_or("resumed"),
+                origin = "daemon"
+            );
+        }
+    }
+
+    fn auto_clear_pause(&self, meeting: &str, generation: u64, cause: &str) {
+        let paused = self.inner.lock().autoshots.as_ref().and_then(|a| a.paused);
+        if paused == Some(cause) {
+            self.auto_pause(meeting, generation, None);
+        }
+    }
+
+    fn auto_pause(&self, meeting: &str, generation: u64, cause: Option<&'static str>) {
+        let mut g = self.inner.lock();
+        if let Some(a) = g.autoshots.as_mut()
+            && a.meeting == meeting
+            && a.generation == generation
+            && a.paused != cause
+        {
+            a.paused = cause;
+            tracing::info!(
+                event = "autoshots_pause",
+                reason = cause.unwrap_or("resumed"),
+                origin = "daemon"
+            );
+            self.emit_state(&g);
+        }
+    }
+
+    async fn auto_hyprctl(&self, what: &str) -> Result<serde_json::Value, String> {
+        #[cfg(test)]
+        return self
+            .auto_hyprctl
+            .lock()
+            .as_ref()
+            .map(|f| f(what))
+            .ok_or("test hyprctl not injected".into());
+        #[cfg(not(test))]
+        {
+            let out = capture_deadline(
+                tokio::process::Command::new("hyprctl")
+                    .args([what, "-j"])
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await?
+            .map_err(|e| e.to_string())?;
+            if !out.status.success() {
+                return Err("hyprctl failed".into());
+            }
+            serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+        }
+    }
+
+    async fn auto_window(&self, target: &Target) -> Result<Option<serde_json::Value>, String> {
+        let Target::Window(id) = target;
+        Ok(self
+            .auto_hyprctl("clients")
+            .await?
+            .as_array()
+            .and_then(|clients| {
+                clients
+                    .iter()
+                    .find(|c| c["stableId"].as_str() == Some(id)) // callWindow is the stableId grim -T takes, not the address
+                    .cloned()
+            }))
+    }
+
+    async fn auto_visible(&self, client: &serde_json::Value) -> Result<bool, String> {
+        let Some(workspace) = client["workspace"]["id"].as_i64() else {
+            return Ok(false);
+        };
+        Ok(self
+            .auto_hyprctl("monitors")
+            .await?
+            .as_array()
+            .is_some_and(|monitors| {
+                monitors.iter().any(|m| {
+                    m["activeWorkspace"]["id"].as_i64() == Some(workspace)
+                        || m["specialWorkspace"]["id"].as_i64() == Some(workspace)
+                })
+            }))
+    }
+
+    pub(super) async fn auto_poll_lock(&self) {
+        if self.inner.lock().autoshots.is_none() {
+            return;
+        }
+        let state = self.auto_lock_state().await;
+        let mut seen = self.lock_seen.lock();
+        let changed = seen.replace(state) != Some(state);
+        drop(seen);
+        if changed {
+            self.elig_gen.fetch_add(1, Ordering::AcqRel);
+            let current = {
+                let g = self.inner.lock();
+                g.autoshots
+                    .as_ref()
+                    .map(|a| (a.meeting.clone(), a.generation, a.paused))
+            };
+            if let Some((meeting, generation, paused)) = current {
+                if state != LockState::Unlocked {
+                    self.auto_pause(&meeting, generation, Some("locked"));
+                } else if paused == Some("locked") {
+                    self.auto_pause(&meeting, generation, None);
+                }
+            }
+        }
+    }
+
     fn auto_stop_if_disallowed(&self, meeting: &str, generation: u64) -> bool {
         let mut g = self.inner.lock();
         g.autoshots
@@ -2879,10 +3414,13 @@ impl Daemon {
         };
         #[cfg(not(test))]
         {
-            let Ok(output) = tokio::process::Command::new("hyprctl")
-                .arg("locked")
-                .output()
-                .await
+            let Ok(Ok(output)) = capture_deadline(
+                tokio::process::Command::new("hyprctl")
+                    .arg("locked")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
             else {
                 return LockState::Unknown;
             };
@@ -2893,8 +3431,12 @@ impl Daemon {
         }
     }
 
-    fn auto_capture_failed(&self, meeting: &str, generation: u64, reason: &str) {
-        tracing::warn!(%reason, "automatic screenshot capture failed");
+    fn auto_capture_failed(&self, meeting: &str, generation: u64, _reason: &str) {
+        tracing::warn!(
+            event = "autoshots_capture_failed",
+            reason = "capture_error",
+            origin = "daemon"
+        );
         let mut g = self.inner.lock();
         if let Some(a) = g.autoshots.as_mut()
             && a.meeting == meeting
@@ -2909,18 +3451,18 @@ impl Daemon {
         }
     }
 
-    async fn auto_image(&self, area: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+    async fn auto_image(&self, target: &Target) -> Result<(Vec<u8>, Vec<u8>), String> {
         #[cfg(test)]
         return self
             .auto_capture
             .lock()
             .as_ref()
-            .map(|f| f(area))
+            .map(|f| f(target))
             .unwrap_or_else(|| Err("test capture not injected".into()));
         #[cfg(not(test))]
         {
-            let fingerprint = screen_area(area, true).await?;
-            let image = screen_area(area, false).await?;
+            let fingerprint = capture(target, true).await?;
+            let image = capture(target, false).await?;
             Ok((image, fingerprint))
         }
     }
@@ -2929,7 +3471,7 @@ impl Daemon {
         if self.auto_stop_if_disallowed(meeting, generation) {
             return;
         }
-        let (area, previous) = {
+        let (target, previous) = {
             let mut g = self.inner.lock();
             if !self.auto_allowed(&g, meeting, generation) {
                 return;
@@ -2941,39 +3483,92 @@ impl Daemon {
                 return;
             }
             a.last_capture = Some(Instant::now());
-            (a.area.clone(), a.last_fingerprint.clone())
+            (a.target.clone(), a.last_fingerprint.clone())
         };
         match self.auto_lock_state().await {
             LockState::Unlocked => {}
-            LockState::Locked => return,
+            LockState::Locked => {
+                self.auto_pause(meeting, generation, Some("locked"));
+                return;
+            }
             LockState::Unknown => {
+                self.auto_pause(meeting, generation, Some("locked"));
                 self.auto_capture_failed(meeting, generation, "lock state unknown");
                 return;
             }
         }
-        if !self.auto_allowed(&self.inner.lock(), meeting, generation) {
+        let client = match self.auto_window(&target).await {
+            Ok(client) => client,
+            Err(error) => {
+                self.auto_capture_failed(meeting, generation, &error);
+                return;
+            }
+        };
+        let elig_gen = self.elig_gen.load(Ordering::Acquire);
+        let eligible = {
+            let g = self.inner.lock();
+            if !self.auto_allowed(&g, meeting, generation) {
+                return;
+            }
+            Self::auto_eligible(&g, &target, client.is_some())
+        };
+        if let Err(cause) = eligible {
+            self.auto_pause(meeting, generation, Some(cause));
             return;
         }
-        let (image, fingerprint) = match self.auto_image(&area).await {
+        let visible = match self.auto_visible(client.as_ref().unwrap()).await {
+            Ok(visible) => visible,
+            Err(error) => {
+                self.auto_capture_failed(meeting, generation, &error);
+                return;
+            }
+        };
+        let (image, fingerprint) = match self.auto_image(&target).await {
             Ok(image) => image,
             Err(error) => {
                 self.auto_capture_failed(meeting, generation, &error);
                 return;
             }
         };
+        if !visible {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let second = match self.auto_image(&target).await {
+                Ok((_, fingerprint)) => fingerprint,
+                Err(error) => {
+                    self.auto_capture_failed(meeting, generation, &error);
+                    return;
+                }
+            };
+            if fingerprint == second {
+                self.auto_pause(meeting, generation, Some("hidden_not_updating"));
+                return;
+            }
+        }
+        // A pause clears only once a capture passes, so a hidden, frozen window logs one cause, not two per tick.
         if same_frame(&previous, &fingerprint) {
+            // An unchanged visible frame proves only that the window is repainting.
+            if visible {
+                self.auto_clear_pause(meeting, generation, "hidden_not_updating");
+            }
             return;
         }
         match self.auto_lock_state().await {
             LockState::Unlocked => {}
-            LockState::Locked => return,
+            LockState::Locked => {
+                self.auto_pause(meeting, generation, Some("locked"));
+                return;
+            }
             LockState::Unknown => {
+                self.auto_pause(meeting, generation, Some("locked"));
                 self.auto_capture_failed(meeting, generation, "lock state unknown");
                 return;
             }
         }
         let mut g = self.inner.lock();
-        if !self.auto_allowed(&g, meeting, generation) {
+        if self.elig_gen.load(Ordering::Acquire) != elig_gen
+            || !self.auto_allowed(&g, meeting, generation)
+            || Self::auto_eligible(&g, &target, client.is_some()).is_err()
+        {
             return;
         }
         let at = g.meeting_offset
@@ -2996,6 +3591,13 @@ impl Daemon {
             return;
         }
         let a = g.autoshots.as_mut().unwrap();
+        if a.paused.take().is_some() {
+            tracing::info!(
+                event = "autoshots_pause",
+                reason = "resumed",
+                origin = "daemon"
+            );
+        }
         a.last_fingerprint = fingerprint;
         a.count += 1;
         if a.count >= 60 {
@@ -3023,9 +3625,11 @@ impl Daemon {
         if epoch != self.autoshots_epoch.load(Ordering::Acquire) {
             return Err("Recording changed while choosing the area.".into());
         }
-        let (meeting, epoch) = {
+        let (meeting, target) = {
             let g = self.inner.lock();
-            if let Some(a) = &g.autoshots {
+            if let Some(a) = &g.autoshots
+                && a.paused != Some("window_closed")
+            {
                 return Err(if a.at_limit {
                     "This meeting has reached its limit of 60 automatic screenshots."
                 } else {
@@ -3055,47 +3659,46 @@ impl Daemon {
                     "This meeting has reached its limit of 60 automatic screenshots.".into(),
                 );
             }
-            (meeting, epoch)
-        };
-        #[cfg(test)]
-        let area = self
-            .auto_area
-            .lock()
-            .clone()
-            .ok_or("test area not injected")?;
-        #[cfg(not(test))]
-        let area = {
-            let output = tokio::time::timeout(
-                Duration::from_secs(120),
-                tokio::process::Command::new("slurp")
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .map_err(|_| "Area selection cancelled.".to_owned())?
-            .map_err(|e| e.to_string())?;
-            if !output.status.success() {
-                return Err("Area selection cancelled.".into());
+            if !g.call.present || g.call.call != "call" {
+                return Err("not in a call".into());
             }
-            String::from_utf8(output.stdout)
-                .map_err(|e| e.to_string())?
-                .trim()
-                .to_owned()
+            if g.call.schema < 2 {
+                return Err("meeting-mode is too old".into());
+            }
+            if g.call.window_state == "ambiguous" {
+                return Err("several possible windows".into());
+            }
+            if g.call.window_state != "bound" || g.call.window.is_empty() {
+                return Err("no meeting window".into());
+            }
+            (meeting, Target::Window(g.call.window.clone()))
         };
-        if area.is_empty() {
-            return Err("Area selection cancelled.".into());
+        if self
+            .auto_window(&target)
+            .await
+            .map_err(|_| "no meeting window")?
+            .is_none()
+        {
+            return Err("no meeting window".into());
         }
         let mut g = self.inner.lock();
         if self.autoshots_epoch.load(Ordering::Acquire) != epoch
-            || g.autoshots.is_some()
+            || g.autoshots
+                .as_ref()
+                .is_some_and(|a| a.paused != Some("window_closed"))
             || g.meeting_id.as_deref() != Some(meeting.as_str())
             || g.recording
                 .as_ref()
                 .is_none_or(|r| r.stop.load(Ordering::Relaxed))
             || self.local_now(&g)
             || (Self::guarded(&g) && !g.consent)
+            || g.call.schema < 2
+            || !g.call.present
+            || g.call.call != "call"
+            || g.call.window_state != "bound"
+            || Target::Window(g.call.window.clone()) != target
         {
-            return Err("Recording changed while choosing the area.".into());
+            return Err("Recording changed while binding the window.".into());
         }
         let count =
             screenshots::count_auto(g.db.connection(), &meeting).map_err(|e| e.to_string())?;
@@ -3105,7 +3708,8 @@ impl Daemon {
         let generation = self.autoshots_epoch.fetch_add(1, Ordering::AcqRel) + 1;
         g.autoshots = Some(AutoShots {
             meeting,
-            area,
+            target,
+            paused: None,
             generation,
             count,
             last_fingerprint: Vec::new(),
@@ -3135,7 +3739,18 @@ impl Daemon {
         title: String,
         new: bool,
         agent: bool,
+        origin: &str,
+        reason: &'static str,
     ) -> Result<Value, String> {
+        let retained_window = {
+            let g = self.inner.lock();
+            g.autoshots.as_ref().map(|a| a.target.clone())
+        };
+        let retained_present = if let Some(target) = &retained_window {
+            self.auto_window(target).await.ok().flatten().is_some()
+        } else {
+            false
+        };
         let (stop, speech, device, output_device, system, echo_gate) = {
             let mut guard = self.inner.lock();
             let g = &mut *guard;
@@ -3220,12 +3835,27 @@ impl Daemon {
             // Line times count from the first frame sent to the transcriber, so the ring restarts too.
             g.ring = MicRing::new(VOICE_RING_SECONDS, audio::SAMPLE_RATE);
             // Reserve the slot so a second start cannot race the blocking open below.
+            let since_ms = now_ms();
+            let for_call = owns_call(&g.call, since_ms);
+            g.handoff = None;
             g.recording = Some(Recording {
                 started: Instant::now(),
-                since_ms: now_ms(),
+                since_ms,
                 stop: stop.clone(),
                 speech: speech.clone(),
+                for_call,
+                call_class: if for_call {
+                    g.call.window_class.clone()
+                } else {
+                    String::new()
+                },
+                kept: false,
+                handled_since: (for_call && g.call.schema >= 2).then_some(g.call.since),
             });
+            g.sound = SoundClock::default();
+            g.sound.reset(Instant::now());
+            self.cancel_countdown(g, "record_start");
+            self.elig_gen.fetch_add(1, Ordering::AcqRel);
             (
                 stop,
                 speech,
@@ -3365,9 +3995,18 @@ impl Daemon {
                         }
                     }
                     g.meeting_id = Some(id.clone());
+                    Self::adopt_call(g, false);
+                    self.update_call_end(g);
                     if let Some(a) = g.autoshots.as_mut() {
-                        if a.meeting == id {
+                        if a.meeting == id
+                            && retained_present
+                            && g.call.present
+                            && g.call.call == "call"
+                            && g.call.window_state == "bound"
+                            && Target::Window(g.call.window.clone()) == a.target
+                        {
                             a.generation = self.autoshots_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+                            a.paused = None;
                         } else {
                             g.autoshots = None;
                         }
@@ -3375,6 +4014,7 @@ impl Daemon {
                     g.speaker_names =
                         meetings::speaker_names(g.db.connection(), &id).unwrap_or_default();
                     self.emit_state(g);
+                    tracing::info!(event = "record_start", reason, origin);
                     id
                 }
                 Err(error) => {
@@ -3393,19 +4033,51 @@ impl Daemon {
     }
 
     fn record_stop(&self) -> Result<Value, String> {
+        self.record_stop_with("user", "cli")
+    }
+
+    fn record_stop_with(&self, reason: &str, origin: &str) -> Result<Value, String> {
         let mut guard = self.inner.lock();
-        let g = &mut *guard;
+        self.stop_locked(&mut guard, reason, origin)
+    }
+
+    fn stop_locked(&self, g: &mut Inner, reason: &str, origin: &str) -> Result<Value, String> {
         match &g.recording {
             Some(r) if !r.stop.swap(true, Ordering::Relaxed) => {}
             _ => return Err("Not recording.".into()),
         }
         g.pending_question = None;
         g.pending_created = None;
+        self.cancel_countdown(g, "record_stop");
+        self.elig_gen.fetch_add(1, Ordering::AcqRel);
         self.autoshots_epoch.fetch_add(1, Ordering::AcqRel);
         if g.dictation.as_ref().is_some_and(|d| d.meeting) {
             g.dictation = None;
         }
+        tracing::info!(event = "record_stop", reason, origin);
         self.emit_state(g);
+        Ok(json!({}))
+    }
+
+    fn record_keep(&self, generation: u64, origin: &str) -> Result<Value, String> {
+        let mut g = self.inner.lock();
+        if g.stopping
+            .as_ref()
+            .is_none_or(|s| s.generation != generation)
+        {
+            return Err("no such countdown".into());
+        }
+        let call_end = g.stopping.as_ref().is_some_and(|s| s.reason == "call_end");
+        self.cancel_countdown(&mut g, "keep");
+        // Keep on an inactivity countdown only restarts the clock; the notes stay the call's.
+        if call_end && let Some(r) = &mut g.recording {
+            r.for_call = false;
+            r.kept = true;
+        }
+        g.sound.reset(Instant::now());
+        self.elig_gen.fetch_add(1, Ordering::AcqRel);
+        tracing::info!(event = "record_keep", reason = "user", origin);
+        self.emit_state(&g);
         Ok(json!({}))
     }
 
@@ -3436,6 +4108,7 @@ impl Daemon {
         let (mut closing, mut done, mut deadline) = (false, false, None);
         let mut system_on = true;
         let mut levels = Levels::default();
+        let mut last_tick = Instant::now();
         while !done {
             let mut events = Vec::new();
             let stopping = stop.load(Ordering::Relaxed);
@@ -3470,8 +4143,17 @@ impl Daemon {
                     SessionEvent::Audio(mut samples) => {
                         self.route_audio(&mut samples);
                         self.tap_audio(&samples);
-                        self.inner.lock().ring.push_interleaved(&samples);
-                        if let Some(v) = levels.feed(&samples, Instant::now()) {
+                        let now = Instant::now();
+                        {
+                            let mut g = self.inner.lock();
+                            g.ring.push_interleaved(&samples);
+                            self.feed_sound_in(&mut g, &samples, now);
+                        }
+                        if now.duration_since(last_tick) >= Duration::from_secs(1) {
+                            last_tick = now;
+                            self.inactivity_tick(now);
+                        }
+                        if let Some(v) = levels.feed(&samples, now) {
                             self.emit("levels", v);
                         }
                         if let Some(l) = &live
@@ -3608,6 +4290,8 @@ impl Daemon {
             if let Some(r) = g.recording.take() {
                 g.last_elapsed = g.meeting_offset + r.started.elapsed().as_secs_f64();
             }
+            self.cancel_countdown(g, "finish_recording");
+            g.sound = SoundClock::default();
             let _ = meetings::finish(g.db.connection(), meeting, g.last_elapsed as i64);
             g.meeting_id = None;
             g.ring = MicRing::new(VOICE_RING_SECONDS, audio::SAMPLE_RATE);
@@ -4684,6 +5368,9 @@ impl Daemon {
             self.emit("notice", json!({"text": "Speech engine and language changes apply at the next recording start."}));
         }
         self.auto_stop_disallowed(g); // a mode change can take consent away
+        if g.settings.inactivity_stop_minutes == 0 {
+            self.clear_inactivity(g, "off");
+        }
         let all = self.settings_reply(g)?;
         self.emit("settings", json!({"settings": all}));
         self.emit_state(g); // a provider or Local-only change flips state.ready
@@ -5236,6 +5923,7 @@ impl Daemon {
 
     /// Choose the session's candidate and apply their local-only flag to the chain builders.
     fn set_candidate(&self, g: &mut Inner, id: Option<String>) {
+        self.elig_gen.fetch_add(1, Ordering::AcqRel);
         let local = id
             .as_deref()
             .and_then(|id| candidates::get(g.db.connection(), id).ok().flatten())
@@ -5863,7 +6551,19 @@ impl Daemon {
         origin: Option<&str>,
     ) -> Result<Value, String> {
         if !matches!(origin, Some("mcp" | "agent")) {
-            return self.dispatch(cmd, args, false).await;
+            return self
+                // Only known origins reach the logs; anything else is a client we don't name.
+                .dispatch(
+                    cmd,
+                    args,
+                    false,
+                    match origin {
+                        None => "cli",
+                        Some("shell") => "shell",
+                        Some(_) => "other",
+                    },
+                )
+                .await;
         }
         if cmd.starts_with("voice.") || cmd == "meetings.export" {
             return Err("not allowed for agents".into());
@@ -6004,7 +6704,9 @@ impl Daemon {
             }
             _ => None,
         };
-        let mut result = self.dispatch(cmd, args, origin == Some("mcp")).await;
+        let mut result = self
+            .dispatch(cmd, args, origin == Some("mcp"), origin.unwrap_or("cli"))
+            .await;
         if let Ok(value) = &mut result {
             self.hide_interviews(cmd, value);
         }
@@ -6016,6 +6718,9 @@ impl Daemon {
 
     /// Strip what a local-only interview leaves in replies to agents.
     fn hide_interviews(&self, cmd: &str, value: &mut Value) {
+        if cmd == "state.get" {
+            value["call_window"]["class"] = "".into();
+        }
         let g = self.inner.lock();
         let Ok(hidden) = candidates::local_only_ids(g.db.connection()) else {
             return;
@@ -6056,6 +6761,7 @@ impl Daemon {
         cmd: &str,
         args: Value,
         agent: bool,
+        origin: &str,
     ) -> Result<Value, String> {
         match cmd {
             "state.get" => Ok(self.state_value(&self.inner.lock())),
@@ -6169,7 +6875,13 @@ impl Daemon {
             "session.delete" => self.session_delete(&parse::<protocol::IdArg>(args)?.id),
             "record.start" => {
                 let a = parse::<protocol::RecordStart>(args)?;
-                self.record_start(a.consent, a.title, a.new, agent).await
+                let reason = if a.reason.as_deref() == Some("call") {
+                    "call"
+                } else {
+                    "user"
+                };
+                self.record_start(a.consent, a.title, a.new, agent, origin, reason)
+                    .await
             }
             "candidate.create" => {
                 let name = parse::<protocol::NameArg>(args)?.name;
@@ -6188,6 +6900,7 @@ impl Daemon {
                 if !candidates::set_local_only(c, &a.id, a.on).map_err(|e| e.to_string())? {
                     return Err("No such candidate.".into());
                 }
+                self.elig_gen.fetch_add(1, Ordering::AcqRel);
                 let row = candidates::get(c, &a.id).map_err(|e| e.to_string())?;
                 let current = g.candidate.clone();
                 self.set_candidate(&mut g, current);
@@ -6204,7 +6917,26 @@ impl Daemon {
                 self.questions(cmd, args)
             }
             "candidates.delete" => self.candidate_delete(&parse::<protocol::IdArg>(args)?.id),
-            "record.stop" => self.record_stop(),
+            "record.keep" => {
+                self.record_keep(args["gen"].as_u64().ok_or("record.keep needs gen")?, origin)
+            }
+            "record.stop" => {
+                let reason = args
+                    .get("reason")
+                    .map(|v| v.as_str().ok_or("record.stop reason must be a string"))
+                    .transpose()?
+                    .unwrap_or("user");
+                // The reason is logged: only known values, never text a client chose.
+                let reason = match reason {
+                    "user" | "notification" | "inactivity_chip" => reason,
+                    _ => "other",
+                };
+                if origin == "cli" && reason == "user" {
+                    self.record_stop()
+                } else {
+                    self.record_stop_with(reason, origin)
+                }
+            }
             "autoshots.start" => self.auto_start().await,
             "autoshots.stop" => Ok(self.auto_stop()),
             "screenshots.list" => {
@@ -9937,6 +10669,10 @@ mod command_tests {
             since_ms: 0,
             stop: Arc::new(AtomicBool::new(false)),
             speech: None,
+            for_call: false,
+            call_class: String::new(),
+            kept: false,
+            handled_since: None,
         });
         d.local_only.store(true, Ordering::Relaxed);
         let err = d.handle("record.tap", tap, None).await.unwrap_err();
@@ -12000,6 +12736,674 @@ mod command_tests {
                 .contains("local-only")
         );
     }
+
+    fn call_reading(schema: u64, call: &str, since: f64, by: &str) -> CallReading {
+        CallReading {
+            present: true,
+            schema,
+            call: call.into(),
+            since,
+            by: by.into(),
+            ..CallReading::default()
+        }
+    }
+
+    fn classed_call(class: &str) -> CallReading {
+        let mut reading = call_reading(2, "call", now_ms() as f64, "native");
+        reading.window_class = class.into();
+        reading
+    }
+
+    #[tokio::test]
+    async fn different_call_stops_before_the_handoff_is_ready() {
+        let d = daemon();
+        d.on_call_reading(classed_call("teams"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let mut events = d.subscribe();
+        d.on_call_reading(classed_call("chrome"));
+        let state = events.recv().await.unwrap();
+        assert_eq!(state["recording"], false);
+        assert_eq!(state["handoff"], Value::Null);
+        assert_eq!(state["handoff_pending"], true);
+        let g = d.inner.lock();
+        assert!(g.recording.as_ref().unwrap().stop.load(Ordering::Relaxed));
+        assert_eq!(g.handoff.as_ref().unwrap().token, g.handoff_seq);
+        assert!(
+            g.handoff_seq > 1_000_000_000_000,
+            "the counter starts at the clock, not 0"
+        );
+        assert_eq!(g.recording.as_ref().unwrap().call_class, "teams");
+    }
+
+    #[tokio::test]
+    async fn different_call_during_countdown_cancels_it() {
+        let d = daemon();
+        d.on_call_reading(classed_call("teams"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        assert_eq!(d.inner.lock().stopping.as_ref().unwrap().reason, "call_end");
+        d.on_call_reading(classed_call("chrome"));
+        let g = d.inner.lock();
+        assert!(g.recording.as_ref().unwrap().stop.load(Ordering::Relaxed));
+        assert!(g.stopping.is_none());
+        assert!(g.handoff.is_some());
+    }
+
+    #[tokio::test]
+    async fn different_call_requires_owned_live_notes_and_known_classes() {
+        for (owner, next, call, kept, for_call) in [
+            ("teams", "teams", "call", false, true),
+            ("teams", "", "call", false, true),
+            ("", "chrome", "call", false, true),
+            ("teams", "chrome", "maybe", false, true),
+            ("teams", "chrome", "call", true, true),
+            ("teams", "chrome", "call", false, false),
+        ] {
+            let d = daemon();
+            d.on_call_reading(classed_call(owner));
+            d.handle("record.start", json!({}), None).await.unwrap();
+            {
+                let mut g = d.inner.lock();
+                let r = g.recording.as_mut().unwrap();
+                r.kept = kept;
+                r.for_call = for_call;
+            }
+            let mut reading = classed_call(next);
+            reading.call = call.into();
+            d.on_call_reading(reading);
+            let g = d.inner.lock();
+            assert!(
+                !g.recording.as_ref().unwrap().stop.load(Ordering::Relaxed),
+                "{owner} -> {next} ({call})"
+            );
+            assert!(g.handoff.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_owner_class_is_filled_once() {
+        let d = daemon();
+        d.on_call_reading(classed_call(""));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        assert!(
+            d.inner
+                .lock()
+                .recording
+                .as_ref()
+                .unwrap()
+                .call_class
+                .is_empty()
+        );
+        d.on_call_reading(classed_call("teams"));
+        assert_eq!(
+            d.inner.lock().recording.as_ref().unwrap().call_class,
+            "teams"
+        );
+        d.on_call_reading(classed_call("teams"));
+        assert_eq!(
+            d.inner.lock().recording.as_ref().unwrap().call_class,
+            "teams"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_waits_for_save_expires_and_clears_on_start() {
+        let d = daemon();
+        {
+            let mut g = d.inner.lock();
+            g.handoff = Some(Handoff {
+                token: 7,
+                at: Instant::now(),
+            });
+            g.finishing_meeting = Some("saving".into());
+            assert!(d.state_value(&g)["handoff"].is_null());
+            assert_eq!(d.state_value(&g)["handoff_pending"], true);
+            g.finishing_meeting = None;
+            assert_eq!(d.state_value(&g)["handoff"], 7);
+            assert_eq!(d.state_value(&g)["handoff_pending"], false);
+            g.handoff.as_mut().unwrap().at = Instant::now() - Duration::from_secs(120);
+            assert!(d.state_value(&g)["handoff"].is_null());
+            g.handoff.as_mut().unwrap().at = Instant::now();
+        }
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let g = d.inner.lock();
+        assert!(g.handoff.is_none());
+        assert!(d.state_value(&g)["handoff"].is_null());
+    }
+
+    #[tokio::test]
+    async fn call_ownership_and_countdown_follow_the_reading() {
+        let d = daemon();
+        let since = now_ms() as f64 - 60_000.0;
+        d.on_call_reading(call_reading(2, "call", since, "native"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        assert_eq!(d.state_value(&d.inner.lock())["for_call"], true);
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let first = d.inner.lock().stopping.as_ref().unwrap().generation;
+        assert_eq!(
+            d.state_value(&d.inner.lock())["stopping"]["reason"],
+            "call_end"
+        );
+        d.on_call_reading(CallReading::default());
+        assert!(d.inner.lock().stopping.is_none());
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let second = d.inner.lock().stopping.as_ref().unwrap().generation;
+        assert_ne!(first, second);
+        assert_eq!(
+            d.handle("record.keep", json!({"gen": first}), None)
+                .await
+                .unwrap_err(),
+            "no such countdown"
+        );
+        d.expire(first);
+        assert!(
+            !d.inner
+                .lock()
+                .recording
+                .as_ref()
+                .unwrap()
+                .stop
+                .load(Ordering::Relaxed)
+        );
+        d.handle("record.keep", json!({"gen": second}), None)
+            .await
+            .unwrap();
+        assert_eq!(d.state_value(&d.inner.lock())["for_call"], false);
+        assert!(d.inner.lock().stopping.is_none());
+        d.on_call_reading(call_reading(2, "call", since + 120_000.0, "native"));
+        assert!(!d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.handle("record.stop", json!({"reason": "user"}), None)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn schema2_adopts_once_and_fallback_does_not_adopt() {
+        let d = daemon();
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let since = now_ms() as f64;
+        d.on_call_reading(call_reading(2, "maybe", since, "native"));
+        assert!(!d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.on_call_reading(call_reading(2, "call", since, "fallback"));
+        assert!(!d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.on_call_reading(call_reading(2, "call", since, "native"));
+        assert!(d.inner.lock().recording.as_ref().unwrap().for_call);
+        assert_eq!(
+            d.inner.lock().recording.as_ref().unwrap().handled_since,
+            Some(since)
+        );
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let generation = d.inner.lock().stopping.as_ref().unwrap().generation;
+        d.handle("record.keep", json!({"gen": generation}), None)
+            .await
+            .unwrap();
+        d.on_call_reading(call_reading(2, "call", since + 1.0, "native"));
+        assert!(!d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn schema1_uses_slack_without_an_upper_bound() {
+        let d = daemon();
+        let earlier = now_ms() as f64 - 300_000.0;
+        d.on_call_reading(call_reading(1, "call", earlier, "fallback"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        assert!(d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+        tokio::task::yield_now().await;
+        let d = daemon();
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let start = d.inner.lock().recording.as_ref().unwrap().since_ms as f64;
+        d.on_call_reading(call_reading(1, "call", start + 6_000.0, "native"));
+        assert!(!d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.on_call_reading(call_reading(1, "call", start + 5_000.0, "native"));
+        assert!(d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn call_end_replaces_inactivity_and_expiry_rechecks_under_lock() {
+        let d = daemon();
+        d.on_call_reading(call_reading(2, "call", now_ms() as f64, "native"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let old = {
+            let mut g = d.inner.lock();
+            d.start_countdown(&mut g, "inactivity");
+            g.stopping.as_ref().unwrap().generation
+        };
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let generation = d.inner.lock().stopping.as_ref().unwrap().generation;
+        assert_ne!(old, generation);
+        assert_eq!(d.inner.lock().stopping.as_ref().unwrap().reason, "call_end");
+        d.expire(old);
+        d.inner.lock().stopping.as_mut().unwrap().at = Instant::now() - Duration::from_secs(1);
+        d.expire(generation);
+        assert!(
+            d.inner
+                .lock()
+                .recording
+                .as_ref()
+                .unwrap()
+                .stop
+                .load(Ordering::Relaxed)
+        );
+        assert!(d.inner.lock().stopping.is_none());
+    }
+
+    fn loud(channel: usize) -> Vec<f32> {
+        let mut v = vec![0.0; 2 * 4_800];
+        for f in v.chunks_mut(2) {
+            f[channel] = 0.5;
+        }
+        v
+    }
+
+    /// Silent frames every 4 s with a tick each, from `t0` for `secs` seconds; returns the end.
+    fn silence(d: &Arc<Daemon>, t0: Instant, secs: u64) -> Instant {
+        let mut t = t0;
+        while t < t0 + Duration::from_secs(secs) {
+            d.feed_sound(&[0.0, 0.0], t);
+            d.inactivity_tick(t);
+            t += Duration::from_secs(4);
+        }
+        t
+    }
+
+    async fn recording_in(call: CallReading) -> (Arc<Daemon>, Instant) {
+        let d = daemon();
+        d.on_call_reading(call);
+        d.handle("record.start", json!({}), None).await.unwrap();
+        (d, Instant::now())
+    }
+
+    fn reason(d: &Arc<Daemon>) -> Option<&'static str> {
+        d.inner.lock().stopping.as_ref().map(|s| s.reason)
+    }
+
+    #[tokio::test]
+    async fn no_call_counts_the_mic_only_and_mic_sound_cancels() {
+        let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        // System sound every few seconds must not keep it alive.
+        let mut t = t0;
+        while t < t0 + Duration::from_secs(10 * 60 + 8) {
+            d.feed_sound(&loud(1), t);
+            d.inactivity_tick(t);
+            t += Duration::from_secs(4);
+        }
+        assert_eq!(reason(&d), Some("inactivity"));
+        d.feed_sound(&loud(0), t);
+        d.inactivity_tick(t);
+        assert_eq!(reason(&d), None);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn short_sound_is_not_sound_and_resets_restart_the_clock() {
+        let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        let t = silence(&d, t0, 9 * 60);
+        // 100 ms is below the 300 ms needed.
+        d.feed_sound(&loud(0)[..2 * 1_600], t);
+        let t = silence(&d, t, 70);
+        assert_eq!(reason(&d), Some("inactivity"));
+        // A change of call resets the clock (at the real now) and cancels the countdown at once.
+        d.on_call_reading(call_reading(2, "maybe", 0.0, "native"));
+        assert_eq!(reason(&d), None);
+        let t = Instant::now().max(t);
+        d.inactivity_tick(t);
+        assert_eq!(reason(&d), None);
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let t = silence(&d, Instant::now(), 9 * 60);
+        assert_eq!(reason(&d), None);
+        // A gap of 5 s or more restarts it.
+        let t = t + Duration::from_secs(120);
+        d.feed_sound(&[0.0, 0.0], t);
+        let t = silence(&d, t, 9 * 60);
+        assert_eq!(reason(&d), None);
+        let _ = silence(&d, t, 70);
+        assert_eq!(reason(&d), Some("inactivity"));
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[test]
+    fn a_burst_across_the_window_boundary_counts() {
+        let mut c = SoundClock::default();
+        let t0 = Instant::now();
+        c.feed(&[0.0, 0.0], t0);
+        // 200 ms at the end of one 1 s window, 100 ms at the start of the next: 300 ms.
+        let ms100 = &loud(0)[..2 * 1_600];
+        c.feed(ms100, t0 + Duration::from_millis(800));
+        c.feed(ms100, t0 + Duration::from_millis(900));
+        assert!(c.last_sound[0].is_none());
+        c.feed(ms100, t0 + Duration::from_millis(1_000));
+        assert!(c.last_sound[0].is_some());
+    }
+
+    #[tokio::test]
+    async fn a_gap_reset_broadcasts_the_cleared_chip() {
+        let (d, t0) = recording_in(call_reading(2, "call", now_ms() as f64, "native")).await;
+        let t = silence(&d, t0, 10 * 60 + 4);
+        assert!(!d.state_value(&d.inner.lock())["inactivity_chip"].is_null());
+        let mut events = d.subscribe();
+        d.feed_sound(&[0.0, 0.0], t + Duration::from_secs(10));
+        let cleared = std::iter::from_fn(|| events.try_recv().ok())
+            .any(|e| e["event"] == "state" && e["inactivity_chip"].is_null());
+        assert!(cleared);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn keep_restarts_the_sound_clock() {
+        let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        let t = silence(&d, t0, 10 * 60 + 8);
+        let generation = d.inner.lock().stopping.as_ref().unwrap().generation;
+        d.handle("record.keep", json!({"gen": generation}), None)
+            .await
+            .unwrap();
+        let _ = t;
+        d.inactivity_tick(Instant::now());
+        assert_eq!(reason(&d), None);
+        let t = silence(&d, Instant::now(), 9 * 60);
+        assert_eq!(reason(&d), None);
+        let _ = silence(&d, t, 70);
+        assert_eq!(reason(&d), Some("inactivity"));
+        // Keep on an inactivity countdown does not mark the notes kept: a later call still adopts them.
+        let generation = d.inner.lock().stopping.as_ref().unwrap().generation;
+        d.handle("record.keep", json!({"gen": generation}), None)
+            .await
+            .unwrap();
+        assert!(!d.inner.lock().recording.as_ref().unwrap().kept);
+        d.on_call_reading(call_reading(2, "call", now_ms() as f64, "native"));
+        assert!(d.inner.lock().recording.as_ref().unwrap().for_call);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn during_a_call_a_chip_comes_first_then_three_times_n_stops() {
+        let (d, t0) = recording_in(call_reading(2, "call", now_ms() as f64, "native")).await;
+        let t = silence(&d, t0, 10 * 60 + 4);
+        assert_eq!(
+            d.state_value(&d.inner.lock())["inactivity_chip"],
+            json!({"minutes": 10})
+        );
+        assert_eq!(reason(&d), None);
+        // Sound on either channel clears the chip.
+        d.feed_sound(&loud(1), t);
+        d.inactivity_tick(t);
+        assert!(d.state_value(&d.inner.lock())["inactivity_chip"].is_null());
+        let t = silence(&d, t, 30 * 60 + 8);
+        assert_eq!(reason(&d), Some("inactivity_call"));
+        assert!(d.state_value(&d.inner.lock())["inactivity_chip"].is_null());
+        d.feed_sound(&loud(0), t);
+        d.inactivity_tick(t);
+        assert_eq!(reason(&d), None);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn turning_inactivity_off_clears_its_chip_and_countdown() {
+        let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        let _ = silence(&d, t0, 10 * 60 + 8);
+        assert_eq!(reason(&d), Some("inactivity"));
+        d.handle(
+            "settings.set",
+            json!({"key": "inactivity_stop_minutes", "value": 0}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reason(&d), None);
+        assert!(d.state_value(&d.inner.lock())["inactivity_chip"].is_null());
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unknown_call_state_shows_only_the_chip() {
+        let (d, t0) = recording_in(CallReading::default()).await;
+        let _ = silence(&d, t0, 31 * 60);
+        assert_eq!(reason(&d), None);
+        assert_eq!(
+            d.state_value(&d.inner.lock())["inactivity_chip"],
+            json!({"minutes": 10})
+        );
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_frames_and_zero_minutes_never_stop() {
+        let (d, t0) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        d.inactivity_tick(t0 + Duration::from_secs(3_600));
+        assert_eq!(reason(&d), None);
+        d.inner.lock().settings.inactivity_stop_minutes = 0;
+        let _ = silence(&d, t0, 31 * 60);
+        assert_eq!(reason(&d), None);
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn call_end_countdown_is_not_replaced_by_inactivity() {
+        let (d, t0) = recording_in(call_reading(2, "call", now_ms() as f64, "native")).await;
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let _ = silence(&d, t0, 11 * 60);
+        assert_eq!(reason(&d), Some("call_end"));
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inactivity_expiry_rechecks_the_clock_under_the_lock() {
+        let (d, _) = recording_in(call_reading(2, "none", 0.0, "native")).await;
+        let now = Instant::now();
+        let past = now.checked_sub(Duration::from_secs(11 * 60)).unwrap();
+        let generation = {
+            let mut g = d.inner.lock();
+            g.sound.since = Some(past);
+            g.sound.last_frame = Some(now);
+            d.start_countdown(&mut g, "inactivity");
+            g.stopping.as_mut().unwrap().at = now - Duration::from_millis(1);
+            g.stopping.as_ref().unwrap().generation
+        };
+        // Sound came back: expiry must not stop, and drops the countdown.
+        d.inner.lock().sound.last_sound[0] = Some(now);
+        d.expire(generation);
+        assert!(d.inner.lock().stopping.is_none());
+        assert!(
+            !d.inner
+                .lock()
+                .recording
+                .as_ref()
+                .unwrap()
+                .stop
+                .load(Ordering::Relaxed)
+        );
+        let generation = {
+            let mut g = d.inner.lock();
+            g.sound.last_sound[0] = None;
+            d.start_countdown(&mut g, "inactivity");
+            g.stopping.as_mut().unwrap().at = now - Duration::from_millis(1);
+            g.stopping.as_ref().unwrap().generation
+        };
+        d.expire(generation);
+        assert!(
+            d.inner
+                .lock()
+                .recording
+                .as_ref()
+                .unwrap()
+                .stop
+                .load(Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_stop_cancels_countdown_and_agents_cannot_keep() {
+        let d = daemon();
+        d.on_call_reading(call_reading(2, "call", now_ms() as f64, "native"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        let generation = d.inner.lock().stopping.as_ref().unwrap().generation;
+        for origin in ["agent", "mcp"] {
+            assert_eq!(
+                d.handle("record.keep", json!({"gen": generation}), Some(origin))
+                    .await
+                    .unwrap_err(),
+                "not allowed for agents"
+            );
+        }
+        d.handle(
+            "record.stop",
+            json!({"reason": "inactivity_chip"}),
+            Some("shell"),
+        )
+        .await
+        .unwrap();
+        assert!(d.inner.lock().stopping.is_none());
+        d.expire(generation);
+    }
+
+    #[tokio::test]
+    async fn transitional_recording_waits_for_meeting_id() {
+        let d = daemon();
+        d.on_call_reading(call_reading(2, "call", now_ms() as f64, "native"));
+        d.handle("record.start", json!({}), None).await.unwrap();
+        let meeting = d.inner.lock().meeting_id.take().unwrap();
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        assert!(d.inner.lock().stopping.is_none());
+        {
+            let mut g = d.inner.lock();
+            g.meeting_id = Some(meeting);
+            Daemon::adopt_call(&mut g, false);
+            d.update_call_end(&mut g);
+            assert_eq!(g.stopping.as_ref().unwrap().reason, "call_end");
+        }
+        d.handle("record.stop", json!({}), None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn call_window_class_is_private_to_agents_and_local_broadcasts() {
+        let d = daemon();
+        let mut reading = call_reading(2, "call", now_ms() as f64, "native");
+        reading.window_state = "bound".into();
+        reading.window_class = "Private class".into();
+        d.on_call_reading(reading);
+        assert_eq!(
+            d.handle("state.get", json!({}), None).await.unwrap()["call_window"]["class"],
+            "Private class"
+        );
+        for origin in ["agent", "mcp"] {
+            let state = d
+                .handle("state.get", json!({}), Some(origin))
+                .await
+                .unwrap();
+            assert_eq!(state["call_window"]["class"], "");
+        }
+        local_interview(&d).await;
+        let mut events = d.subscribe();
+        d.emit_state(&d.inner.lock());
+        let event = events.recv().await.unwrap();
+        assert_eq!(event["call_window"]["class"], "");
+        for origin in ["agent", "mcp"] {
+            assert_eq!(
+                d.handle("state.get", json!({}), Some(origin))
+                    .await
+                    .unwrap()["call_window"]["class"],
+                ""
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_logs_omit_titles_meeting_ids_and_window_ids() {
+        if std::env::var_os("MEETINGAI_LOG_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "daemon::session::command_tests::lifecycle_logs_omit_titles_meeting_ids_and_window_ids"])
+                .env("MEETINGAI_LOG_TEST_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        struct LogWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || LogWriter(Arc::clone(&writer)))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let d = daemon();
+        let mut reading = call_reading(2, "call", now_ms() as f64, "native");
+        reading.window = "0xSecretWindow".into();
+        d.on_call_reading(reading);
+        d.handle(
+            "record.start",
+            json!({"title": "Secret roadmap"}),
+            Some("Secret origin"),
+        )
+        .await
+        .unwrap();
+        let meeting = d.inner.lock().meeting_id.clone().unwrap();
+        d.on_call_reading(call_reading(2, "none", 0.0, "native"));
+        // Client-chosen text never reaches the logged reason or origin.
+        d.handle(
+            "record.stop",
+            json!({"reason": "Secret client reason"}),
+            Some("shell"),
+        )
+        .await
+        .unwrap();
+        for reason in [json!("call"), json!("Secret client reason")] {
+            let other = daemon();
+            other
+                .handle("record.start", json!({"reason": reason}), None)
+                .await
+                .unwrap();
+        }
+        let other = daemon();
+        other.on_call_reading(classed_call("teams"));
+        other.handle("record.start", json!({}), None).await.unwrap();
+        other.on_call_reading(classed_call("chrome"));
+        let output = String::from_utf8(logs.lock().clone()).unwrap();
+        assert!(
+            output.contains("record_start") && output.contains("record_stop"),
+            "{output}"
+        );
+        assert!(output.contains("origin=\"shell\""), "{output}");
+        let starts: Vec<_> = output
+            .lines()
+            .filter(|line| line.contains("event=\"record_start\""))
+            .collect();
+        assert_eq!(starts.len(), 4, "{output}");
+        assert!(starts[0].contains("reason=\"user\""), "{output}");
+        assert!(starts[1].contains("reason=\"call\""), "{output}");
+        assert!(starts[2].contains("reason=\"user\""), "{output}");
+        assert!(output.contains("reason=\"new_call\""), "{output}");
+        assert!(
+            output.contains("reason=\"other\"") && output.contains("origin=\"other\""),
+            "{output}"
+        );
+        for secret in [
+            "Secret roadmap",
+            "0xSecretWindow",
+            "Secret client",
+            "Secret origin",
+            meeting.as_str(),
+        ] {
+            assert!(!output.contains(secret), "{output}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -12016,7 +13420,20 @@ mod autoshots_tests {
             capture: false,
         })
         .unwrap();
-        *d.auto_area.lock() = Some("0,0 100x100".into());
+        d.inner.lock().call = CallReading {
+            present: true,
+            schema: 2,
+            call: "call".into(),
+            window: "0xtest".into(),
+            window_state: "bound".into(),
+            showing: true,
+            ..CallReading::default()
+        };
+        *d.auto_hyprctl.lock() = Some(Box::new(|what| match what {
+            "clients" => json!([{"stableId":"0xtest", "workspace":{"id":1}}]),
+            "monitors" => json!([{"activeWorkspace":{"id":1},"specialWorkspace":{"id":-99}}]),
+            _ => unreachable!(),
+        }));
         *d.auto_unlocked.lock() = Some(Box::new(|| true));
         *d.auto_capture.lock() = Some(Box::new(|_| Ok((vec![1, 2, 3], vec![4; 100]))));
         d
@@ -12025,6 +13442,277 @@ mod autoshots_tests {
     async fn started(d: &Arc<Daemon>) -> String {
         d.handle("record.start", json!({}), None).await.unwrap();
         d.inner.lock().meeting_id.clone().unwrap()
+    }
+
+    #[tokio::test]
+    async fn binding_refusals_and_closed_restart() {
+        let d = daemon();
+        started(&d).await;
+        for (schema, call, state, error) in [
+            (1, "call", "bound", "meeting-mode is too old"),
+            (2, "none", "bound", "not in a call"),
+            (2, "call", "ambiguous", "several possible windows"),
+            (2, "call", "none", "no meeting window"),
+        ] {
+            {
+                let mut g = d.inner.lock();
+                g.call.schema = schema;
+                g.call.call = call.into();
+                g.call.window_state = state.into();
+            }
+            assert_eq!(d.auto_start().await.unwrap_err(), error);
+        }
+        {
+            let mut g = d.inner.lock();
+            g.call.window_state = "bound".into();
+        }
+        d.auto_start().await.unwrap();
+        // The binding is the stableId: a window whose address happens to match is still "closed".
+        *d.auto_hyprctl.lock() = Some(Box::new(|what| match what {
+            "clients" => json!([{"address":"0xtest","stableId":"18000001","workspace":{"id":1}}]),
+            "monitors" => json!([{"activeWorkspace":{"id":1}}]),
+            _ => unreachable!(),
+        }));
+        let (meeting, generation) = {
+            let g = d.inner.lock();
+            let a = g.autoshots.as_ref().unwrap();
+            (a.meeting.clone(), a.generation)
+        };
+        d.auto_capture_once(&meeting, generation).await;
+        assert_eq!(
+            d.inner.lock().autoshots.as_ref().unwrap().paused,
+            Some("window_closed")
+        );
+        assert_eq!(d.auto_start().await.unwrap_err(), "no meeting window");
+        *d.auto_hyprctl.lock() = Some(Box::new(|what| match what {
+            "clients" => json!([{"stableId":"0xtest","workspace":{"id":1}}]),
+            "monitors" => json!([{"activeWorkspace":{"id":1}}]),
+            _ => unreachable!(),
+        }));
+        d.auto_start().await.unwrap();
+        assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().paused, None);
+    }
+
+    #[tokio::test]
+    async fn transient_causes_keep_autoshots_on() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        d.auto_start().await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        for (call, state, showing, stopping, cause) in [
+            ("none", "bound", true, false, "no_call"),
+            ("call", "ambiguous", true, false, "ambiguous"),
+            ("call", "none", true, false, "no_window"),
+            ("call", "bound", false, false, "not_showing"),
+            ("call", "bound", true, true, "countdown"),
+        ] {
+            {
+                let mut g = d.inner.lock();
+                g.call.call = call.into();
+                g.call.window_state = state.into();
+                g.call.showing = showing;
+                g.stopping = stopping.then(|| Stopping {
+                    generation: 1,
+                    reason: "inactivity",
+                    at: Instant::now(),
+                    meeting: meeting.clone(),
+                });
+                g.autoshots.as_mut().unwrap().last_capture = None;
+            }
+            d.auto_capture_once(&meeting, generation).await;
+            assert_eq!(d.state_value(&d.inner.lock())["autoshots"]["paused"], cause);
+            assert!(d.inner.lock().autoshots.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lock_pause_outlives_a_transient_cause() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        d.auto_start().await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        d.auto_pause(&meeting, generation, Some("locked"));
+        let call = d.inner.lock().call.clone();
+        let mut off = call.clone();
+        off.call = "none".into();
+        d.on_call_reading(off);
+        d.on_call_reading(call);
+        assert_eq!(
+            d.inner.lock().autoshots.as_ref().unwrap().paused,
+            Some("locked")
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_flip_then_revert_discards_capture() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        d.auto_start().await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        let me = d.clone();
+        *d.auto_capture.lock() = Some(Box::new(move |_| {
+            let mut call = me.inner.lock().call.clone();
+            call.window_seq += 1;
+            me.on_call_reading(call.clone());
+            call.window_seq -= 1;
+            me.on_call_reading(call);
+            Ok((vec![1, 2, 3], vec![4; 100]))
+        }));
+        d.auto_capture_once(&meeting, generation).await;
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_window_needs_a_changing_fingerprint() {
+        let d = daemon();
+        let meeting = started(&d).await;
+        d.auto_start().await.unwrap();
+        let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+        *d.auto_hyprctl.lock() = Some(Box::new(|what| match what {
+            "clients" => json!([{"stableId":"0xtest","workspace":{"id":2}}]),
+            "monitors" => json!([{"activeWorkspace":{"id":1}}]),
+            _ => unreachable!(),
+        }));
+        d.auto_capture_once(&meeting, generation).await;
+        assert_eq!(
+            d.inner.lock().autoshots.as_ref().unwrap().paused,
+            Some("hidden_not_updating")
+        );
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            0
+        );
+        let n = Arc::new(AtomicUsize::new(0));
+        let seen = n.clone();
+        *d.auto_capture.lock() = Some(Box::new(move |_| {
+            let n = seen.fetch_add(1, Ordering::Relaxed) as u8;
+            Ok((vec![1, 2, 3], vec![n; 100]))
+        }));
+        d.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
+        d.auto_capture_once(&meeting, generation).await;
+        assert_eq!(
+            screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_poll_changes_pause_and_generation() {
+        let d = daemon();
+        started(&d).await;
+        d.auto_start().await.unwrap();
+        d.auto_poll_lock().await;
+        let before = d.elig_gen.load(Ordering::Acquire);
+        *d.auto_unlocked.lock() = Some(Box::new(|| false));
+        d.auto_poll_lock().await;
+        assert!(d.elig_gen.load(Ordering::Acquire) > before);
+        assert_eq!(
+            d.inner.lock().autoshots.as_ref().unwrap().paused,
+            Some("locked")
+        );
+        let before = d.elig_gen.load(Ordering::Acquire);
+        *d.auto_unlocked.lock() = Some(Box::new(|| true));
+        d.auto_poll_lock().await;
+        assert!(d.elig_gen.load(Ordering::Acquire) > before);
+        assert_eq!(d.inner.lock().autoshots.as_ref().unwrap().paused, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_eligibility_flip_reverted_during_capture_is_discarded() {
+        for source in [
+            "call",
+            "window_seq",
+            "countdown",
+            "consent",
+            "local_only",
+            "candidate",
+            "candidate.local_only",
+            "lock",
+        ] {
+            let d = daemon();
+            let meeting = started(&d).await;
+            d.auto_start().await.unwrap();
+            d.auto_poll_lock().await;
+            let candidate = {
+                let g = d.inner.lock();
+                candidates::create(g.db.connection(), "Test").unwrap().id
+            };
+            let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
+            let me = d.clone();
+            *d.auto_capture.lock() = Some(Box::new(move |_| {
+                match source {
+                    "call" | "window_seq" => {
+                        let original = me.inner.lock().call.clone();
+                        let mut changed = original.clone();
+                        if source == "call" {
+                            changed.call = "maybe".into();
+                        } else {
+                            changed.window_seq += 1;
+                        }
+                        me.on_call_reading(changed);
+                        me.on_call_reading(original);
+                    }
+                    "countdown" => {
+                        let mut g = me.inner.lock();
+                        me.start_countdown(&mut g, "inactivity");
+                        me.cancel_countdown(&mut g, "test");
+                    }
+                    "consent" => {
+                        let mut g = me.inner.lock();
+                        g.consent = true;
+                        me.emit_state(&g);
+                        g.consent = false;
+                        me.emit_state(&g);
+                    }
+                    "local_only" => {
+                        let g = me.inner.lock();
+                        me.local_only.store(true, Ordering::Relaxed);
+                        me.emit_state(&g);
+                        me.local_only.store(false, Ordering::Relaxed);
+                        me.emit_state(&g);
+                    }
+                    "candidate" => {
+                        let mut g = me.inner.lock();
+                        me.set_candidate(&mut g, None);
+                        me.set_candidate(&mut g, None);
+                    }
+                    "candidate.local_only" => {
+                        tokio::task::block_in_place(|| {
+                            let runtime = tokio::runtime::Handle::current();
+                            for on in [true, false] {
+                                runtime
+                                    .block_on(me.handle(
+                                        "candidate.local_only",
+                                        json!({"id": candidate, "on": on}),
+                                        None,
+                                    ))
+                                    .unwrap();
+                            }
+                        });
+                    }
+                    "lock" => {
+                        tokio::task::block_in_place(|| {
+                            let runtime = tokio::runtime::Handle::current();
+                            *me.auto_unlocked.lock() = Some(Box::new(|| false));
+                            runtime.block_on(me.auto_poll_lock());
+                            *me.auto_unlocked.lock() = Some(Box::new(|| true));
+                            runtime.block_on(me.auto_poll_lock());
+                        });
+                    }
+                    _ => unreachable!(),
+                }
+                Ok((vec![1, 2, 3], vec![4; 100]))
+            }));
+            d.auto_capture_once(&meeting, generation).await;
+            assert_eq!(
+                screenshots::count_auto(d.inner.lock().db.connection(), &meeting).unwrap(),
+                0,
+                "{source}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -12236,6 +13924,16 @@ mod autoshots_tests {
     }
 
     #[tokio::test]
+    async fn grim_deadline_rejects_a_stalled_capture() {
+        assert_eq!(
+            capture_deadline(std::future::pending::<()>())
+                .await
+                .unwrap_err(),
+            "timed out"
+        );
+    }
+
+    #[tokio::test]
     async fn capture_failure_warns_once_and_locked_screen_is_silent() {
         let d = daemon();
         let meeting = started(&d).await;
@@ -12244,7 +13942,7 @@ mod autoshots_tests {
         let mut events = d.subscribe();
         *d.auto_unlocked.lock() = Some(Box::new(|| false));
         d.auto_capture_once(&meeting, generation).await;
-        assert!(events.try_recv().is_err());
+        assert_eq!(events.try_recv().unwrap()["autoshots"]["paused"], "locked");
         *d.auto_unlocked.lock() = None;
         d.inner.lock().autoshots.as_mut().unwrap().last_capture = None;
         d.auto_capture_once(&meeting, generation).await;
@@ -12253,11 +13951,7 @@ mod autoshots_tests {
         let notices: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
             .filter(|event| event["event"] == "notice")
             .collect();
-        assert_eq!(notices.len(), 1);
-        assert_eq!(
-            notices[0]["text"],
-            "Automatic screenshots could not capture; none are being saved."
-        );
+        assert_eq!(notices.len(), 1, "an unreadable lock state warns once");
         d.handle("autoshots.stop", json!({}), None).await.unwrap();
         d.handle("autoshots.start", json!({}), None).await.unwrap();
         let generation = d.inner.lock().autoshots.as_ref().unwrap().generation;
@@ -12990,8 +14684,8 @@ mod autoshots_tests {
         }
         d.handle("record.start", json!({}), None).await.unwrap();
         assert_eq!(
-            d.inner.lock().autoshots.as_ref().unwrap().area,
-            "0,0 100x100"
+            d.inner.lock().autoshots.as_ref().unwrap().target,
+            Target::Window("0xtest".into())
         );
         d.record_stop().unwrap();
         for _ in 0..200 {
@@ -13024,7 +14718,8 @@ mod autoshots_tests {
         };
         let seed = || AutoShots {
             meeting: meeting.clone(),
-            area: "0,0 100x100".into(),
+            target: Target::Window("0xtest".into()),
+            paused: None,
             generation: 1,
             count: 0,
             last_fingerprint: Vec::new(),

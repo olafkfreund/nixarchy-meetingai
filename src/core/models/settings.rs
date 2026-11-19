@@ -221,6 +221,8 @@ pub struct Settings {
     pub recap_prompt_interviewer: String,
     /// Start recording straight away when a call begins.
     pub auto_record_on_call: bool,
+    /// Stop notes after this many minutes with no sound; 0 is off.
+    pub inactivity_stop_minutes: u32,
     /// Name sessions from the calendar (read-only, through `gog`).
     pub calendar_enabled: bool,
     pub chat_model: String,
@@ -271,6 +273,7 @@ impl Default for Settings {
             recap_prompt_team: RECAP_PROMPT_TEAM.to_owned(),
             recap_prompt_interviewer: RECAP_PROMPT_INTERVIEWER.to_owned(),
             auto_record_on_call: false,
+            inactivity_stop_minutes: 10,
             calendar_enabled: false,
             chat_model: "sonnet".into(),
             live_provider: "claude-sub".into(),
@@ -296,6 +299,7 @@ mod keys {
     pub const RECAP_PROMPT_TEAM: &str = "recap_prompt_team";
     pub const RECAP_PROMPT_INTERVIEWER: &str = "recap_prompt_interviewer";
     pub const AUTO_RECORD_ON_CALL: &str = "auto_record_on_call";
+    pub const INACTIVITY_STOP_MINUTES: &str = "inactivity_stop_minutes";
     pub const CALENDAR_ENABLED: &str = "calendar_enabled";
     pub const CHAT_MODEL: &str = "chat_model";
     pub const MEETING_MODE: &str = "meeting_mode";
@@ -399,6 +403,11 @@ impl Settings {
                 &defaults.recap_prompt_interviewer,
             ),
             auto_record_on_call: flag(keys::AUTO_RECORD_ON_CALL, defaults.auto_record_on_call),
+            inactivity_stop_minutes: number(
+                keys::INACTIVITY_STOP_MINUTES,
+                defaults.inactivity_stop_minutes,
+            )
+            .min(240),
             calendar_enabled: flag(keys::CALENDAR_ENABLED, defaults.calendar_enabled),
             chat_model: text(keys::CHAT_MODEL, &defaults.chat_model),
             live_provider: text("live_provider", &defaults.live_provider),
@@ -418,7 +427,7 @@ impl Settings {
         })
     }
 
-    fn pairs(&self) -> [(&'static str, String); 39] {
+    fn pairs(&self) -> [(&'static str, String); 40] {
         [
             ("chat_provider", self.chat_provider.clone()),
             ("reduce_motion", self.reduce_motion.to_string()),
@@ -471,6 +480,10 @@ impl Settings {
             (
                 keys::AUTO_RECORD_ON_CALL,
                 self.auto_record_on_call.to_string(),
+            ),
+            (
+                keys::INACTIVITY_STOP_MINUTES,
+                self.inactivity_stop_minutes.min(240).to_string(),
             ),
             (keys::CALENDAR_ENABLED, self.calendar_enabled.to_string()),
             (keys::CHAT_MODEL, self.chat_model.clone()),
@@ -626,6 +639,7 @@ mod tests {
             recap_prompt_team: "my team".into(),
             recap_prompt_interviewer: "my interviewer".into(),
             auto_record_on_call: true,
+            inactivity_stop_minutes: 25,
             calendar_enabled: true,
             chat_model: "opus".into(),
             live_provider: "agy-sub".into(),
@@ -643,6 +657,25 @@ mod tests {
         };
         custom.save(&database).unwrap();
         assert_eq!(Settings::load(&database).unwrap(), custom);
+    }
+
+    #[test]
+    fn inactivity_minutes_default_and_clamp() {
+        let database = Database::open_in_memory().unwrap();
+        assert_eq!(
+            Settings::load(&database).unwrap().inactivity_stop_minutes,
+            10
+        );
+        Settings::set(&database, "inactivity_stop_minutes", "900").unwrap();
+        assert_eq!(
+            Settings::load(&database).unwrap().inactivity_stop_minutes,
+            240
+        );
+        Settings::set(&database, "inactivity_stop_minutes", "0").unwrap();
+        assert_eq!(
+            Settings::load(&database).unwrap().inactivity_stop_minutes,
+            0
+        );
     }
 
     #[test]

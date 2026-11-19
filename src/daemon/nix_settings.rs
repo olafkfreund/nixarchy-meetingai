@@ -63,6 +63,7 @@ fn valid(key: &str, value: &str) -> bool {
                 ChatProvider::by_id(value).is_some() || value.starts_with("custom-")
             }
             "speech_provider" => SttProvider::by_id(value).is_some(),
+            "inactivity_stop_minutes" => value.parse::<u32>().is_ok_and(|n| n <= 240),
             "text_scale" => value.parse::<u32>().is_ok_and(|n| (80..=160).contains(&n)),
             _ => true,
         }
