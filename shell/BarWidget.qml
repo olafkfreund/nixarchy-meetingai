@@ -38,6 +38,16 @@ BarWidget {
     }
     readonly property string callTip: (calls.call === "maybe" ? "Possible call" : "Call") + (calls.app ? " · " + calls.app : "") + (calls.title ? " · " + calls.title : "")
 
+    readonly property var stopping: client.recording ? (client.state.stopping || null) : null
+    readonly property var inactive: client.recording ? (client.state.inactivity_chip || null) : null
+    property double stopAt: 0   // when the countdown ends, from in_s at the last state
+    onStoppingChanged: { root.now = Date.now(); root.stopAt = root.stopping ? root.now + Number(root.stopping.in_s) * 1000 : 0; }   // same clock, or a mid-second event reads in_s + 1
+    readonly property int stopLeft: root.stopping ? Math.max(0, Math.ceil((root.stopAt - root.now) / 1000)) : 0
+    readonly property string windowTip: {
+        var w = client.state.call_window || {};
+        return w.state === "bound" ? "Meeting window" + (calls.app ? " \u00b7 " + calls.app : "") + (w.class ? " \u00b7 " + w.class : "") : w.state === "ambiguous" ? "several possible windows" : "no meeting window";
+    }
+
     function takeNotes() {
         client.send("record.start", calls.title ? { new: true, title: calls.title } : { new: true }, function(r) {
             var e = String(r.error || "");
@@ -84,7 +94,7 @@ BarWidget {
             text: "\u{F0C46}"   // nf-md-calendar_text_outline: meeting notes (the microphone_message glyph read as a bug at bar size)
             active: client.recording
             dimmed: !client.connected
-            tooltipText: !client.connected ? "Meeting AI: daemon not running" : (client.recording ? "Taking notes · " + root.timer : root.finishing ? "Meeting AI: finishing the notes" : calls.call !== "none" ? root.callTip : "Meeting AI")
+            tooltipText: !client.connected ? "Meeting AI: daemon not running" : (client.recording ? "Taking notes · " + root.timer + " · " + root.windowTip : root.finishing ? "Meeting AI: finishing the notes" : calls.call !== "none" ? root.callTip : "Meeting AI")
             onPressed: function(b) {
                 if (b === Qt.RightButton) root.run("omarchy-shell meetingai toggle");
                 else { root.menuOpen = !root.menuOpen; root.confirmQuit = false; }
@@ -110,6 +120,60 @@ BarWidget {
             font.bold: true
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
+        }
+        Rectangle {   // the daemon is about to stop the notes: click keeps them
+            objectName: "stopChip"
+            visible: root.stopping !== null
+            anchors.verticalCenter: parent.verticalCenter
+            width: stopText.implicitWidth + Style.spacing.sm * 2
+            height: stopText.implicitHeight + Style.spacing.xs * 2
+            radius: height / 2
+            color: "transparent"
+            border.width: 1
+            border.color: Commons.Color.bar.text
+            Accessible.role: Accessible.Button
+            Accessible.name: "Keep recording"
+            Text {
+                id: stopText
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: "Notes stop in " + root.stopLeft + " s \u00b7 Keep"
+                color: Commons.Color.bar.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: client.send("record.keep", { gen: root.stopping.gen })
+            }
+        }
+        Rectangle {   // no sound for a while: click stops the notes
+            objectName: "inactivityChip"
+            visible: root.inactive !== null && root.stopping === null
+            anchors.verticalCenter: parent.verticalCenter
+            width: inactText.implicitWidth + Style.spacing.sm * 2
+            height: inactText.implicitHeight + Style.spacing.xs * 2
+            radius: height / 2
+            color: "transparent"
+            border.width: 1
+            border.color: Commons.Color.bar.text
+            Accessible.role: Accessible.Button
+            Accessible.name: "Stop notes"
+            Text {
+                id: inactText
+                anchors.centerIn: parent
+                textFormat: Text.PlainText
+                text: root.inactive ? "No sound for " + root.inactive.minutes + " min \u00b7 Stop notes" : ""
+                color: Commons.Color.bar.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: client.send("record.stop", { reason: "inactivity_chip" })
+            }
         }
         Rectangle {   // click starts the notes, right-click dismisses it for this call
             id: chip
@@ -163,11 +227,14 @@ BarWidget {
         bar: root.bar
         owner: root
         open: root.menuOpen
-        contentWidth: popup.fittedContentWidth(Style.space(180))
-        contentHeight: popup.fittedContentHeight(root.confirmQuit ? Style.space(140) : col.implicitHeight)
+        // The stop confirmation needs a wide card: ConfirmDialog takes the host's width less 32 (306 here); at the menu's 180 its text wrapped one word per line.
+        // shortcut: the height is a constant (fits 5 lines; scales with the font size), a pinned larger `title` font token alone can clip it; upgrade by giving ConfirmDialog an implicitHeight in the Omarchy tree.
+        contentWidth: popup.fittedContentWidth(Style.space(root.confirmQuit ? 370 : 180))
+        contentHeight: popup.fittedContentHeight(root.confirmQuit ? Style.space(190) : col.implicitHeight)
 
         Column {
             id: col
+            visible: !root.confirmQuit   // the menu labels showed faintly through the dialog's scrim
             width: parent.width
             spacing: Style.spacing.xs
 

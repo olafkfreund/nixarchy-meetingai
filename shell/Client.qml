@@ -83,7 +83,7 @@ Item {
         }
         root.seq += 1;
         root.pending[root.seq] = cb || null;
-        sock.write(JSON.stringify({ id: root.seq, cmd: cmd, args: args || {} }) + "\n");
+        sock.write(JSON.stringify({ id: root.seq, cmd: cmd, args: args || {}, origin: "shell" }) + "\n");
         sock.flush();
     }
 

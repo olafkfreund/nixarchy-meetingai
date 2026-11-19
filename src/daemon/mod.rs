@@ -2,6 +2,7 @@
 //! driven over a unix socket by the Quickshell plugin and `ctl`.
 
 pub mod calendar;
+pub mod callstate;
 pub mod nix_settings;
 pub mod protocol;
 pub mod server;
@@ -67,6 +68,48 @@ pub fn run() -> Result<(), String> {
                 loop {
                     daemon.calendar_refresh(true).await;
                     tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                }
+            });
+        }
+        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+            let daemon = daemon.clone();
+            let path = std::path::PathBuf::from(runtime).join("meeting-mode.json");
+            tokio::spawn(async move {
+                let mut signature = None;
+                let mut bytes = Vec::new();
+                let mut previous = callstate::CallReading::default();
+                loop {
+                    let metadata = tokio::fs::metadata(&path).await.ok();
+                    let next = metadata.as_ref().map(|m| (m.modified().ok(), m.len()));
+                    let changed = next != signature;
+                    if changed {
+                        match tokio::fs::read(&path).await {
+                            Ok(read) => {
+                                bytes = read;
+                                signature = next;
+                            }
+                            Err(_) => {
+                                bytes.clear();
+                                signature = None;
+                            }
+                        }
+                    }
+                    let alive = if let Some(pid) = callstate::pid(&bytes) {
+                        tokio::fs::metadata(format!("/proc/{pid}")).await.is_ok()
+                    } else {
+                        false
+                    };
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    let reading = callstate::parse(&bytes, now, |_| alive);
+                    if reading != previous {
+                        daemon.on_call_reading(reading.clone());
+                        previous = reading;
+                    }
+                    daemon.auto_poll_lock().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             });
         }
